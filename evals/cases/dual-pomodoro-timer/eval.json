@@ -1,0 +1,76 @@
+{
+  "name": "dual-pomodoro-timer",
+  "description": "Wave-2 dual-track case: a pomodoro timer with a completion sound — the recurring-timer surface (Sub.timer / fx.startTimer), a work/break state machine with auto-advance, the audio surface at completions, and guarded stale ticks. Same spec on both tracks.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Replace the starter counter with a pomodoro timer.\n\nRequirements:\n- The classic cycle: 25-minute focus sessions (\"focus\", 1500 seconds) alternating with 5-minute rest breaks (\"rest\", 300 seconds). The app starts on a focus session, paused, with the full time remaining.\n- Buttons named exactly \"Start\", \"Pause\", and \"Reset\". While running, the countdown advances once per second through the toolkit's timer surface — never a thread, never a sleep. While paused (and after Reset), NO timer stays armed — the app is fully idle.\n- Start does nothing while already running. Pause stops the countdown. A tick that arrives while paused (a stale fire) changes nothing. Reset returns to a paused focus session with the full 1500 seconds and keeps the completed count.\n- When a running session reaches zero it completes: the phase flips automatically (focus to rest, rest to focus), the remaining time becomes the new phase's full duration, the countdown keeps running, and the app plays the completion sound assets/ding.wav through the toolkit's audio surface. Completing a FOCUS session increments a completed-sessions count; completing a rest does not.\n- The view shows the phase, the remaining time as MM:SS, the completed count, and the controls.\n\nThe exact contract (the grader compiles against it; message arms and model fields are snake_case):\n- Model fields: phase (exactly one of \"focus\" | \"rest\"), remaining_seconds (integer), running (boolean), completed_count (integer).\n- Msg arms: start, pause, reset (no payloads); tick — the timer arm, carrying your track's timer payload (in TypeScript one number field, the fire time; in Zig the toolkit's timer payload).\n- In Zig, keep Model/Msg/update/initialModel pub in src/main.zig, with the effects-channel update shape (update(model, msg, fx) and pub const Effects = native_sdk.Effects(Msg)).\n\nKeep the logic out of the view: markup binds values and dispatches messages only. Check your work with the loop in README.md until it is green, and make sure the behavior above actually holds. When you are done, summarize what you built.",
+  "frontend": "app-dual",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": [
+        "-Dplatform=null"
+      ]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "Start",
+      "expect": true,
+      "description": "the view carries the Start control"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zig",
+      "pattern": "std\\.Thread|std\\.Io\\.sleep|std\\.time\\.sleep",
+      "expect": false,
+      "description": "no threads or sleeps — the timer surface only"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The timer rides the toolkit surface with the resource honesty the spec pins: armed exactly while running (declared from the model on the ts track, armed/cancelled through the effects channel on the zig track), nothing armed while paused or after reset, and stale ticks guarded in update.",
+        "The state machine is coherent: one source of truth for phase/remaining/running, auto-advance handled in the tick transition (not in the view), work-only completion counting, and reset semantics exactly as specified.",
+        "The completion sound goes through the audio surface with the pinned asset path, issued from the completing transition — not from the view, not from a side channel.",
+        "The MM:SS display is derived at view time from remaining_seconds (integer-honest arithmetic — on the ts track that means the subset's integer discipline, not float division), never cached in the model."
+      ],
+      "files": [
+        "src/core.ts",
+        "src/*.zig",
+        "src/*.native"
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the timer discipline and state machine beyond compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "timer declared exactly while running, second-by-second countdown, auto-advance with sound and work-only counting, stale ticks and re-entry guarded, reset semantics"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": [
+            "-Dplatform=null"
+          ],
+          "description": "timer armed exactly while running, second-by-second countdown, auto-advance with sound and work-only counting, stale ticks and re-entry guarded, reset semantics"
+        }
+      ]
+    }
+  }
+}

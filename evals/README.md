@@ -4,7 +4,7 @@ An eval harness for AI-agent authoring of Native SDK apps. It formalizes the "cl
 
 Per case the runner:
 
-1. **Scaffolds** a fresh workspace with the repo's own CLI — `zig build` at the repo root, then `zig-out/bin/native init evals/.workspaces/<case> --frontend native` — and delivers the skill exactly the way a real user gets it: `native skills get native-ui` written to the workspace's `.claude/skills/native-ui/SKILL.md` (`init` does not ship skills). The workspace is then **pre-warmed** (`native test` once — workspaces are zero-config, so builds go through the CLI verbs) so the agent's own builds are incremental and its wall-clock isn't spent compiling the SDK.
+1. **Scaffolds** a fresh workspace with the repo's own CLI — `zig build` at the repo root, then `zig-out/bin/native init evals/.workspaces/<case> --frontend native` (`--template zig-core` for the pre-existing native cases and the zig side of dual cases, `--template ts-core` for the ts side) — and delivers each track's skills exactly the way a real user gets them: `native skills get <name>` written to `.claude/skills/<name>/SKILL.md` (`init` does not ship skills). The zig track gets `native-ui` + `zig`; the ts app track gets `ts-core` + `native-ui`; core-only ts-core cases get `ts-core`. The workspace is then **pre-warmed** (`native test` once — workspaces are zero-config, so builds go through the CLI verbs) so the agent's own builds are incremental and its wall-clock isn't spent compiling the SDK.
 2. **Runs the agent-under-test**: `claude -p "<task prompt>"` headless in the workspace, routed through the Vercel AI Gateway, with a per-run `CLAUDE_CONFIG_DIR` so no user-level memory/plugins/hooks leak in, `--max-turns`, a wall-clock timeout, and the full `stream-json` transcript captured to `results/`.
 3. **Grades** with deterministic checks: `native test` in the workspace, `native markup check` on the `.native` files, per-case file greps (e.g. "the board uses `<template>`"), and live automation-snapshot greps (`native build` with `-Dautomation=true`, launch, wait for the automation snapshot, grep it for expected roles/names).
 4. **Judges** quality the deterministic checks can't see — idiomatic Model/Msg design, template factoring, test meaningfulness — with an `llm_judge` check: a judge model called directly through the gateway scores case-specific criteria 0–10 against the task prompt and the agent's code. Advisory by default (the score is recorded and printed but never fails the case); set `"advisory": false` on a case to make `minScore` a gate. Skipped in `--dry-run`.
@@ -28,7 +28,7 @@ ANTHROPIC_AUTH_TOKEN=$AI_GATEWAY_API_KEY
 ANTHROPIC_API_KEY=            # empty string on purpose: a non-empty value would win over the auth token
 ```
 
-Models are gateway slugs. The coder (agent-under-test) defaults to `anthropic/claude-sonnet-5` (override with `--model` or `NATIVE_SDK_EVAL_MODEL`); the judge defaults to `anthropic/claude-opus-4.8` (override with `--judge-model` or `NATIVE_SDK_EVAL_JUDGE_MODEL`).
+Models are gateway slugs. The coder (agent-under-test) defaults to `anthropic/claude-sonnet-5` (override with `--model` or `NATIVE_SDK_EVAL_MODEL`); the judge defaults to `anthropic/claude-opus-4.8` (override with `--judge-model` or `NATIVE_SDK_EVAL_JUDGE_MODEL`). Both tracks of a dual case always run with the SAME coder model — fairness is a property of the run, so set it once at run time.
 
 ## Usage
 
@@ -46,6 +46,7 @@ pnpm eval                             # the whole suite
 pnpm eval --model anthropic/claude-opus-4.8 templates-settings-app
 pnpm eval --judge-model anthropic/claude-fable-5 templates-settings-app
 pnpm eval --skip-live                 # skip snapshot checks (no app launch / non-macOS)
+pnpm eval --track ts dual-feed-table  # one track of a dual-track case (default: both)
 pnpm eval --keep-workspaces           # keep .workspaces/<case> around for inspection
 pnpm eval --trials 5 expenses-table   # 5 independent trials per case; report pass rates
 pnpm eval --concurrency 3             # run up to 3 case trials in parallel (default 2 locally)
@@ -133,6 +134,45 @@ In both modes the runner passes `--disallowedTools` deny rules for `evals/cases/
 - `playlist-row-actions` — exercises the interaction seams: row-level Enter as a list row's primary action (`on-submit` on `list-item`, distinct from select-on-press) and the app-level key fallback (`Options.on_key`) for Space and the arrows when nothing is focused. Greps assert the row-level submit binding and the fallback wiring; the snapshot asserts the seeded rows, the model-driven selection, and the idle derived status.
 
 Add a case by creating `cases/<name>/eval.json` (see `src/types.ts` for the schema). Prompts describe app **requirements**, never the solution — the point is to see whether a fresh agent reaches the intended grammar from the skill alone.
+
+## The TS-authoring track
+
+Cases with `"frontend": "ts-core"` measure the other authoring surface: the app core written in the TypeScript subset and compiled by `packages/core`. The scaffold is not an app — it is `src/core.ts` (the case's `starter/` overlay when it ships one, else a minimal counter core), a README with the check loop, and the `ts-core` skill delivered via `native skills get ts-core`. Two graders replace build/markup/snapshot:
+
+- `ts_transpile` — the transpiler must exit clean on `src/core.ts`: tsc-semantics typecheck, every subset rule (NS1001-NS1050), Zig emission. Failing diagnostics stay in the result as the violation evidence.
+- `ts_harness` — behavioral grading: transpile the core, assemble a scratch dir with the emitted `core.zig`, the rt kernel, and the case's `harness.zig`, then `zig test harness.zig`. The harness drives the real dispatch cycle (`update` → `commitModelRoot` → `frameReset`) and asserts the prompt's requirements, so the case prompt pins the Model/Msg/export contract exactly (an API spec, not a solution).
+
+Because the grading harness compiles against the agent's code, ts-core prompts pin names; behavior stays requirements-only. The transpiler compiles pure `update(model, msg): Model` cores and effectful `Model | [Model, Cmd<Msg>]` pair-returns (the Cmd surface); the wave-2 dual-track cases below are the effects coverage.
+
+The ts-core cases:
+
+- `ts-habits-core` — a fresh core from a requirements description (the TS mirror of `habits-tracker`): seeded habits, toggle-with-streak math, a trimmed draft add path, exclusive filters, derived counts.
+- `ts-expenses-filter` — a feature-add to an existing subset file: extend a working expense ledger (shipped as `starter/`) with an exclusive `Category | null` filter and derived filtered views, without breaking the existing behavior.
+- `ts-countdown-bugfix` — a bug-fix in an existing subset file: a countdown core whose tick/reset/set_duration transitions drifted from the spec (unguarded ticks, no completion stop/floor, hardcoded reset); the prompt states the intended behavior, the harness isolates each drift.
+- `ts-tag-input-core` — the text seam under pressure: comma-separated tag parsing with byte-level trim, empty-drop, and case-insensitive dedupe, where string methods are the reflex and NS1004 says no.
+
+## The dual-track cases (wave 2)
+
+Wave 1's four ts-* cases measured subset compliance on toy katas and compared against Zig numbers gathered **before** the `zig` 0.16-idioms skill existed. Wave 2 replaces that comparison with an honest, contemporaneous one: six realistic asks, each ONE language-blind spec (`"frontend": "app-dual"`) that runs on **both authoring tracks** — `<case>@ts` scaffolds a full TypeScript app (`native init --frontend native --template ts-core`), `<case>@zig` the Zig app template (`--template zig-core`). Identical prompt, identical shared checks, one behavioral spec asserted by two thin per-track harnesses; `--track ts|zig` selects a lane, the default runs both.
+
+Grading per track: the shared checks (`native test -Dplatform=null`, markup check, view greps, the judge with a case rubric) plus the track's behavioral harness. On the ts track, `ts_harness` transpiles `src/core.ts` (its whole import graph) and `zig test`s the case's `harness-ts.zig` against the emitted core, the rt kernel, and `harness-lib/cmdview.zig` — a decoder over the Cmd/Sub wire format, so harnesses assert effects semantically ("one GET to the pinned URL", "the delay re-armed on the same key"). On the zig track, `zig_harness` injects the case's `harness-zig.zig` into the workspace as `src/eval_behavior_spec.zig` (a test import appended to `src/main.zig`, restored afterward) and runs `native test`, so it compiles against the agent's real Model/Msg/update and drives the SDK's deterministic **fake effects executor** (`fx.executor = .fake`, `pendingSpawnAt`/`feedLine`/`feedExit`/`fireTimer`/`feedResponse`/`feedFileResult`).
+
+The cases — every prompt reads like a real user ask, and every effect result is fed by the harness (no network, no processes, no clocks during grading):
+
+- `dual-feed-table` — "fetch JSON from this API and show it in a sortable table": the HTTP effect (pinned URL, buffered GET, keyed), JSON parsing of a pinned flat schema, two sort orders derived at view time, and the five honest states (idle / loading with re-entry guarded / loaded / explicit empty / failed keeping previous rows) across non-200, transport-failure, and malformed-body deliveries.
+- `dual-notes-autosave` — "add debounced autosave to this notes app" (starter provided per track, both riding the SDK text-input engines): the keyed one-shot re-arm debounce (Cmd.delay / fx.startTimer replace), byte-exact notes.tsv serialization, Save now with the pending autosave cancelled, a five-state save lifecycle, and the late-result race (a save landing after newer edits must not mark them saved).
+- `dual-pomodoro-timer` — "build a pomodoro timer with a completion sound": the recurring timer surface (Sub.timer declared from the model / fx timer armed-cancelled through the channel — armed exactly while running), auto-advancing focus/rest state machine, work-only completion counting, stale-tick guards, and the audio surface at completions.
+- `dual-list-delete-fix` — "this list doesn't update after delete — fix it": a realistic seeded bug (a hand-maintained visible-list cache that delete forgot) in a medium app with a markup view; the harness pins list correctness across delete/toggle/add/filter, the judge scores whether the fix is the derive-don't-store root cause or a symptom patch.
+- `dual-ledger-csv-split` — "split this core into modules and add export-to-CSV in the new module": multi-file authoring (relative imports on ts, `@import` on zig, both grepped), byte-exact CSV quoting (commas and doubled quotes exercised by the seeds), the file-write effect, and a four-state export lifecycle.
+- `dual-sysinfo-panel` — "show system info from a shell command in the UI": a collect-mode background spawn of a pinned argv, byte parsing of the output line, re-entry guarded while probing, and honest ok / failed-with-code / never-started states.
+
+Starters (`starter-ts/`, `starter-zig/`) overlay the scaffold for the feature-add, bug-fix, and split cases — written in each track's idiom (immutable spread cores over the SDK text engine on ts; bounded buffers, `canvas.TextBuffer`, and Model-method bindings on zig) so neither track starts from translated code.
+
+**Fairness and methodology.** Both tracks get identical prompts (language-neutral asks; the pinned contract names arms/fields in the wire spelling and states each track's idiom for the few surfaces that necessarily differ — routed err arms on ts vs payload-carried outcomes on zig). Each track gets its CURRENT skill set by the documented delivery path and nothing extra: ts → `ts-core` + `native-ui`; zig → `native-ui` + `zig` (the 0.16-idioms skill). The same coder model grades both tracks of a run. Known caveats to carry into any writeup: wave-1's Zig numbers predate the `zig` skill (this suite is the corrected baseline — the pre-existing native cases now also receive it, so their history splits at this commit); the behavioral harnesses are compiled contracts, so a run can fail for contract-shape reasons the prompt pins explicitly; and the two tracks' harness glue differs by necessity (wire-format decoding vs fake-executor introspection) while asserting the same spec, test for test.
+
+### Authoring metrics
+
+`pnpm metrics results/<stamp> [...]` post-processes finished runs' transcripts into the agent-authoring metrics the checks cannot see, per case and per track — **ts** (the ts-core cases and the `@ts` side of dual cases) vs **zig** (the pre-existing native cases and the `@zig` side): **first-pass compliance** (did the agent's first compliance check after touching sources pass — the transpiler run, `native check`, `native test`, or `native build` on the ts track; `native test` / `native build` / `native check` / `native markup check` on the zig track), **retries-to-green** (failing compliance runs before the first green), **teaching-error encounters** (failing compliance runs that carried a teaching diagnostic — the "did the diagnostics work" round-trip count wave 2 compares across tracks), **violation taxonomy** (NS/TS rule IDs on the ts track; zig error lines on the zig track, with `no member named 'X'` bucketed by member so the 0.16-idiom class is visible) raw and per 1k generated LOC (lines written through Write/Edit to source files, `.native` markup included), and **task success** (the run's own pass verdict). Harness friction — permission-refused commands, errored compounds with no diagnostic in the output — is dropped from the event stream so it never masquerades as an authoring failure. It writes `authoring-metrics.json` next to each `summary.json`.
 
 ## CI
 

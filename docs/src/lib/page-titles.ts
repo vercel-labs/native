@@ -8,6 +8,8 @@ export const PAGE_TITLES: Record<string, string> = {
   introduction: "Introduction",
   "quick-start": "Quick Start",
   "app-model": "App Model",
+  typescript: "TypeScript Cores",
+  "typescript/packages": "Where Packages Go",
   "native-ui": "Native UI",
   state: "State & Data Flow",
   theming: "Theming",

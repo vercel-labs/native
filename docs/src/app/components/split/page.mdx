@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Split
 
@@ -22,6 +23,21 @@ import { AttrTable } from "@/components/attr-table";
 
 A `value` of 0 lays out at 0.5, so a fresh model starts centered. Put conditional or repeated content inside a pane container — the split itself takes exactly two children.
 
+In `update`, the arm echoes the applied fraction back into the bound field:
+
+<CodeToggle>
+
+```ts
+case "sidebar_resized":
+  return { ...model, sidebar_fraction: msg.fraction };
+```
+
+```zig
+.sidebar_resized => |fraction| model.sidebar_fraction = fraction,
+```
+
+</CodeToggle>
+
 ## Animated resize
 
 `resize-duration` (milliseconds) turns the bound `value` into a target: a rebuild that moves it — a collapse toggle in `update`, not a drag echo — eases the rendered fraction there instead of snapping, one step per presented frame, reflowing both panes exactly as a divider drag would and dispatching the same `on-resize` echoes. `resize-easing` names the curve (`linear`, `standard` — the default — `emphasized`, `spring`) and needs a nonzero duration beside it. Under a reduced-motion appearance the split snaps automatically — apps need do nothing. Omitting `resize-duration` (or setting 0) keeps today's snap.
@@ -39,9 +55,9 @@ A `value` of 0 lays out at 0.5, so a fresh model starts centered. Put conditiona
 
 Here `sidebar_fraction` is the model's declared resting fraction — flip it between the expanded and collapsed values in `update` and the runtime animates the divider there. In Zig views the same pair is `ElementOptions.resize_duration`/`resize_easing` on `ui.split`.
 
-## Zig builder
+## Programmatic construction (Zig)
 
-`on_resize` pairs with `valueMsg`, which builds the `f32`-payload message constructor.
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically. `on_resize` pairs with `valueMsg`, which builds the `f32`-payload message constructor.
 
 ```zig
 ui.split(.{
@@ -57,12 +73,6 @@ ui.split(.{
         ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Content"),
     }),
 })
-```
-
-And in `update`:
-
-```zig
-.sidebar_resized => |fraction| model.sidebar_fraction = fraction,
 ```
 
 ## Attributes

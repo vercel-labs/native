@@ -1,0 +1,29 @@
+<column gap="6" padding="10">
+  <text>{banner} filter {filter} next {nextId}</text>
+  <text>done {doneCount}</text>
+  <if test="{selected}">
+    <text>picked {selected}</text>
+  </if>
+  <row gap="4">
+    <text-field text="{draft}" label="Draft" on-input="draft_edit" width="160" />
+    <text>draft [{draft}]</text>
+  </row>
+  <row gap="4">
+    <button on-press="add">Add</button>
+    <button on-press="cycle">Cycle</button>
+    <button on-press="clear">Clear</button>
+  </row>
+  <for each="tasks" as="t" key="id">
+    <row key="{t.id}" gap="4" cross="center">
+      <text grow="1">{t.title} #{t.id}</text>
+      <if test="{t.done}">
+        <badge>done</badge>
+      </if>
+      <button size="sm" on-press="toggle:{t.id}">Flip</button>
+      <button size="sm" on-press="pick:{t.id}">Pick</button>
+    </row>
+  </for>
+  <else>
+    <text>no tasks</text>
+  </else>
+</column>

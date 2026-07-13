@@ -14,6 +14,7 @@ pub const embedlib = @import("embedlib.zig");
 pub const eject_components = @import("eject_components.zig");
 pub const toolchain = @import("toolchain.zig");
 pub const verbs = @import("verbs.zig");
+pub const ts_core = @import("ts_core.zig");
 pub const ios = @import("ios.zig");
 pub const android = @import("android.zig");
 pub const xcodeproj = @import("xcodeproj.zig");

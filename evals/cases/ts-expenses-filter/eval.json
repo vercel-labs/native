@@ -1,0 +1,36 @@
+{
+  "name": "ts-expenses-filter",
+  "description": "Feature-add to an existing subset core: extend a working expense ledger with an exclusive category filter and filtered totals, without breaking the existing behavior.",
+  "prompt": "This workspace holds a TypeScript app core (see README.md; the deliverable is src/core.ts, written in the app-core subset — the authoring guide is .claude/skills/ts-core/SKILL.md). src/core.ts is a working expense-ledger core: expenses with a label, an amount in cents, and a category (\"food\" | \"travel\" | \"gear\"), plus add/remove messages and total/count helpers. Extend it with category filtering.\n\nRequirements:\n- The model gains a category filter: exactly one category, or no filter (show everything). It starts unfiltered.\n- A new message sets or clears the filter. Exactly one filter value is active at a time.\n- Filtered views: the expenses the current filter shows, and their total in cents, both derived (never stored).\n- Removing an expense works the same regardless of the active filter, and the unfiltered total/count helpers keep working exactly as before.\n\nThe exact contract for the additions (the grader compiles against it; keep the existing exports unchanged):\n- Model gains the field filter (Category | null; null means unfiltered).\n- Msg gains the arm { kind: \"set_filter\", filter: Category | null }.\n- export function visibleExpenses(model: Model): readonly Expense[], export function visibleTotalCents(model: Model): number.\n\nCheck your work with the transpiler command in README.md until it exits clean, and make sure the behavior above actually holds (node can import the module directly). When you are done, summarize what changed.",
+  "frontend": "ts-core",
+  "timeoutMs": 900000,
+  "maxTurns": 50,
+  "checks": [
+    {
+      "type": "ts_transpile"
+    },
+    {
+      "type": "ts_harness",
+      "description": "existing add/remove/total behavior intact, exclusive filter, derived filtered list and total"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/core.ts",
+      "pattern": "set_filter",
+      "expect": true,
+      "description": "the filter changes through a message, not a helper mutation"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The feature lands as a minimal, coherent extension: existing arms and helpers untouched, new state has one owner, no duplicated filtering logic.",
+        "Filtered values are derived on demand from the model, never cached in it.",
+        "The new code matches the file's existing style and stays idiomatic immutable TypeScript."
+      ],
+      "files": ["src/core.ts"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the feature addition beyond compliance"
+    }
+  ]
+}

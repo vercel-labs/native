@@ -24,7 +24,7 @@ State changes should be explicit, inspectable and easy to reason about. Events p
 
 ## Simple authoring
 
-Interfaces should be easy to read, easy to write and easy to generate. Views are declarative markup with bindings and message dispatch — no lifecycle, no hidden state, no imperative wiring — validated at check and compile time with teaching errors that point at a line and column. [Native UI](/native-ui) covers every element and pattern.
+Interfaces should be easy to read, easy to write and easy to generate. Views are declarative markup with bindings and message dispatch — no lifecycle, no hidden state, no imperative wiring — validated at check and compile time with teaching errors that point at a line and column. [Native UI](/native-ui) covers every element and pattern. App logic follows the same idea: by default it is plain TypeScript compiled to native code at build time — no JS runtime in the binary — with Zig first-class by choice. Zig is how the whole toolkit works; TypeScript and Native markup are how applications are authored. [TypeScript Cores](/typescript) covers the logic tier.
 
 ## AI is part of the workflow
 

@@ -14,9 +14,11 @@ pub const RawManifest = struct {
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     webview_layer: []const u8 = "auto",
     theme: ?[]const u8 = null,
+    theme_accent: ?[]const u8 = null,
     cef: RawCef = .{},
     frontend: ?RawFrontend = null,
     security: RawSecurity = .{},
+    assets: RawAssets = .{},
     windows: []const RawWindow = &.{},
     shell: RawShell = .{},
     commands: []const RawCommand = &.{},
@@ -57,6 +59,19 @@ pub const RawFrontendDev = struct {
 
 pub const RawSecurity = struct {
     navigation: RawNavigation = .{},
+};
+
+/// Launch-registered assets (the TypeScript-core wiring's image channel):
+/// each image is read once at launch and registered on the installing
+/// frame under its declared `ImageId` — the id markup avatar bindings
+/// reference.
+pub const RawAssets = struct {
+    images: []const RawImageAsset = &.{},
+};
+
+pub const RawImageAsset = struct {
+    id: u64,
+    path: []const u8,
 };
 
 pub const RawNavigation = struct {

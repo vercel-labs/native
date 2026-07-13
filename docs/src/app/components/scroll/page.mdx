@@ -1,9 +1,10 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Scroll
 
-A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. Scrolling pins at the content edges by default — no rubber-band bounce; kinetic motion stops cleanly at the boundary. `overscroll="rubber_band"` opts one region into bouncing past its edges (both the engine physics and the native macOS scroller honor it), and the `ScrollPhysics.overscroll` design token flips the app-wide default, which per-region values override. `on-reach-end` dispatches a plain Msg when a scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (appending a batch grows the extent and re-arms the next approach). A programmatic jump to the end fires once and never re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it. Pair with [list](/components/list) for layout-culled rows, or the builder's [virtual list](/components/virtual-list) for dataset-scale windows.
+A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload — or, in a transpiled TypeScript core, a declared record of the same `offset`/`velocity`/`viewport_extent`/`content_extent` fields, matched by name — that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. Echo the offset into a model field bound as `value` and the model owns the position too: setting the field scrolls the region (the controlled-scroll shape). Scrolling pins at the content edges by default — no rubber-band bounce; kinetic motion stops cleanly at the boundary. `overscroll="rubber_band"` opts one region into bouncing past its edges (both the engine physics and the native macOS scroller honor it), and the `ScrollPhysics.overscroll` design token flips the app-wide default, which per-region values override. `on-reach-end` dispatches a plain Msg when a scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (appending a batch grows the extent and re-arms the next approach). A programmatic jump to the end fires once and never re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it. Pair with [list](/components/list) for layout-culled rows, or the builder's [virtual list](/components/virtual-list) for dataset-scale windows.
 
 <ComponentPreview name="scroll" alt="A scroll region rendered by the engine" caption="a fixed-height scroll region; the engine draws the scrollbar during scrolling" />
 
@@ -23,9 +24,29 @@ A scroll view: wrap multiple children in a single column inside it. The engine o
 </scroll>
 ```
 
-## Zig builder
+The arm receives the scroll state and stores what the model wants to remember — echo `offset` into a field bound as the scroll's `value` and the model owns the position too:
 
-`on_scroll` pairs with `Ui.scrollMsg(.tag)`; the delivered offset is the value the runtime already applied, so echoing it back never fights the scroll reconcile.
+<CodeToggle>
+
+```ts
+import { type ScrollState } from "@native-sdk/core/events";
+
+export type Msg = /* ... */ | { readonly kind: "log_scrolled"; readonly scroll: ScrollState };
+// in update:
+case "log_scrolled":
+  return { ...model, changelog_offset: msg.scroll.offset };
+```
+
+```zig
+// Msg arm: log_scrolled: canvas.ScrollState
+.log_scrolled => |scroll| model.changelog_offset = scroll.offset,
+```
+
+</CodeToggle>
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically. `on_scroll` pairs with `Ui.scrollMsg(.tag)`; the delivered offset is the value the runtime already applied, so echoing it back never fights the scroll reconcile.
 
 ```zig
 ui.scroll(.{ .height = 240, .padding = 8, .on_scroll = Ui.scrollMsg(.log_scrolled) }, .{

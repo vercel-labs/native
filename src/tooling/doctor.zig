@@ -4,6 +4,8 @@ const cef = @import("cef.zig");
 const debug = @import("debug");
 const manifest_tool = @import("manifest.zig");
 const web_engine = @import("web_engine.zig");
+const buildgraph = @import("buildgraph.zig");
+const ts_core = @import("ts_core.zig");
 
 pub const Error = error{
     DoctorProblems,
@@ -142,6 +144,7 @@ pub fn reportForCurrentHostWithProbe(
     try buffers.add("null-backend", .available, "headless WebView shell platform is available", .{});
     try addLogPathCheck(buffers, env_map);
     try addManifestCheck(buffers, allocator, io, options);
+    try addTsEditorPackageCheck(buffers, allocator, io, env_map, probe);
     if (target.os == .macos) {
         try buffers.add("webview-system", .available, "WKWebView system WebView backend is available on macOS hosts", .{});
         try addPathCheck(buffers, io, probe, "codesign", "/usr/bin/codesign", "codesign is available for macOS signing", "codesign was not found");
@@ -224,6 +227,30 @@ fn addLogPathCheck(buffers: *ReportBuffers, env_map: *std.process.Environ.Map) !
         return buffers.add("log-path", .missing, "log directory could not be resolved: {s}", .{@errorName(err)});
     };
     try buffers.add("log-path", .available, "runtime logs will be written to {s}", .{paths.log_file});
+}
+
+/// TypeScript apps only (cwd has src/core.ts): compare the app's editor
+/// copy of @native-sdk/core (node_modules — the pre-publish surface stock
+/// tsc resolves) against the SDK's bundled package. A mismatch never breaks
+/// a build (builds don't read node_modules); it breaks IntelliSense, so the
+/// teaching line names the fix.
+fn addTsEditorPackageCheck(buffers: *ReportBuffers, allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, probe: Probe) !void {
+    if (!probe.pathExists(io, "src/core.ts")) return;
+    const framework_root = (buildgraph.resolveFrameworkRoot(allocator, io, env_map) catch null) orelse {
+        return buffers.add("ts-editor-package", .missing, "cannot locate the Native SDK framework to verify node_modules/@native-sdk/core; set NATIVE_SDK_PATH to your framework checkout", .{});
+    };
+    defer allocator.free(framework_root);
+    const status = ts_core.editorPackageStatus(allocator, io, framework_root, ".") catch {
+        return buffers.add("ts-editor-package", .missing, "the SDK at {s} is missing packages/core - cannot verify the editor package", .{framework_root});
+    };
+    defer status.deinit(allocator);
+    if (status.fresh()) {
+        try buffers.add("ts-editor-package", .available, "node_modules/@native-sdk/core matches the SDK (v{s}) - stock editor TypeScript resolves the SDK", .{status.bundled});
+    } else if (status.installed) |installed| {
+        try buffers.add("ts-editor-package", .missing, "node_modules/@native-sdk/core is v{s} but the SDK ships v{s} - `native check` refreshes it (after the npm publish: `npm install`); builds are unaffected", .{ installed, status.bundled });
+    } else {
+        try buffers.add("ts-editor-package", .missing, "node_modules/@native-sdk/core is missing - editor TypeScript cannot resolve the SDK; `native check` materializes it (builds are unaffected)", .{});
+    }
 }
 
 fn addManifestCheck(buffers: *ReportBuffers, allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
@@ -316,6 +343,57 @@ test "doctor options parse strict manifest and cef checks" {
     try std.testing.expectEqual(web_engine.Engine.chromium, options.web_engine_override.?);
     try std.testing.expectEqualStrings("app.zon", options.manifest_path.?);
     try std.testing.expectEqualStrings("third_party/cef/macos", options.cef_dir_override.?);
+}
+
+test "doctor reports the TS editor package when the tree has a core.ts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // A fake SDK checkout (framework marker + bundled package) under the
+    // cache; the cwd (repo root) plays the app dir and has no
+    // node_modules/@native-sdk/core, so the check reports the missing copy.
+    const sdk = ".zig-cache/test-doctor-editor-package/sdk";
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, ".zig-cache/test-doctor-editor-package") catch {};
+    defer cwd.deleteTree(io, ".zig-cache/test-doctor-editor-package") catch {};
+    try cwd.createDirPath(io, sdk ++ "/src");
+    try cwd.createDirPath(io, sdk ++ "/packages/core/sdk");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/src/root.zig", .data = "// marker" });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/package.json", .data = "{ \"version\": \"0.0.5\" }" });
+
+    const Fake = struct {
+        fn commandAvailable(context: ?*anyopaque, inner_allocator: std.mem.Allocator, inner_io: std.Io, argv: []const []const u8) bool {
+            _ = context;
+            _ = inner_allocator;
+            _ = inner_io;
+            _ = argv;
+            return true;
+        }
+
+        fn pathExists(context: ?*anyopaque, inner_io: std.Io, path: []const u8) bool {
+            _ = context;
+            _ = inner_io;
+            return std.mem.eql(u8, path, "src/core.ts");
+        }
+    };
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("HOME", "/Users/alice");
+    try env_map.put("NATIVE_SDK_PATH", sdk);
+    var buffers: ReportBuffers = .{};
+    const report = try reportForCurrentHostWithProbe(allocator, io, &env_map, .{}, &buffers, .{
+        .command_fn = Fake.commandAvailable,
+        .path_fn = Fake.pathExists,
+    });
+
+    var found = false;
+    for (report.checks) |check| {
+        if (!std.mem.eql(u8, check.id, "ts-editor-package")) continue;
+        found = true;
+        try std.testing.expectEqual(platform_info.Status.missing, check.status);
+        try std.testing.expect(std.mem.indexOf(u8, check.message, "native check") != null);
+    }
+    try std.testing.expect(found);
 }
 
 test "doctor report uses injected probes" {

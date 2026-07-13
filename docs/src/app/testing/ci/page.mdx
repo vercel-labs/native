@@ -21,7 +21,7 @@ Most apps get lasting value from tiers 1 and 2 alone — that is what the genera
 `native automate assert` replaces grep-and-sleep chains with one polling command:
 
 ```bash
-native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'total: 0'
 ```
 
 Each argument is a regex that must match `snapshot.txt`. The command polls until every pattern matches or the timeout expires, then exits 0 (CI-friendly). On failure it exits non-zero, names each missing pattern, and prints the snapshot tail so the CI log carries the evidence.
@@ -72,7 +72,7 @@ The `smoke` job is tier 2. It installs GTK and Xvfb, builds the framework CLI, t
     pid=$!
     trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
     "$cli" automate wait
-    "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+    "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'total: 0'
     "$cli" automate screenshot main-canvas
     test -s .zig-cache/native-sdk-automation/screenshot-main-canvas.png
 ```
@@ -82,7 +82,7 @@ Step by step:
 1. `rm -rf .zig-cache/native-sdk-automation` clears stale automation artifacts so assertions never pass against a previous run.
 2. `xvfb-run -a` launches the real binary under a virtual display; the `trap` guarantees the app dies with the job.
 3. `automate wait` blocks until the runtime publishes `ready=true`.
-4. `automate assert` proves the GPU surface presented non-blank pixels and the scaffolded counter UI (the Reset button and the `count: 0` status bar) reached the accessibility snapshot.
+4. `automate assert` proves the GPU surface presented non-blank pixels and the scaffolded counter UI (the Reset button and the `total: 0` status bar) reached the accessibility snapshot.
 5. `automate screenshot` renders the `main-canvas` view to a PNG and the final `test -s` fails the job if it is empty.
 
 As the app grows, extend the assert line with patterns for your own widgets, add `automate widget-click` interactions between assertions, or check screenshots against committed goldens.

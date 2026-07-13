@@ -33,6 +33,12 @@ pub const Metadata = struct {
     /// the known pack names so a typo is a check error, never a silent
     /// default-theme fallback.
     theme: ?[]const u8 = null,
+    /// The manifest's one-accent brand override (`theme_accent =
+    /// "#df2670"`), layered over the resolved pack by the runtime
+    /// (`canvas.accentOverrides`; high contrast skips it). Optional —
+    /// absent keeps the pack's own accent. Validated as a #rrggbb hex
+    /// color so a typo is a check error, never a silent stock accent.
+    theme_accent: ?[]const u8 = null,
     cef: web_engine_tool.CefConfig = .{},
     frontend: ?FrontendMetadata = null,
     security: SecurityMetadata = .{},
@@ -54,6 +60,7 @@ pub const Metadata = struct {
         if (self.display_name) |value| allocator.free(value);
         if (self.description) |value| allocator.free(value);
         if (self.theme) |value| allocator.free(value);
+        if (self.theme_accent) |value| allocator.free(value);
         allocator.free(self.version);
         allocator.free(self.web_engine);
         allocator.free(self.webview_layer);
@@ -374,6 +381,12 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
             .message = "app.zon theme is invalid - expected one of: house, geist",
         };
     }
+    if (metadata.theme_accent) |accent| {
+        if (!isHexColor(accent)) return .{
+            .ok = false,
+            .message = "app.zon theme_accent is invalid - expected a #rrggbb hex color (e.g. \"#df2670\")",
+        };
+    }
     validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app.zon icons are invalid" };
     if (try checkIconSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.icons)) |icon_message| {
         return .{ .ok = false, .message = icon_message };
@@ -480,6 +493,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .display_name = if (raw.display_name) |value| try allocator.dupe(u8, value) else null,
         .description = if (raw.description) |value| try allocator.dupe(u8, value) else null,
         .theme = if (raw.theme) |value| try allocator.dupe(u8, value) else null,
+        .theme_accent = if (raw.theme_accent) |value| try allocator.dupe(u8, value) else null,
         .version = try allocator.dupe(u8, raw.version),
         .icons = try duplicateStringList(allocator, raw.icons),
         .platforms = try duplicateStringList(allocator, raw.platforms),
@@ -958,6 +972,17 @@ fn isKnownThemePack(name: []const u8) bool {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
     return false;
+}
+
+/// One #rrggbb hex color — the `theme_accent` shape the runner's
+/// comptime parse accepts (kept in step the same way as the pack names:
+/// a drift is a build error in the app, never a shipped typo).
+fn isHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |byte| {
+        _ = std.fmt.charToDigit(byte, 16) catch return false;
+    }
+    return true;
 }
 
 fn validateIconPaths(icons: []const []const u8) !void {
@@ -2202,4 +2227,26 @@ test "manifest validates the theme pack name" {
     try std.testing.expect(isKnownThemePack("house"));
     try std.testing.expect(isKnownThemePack("geist"));
     try std.testing.expect(!isKnownThemePack("neon"));
+}
+
+test "manifest validates the theme accent hex color" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .theme = "geist",
+        \\  .theme_accent = "#df2670",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("#df2670", metadata.theme_accent.?);
+    // The hex-shape check is the tooling half of the contract; the
+    // runner re-parses the same shape at comptime in the app build.
+    try std.testing.expect(isHexColor("#df2670"));
+    try std.testing.expect(isHexColor("#000000"));
+    try std.testing.expect(!isHexColor("df2670"));
+    try std.testing.expect(!isHexColor("#df267"));
+    try std.testing.expect(!isHexColor("#df26700"));
+    try std.testing.expect(!isHexColor("#df267g"));
 }

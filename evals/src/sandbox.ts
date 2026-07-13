@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Sandbox } from "@vercel/sandbox";
 import { exec } from "./util.ts";
-import type { CaseResult, EvalCase } from "./types.ts";
+import type { CaseResult, EvalCase, Track } from "./types.ts";
 
 /** Per-sandbox wall clock. 45 minutes is the Hobby-plan ceiling; a case's
  * agent budget (20-25 min) plus incremental builds and grading fits under it. */
@@ -104,6 +104,11 @@ export async function packRepo(repoRoot: string): Promise<string> {
     "node_modules",
     ".workspaces",
     "results",
+    // Per-app managed build state (examples/*/.native holds gigabytes of
+    // zig cache on a machine that has run the examples). The sandbox-side
+    // rsync already excluded it; without this tar-side twin the upload
+    // blows the request-size limit whenever local example caches exist.
+    ".native",
     ".env.local",
     ".env*.local",
   ].flatMap((pattern) => ["--exclude", pattern, "--exclude", `*/${pattern}`, "--exclude", `*/${pattern}/*`]);
@@ -133,6 +138,9 @@ rsync -a --delete \
 rm -rf /tmp/repo-sync /tmp/repo.tgz
 echo "working tree refreshed over baked ref $(cat /opt/native-sdk/baked-ref)"
 cd ${REPO_DIR}/evals && pnpm install --frozen-lockfile
+# The transpiler's installed dependency (TS-track graders and build graphs).
+# The bake also installs it now; this covers images from before it did.
+cd ${REPO_DIR}/packages/core && npm ci --silent
 `;
 
 /** Start the headless display and block until it accepts connections. */
@@ -146,6 +154,10 @@ exit 1
 
 export async function runCaseInSandbox(options: {
   evalCase: EvalCase;
+  /** app-dual cases: the track this sandbox run grades. */
+  track?: Track | undefined;
+  /** Results label: `<case>` or `<case>@<track>`. */
+  label: string;
   tarballPath: string;
   gatewayKey: string | undefined;
   model: string;
@@ -195,13 +207,14 @@ export async function runCaseInSandbox(options: {
       `cd ${REPO_DIR}/evals &&`,
       "pnpm eval --skip-permissions --keep-workspaces --lane linux-sandbox",
       ...(options.dryRun ? ["--dry-run"] : []),
+      ...(options.track ? [`--track ${options.track}`] : []),
       `--model ${options.model} --judge-model ${options.judgeModel}`,
       evalCase.name,
     ].join(" ");
     const innerAsUser = `setpriv --reuid=${EVAL_USER} --regid=${EVAL_USER} --init-groups env HOME=/home/${EVAL_USER} bash -c ${JSON.stringify(inner)}`;
-    // The inner harness prefixes its own lines with the case name; strip it
+    // The inner harness prefixes its own lines with the run label; strip it
     // since our `log` adds the same prefix.
-    const innerPrefix = `[${evalCase.name}] `;
+    const innerPrefix = `[${options.label}] `;
     const innerLog = (line: string): void =>
       log(line.startsWith(innerPrefix) ? line.slice(innerPrefix.length) : line);
     const innerEnv: Record<string, string> = { ...SANDBOX_ENV };
@@ -222,7 +235,7 @@ export async function runCaseInSandbox(options: {
     const stampCmd = await sandbox.runCommand("bash", ["-c", `ls -t ${REPO_DIR}/evals/results | head -1`]);
     const stamp = (await stampCmd.stdout()).trim();
     if (!stamp) throw new Error(`inner run exited ${innerExit} without a results directory`);
-    const caseDir = `${REPO_DIR}/evals/results/${stamp}/${evalCase.name}`;
+    const caseDir = `${REPO_DIR}/evals/results/${stamp}/${options.label}`;
     const pack = await sandbox.runCommand("bash", [
       "-c",
       `cd ${caseDir} && tar czf /tmp/case-results.tgz --exclude claude-config .`,
@@ -233,7 +246,7 @@ export async function runCaseInSandbox(options: {
     const resultsTar = await sandbox.readFileToBuffer({ path: "/tmp/case-results.tgz" });
     if (!resultsTar) throw new Error("case results tarball missing from sandbox");
     mkdirSync(options.localResultsDir, { recursive: true });
-    const localTar = join(tmpdir(), `native-sdk-evals-out-${process.pid}-${evalCase.name}.tgz`);
+    const localTar = join(tmpdir(), `native-sdk-evals-out-${process.pid}-${options.label}.tgz`);
     writeFileSync(localTar, resultsTar);
     const unpack = await exec("tar", ["xzf", localTar, "-C", options.localResultsDir], {
       cwd: options.localResultsDir,

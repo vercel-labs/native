@@ -1423,6 +1423,60 @@ pub const ControlTokenOverrides = struct {
     }
 };
 
+/// The ONE-accent brand statement as a token override bundle: the
+/// manifest theme surface (`app.zon`'s `.theme_accent`) resolves through
+/// this, and Zig apps can layer the same bundle over any pack. Three
+/// slots carry an accent identity, plus the slider's own table:
+///
+/// - `colors.accent`/`accent_text`: the filled-primary pair — selected
+///   fills, "Playing"-style primary badges, filled primary buttons, and
+///   every control fill deriving from the accent channel. The knockout
+///   ink derives from the accent's relative luminance (white over dark
+///   accents, near-black over light ones) so the pair stays readable in
+///   both schemes without a second manifest knob.
+/// - `colors.focus_ring`: packs spend their identity hue on focus; with
+///   the identity moved, the ring follows so focus and accent chrome
+///   read as one system.
+/// - `controls.slider.active_background`: the slider table states its
+///   own hue for the filled range rather than deriving from the accent
+///   channel, so the same move is stated once more or a seek scrubber
+///   would keep the pack's stock hue.
+///
+/// High-contrast composition is the CALLER's rule (accessibility beats
+/// brand): the runtime skips this bundle when the system asks for high
+/// contrast, taking the pack's own loud register untouched.
+pub fn accentOverrides(accent: Color) DesignTokenOverrides {
+    return .{
+        .colors = .{
+            .accent = accent,
+            .accent_text = accentKnockoutInk(accent),
+            .focus_ring = accent,
+        },
+        .controls = .{
+            .slider = .{ .active_background = accent },
+        },
+    };
+}
+
+/// The readable knockout ink over one accent fill: WHITE whenever it
+/// clears the 4.5:1 text bar over the accent (the ink packs pair with
+/// every solid identity fill — the convention brands expect), and the
+/// near-black text ink only when the accent is light enough that white
+/// honestly cannot (1.05 / (L + 0.05) < 4.5).
+fn accentKnockoutInk(accent: Color) Color {
+    const luminance = 0.2126 * srgbToLinear(accent.r) +
+        0.7152 * srgbToLinear(accent.g) +
+        0.0722 * srgbToLinear(accent.b);
+    // White clears 4.5:1 up to L = 1.05/4.5 - 0.05 ≈ 0.18333.
+    if (luminance <= 0.18333) return Color.rgb8(255, 255, 255);
+    return Color.rgb8(10, 10, 10);
+}
+
+fn srgbToLinear(channel: f32) f32 {
+    if (channel <= 0.04045) return channel / 12.92;
+    return std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+}
+
 pub const DesignTokenOverrides = struct {
     colors: ColorTokenOverrides = .{},
     typography: TypographyTokenOverrides = .{},

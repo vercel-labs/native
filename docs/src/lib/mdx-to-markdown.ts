@@ -12,6 +12,10 @@ import { componentPages } from "./components-pages";
  * - `<ComponentIndexGrid />` becomes the component index as a list.
  * - `<IconGallery />` becomes the icon-name list from the vocabulary.
  * - `<ComponentPreview ... />` (an engine-rendered image) is dropped.
+ * - `<CodeToggle>` wrappers are unwrapped: the fenced samples inside are
+ *   plain markdown already, so only the tags drop.
+ * - Filenamed fences (```ts:src/core.ts) become a labeled `path`: line
+ *   above a plain ```ts fence.
  *
  * Inline HTML (tables, definition lists) passes through untouched —
  * it is valid markdown as written.
@@ -20,15 +24,48 @@ export function mdxToCleanMarkdown(raw: string): string {
   const lines = raw.split("\n");
   const out: string[] = [];
   let jsxBlock: string[] | null = null;
+  let inFence = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
+
+    // Fenced code passes through verbatim: TypeScript samples start lines
+    // with `import`/`export`, which only MDX-level lines may strip. The one
+    // rewrite is a filenamed opener (```ts:src/core.ts — the site renders
+    // the path as a header row): copied markdown gets the path as a labeled
+    // line above a plain fence, so any renderer highlights the real
+    // language instead of choking on the colon.
+    if (jsxBlock === null && trimmed.startsWith("```")) {
+      if (!inFence) {
+        const meta = trimmed.match(/^```([^\s:`]+):(\S+)$/);
+        if (meta) {
+          out.push(`\`${meta[2]}\`:`);
+          out.push("");
+          out.push("```" + meta[1]);
+          inFence = true;
+          continue;
+        }
+      }
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
 
     if (jsxBlock === null && (trimmed.startsWith("export ") || trimmed.startsWith("import "))) {
       continue;
     }
 
-    // A capitalized JSX component; all docs components are self-closing.
+    // CodeToggle is the one paired-tag component: its children are ordinary
+    // fenced code blocks, valid markdown as written, so drop only the tags.
+    if (jsxBlock === null && (trimmed === "<CodeToggle>" || trimmed === "</CodeToggle>")) {
+      continue;
+    }
+
+    // A capitalized JSX component; every other docs component is self-closing.
     if (jsxBlock === null && /^<[A-Z]/.test(trimmed)) {
       jsxBlock = [line];
     } else if (jsxBlock !== null) {

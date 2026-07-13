@@ -1,0 +1,155 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# Where Packages Go
+
+An app core is pure TypeScript: no npm packages run inside it, because no JS engine ships in the binary. That line is drawn on purpose, and it buys the properties the rest of the toolkit stands on — byte-identical record→replay, headless testing of the whole app, automation over real state, and native dispatch speed with zero allocation at runtime. The language inside the core is complete ([TypeScript Cores](/typescript) covers exactly what that means); the ecosystem lives at the edges, and every edge has a first-class pattern.
+
+The question behind "can I use npm?" is almost always one of these four:
+
+<table>
+  <thead>
+    <tr>
+      <th>You want</th>
+      <th>The pattern</th>
+      <th>Where the code runs</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>An HTTP API — including AI/LLM endpoints</td>
+      <td><code>Cmd.fetch</code> with routed results</td>
+      <td>The effect engine, in the binary</td>
+    </tr>
+    <tr>
+      <td>An npm-heavy UI (an editor, a charting stack, an existing React app)</td>
+      <td>Embed a web frontend</td>
+      <td>A WebView surface, full npm</td>
+    </tr>
+    <tr>
+      <td>A Node library for one job</td>
+      <td><code>Cmd.spawn</code> a node sidecar</td>
+      <td>A subprocess, streaming lines back</td>
+    </tr>
+    <tr>
+      <td>A pure utility (parsing, formatting, math)</td>
+      <td>Usually nothing — or vendor it under <code>src/</code></td>
+      <td>Inside the core, compiled to native</td>
+    </tr>
+  </tbody>
+</table>
+
+## Calling APIs, AI endpoints included
+
+Most packages people reach for first — API clients, AI SDKs — are HTTP wrappers. The HTTP is already in the toolkit: `Cmd.fetch` performs a buffered exchange on the effect engine and routes the result back as an ordinary Msg carrying `{ status, body }`. The request is data, the response is a message, and a recorded session replays the whole conversation with zero network — which is not something an SDK dependency can offer. A complete client for an OpenAI-compatible chat endpoint:
+
+<CodeToggle>
+
+```ts:src/core.ts
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export interface Model {
+  readonly answer: Uint8Array;
+  readonly waiting: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "ask" }
+  | { readonly kind: "answered"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "ask_failed"; readonly reason: Uint8Array };
+
+export const viewUnbound = ["answered", "ask_failed"] as const;
+
+export function initialModel(): Model {
+  return { answer: new Uint8Array(0), waiting: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "ask":
+      if (model.waiting) return model; // one request in flight, by model state
+      return [
+        { ...model, waiting: true },
+        Cmd.fetch(
+          {
+            url: asciiBytes("http://127.0.0.1:11434/v1/chat/completions"),
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: asciiBytes('{"model":"local-model","messages":[{"role":"user","content":"Say hi in five words"}]}'),
+            timeoutMs: 120000,
+          },
+          { key: "chat", ok: "answered", err: "ask_failed" },
+        ),
+      ];
+    case "answered":
+      // The status is the real HTTP status - a 404 is a delivered
+      // response. Parse the body in pure TypeScript over bytes; the
+      // ai-chat-ts example ships the complete JSON walk.
+      return { ...model, waiting: false, answer: msg.body };
+    case "ask_failed":
+      // The transport reason ("timed_out", "connect_failed", ...) -
+      // failure is never silence.
+      return { ...model, waiting: false, answer: msg.reason };
+  }
+}
+```
+
+```zig
+// The same exchange on the Zig effects channel.
+.ask => fx.fetch(.{
+    .key = chat_key,
+    .method = .POST,
+    .url = "http://127.0.0.1:11434/v1/chat/completions",
+    .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    .body = "{\"model\":\"local-model\",\"messages\":[...]}",
+    .on_response = Effects.responseMsg(.answered),
+}),
+.answered => |response| model.recordAnswer(response), // copy response.body
+```
+
+</CodeToggle>
+
+The flagship version of this pattern is [`examples/ai-chat-ts`](https://github.com/vercel-labs/native/tree/main/examples/ai-chat-ts): a chat client for an OpenAI-compatible endpoint — conversation history in the Model, request encoding and response parsing as plain subset TypeScript over bytes, endpoint and credentials through the env channel with the key riding a runtime-built `Authorization: Bearer` header (header names are compile-time; header values may be runtime bytes), honest sending/failed/unconfigured states — with an end-to-end suite that pins the exact request bytes and replays a recorded conversation with no network in the room and none of the launch variables set. One v1 boundary, stated plainly: responses are buffered, not token-streamed (the engine underneath already streams line-framed bodies on the Zig channel; the TS Cmd surface for it is roadmap).
+
+## Full npm ecosystem UIs
+
+When the point is the ecosystem itself — a code-editor component, an existing React or Next.js app, a charting library — embed a web frontend. This is a first-class surface, not a workaround: the WebView is a component of the native shell, the [bridge](/bridge) carries typed messages between the web page and the app, and the scaffold wires the dev-server/bundled-assets split for you:
+
+```bash
+native init my_app --frontend next   # or vite | react | svelte | vue
+```
+
+npm lives in the web surface, where a JS engine actually exists; the native tier keeps the window, menus, tray, dialogs, and everything else the frontend cannot reach. [Web Content](/frontend) covers the full setup, including production asset bundling.
+
+## Node as a worker
+
+A Node library that does one discrete job — render a template, run a linter, transform a file — can run as a sidecar process: `Cmd.spawn` starts it, stdin carries the job, and stdout streams back line by line as Msgs. This is the raw pattern, honestly raw: argv is a compile-time array literal, you own the line protocol, each stdout line is bounded at 4 KiB (use `collect: true` to buffer whole output instead, up to 512 KiB), and the child needs node on the host — which is a real deployment decision, not a footnote.
+
+```ts
+case "render":
+  return [
+    { ...model, rendering: true },
+    Cmd.spawn([asciiBytes("/usr/local/bin/node"), asciiBytes("scripts/render.mjs")], {
+      key: "render",
+      stdin: model.template,
+      line: "render_line",
+      exit: "render_done",
+      err: "render_failed",
+    }),
+  ];
+```
+
+Cancellation (`Cmd.cancel("render")`), the exit code on the `exit` arm, and machine-readable failure reasons all follow the standard effect contract — see [the streaming ops](/typescript#effects-are-cmd-data). `examples/system-monitor-ts` is the reference for the collect shape: spawn a tool, parse its whole output in the core.
+
+## Pure utilities
+
+For leaf-node utilities — date math, CSV rows, number formatting — the honest answer is that most of them dissolve: text is bytes and data is records in a core, so the code you would have imported is often a short function over `Uint8Array` you can see all of. When you do want library code, two channels exist:
+
+```ts:src/core.ts
+import { parseCsvRow } from "./csv.ts";                    // vendored under src/
+import { containsIgnoreCase } from "@native-sdk/core/text"; // the SDK library channel
+```
+
+- **Vendor it under `src/`.** Subset-clean TypeScript compiles into the core like your own modules ([splitting a core into modules](/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether a vendored file fits. Code that leans on classes, exceptions, or regexes generally wants rewriting rather than vendoring, and the rewrite is usually smaller than the dependency.
+- **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, transpiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. The channel grows with the toolkit; JSON encoding/parsing over bytes, today demonstrated in `examples/ai-chat-ts/src/api.ts`, is the kind of module it exists to absorb.
+
+One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly the files under `src/` plus the SDK modules — the whole program is readable, the build is hermetic, and nothing arrives at build time that you have not checked in.

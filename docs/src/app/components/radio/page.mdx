@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Radio
 
@@ -17,7 +18,26 @@ The single-choice value control, grouped by a `radio-group` row container. Like 
 </radio-group>
 ```
 
-## Zig builder
+One field holds the group's choice — a string-literal union in a TypeScript core, an enum in a Zig core — and each radio's arm sets it:
+
+<CodeToggle>
+
+```ts
+// model: { readonly density: "default" | "comfortable" | "compact" }
+case "set_comfortable":
+  return { ...model, density: "comfortable" };
+```
+
+```zig
+// model: density: enum { default, comfortable, compact } = .default,
+.set_comfortable => model.density = .comfortable,
+```
+
+</CodeToggle>
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.el(.radio_group, .{ .gap = 12 }, .{

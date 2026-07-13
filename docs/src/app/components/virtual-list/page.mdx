@@ -7,7 +7,11 @@ The windowed virtual list: a scroll region that represents the model's whole dat
 
 <ComponentPreview name="virtual-list" alt="A windowed virtual list rendered by the engine" caption="2,500 rows exist as arithmetic; the tree holds only the visible window" />
 
-## Zig builder
+## Markup
+
+The windowed virtual list is **builder-only**: the closed markup grammar has no channel for the view to receive the runtime's range request inside a `for` binding, so markup cannot build "only the visible rows" honestly — and the variable-extent mode additionally needs an estimate **function**, which the closed grammar has no binding form for. Markup lists keep the bounded form — [`<list virtualized>`](/components/list) lays out only the visible window of the rows the `for` produced, which is the right shape when the row set already fits the model (hundreds, not hundreds of thousands). `on-reach-end` IS markup-expressible on `scroll`, so markup apps get honest infinite fetch with bounded windows.
+
+## Programmatic construction (Zig)
 
 Declare the list options once and use them twice — `virtualWindow` resolves which items are visible, `virtualList` mounts exactly those rows. Keys carry per-item identity: a row that scrolls away and back returns under the same structural id, so engine-owned and model-owned row state survive window shifts.
 
@@ -126,7 +130,3 @@ Chat transcripts, mixed-height feeds, and markdown-bearing lists set `extent_est
 - **Visible content never jumps.** The built window is anchored on the first visible row: it lands exactly at the offset table's edge for it, freshly mounted rows stack above/below at their real heights, and every correction shifts the scroll offset and the geometry together. Estimate error surfaces off screen, not under the pointer.
 
 `anchor = .trailing`, `on_reach_start`, and `index_base` complete the transcript shape — see `examples/feed` for the mixed-height showcase and the options table above for each field.
-
-## Markup
-
-The windowed virtual list is **builder-only**: the closed markup grammar has no channel for the view to receive the runtime's range request inside a `for` binding, so markup cannot build "only the visible rows" honestly — and the variable-extent mode additionally needs an estimate **function**, which the closed grammar has no binding form for. Markup lists keep the bounded form — [`<list virtualized>`](/components/list) lays out only the visible window of the rows the `for` produced, which is the right shape when the row set already fits the model (hundreds, not hundreds of thousands). `on-reach-end` IS markup-expressible on `scroll`, so markup apps get honest infinite fetch with bounded windows.

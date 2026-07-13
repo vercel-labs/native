@@ -1,10 +1,25 @@
+import { CodeToggle } from "@/components/code-toggle";
+
 # State & Data Flow
 
-The model stores source-of-truth state only: the raw items, the current filter, the draft text. Everything the view shows that is computable from those — counts, sums, filtered lists, formatted strings — is derived at view time, never stored. This page collects the data-flow patterns that keep a Native SDK app honest.
+The model stores source-of-truth state only: the raw items, the current filter, the draft text. Everything the view shows that is computable from those — counts, sums, filtered lists, formatted strings — is derived at view time, never stored. This page collects the data-flow patterns that keep a Native SDK app honest; they hold in both core languages, and the samples show each where the expression differs.
 
 ## Derive, don't store
 
-A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived method cannot go stale.
+A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived function cannot go stale.
+
+<CodeToggle>
+
+```ts
+// WRONG: derived state cached in the model, maintained by hand in update()
+//   readonly visibleCount: number;
+
+// RIGHT: the model keeps the sources; exported single-model helpers derive
+// per rebuild and join the binding surface ({visible_count}, {visible_cents})
+export function visibleCount(model: Model): number {
+  return model.expenses.filter((e) => matches(model, e)).length;
+}
+```
 
 ```zig
 // WRONG: derived state cached in the model, maintained by hand in update()
@@ -15,6 +30,8 @@ summary_storage: [64]u8,   // preformatted display string
 pub fn visibleCount(model: *const Model) usize { ... }
 pub fn visibleCents(model: *const Model) u64 { ... }
 ```
+
+</CodeToggle>
 
 Derived numbers need no allocation — bind the methods and let text interpolation compose the line:
 
@@ -72,7 +89,7 @@ pub fn summary(model: *const Model, arena: std.mem.Allocator) []const u8 {
 <status-bar>{summary}</status-bar>
 ```
 
-The arena lives for exactly one view build, so nothing is stored and nothing goes stale.
+The arena lives for exactly one view build, so nothing is stored and nothing goes stale. (These formatting samples are Zig: view-time formatting runs in the view tier, which a zero-config TypeScript app never writes. Inside a TypeScript core, derived display text is bytes built with `asciiBytes` templates — see [TypeScript Cores](/typescript#the-subset-posture).)
 
 For `<if test>`, prefer an explicit boolean predicate method over numeric truthiness: `test="{hasHabits}"` with `pub fn hasHabits(m: *const Model) bool` states the condition; `test="{habit_count}"` works (non-zero is truthy) but hides it.
 
@@ -82,6 +99,18 @@ The model applies every edit event and is the source of truth; the runtime keeps
 
 ```html
 <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
+```
+
+<CodeToggle>
+
+```ts
+// model field: the bytes the field renders; markup binds {draft}
+//   readonly draft: Uint8Array;
+// in update (msg.edit is the TextInputEvent mirror union your core declares):
+case "draft_edit":
+  return { ...model, draft: applyEdit(model.draft, msg.edit) }; // mirror every edit
+case "add":
+  return { ...withNewTask(model), draft: new Uint8Array(0) };   // clearing the source clears the field
 ```
 
 ```zig
@@ -94,7 +123,9 @@ pub fn draft(model: *const Model) []const u8 {        // the fn the markup's tex
 .add => { model.addTask(model.draft_buffer.text()); model.draft_buffer.clear(); },  // clearing the source clears the field
 ```
 
-`on-input` names a `Msg` variant whose payload is `canvas.TextInputEvent`; `canvas.TextBuffer` applies each event and holds the text. The markup binds the function (`text="{draft}"`), never the buffer: binding a `TextBuffer` model field directly is a teaching error pointing at this pattern. Clipboard and selection come free: the runtime owns cmd/ctrl+C/X/V in editable text, cut and paste arrive as ordinary edit events, and the mirror stays consistent with zero extra code.
+</CodeToggle>
+
+`on-input` names a `Msg` variant carrying the text-input event. In a TypeScript core the event union is declared in your core (see [Native UI: Messages](/native-ui#messages) for the canonical declaration) and a pure reducer applies each event over the draft bytes. In a Zig core the payload is `canvas.TextInputEvent` and `canvas.TextBuffer` applies each event and holds the text — the markup binds the function (`text="{draft}"`), never the buffer: binding a `TextBuffer` model field directly is a teaching error pointing at this pattern. Clipboard and selection come free: the runtime owns cmd/ctrl+C/X/V in editable text, cut and paste arrive as ordinary edit events, and the mirror stays consistent with zero extra code.
 
 ## Echo runtime-applied values back
 
@@ -107,15 +138,24 @@ Some state is applied by the runtime first — a scroll offset, a split-pane fra
 </split>
 ```
 
+<CodeToggle>
+
+```ts
+case "sidebar_resized":
+  return { ...model, sidebarSplit: msg.fraction };
+```
+
 ```zig
 .sidebar_resized => |fraction| model.sidebar_split = fraction,
 ```
+
+</CodeToggle>
 
 `on-scroll` follows the same shape with a `canvas.ScrollState` payload — store `offset`, echo it through the scroll's `value`, and slide a bounded window from it when content is large. See [Native UI: Messages](/native-ui#messages).
 
 ## Time: a testable seam
 
-Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees — do not call `clock_gettime` yourself. The facade owns the clocks:
+In a TypeScript core this is settled by rule: `update` is deterministic, and time arrives as message payloads (`Cmd.now`, `Cmd.delay`, `Sub.timer` — see [TypeScript Cores](/typescript#effects-are-cmd-data)). The seam below is the Zig core's equivalent. Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees — do not call `clock_gettime` yourself. The facade owns the clocks:
 
 ```zig
 native_sdk.nowMs()                  // wall ms since the Unix epoch (i64) — timestamps

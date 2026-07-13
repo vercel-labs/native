@@ -191,6 +191,10 @@ pub fn describe(comptime Model: type, comptime Msg: type, comptime specials: Spe
 }
 
 fn describeGroup(comptime T: type) Group {
+    return describeGroupSeen(T, &.{});
+}
+
+fn describeGroupSeen(comptime T: type, comptime seen: []const type) Group {
     comptime {
         var scalars: []const Scalar = &.{};
         var groups: []const NamedGroup = &.{};
@@ -203,11 +207,17 @@ fn describeGroup(comptime T: type) Group {
                 }};
                 continue;
             }
-            if (@typeInfo(field.type) == .@"struct") {
+            // `reflect.Pointee` transparency: a `*const Row` field
+            // traverses like the struct it shares. Pointer models can
+            // cycle (unlike by-value structs), so already-described
+            // types stop the walk — the engines resolve such paths
+            // segment by segment and never recurse into the type graph.
+            const Nested = reflect.Pointee(field.type);
+            if (@typeInfo(Nested) == .@"struct" and !typeListed(Nested, seen ++ &[_]type{T})) {
                 groups = groups ++ &[_]NamedGroup{.{
                     .name = field.name,
-                    .type_name = @typeName(field.type),
-                    .group = describeGroup(field.type),
+                    .type_name = @typeName(Nested),
+                    .group = describeGroupSeen(Nested, seen ++ &[_]type{T}),
                 }};
             }
         }
@@ -238,14 +248,24 @@ fn describeGroup(comptime T: type) Group {
     }
 }
 
+fn typeListed(comptime T: type, comptime seen: []const type) bool {
+    for (seen) |S| {
+        if (S == T) return true;
+    }
+    return false;
+}
+
 fn describeItem(comptime Item: type) Iterable {
     comptime {
+        // `reflect.Pointee` transparency: `[]const *const Row` iterates
+        // items that bind like Row itself.
+        const Bare = reflect.Pointee(Item);
         return .{
             .name = "",
-            .item_type = @typeName(Item),
+            .item_type = @typeName(Bare),
             .item_kind = if (reflect.supportedScalar(Item)) reflect.scalarKindOf(Item) else null,
             .item_scalar = reflect.supportedScalar(Item),
-            .item = if (@typeInfo(Item) == .@"struct") describeGroup(Item) else .{},
+            .item = if (@typeInfo(Bare) == .@"struct") describeGroup(Bare) else .{},
         };
     }
 }
@@ -299,7 +319,16 @@ fn describeMsgs(comptime Msg: type, comptime specials: Specials) []const MsgTag 
 fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     if (T == void) return .none;
     if (T == specials.TextInputEvent) return .text_input;
+    // A declared mirror of the text-input event union (transpiled cores,
+    // where type identity cannot cross the emission boundary) binds
+    // through on-input exactly like the canvas type — same resolution as
+    // both engines' inputConstructor.
+    if (reflect.declaredTextInputUnion(T)) return .text_input;
     if (T == specials.ScrollState) return .scroll_state;
+    // A declared mirror of the scroll-state record (transpiled cores) binds
+    // through on-scroll exactly like the canvas type — same resolution as
+    // both engines' scrollConstructor.
+    if (reflect.declaredScrollStateRecord(T)) return .scroll_state;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -831,11 +860,28 @@ const Checker = struct {
             return;
         }
         if (std.mem.eql(u8, event, "resize")) {
+            // f32 is the canvas-native arm; f64 the transpiled one-number
+            // float arm (engine parity — integer arms stay excluded, a
+            // fraction rounded into an integer would be useless data).
             const found = tag orelse return self.failAttr(node, attribute, markup.on_resize_payload_message);
-            if (found.payload != .float or !std.mem.eql(u8, found.payload_type, "f32")) {
+            const resize_ok = found.payload == .float and
+                (std.mem.eql(u8, found.payload_type, "f32") or std.mem.eql(u8, found.payload_type, "f64"));
+            if (!resize_ok) {
                 return self.failAttr(node, attribute, markup.on_resize_payload_message);
             }
             return;
+        }
+        // The value-payload change event (engine parity): a slider's
+        // on-change with a bare tag naming a value-carrying arm — f32 (the
+        // canvas-native shape) or the transpiled one-number float arm
+        // (f64) — dispatches the applied 0..1 fraction. Void arms fall
+        // through to the static form below.
+        if (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0) {
+            if (tag) |found| {
+                const value_arm = found.payload == .float and
+                    (std.mem.eql(u8, found.payload_type, "f32") or std.mem.eql(u8, found.payload_type, "f64"));
+                if (value_arm) return;
+            }
         }
         const found = tag orelse return self.failNamed(node, unknown_tag_message, expression.tag, .{ .msgs = self.contract });
         if (found.payload == .none) {
@@ -1258,7 +1304,7 @@ const Checker = struct {
 
     /// `<chart>` and its `<series>` children: options resolve like the
     /// engines' (numbers, whole numbers, truthy flags, text), and every
-    /// series `values` binding must name an f32 iterable — a wrong item
+    /// series `values` binding must name an f32 or f64 iterable — a wrong item
     /// type fails with the model type named, so the fix is visible from
     /// the finding.
     fn checkChart(self: *Checker, node: markup.MarkupNode) CheckErr!void {
@@ -1321,7 +1367,9 @@ const Checker = struct {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const item = try self.resolveIterable(node, expression.binding, markup.series_values_message);
-                if (!std.mem.eql(u8, item.type_name, "f32")) {
+                // f32 is the canvas-native series element; f64 the
+                // transpiled-core one (both engines narrow it per sample).
+                if (!std.mem.eql(u8, item.type_name, "f32") and !std.mem.eql(u8, item.type_name, "f64")) {
                     const message = std.fmt.allocPrint(self.arena, "{s} (\"{s}\" iterates {s})", .{
                         markup.series_values_message, expression.binding, item.type_name,
                     }) catch return error.OutOfMemory;
@@ -1520,11 +1568,16 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
 
 // -------------------------------------------------------------- artifact
 
-/// Hash the app's Zig sources: every `.zig` file under `root_path`,
-/// path-sorted, path and contents both mixed in. The emit step stamps
-/// this into the artifact; `native check` recomputes it and DEGRADES to
-/// structural checking on any mismatch — a stale contract can hide new
-/// fields or resurrect deleted ones, so it must never pass silently.
+/// Hash the app's core sources: every `.zig` and `.ts` file under
+/// `root_path`, path-sorted, path and contents both mixed in. TypeScript
+/// cores are hashed too because on that track the Model/Msg truth lives
+/// in `src/core.ts` — a core edit changes no `.zig` file, and a contract
+/// that stays "fresh" through it reports phantom unknown-tag and
+/// unknown-field errors against the user's new state. The emit step
+/// stamps this into the artifact; `native check` recomputes it and
+/// DEGRADES to structural checking on any mismatch — a stale contract
+/// can hide new fields or resurrect deleted ones, so it must never pass
+/// silently.
 pub fn hashSourceDir(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8) !u64 {
     return hashSourceDirAt(allocator, io, std.Io.Dir.cwd(), root_path);
 }
@@ -1540,7 +1593,8 @@ pub fn hashSourceDirAt(allocator: std.mem.Allocator, io: std.Io, base: std.Io.Di
     var walker = try root.walk(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".zig")) {
+        if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.path, ".zig") or std.mem.endsWith(u8, entry.path, ".ts")) {
             try paths.append(allocator, try allocator.dupe(u8, entry.path));
         }
     }

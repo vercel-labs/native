@@ -1,11 +1,13 @@
+import { CodeToggle } from "@/components/code-toggle";
+
 # Native UI
 
-The default Native SDK app is native-rendered: the view is a Native markup file (`.native`), the logic is Zig, and rendering happens through Native SDK's own engine. Scaffold one with `native init my_app` and run it with `native dev`.
+The default Native SDK app is native-rendered: the view is a Native markup file (`.native`), the logic is an app core — TypeScript by default, or Zig — and rendering happens through Native SDK's own engine. Scaffold one with `native init my_app` and run it with `native dev`.
 
 An app is four things:
 
 - `src/app.native` — the entire UI: elements, layout, bindings, and message dispatch.
-- `Model` — a plain Zig struct holding your state.
+- `Model` — a plain data structure holding your state.
 - `Msg` — a tagged union of everything that can happen.
 - `update(model, msg)` — the only place state changes.
 
@@ -13,7 +15,7 @@ The runtime owns the rest: install, presentation, resize, typed event dispatch, 
 
 ## A complete view
 
-```html
+```html:src/app.native
 <column gap="12" padding="16">
   <row gap="8" cross="center">
     <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
@@ -203,7 +205,20 @@ Scalar bindings take the allocator form too: `{summary}` binds `pub fn summary(m
 
 ## Messages
 
-`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant whose payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds — the markup binds a `pub fn` returning the text (`text="{draft}"`), and binding the `TextBuffer` field itself directly is a teaching error pointing at this pattern:
+`on-press`, `on-toggle`, `on-change`, and `on-submit` name a variant of your `Msg` union, optionally with one binding payload (`toggle:{t.id}`). `on-input` names a variant carrying the runtime's text-input event, and each core tier declares that in its own vocabulary. In a TypeScript core the event union mirrors the runtime's event vocabulary structurally, and `on-input` matches the shape and translates each runtime event into your union at dispatch — import it from `@native-sdk/core/text` (or `@native-sdk/core/events`), or declare the same shape in-file; your `update` reduces the events over the draft bytes. In a Zig core the payload is `canvas.TextInputEvent`; pair it with `canvas.TextBuffer` in the model for editor state that survives rebuilds — the markup binds a `pub fn` returning the text (`text="{draft}"`), and binding the `TextBuffer` field itself directly is a teaching error pointing at this pattern:
+
+<CodeToggle>
+
+```ts
+import { type TextInputEvent } from "@native-sdk/core/text";
+// insert_text / delete_* / clear / move_caret / set_selection /
+// set_composition / commit_composition / cancel_composition — the full
+// union is the SDK's; the same shape declared in-file matches identically.
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "draft_edit"; readonly edit: TextInputEvent };
+```
 
 ```zig
 draft_buffer: canvas.TextBuffer(64) = .{},
@@ -215,7 +230,9 @@ pub fn draft(model: *const Model) []const u8 {
 .add => { model.addTask(model.draft_buffer.text()); model.draft_buffer.clear(); },
 ```
 
-`on-scroll` (on the `scroll` element; `Ui.scrollMsg(.tag)` on `on_scroll` in Zig views) names a variant whose payload is `canvas.ScrollState`: after every user scroll — wheel, kinetic momentum, keyboard, accessibility — the runtime delivers the post-scroll `offset`, `viewport_extent`, and `content_extent`, so long content can page or lazy-load a bounded window that follows the scrollbar. The payload carries the offset the runtime already applied: store it in the model and echo it back through the scroll's `value`, and rebuilds never fight live scrolling.
+</CodeToggle>
+
+`on-scroll` (on the `scroll` element; `Ui.scrollMsg(.tag)` on `on_scroll` in Zig views) names a variant whose payload is `canvas.ScrollState` (in a TypeScript core, the `ScrollState` record from `@native-sdk/core/events`, or the same four-numeric-field shape declared in-file): after every user scroll — wheel, kinetic momentum, keyboard, accessibility — the runtime delivers the post-scroll `offset`, `viewport_extent`, and `content_extent`, so long content can page or lazy-load a bounded window that follows the scrollbar. The payload carries the offset the runtime already applied: store it in the model and echo it back through the scroll's `value`, and rebuilds never fight live scrolling.
 
 `on-resize` (on the `split` element; `Ui.valueMsg(.tag)` on `on_resize` in Zig views) names a variant whose payload is the new first-pane fraction (`f32`): after every divider drag, keyboard adjustment, or assistive increment/decrement the runtime delivers the fraction it already applied and clamped — store it in the model and echo it back through the split's `value`, and rebuilds never fight live resizing.
 
@@ -293,7 +310,26 @@ Editable text fields present the standard Cut / Copy / Paste / Select All menu w
 
 ## Effects
 
-For anything asynchronous — running `gh`, streaming an agent's stdout — `update` takes a third parameter, the effects channel. Declare `.update_fx` instead of `.update` (two-argument apps are unchanged):
+For anything asynchronous — running `gh`, streaming an agent's stdout — `update` never performs the work; it describes it, and results come back as ordinary Msgs. In a TypeScript core the description is `Cmd` data returned beside the next model ([TypeScript Cores: Effects](/typescript#effects-are-cmd-data) has the whole vocabulary); in a Zig core, `update` takes a third parameter, the effects channel — declare `.update_fx` instead of `.update` (two-argument apps are unchanged). The subprocess stream in both:
+
+<CodeToggle>
+
+```ts
+case "start":
+  return [model, Cmd.spawn(
+    [asciiBytes("gh"), asciiBytes("issue"), asciiBytes("list")],
+    {
+      key: "issues",
+      line: "line",   // each stdout line dispatches { kind: "line", text: Uint8Array }
+      exit: "exited", // a clean exit dispatches { kind: "exited", code: number }
+      err: "stream_failed",
+    },
+  )];
+case "cancel":
+  return [model, Cmd.cancel("issues")]; // the stream's err arm gets `cancelled`
+case "line":
+  return { ...model, lines: [...model.lines, { text: msg.text }] };
+```
 
 ```zig
 const Effects = native_sdk.UiApp(Model, Msg).Effects;
@@ -313,13 +349,31 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 }
 ```
 
+</CodeToggle>
+
 The process runs on a worker thread the runtime owns; results post to a bounded queue, the platform loop is nudged, and Msgs dispatch on the loop thread — the model is never touched off-thread. Views never spawn: a button dispatches a Msg, and that Msg's update arm spawns.
 
 Boot-time effects go in `.init_fx`, the app's init command: it runs exactly once on the installing frame, before the first view build, so a loading flag set there is in the very first paint and the boot fetch is already in flight when the window appears. Results arrive as ordinary Msgs; it works with either update form.
 
 Line streaming truncates single-line JSON at the 4 KiB line cap, so tools like `gh --json` use collect mode instead: spawn with `.output = .collect` and whole stdout (up to 512 KiB) arrives once on the exit Msg as `exit.output`, together with the child's stderr tail (last 4 KiB) in `exit.stderr_tail` — check it when `exit.code != 0`. No line Msgs fire for a collect spawn, overflow arrives cut with `output_truncated`/`stderr_truncated` set (never silently), and both slices die with the update call — copy what the model keeps.
 
-HTTP requests ride the same channel: `fx.fetch` runs one request on a worker thread and delivers its terminal outcome as exactly one Msg — a real response (any status, non-2xx included), a classified failure (`rejected`, `connect_failed`, `tls_failed`, `protocol_failed`, `timed_out`), or `cancelled`:
+HTTP requests ride the same channel: one buffered request on a worker thread, delivering its terminal outcome as exactly one Msg — a real response (any status, non-2xx included), a classified failure (`rejected`, `connect_failed`, `tls_failed`, `protocol_failed`, `timed_out`), or `cancelled`:
+
+<CodeToggle>
+
+```ts
+case "load":
+  return [model, Cmd.fetch(
+    { url: asciiBytes("https://api.example.com/search?q=zig") },
+    { key: "search", ok: "fetched", err: "fetch_failed" },
+  )];
+case "stop":
+  return [model, Cmd.cancel("search")];
+case "fetched":
+  // the ok arm carries { status: number, body: Uint8Array } — a 404 is
+  // still ok: an HTTP-level error is a delivered response
+  return { ...model, status: msg.status, body: msg.body };
+```
 
 ```zig
 .load => fx.fetch(.{
@@ -330,6 +384,8 @@ HTTP requests ride the same channel: `fx.fetch` runs one request on a worker thr
 .stop => fx.cancel(search_key),
 .fetched => |response| model.recordResults(response),  // copy response.body — the slice dies with this call
 ```
+
+</CodeToggle>
 
 Response bodies are binary-safe and bounded (256 KiB; longer arrives cut with `truncated = true`), the whole exchange honors a per-fetch timeout (default 30 s), and cancelling a fetch delivers exactly one `cancelled` Msg with nothing after it.
 

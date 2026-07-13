@@ -8,8 +8,9 @@ import {
   findGatewayKey,
   runAgent,
 } from "./agent.ts";
+import { analyzeTranscript, metricsTrackFor } from "./efficiency.ts";
 import { computeMarkupShare, formatMarkupShare } from "./markup-share.ts";
-import { buildCli, prewarmWorkspace, scaffoldWorkspace } from "./scaffold.ts";
+import { buildCli, prewarmTsCoreWorkspace, prewarmWorkspace, scaffoldWorkspace } from "./scaffold.ts";
 import { DEFAULT_JUDGE_MODEL } from "./judge.ts";
 import { ensureSandboxAuth, packRepo, runCaseInSandbox } from "./sandbox.ts";
 import { runChecks } from "./grade.ts";
@@ -20,7 +21,9 @@ import type {
   CaseResult,
   CheckAggregate,
   EvalCase,
+  RunnableCase,
   RunnerOptions,
+  Track,
 } from "./types.ts";
 
 const USAGE = `usage: pnpm eval [options] [case ...]
@@ -56,6 +59,9 @@ options:
   --lane <lane>        grading lane: macos-local (default) or linux-sandbox
                        (what --sandbox passes to the harness run inside the
                        microVM; rarely set by hand)
+  --track <ts|zig>     app-dual cases only: run just the named authoring
+                       track (default: both tracks, as <case>@ts and
+                       <case>@zig). Non-dual cases ignore the filter.
   --model <slug>       coder model slug (default: ${DEFAULT_MODEL};
                        also via ZN_EVAL_MODEL)
   --judge-model <slug> judge model slug for llm_judge checks (default:
@@ -97,12 +103,15 @@ async function main(): Promise<void> {
     cliPath = await buildCli(options.repoRoot);
   }
 
-  // With --trials n each case becomes n fully independent trial tasks (own
-  // workspace, own agent run, own checks + judge) that share the concurrency
-  // pool with everything else. trials=1 keeps today's layout exactly.
+  // app-dual cases expand into one runnable per selected track (<case>@ts,
+  // <case>@zig); everything else is one runnable. With --trials n each
+  // runnable becomes n fully independent trial tasks (own workspace, own
+  // agent run, own checks + judge) that share the concurrency pool with
+  // everything else. trials=1 keeps today's layout exactly.
+  const runnables = cases.flatMap((evalCase) => expandTracks(evalCase, options.track));
   const trials = options.trials;
-  const tasks = cases.flatMap((evalCase) =>
-    Array.from({ length: trials }, (_, index) => ({ evalCase, trial: index + 1 })),
+  const tasks = runnables.flatMap((runnable) =>
+    Array.from({ length: trials }, (_, index) => ({ runnable, trial: index + 1 })),
   );
   // Sandbox default stays bounded: each case is its own microVM, but plans
   // rate-limit vCPU allocation (Hobby: 40 vCPUs per 10 minutes), so at the
@@ -114,25 +123,31 @@ async function main(): Promise<void> {
   if (tasks.length > 1) {
     const trialNote = trials > 1 ? ` x ${trials} trials` : "";
     console.log(
-      `running ${cases.length} case${cases.length > 1 ? "s" : ""}${trialNote} (${tasks.length} runs), ${concurrency} at a time${options.sandbox ? " (vercel sandbox)" : ""}`,
+      `running ${runnables.length} case run${runnables.length > 1 ? "s" : ""}${trialNote} (${tasks.length} total), ${concurrency} at a time${options.sandbox ? " (vercel sandbox)" : ""}`,
     );
   }
-  const trialResults = await runPool(tasks, concurrency, async ({ evalCase, trial }) => {
-    const label = trials > 1 ? `${evalCase.name}#${trial}` : evalCase.name;
+  const trialResults = await runPool(tasks, concurrency, async ({ runnable, trial }) => {
+    const { evalCase } = runnable;
+    const label = trials > 1 ? `${runnable.label}#${trial}` : runnable.label;
     const log = (line: string): void => console.log(`[${label}] ${line}`);
     const caseResultsDir =
       trials > 1
-        ? join(runResultsDir, evalCase.name, `trial-${trial}`)
-        : join(runResultsDir, evalCase.name);
+        ? join(runResultsDir, runnable.label, `trial-${trial}`)
+        : join(runResultsDir, runnable.label);
     // Trials of the same case can run concurrently: each needs its own
-    // workspace directory or the scaffolds would clobber each other.
-    const workspaceName = trials > 1 ? `${evalCase.name}-trial-${trial}` : evalCase.name;
+    // workspace directory or the scaffolds would clobber each other. The
+    // "@track" label becomes "-track" here: the workspace name feeds
+    // `native init` (module name, bundle id), which wants plain words.
+    const workspaceBase = runnable.label.replace("@", "-");
+    const workspaceName = trials > 1 ? `${workspaceBase}-trial-${trial}` : workspaceBase;
     mkdirSync(caseResultsDir, { recursive: true });
     try {
       let result: CaseResult;
       if (options.sandbox) {
         result = await runCaseInSandbox({
           evalCase,
+          track: runnable.track,
+          label: runnable.label,
           tarballPath: tarballPath!,
           gatewayKey,
           model: options.model,
@@ -144,7 +159,7 @@ async function main(): Promise<void> {
           log,
         });
       } else {
-        result = await runCaseLocal(evalCase, options, {
+        result = await runCaseLocal(runnable, options, {
           cliPath: cliPath!,
           workspacesDir,
           workspaceName,
@@ -179,6 +194,7 @@ async function main(): Promise<void> {
         checks: [],
         passed: false,
       };
+      if (runnable.track) result.track = runnable.track;
       if (trials > 1) result.trial = trial;
       return result;
     }
@@ -191,10 +207,10 @@ async function main(): Promise<void> {
     printSummary(trialResults, options);
     anyFailed = trialResults.some((result) => !result.passed);
   } else {
-    const aggregates = cases.map((evalCase, caseIndex) =>
+    const aggregates = runnables.map((runnable, index) =>
       aggregateCase(
-        evalCase.name,
-        trialResults.slice(caseIndex * trials, (caseIndex + 1) * trials),
+        runnable,
+        trialResults.slice(index * trials, (index + 1) * trials),
       ),
     );
     for (const aggregate of aggregates) {
@@ -224,23 +240,47 @@ interface LocalCaseContext {
 }
 
 async function runCaseLocal(
-  evalCase: EvalCase,
+  runnable: RunnableCase,
   options: RunnerOptions,
   context: LocalCaseContext,
 ): Promise<CaseResult> {
+  const { evalCase, track } = runnable;
   const { log } = context;
   const startedAt = new Date().toISOString();
 
+  const caseDir = join(options.evalsRoot, "cases", evalCase.name);
   const workspace = await scaffoldWorkspace(
     options.repoRoot,
     context.cliPath,
     context.workspacesDir,
     context.workspaceName,
     evalCase.frontend,
+    caseDir,
+    track,
   );
+  const skillNames =
+    evalCase.frontend === "ts-core"
+      ? ["ts-app-core"]
+      : evalCase.frontend === "app-dual"
+        ? track === "ts"
+          ? ["ts-app-core", "native-ui"]
+          : ["native-ui", "zig"]
+        : ["native-ui", "zig"];
   log(`[scaffold] workspace ready: ${workspace.path}`);
-  log(`[scaffold] skill delivered: .claude/skills/native-ui/SKILL.md`);
-  if (!options.dryRun) await prewarmWorkspace(workspace, log);
+  log(`[scaffold] skills delivered: ${skillNames.map((name) => `.claude/skills/${name}/SKILL.md`).join(", ")}`);
+  if (!options.dryRun) {
+    if (evalCase.frontend === "ts-core") {
+      await prewarmTsCoreWorkspace(options.repoRoot, workspace, log);
+    } else if (evalCase.frontend === "app-dual" && track === "ts") {
+      // The ts track's graders hit two graphs: the app's own zero-config
+      // build (`native test`) and the transpile + `zig test` harness path.
+      // Warm both so neither bills agent wall-clock.
+      await prewarmWorkspace(workspace, log);
+      await prewarmTsCoreWorkspace(options.repoRoot, workspace, log);
+    } else {
+      await prewarmWorkspace(workspace, log);
+    }
+  }
 
   const configDir = join(context.caseResultsDir, "claude-config");
   mkdirSync(configDir, { recursive: true });
@@ -254,7 +294,7 @@ async function runCaseLocal(
 
   let agent: AgentRunResult;
   if (options.dryRun) {
-    const agentEnv = assembleAgentEnv(context.gatewayKey ?? "<AI_GATEWAY_API_KEY>", options.repoRoot, configDir);
+    const agentEnv = assembleAgentEnv(context.gatewayKey ?? "<AI_GATEWAY_API_KEY>", options.repoRoot, configDir, workspace.path);
     log("[dry-run] env overrides for the claude subprocess:");
     for (const [key, value] of Object.entries(agentEnv.redacted)) {
       log(`  ${key}=${value}`);
@@ -263,7 +303,7 @@ async function runCaseLocal(
     log(`[dry-run] cwd: ${invocation.cwd}`);
     agent = { status: "dry_run", model: options.model, durationMs: 0 };
   } else {
-    const agentEnv = assembleAgentEnv(context.gatewayKey!, options.repoRoot, configDir);
+    const agentEnv = assembleAgentEnv(context.gatewayKey!, options.repoRoot, configDir, workspace.path);
     log(`[agent] claude -p (model ${options.model}, max ${evalCase.maxTurns} turns, timeout ${formatDuration(evalCase.timeoutMs)})...`);
     agent = await runAgent({
       invocation,
@@ -283,8 +323,27 @@ async function runCaseLocal(
   const markupShare = computeMarkupShare(workspace.path);
   log(`[markup] ${formatMarkupShare(markupShare)}`);
 
-  const checks = await runChecks(evalCase.checks, {
+  // Efficiency read from the transcript: turns-to-first-green is the
+  // agent-verification proxy (first green agent-run check after the first
+  // source edit — the graders only run once, below), and the post-green tail
+  // is the turns burned after that. Full epistemics in efficiency.ts.
+  const analysis =
+    agent.transcriptPath !== undefined
+      ? analyzeTranscript(agent.transcriptPath, metricsTrackFor(evalCase.frontend, track))
+      : null;
+  if (analysis) {
+    const { efficiency } = analysis;
+    log(
+      efficiency.firstGreenTurn !== null
+        ? `[efficiency] agent-verified green at turn ${efficiency.firstGreenTurn}/${efficiency.observedTurns} (${formatDuration(efficiency.firstGreenMs ?? 0)}); ${efficiency.turnsAfterGreen} turns after green`
+        : `[efficiency] agent verification never went green (${efficiency.verificationRuns} runs after editing)`,
+    );
+  }
+
+  const checks = await runChecks(runnable.checks, {
     workspace,
+    repoRoot: options.repoRoot,
+    caseDir,
     log,
     skipLive: options.skipLive,
     dryRun: options.dryRun,
@@ -295,7 +354,9 @@ async function runCaseLocal(
     judgeModel: options.judgeModel,
     gatewayKey: context.gatewayKey,
   });
-  const agentOk = agent.status === "completed" || agent.status === "dry_run";
+  // "capped" (hit --max-turns) grades like completion: the checks decide,
+  // and the cap rides result.json as cost (agent.cappedAtTurns, turns).
+  const agentOk = agent.status === "completed" || agent.status === "dry_run" || agent.status === "capped";
   // Advisory judge checks record a score but never fail the case.
   const passed =
     agentOk && checks.every((check) => check.status !== "fail" || check.advisory === true);
@@ -310,9 +371,30 @@ async function runCaseLocal(
     checks,
     passed,
   };
+  if (analysis) caseResult.efficiency = analysis.efficiency;
+  if (track) caseResult.track = track;
   writeFileSync(join(context.caseResultsDir, "result.json"), `${JSON.stringify(caseResult, null, 2)}\n`);
   if (!options.keepWorkspaces) rmSync(workspace.path, { recursive: true, force: true });
   return caseResult;
+}
+
+/**
+ * Expand a case into its runnable track runs. app-dual cases produce one
+ * runnable per selected track — the SAME spec (prompt, timeouts, shared
+ * checks), plus the track's thin check additions — labeled `<case>@<track>`.
+ * Everything else runs exactly as before, unlabeled.
+ */
+function expandTracks(evalCase: EvalCase, filter: Track | undefined): RunnableCase[] {
+  if (evalCase.frontend !== "app-dual") {
+    return [{ evalCase, label: evalCase.name, checks: evalCase.checks }];
+  }
+  const tracks: Track[] = filter ? [filter] : ["ts", "zig"];
+  return tracks.map((track) => ({
+    evalCase,
+    track,
+    label: `${evalCase.name}@${track}`,
+    checks: [...evalCase.checks, ...(evalCase.tracks?.[track]?.checks ?? [])],
+  }));
 }
 
 /** Run `worker` over `items` with at most `limit` in flight; results keep item order. */
@@ -341,8 +423,9 @@ function parseArgs(argv: string[]): RunnerOptions {
     repoRoot,
     evalsRoot,
     caseNames: [],
-    model: process.env.ZN_EVAL_MODEL ?? DEFAULT_MODEL,
-    judgeModel: process.env.ZN_EVAL_JUDGE_MODEL ?? DEFAULT_JUDGE_MODEL,
+    track: undefined,
+    model: process.env.NATIVE_SDK_EVAL_MODEL ?? process.env.ZN_EVAL_MODEL ?? DEFAULT_MODEL,
+    judgeModel: process.env.NATIVE_SDK_EVAL_JUDGE_MODEL ?? process.env.ZN_EVAL_JUDGE_MODEL ?? DEFAULT_JUDGE_MODEL,
     dryRun: false,
     skipLive: false,
     skipPermissions: false,
@@ -421,6 +504,16 @@ function parseArgs(argv: string[]): RunnerOptions {
         index += 1;
         break;
       }
+      case "--track": {
+        const value = argv[index + 1];
+        if (value !== "ts" && value !== "zig") {
+          console.error("--track must be ts or zig");
+          process.exit(2);
+        }
+        options.track = value;
+        index += 1;
+        break;
+      }
       case "--trials":
       case "--concurrency":
       case "--sandbox-vcpus": {
@@ -475,7 +568,9 @@ function validateCase(evalCase: EvalCase, name: string, path: string): void {
   const problems: string[] = [];
   if (evalCase.name !== name) problems.push(`name "${evalCase.name}" != directory "${name}"`);
   if (typeof evalCase.prompt !== "string" || evalCase.prompt.length < 20) problems.push("prompt missing/too short");
-  if (evalCase.frontend !== "native") problems.push(`unsupported frontend "${evalCase.frontend}"`);
+  if (evalCase.frontend !== "native" && evalCase.frontend !== "ts-core" && evalCase.frontend !== "app-dual") problems.push(`unsupported frontend "${evalCase.frontend}"`);
+  if (evalCase.frontend === "app-dual" && (!evalCase.tracks?.ts || !evalCase.tracks.zig)) problems.push("app-dual cases need tracks.ts and tracks.zig");
+  if (evalCase.frontend !== "app-dual" && evalCase.tracks) problems.push("tracks is only valid on app-dual cases");
   if (!Number.isFinite(evalCase.timeoutMs) || evalCase.timeoutMs <= 0) problems.push("timeoutMs must be positive");
   if (!Number.isInteger(evalCase.maxTurns) || evalCase.maxTurns <= 0) problems.push("maxTurns must be a positive integer");
   if (!Array.isArray(evalCase.checks) || evalCase.checks.length === 0) problems.push("checks must be non-empty");
@@ -491,13 +586,18 @@ function validateCase(evalCase: EvalCase, name: string, path: string): void {
  * trial with no checks simply contributes to no counters), and mean judge
  * score across every recorded llm_judge overall.
  */
-function aggregateCase(name: string, results: CaseResult[]): CaseAggregate {
+function aggregateCase(runnable: RunnableCase, results: CaseResult[]): CaseAggregate {
   const checkOrder: string[] = [];
   const checkStats = new Map<string, CheckAggregate>();
   const judgeScores: number[] = [];
   const markupShares: number[] = [];
   const turns: number[] = [];
+  const firstGreenTurns: number[] = [];
+  const turnsAfterGreen: number[] = [];
   let totalCostUsd: number | undefined;
+  let totalInputTokens: number | undefined;
+  let totalOutputTokens: number | undefined;
+  let totalCacheReadTokens: number | undefined;
   let totalDurationMs = 0;
   for (const result of results) {
     for (const check of result.checks) {
@@ -516,9 +616,14 @@ function aggregateCase(name: string, results: CaseResult[]): CaseAggregate {
     }
     if (result.markupShare?.share != null) markupShares.push(result.markupShare.share);
     if (result.agent.numTurns !== undefined) turns.push(result.agent.numTurns);
+    if (result.efficiency?.firstGreenTurn != null) firstGreenTurns.push(result.efficiency.firstGreenTurn);
+    if (result.efficiency?.turnsAfterGreen != null) turnsAfterGreen.push(result.efficiency.turnsAfterGreen);
     if (result.agent.totalCostUsd !== undefined) {
       totalCostUsd = (totalCostUsd ?? 0) + result.agent.totalCostUsd;
     }
+    if (result.agent.inputTokens !== undefined) totalInputTokens = (totalInputTokens ?? 0) + result.agent.inputTokens;
+    if (result.agent.outputTokens !== undefined) totalOutputTokens = (totalOutputTokens ?? 0) + result.agent.outputTokens;
+    if (result.agent.cacheReadTokens !== undefined) totalCacheReadTokens = (totalCacheReadTokens ?? 0) + result.agent.cacheReadTokens;
     totalDurationMs += result.agent.durationMs;
   }
   // Per-check mean judge score, from every trial that recorded one.
@@ -538,17 +643,25 @@ function aggregateCase(name: string, results: CaseResult[]): CaseAggregate {
     if (scores.length > 0) stat.meanScore = mean(scores);
   }
   const aggregate: CaseAggregate = {
-    case: name,
+    case: runnable.label,
     trials: results.length,
     passedTrials: results.filter((result) => result.passed).length,
     checks: checkOrder.map((key) => checkStats.get(key)!),
     totalDurationMs,
     results,
   };
+  if (runnable.track) aggregate.track = runnable.track;
+  const cappedTrials = results.filter((result) => result.agent.cappedAtTurns === true).length;
+  if (cappedTrials > 0) aggregate.cappedTrials = cappedTrials;
   if (judgeScores.length > 0) aggregate.meanJudgeScore = mean(judgeScores);
   if (markupShares.length > 0) aggregate.meanMarkupShare = mean(markupShares);
   if (turns.length > 0) aggregate.meanTurns = mean(turns);
+  if (firstGreenTurns.length > 0) aggregate.meanFirstGreenTurn = mean(firstGreenTurns);
+  if (turnsAfterGreen.length > 0) aggregate.meanTurnsAfterGreen = mean(turnsAfterGreen);
   if (totalCostUsd !== undefined) aggregate.totalCostUsd = totalCostUsd;
+  if (totalInputTokens !== undefined) aggregate.totalInputTokens = totalInputTokens;
+  if (totalOutputTokens !== undefined) aggregate.totalOutputTokens = totalOutputTokens;
+  if (totalCacheReadTokens !== undefined) aggregate.totalCacheReadTokens = totalCacheReadTokens;
   return aggregate;
 }
 
@@ -575,10 +688,14 @@ function printTrialSummary(aggregates: CaseAggregate[], options: RunnerOptions):
     markup:
       aggregate.meanMarkupShare !== undefined ? aggregate.meanMarkupShare.toFixed(2) : "-",
     turns: aggregate.meanTurns !== undefined ? aggregate.meanTurns.toFixed(1) : "-",
+    // Agent-verification proxy (see EfficiencyMetrics): mean first-green turn
+    // and mean post-green tail across the trials that went green.
+    "green@": aggregate.meanFirstGreenTurn !== undefined ? aggregate.meanFirstGreenTurn.toFixed(1) : "-",
+    tail: aggregate.meanTurnsAfterGreen !== undefined ? aggregate.meanTurnsAfterGreen.toFixed(1) : "-",
     cost: aggregate.totalCostUsd !== undefined ? `$${aggregate.totalCostUsd.toFixed(4)}` : "-",
     time: formatDuration(aggregate.totalDurationMs),
   }));
-  const columns = ["case", "lane", "pass rate", "checks", "judge", "markup", "turns", "cost", "time"] as const;
+  const columns = ["case", "lane", "pass rate", "checks", "judge", "markup", "turns", "green@", "tail", "cost", "time"] as const;
   const widths = columns.map((column) =>
     Math.max(column.length, ...rows.map((row) => row[column].length)),
   );
@@ -613,18 +730,22 @@ function printSummary(results: CaseResult[], options: RunnerOptions): void {
       .filter((check) => check.type === "llm_judge" && check.score !== undefined)
       .map((check) => `${check.score!.toFixed(1)}/10`);
     return {
-      case: result.case,
+      case: result.track ? `${result.case}@${result.track}` : result.case,
       lane: result.lane ?? options.lane,
       result: result.passed ? "PASS" : "FAIL",
       checks: checkSummary,
       judge: judgeScores.join(" ") || "-",
       markup: result.markupShare?.share != null ? result.markupShare.share.toFixed(2) : "-",
       turns: result.agent.numTurns?.toString() ?? "-",
+      // Agent-verification proxy (see EfficiencyMetrics): first-green turn
+      // and the post-green tail.
+      "green@": result.efficiency?.firstGreenTurn != null ? String(result.efficiency.firstGreenTurn) : "-",
+      tail: result.efficiency?.turnsAfterGreen != null ? String(result.efficiency.turnsAfterGreen) : "-",
       cost: result.agent.totalCostUsd !== undefined ? `$${result.agent.totalCostUsd.toFixed(4)}` : "-",
       time: formatDuration(result.agent.durationMs + result.checks.reduce((sum, check) => sum + check.durationMs, 0)),
     };
   });
-  const columns = ["case", "lane", "result", "checks", "judge", "markup", "turns", "cost", "time"] as const;
+  const columns = ["case", "lane", "result", "checks", "judge", "markup", "turns", "green@", "tail", "cost", "time"] as const;
   const widths = columns.map((column) =>
     Math.max(column.length, ...rows.map((row) => row[column].length)),
   );

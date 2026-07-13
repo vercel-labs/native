@@ -442,6 +442,14 @@ pub const attrs = [_]AttrInfo{
     // (absent) declares no origin, so every existing document keeps
     // its mount-never-animates behavior.
     .{ .code = 78, .name = "resize-origin", .class = .number, .group = .option, .field = "resize_origin" },
+    // The quiet-surface knob (`WidgetStyle.quiet_hover`) for
+    // image-forward content tiles: opts a pressable element out of the
+    // HOVER wash only — press/selection fills, the focus ring, cursor
+    // intent, and hit testing keep their own channels. Hit-target
+    // elements only (the validator scopes it; anywhere else it would be
+    // silently inert). No `field`: the engines apply it to
+    // `ElementOptions.style`, not a flat option field.
+    .{ .code = 79, .name = "quiet-hover", .class = .flag, .group = .option },
 };
 
 // ----------------------------------------------------------------- events

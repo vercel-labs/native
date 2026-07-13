@@ -42,6 +42,112 @@ pub const AppOptions = struct {
     app_root: []const u8 = ".",
 };
 
+/// Which core the app tree carries. No flag and no config anywhere: the
+/// tree IS the truth — `src/core.ts` is a TypeScript core (transpiled at
+/// build time, run through generated wiring), `src/main.zig` a Zig one,
+/// and both at once is a teaching error naming the two files.
+const CoreTree = enum { zig, ts, both, neither };
+
+fn detectCoreTree(b: *std.Build, app_root: []const u8) CoreTree {
+    const has_ts = appFileExists(b, app_root, "src/core.ts");
+    const has_zig = appFileExists(b, app_root, "src/main.zig");
+    if (has_ts and has_zig) return .both;
+    if (has_ts) return .ts;
+    if (has_zig) return .zig;
+    return .neither;
+}
+
+fn appFileExists(b: *std.Build, app_root: []const u8, sub_path: []const u8) bool {
+    b.build_root.handle.access(b.graph.io, appPath(b, app_root, sub_path), .{}) catch return false;
+    return true;
+}
+
+/// The staged TypeScript-core wiring: one generated directory holding the
+/// transpiled core (core.zig), its rt kernel, the app's markup, and the
+/// SDK's generated-wiring entry (ts_core_main.zig as main.zig). Built once
+/// per app build and shared by the exe and test modules.
+const TsCoreStage = struct {
+    main_root: std.Build.LazyPath,
+};
+
+fn tsCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) TsCoreStage {
+    if (!appFileExists(b, app_root, "src/app.native")) {
+        @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
+            " so add src/app.native (the whole view tier binds the core's emitted model)\n");
+    }
+    const node = b.findProgram(&.{"node"}, &.{}) catch {
+        @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core transpiler runs at" ++
+            " build time; the binary it emits ships no JS runtime).\nInstall Node.js 22+ — https://nodejs.org" ++
+            " or `brew install node` — and re-run.\n");
+    };
+    dep.builder.build_root.handle.access(
+        dep.builder.graph.io,
+        "packages/core/node_modules/@typescript/typescript6",
+        .{},
+    ) catch {
+        @panic("\nthe SDK's @native-sdk/core transpiler is missing its installed dependency.\nFix with:" ++
+            " cd <sdk>/packages/core && npm ci\n");
+    };
+
+    const transpile = b.addSystemCommand(&.{node});
+    transpile.addFileArg(dep.path("packages/core/src/cli.ts"));
+    transpile.addFileArg(b.path(appPath(b, app_root, "src/core.ts")));
+    transpile.addArg("-o");
+    const emitted_core = transpile.addOutputFileArg("core.zig");
+    // The transpiler reads its own sources, the SDK modules, and the core's
+    // WHOLE import graph at run time; declare them so a transpiler upgrade
+    // or an edit to ANY module of a multi-file core re-emits it. The graph
+    // is declared as every .ts under the app's src/ (a superset of the
+    // reachable imports: over-approximation only re-runs the transpile,
+    // never misses a stale input). Failure mode: the checker's NS
+    // diagnostics stream to stderr verbatim — they are the teaching layer,
+    // nothing wraps them.
+    addTsDirInputs(b, dep.builder, transpile, "packages/core/sdk");
+    addAppTsDirInputs(b, transpile, appPath(b, app_root, "src"));
+    const transpiler_sources = [_][]const u8{
+        "checker.ts", "cli.ts", "diagnostics.ts", "emitter.ts", "infer.ts", "modules.ts", "transpile.ts", "typed_ast.ts", "types.ts",
+    };
+    for (transpiler_sources) |source| {
+        transpile.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
+    }
+
+    // The wiring imports core.zig and app.native relatively; the emitted
+    // core imports rt.zig relatively: stage all four into one directory.
+    const staged = b.addWriteFiles();
+    _ = staged.addCopyFile(emitted_core, "core.zig");
+    _ = staged.addCopyFile(dep.path("packages/core/rt/rt.zig"), "rt.zig");
+    _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
+    return .{ .main_root = main_root };
+}
+
+/// Declare every .ts file in an SDK-relative directory as a file input of
+/// the transpile step (the SDK library modules an app may import).
+fn addTsDirInputs(b: *std.Build, sdk_builder: *std.Build, transpile: *std.Build.Step.Run, dir_path: []const u8) void {
+    var dir = sdk_builder.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var it = dir.iterate();
+    while (it.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".ts")) continue;
+        transpile.addFileInput(sdk_builder.path(b.fmt("{s}/{s}", .{ dir_path, entry.name })));
+    }
+}
+
+/// Declare every .ts file under the app's src/ (recursively — a core may
+/// split into subdirectories) as a file input of the transpile step.
+fn addAppTsDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, src_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
+        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
+    }
+}
+
 /// The `native_sdk_app_*` C ABI every embed static library exports.
 pub const mobile_export_symbol_names = [_][]const u8{
     "native_sdk_app_create",
@@ -190,11 +296,31 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
     const app_optimize = exampleOptimizeMode(b, optimize_request, .ReleaseFast);
 
+    // The core role is detected from the tree (never a flag or config):
+    // builds with a custom `main` entry declared their core explicitly and
+    // skip detection.
+    const core_tree: CoreTree = if (std.mem.eql(u8, app_options.main, "src/main.zig"))
+        detectCoreTree(b, app_options.app_root)
+    else
+        .zig;
+    if (core_tree == .both) {
+        @panic("\nthis app declares two cores: src/core.ts (TypeScript) and src/main.zig (Zig)." ++
+            "\nAn app has exactly one core - the tree is the truth. Keep src/core.ts and delete" ++
+            " src/main.zig,\nor keep src/main.zig and delete src/core.ts. (Other Zig files under" ++
+            " src/ are fine either way.)\n");
+    }
+    const ts_stage: ?TsCoreStage = if (core_tree == .ts) tsCoreStage(b, dep, app_options.app_root) else null;
+
     // Mobile targets get the embed static library as a `lib` step: the
     // artifact the toolkit-owned iOS host (and any hand-written shim)
     // links, so `native dev|package --target ios` works against every
     // standard app build — generated graph or ejected — with nothing but
     // `-Dtarget`. Desktop targets keep the step absent.
+    if (ts_stage != null and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
+        @panic("\nTypeScript app cores build desktop apps today; the mobile embed library for TS" ++
+            " cores lands with the mobile host tier.\nBuild for a desktop target, or port the core" ++
+            " to a Zig `mobileOptions` app for mobile.\n");
+    }
     if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
@@ -248,7 +374,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod);
+    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage);
     const exe = b.addExecutable(.{
         .name = app_options.name,
         .root_module = app_mod,
@@ -263,10 +389,41 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
-    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod);
+    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod, ts_stage);
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // `native test` must surface the app's compile-time teaching errors,
+    // not just its test failures. Test builds never analyze `main` (the
+    // test runner replaces the entry point), so rules that fire inside it
+    // — UiApp.create's Model-defaults rule above all — used to ambush at
+    // `native build`, the LAST step in the loop. Compiling this object
+    // forces full semantic analysis of the app module, entry point
+    // included; nothing links or runs.
+    const analysis_root = b.addWriteFiles().add("app_analysis.zig",
+        \\//! Generated by the app build: force semantic analysis of the
+        \\//! app's entry point at test time. Exactly `main`, transitively —
+        \\//! the same surface `native build` analyzes — so test-time can
+        \\//! never be stricter than the build it fronts.
+        \\comptime {
+        \\    const app = @import("app");
+        \\    if (@hasDecl(app, "main")) _ = &app.main;
+        \\}
+        \\
+    );
+    const analysis_mod = b.createModule(.{
+        .root_source_file = analysis_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    analysis_mod.addImport("app", test_app_mod);
+    const analysis_obj = b.addObject(.{
+        .name = b.fmt("{s}-analysis", .{app_options.name}),
+        .root_module = analysis_mod,
+        .use_llvm = useLlvmWorkaround(target),
+    });
+    test_step.dependOn(&analysis_obj.step);
 
     // `zig build model-contract`: reflect the app's Model/Msg into
     // zig-out/model-contract.zon so `native check` can verify markup
@@ -388,20 +545,35 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
     };
 }
 
-fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module) *std.Build.Module {
+fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage) *std.Build.Module {
     const native_sdk_mod = nativeSdkModule(b, dep, target, optimize);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const manifest_mod = b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) });
     runner_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("build_options", options_mod);
-    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) }));
+    runner_mod.addImport("app_manifest_zon", manifest_mod);
 
-    const app_mod = localModule(b, target, optimize, appPath(b, app_options.app_root, app_options.main));
+    const app_mod = if (ts_stage) |stage|
+        // TypeScript core: the app module roots at the staged generated
+        // wiring (ts_core_main.zig beside the transpiled core.zig, its rt
+        // kernel, and the app's markup).
+        b.createModule(.{
+            .root_source_file = stage.main_root,
+            .target = target,
+            .optimize = optimize,
+        })
+    else
+        localModule(b, target, optimize, appPath(b, app_options.app_root, app_options.main));
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
+    if (ts_stage != null) {
+        // The wiring derives scene/identity/security from app.zon itself.
+        app_mod.addImport("app_manifest_zon", manifest_mod);
+    }
     return app_mod;
 }
 

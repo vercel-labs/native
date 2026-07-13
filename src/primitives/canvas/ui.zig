@@ -23,6 +23,7 @@ const builtin = @import("builtin");
 const font_coverage = @import("font_coverage.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const reflect = @import("ui_markup_reflect.zig");
 const ui_provenance = @import("ui_provenance.zig");
 
 const ObjectId = canvas.ObjectId;
@@ -786,12 +787,99 @@ pub fn Ui(comptime Msg: type) type {
             }.make;
         }
 
+        /// Comptime message constructor for `on_input` over a DECLARED
+        /// text-input event union (`ui_markup_reflect.declaredTextInputUnion`
+        /// — the transpiled-core shape, where the emitted module declares
+        /// its own mirror of `canvas.TextInputEvent` and type identity
+        /// cannot cross the emission boundary). The built message carries
+        /// the arm's own union value, translated field-for-field from the
+        /// runtime event at dispatch: tags map by name, numeric fields widen
+        /// the way the payload declares them (i64 or f64), and the event's
+        /// text slices ride through unchanged (host-event lifetime — one
+        /// dispatch, exactly what `update` gets everywhere else).
+        pub fn translatedInputMsg(comptime tag: std.meta.Tag(Msg), comptime Payload: type) InputMsgFn {
+            return struct {
+                fn caret(comptime D: type, direction: canvas.TextCaretDirection) D {
+                    return switch (direction) {
+                        inline else => |d| @field(D, @tagName(d)),
+                    };
+                }
+
+                fn num(comptime N: type, value: usize) N {
+                    // Saturating, not @intCast: selection offsets carry a
+                    // defined "to the end, whatever the length" sentinel —
+                    // select-all synthesizes `set_selection` with
+                    // `focus = maxInt(usize)` (events.zig), which every
+                    // consumer snaps to its text length (the runtime editor
+                    // via snapTextSelection, an elm-mirror core via its own
+                    // snap). maxInt(usize) does not fit the declared i64
+                    // field class, and panicking on translation killed the
+                    // app on the first cmd/ctrl+A (or automation set_text)
+                    // in ANY transpiled-core text field. Saturating keeps
+                    // the sentinel's meaning — still past any real length,
+                    // the core's snap resolves it exactly like the Zig
+                    // TextEditState does — and leaves real offsets exact.
+                    return if (@typeInfo(N) == .float) @floatFromInt(value) else std.math.lossyCast(N, value);
+                }
+
+                fn make(edit: canvas.TextInputEvent) Msg {
+                    const payload: Payload = switch (edit) {
+                        .insert_text => |inserted| @unionInit(Payload, "insert_text", inserted),
+                        .delete_backward => @unionInit(Payload, "delete_backward", {}),
+                        .delete_forward => @unionInit(Payload, "delete_forward", {}),
+                        .delete_word_backward => @unionInit(Payload, "delete_word_backward", {}),
+                        .delete_word_forward => @unionInit(Payload, "delete_word_forward", {}),
+                        .clear => @unionInit(Payload, "clear", {}),
+                        .move_caret => |move| blk: {
+                            const Move = @FieldType(Payload, "move_caret");
+                            break :blk @unionInit(Payload, "move_caret", .{
+                                .direction = caret(@FieldType(Move, "direction"), move.direction),
+                                .extend = move.extend,
+                            });
+                        },
+                        .set_selection => |selection| blk: {
+                            const Selection = @FieldType(Payload, "set_selection");
+                            break :blk @unionInit(Payload, "set_selection", .{
+                                .anchor = num(@FieldType(Selection, "anchor"), selection.anchor),
+                                .focus = num(@FieldType(Selection, "focus"), selection.focus),
+                            });
+                        },
+                        .set_composition => |composition| blk: {
+                            const Composition = @FieldType(Payload, "set_composition");
+                            const Cursor = @typeInfo(@FieldType(Composition, "cursor")).optional.child;
+                            break :blk @unionInit(Payload, "set_composition", .{
+                                .text = composition.text,
+                                .cursor = if (composition.cursor) |cursor| num(Cursor, cursor) else null,
+                            });
+                        },
+                        .commit_composition => @unionInit(Payload, "commit_composition", {}),
+                        .cancel_composition => @unionInit(Payload, "cancel_composition", {}),
+                    };
+                    return @unionInit(Msg, @tagName(tag), payload);
+                }
+            }.make;
+        }
+
         /// Comptime message constructor for `on_value`: `valueMsg(.confidence)`
         /// yields a function building `Msg{ .confidence = value }`.
         pub fn valueMsg(comptime tag: std.meta.Tag(Msg)) ValueMsgFn {
             return struct {
                 fn make(value: f32) Msg {
                     return @unionInit(Msg, @tagName(tag), value);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_value`/`on_resize` over a
+        /// DECLARED one-number float arm (`ui_markup_reflect.valueArmClass`
+        /// — the transpiled-core shape, where the arm's payload is the
+        /// emitted `f64` rather than `f32` by identity). The runtime's
+        /// applied 0..1 fraction widens exactly at dispatch.
+        pub fn translatedValueMsg(comptime tag: std.meta.Tag(Msg), comptime Payload: type) ValueMsgFn {
+            return struct {
+                fn make(value: f32) Msg {
+                    const payload: Payload = @floatCast(value);
+                    return @unionInit(Msg, @tagName(tag), payload);
                 }
             }.make;
         }
@@ -804,6 +892,43 @@ pub fn Ui(comptime Msg: type) type {
             return struct {
                 fn make(scroll_state: canvas.ScrollState) Msg {
                     return @unionInit(Msg, @tagName(tag), scroll_state);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_scroll` over a DECLARED
+        /// scroll-state record (`ui_markup_reflect.declaredScrollStateRecord`
+        /// — the transpiled-core shape, where the emitted module declares
+        /// its own mirror of `canvas.ScrollState` and type identity cannot
+        /// cross the emission boundary). The built message carries the
+        /// arm's own record value, translated field-for-field from the
+        /// runtime state at dispatch: fields map by name, and each numeric
+        /// field widens the way the payload declares it (exactly into
+        /// floats, rounded to the nearest whole number into integers).
+        pub fn translatedScrollMsg(comptime tag: std.meta.Tag(Msg), comptime Payload: type) ScrollMsgFn {
+            return struct {
+                fn num(comptime N: type, value: f32) N {
+                    return if (@typeInfo(N) == .float) @floatCast(value) else @intFromFloat(@round(value));
+                }
+
+                /// The `canvas.ScrollState` field behind a payload field
+                /// name: identical for the canvas spelling, mapped for the
+                /// TS SDK spelling (`viewportExtent` — transpiled fields
+                /// keep their TS names).
+                fn sourceName(comptime name: []const u8) []const u8 {
+                    if (@hasField(canvas.ScrollState, name)) return name;
+                    inline for (reflect.scroll_state_field_names_ts, 0..) |ts_name, index| {
+                        if (comptime std.mem.eql(u8, name, ts_name)) return reflect.scroll_state_field_names[index];
+                    }
+                    unreachable; // declaredScrollStateRecord admits no other name
+                }
+
+                fn make(scroll_state: canvas.ScrollState) Msg {
+                    var payload: Payload = undefined;
+                    inline for (@typeInfo(Payload).@"struct".fields) |field| {
+                        @field(payload, field.name) = num(field.type, @field(scroll_state, sourceName(field.name)));
+                    }
+                    return @unionInit(Msg, @tagName(tag), payload);
                 }
             }.make;
         }

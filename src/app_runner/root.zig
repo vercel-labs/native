@@ -254,6 +254,30 @@ pub fn manifestThemePack() native_sdk.canvas.ThemePack {
         @compileError("unknown app.zon theme \"" ++ name ++ "\" — expected one of: house, geist");
 }
 
+/// The manifest's ONE-accent brand override (`theme_accent = "#df2670"`),
+/// resolved at comptime so a malformed value is a build error naming the
+/// field — never a silent fallback. Absent means the pack's own accent.
+/// Apps hand this to their `UiApp` options' `theme_accent` field; the
+/// runtime layers `canvas.accentOverrides` over the resolved pack (and
+/// skips it under high contrast — accessibility beats brand).
+pub fn manifestThemeAccent() ?native_sdk.canvas.Color {
+    if (comptime !@hasField(@TypeOf(app_manifest), "theme_accent")) return null;
+    const value: []const u8 = app_manifest.theme_accent;
+    return comptime parseHexColor(value) orelse
+        @compileError("invalid app.zon theme_accent \"" ++ value ++ "\" — expected a #rrggbb hex color");
+}
+
+fn parseHexColor(comptime value: []const u8) ?native_sdk.canvas.Color {
+    comptime {
+        if (value.len != 7 or value[0] != '#') return null;
+        var channels: [3]u8 = undefined;
+        for (&channels, 0..) |*channel, index| {
+            channel.* = std.fmt.parseInt(u8, value[1 + index * 2 .. 3 + index * 2], 16) catch return null;
+        }
+        return native_sdk.canvas.Color.rgb8(channels[0], channels[1], channels[2]);
+    }
+}
+
 /// Whether app.zon declares web content — the shared declare-to-use
 /// contract (`native_sdk.app_manifest.web_layer`) over the comptime
 /// manifest import: a `.frontend` block, the `"webview"` capability, a

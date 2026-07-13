@@ -98,6 +98,24 @@ pub const EffectAudioEventKind = runtime_effects.EffectAudioEventKind;
 pub const EffectAudioSource = runtime_effects.EffectAudioSource;
 pub const audioCachePath = runtime_effects.audioCachePath;
 pub const max_effect_audio_path_bytes = runtime_effects.max_effect_audio_path_bytes;
+pub const EffectHostResult = runtime_effects.EffectHostResult;
+pub const HostCallBinding = runtime_effects.HostCallBinding;
+pub const max_effect_host_name_bytes = runtime_effects.max_effect_host_name_bytes;
+pub const max_effect_host_payload_bytes = runtime_effects.max_effect_host_payload_bytes;
+pub const max_effect_host_result_bytes = runtime_effects.max_effect_host_result_bytes;
+
+const runtime_ts_core_host = @import("ts_core_host.zig");
+pub const TsCoreHost = runtime_ts_core_host.TsCoreHost;
+pub const ts_core_request_key_base = runtime_ts_core_host.request_key_base;
+pub const ts_core_timer_key_base = runtime_ts_core_host.timer_key_base;
+pub const ts_core_effect_key_base = runtime_ts_core_host.effect_key_base;
+pub const ts_core_delay_key_base = runtime_ts_core_host.delay_key_base;
+pub const ts_core_clip_write_key_base = runtime_ts_core_host.clip_write_key_base;
+pub const ts_core_spawn_key_base = runtime_ts_core_host.spawn_key_base;
+pub const ts_core_audio_key_base = runtime_ts_core_host.audio_key_base;
+
+const runtime_ts_ui_app = @import("ts_ui_app.zig");
+pub const TsUiApp = runtime_ts_ui_app.TsUiApp;
 
 const runtime_session_journal = @import("session_journal.zig");
 const runtime_session_record = @import("session_record.zig");

@@ -62,10 +62,23 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         children?: string;
       }>;
       const className = codeElement?.props?.className || "";
-      const lang = className.replace("language-", "") || "typescript";
+      // The fence info string, e.g. ```ts:src/core.ts — MDX drops fence
+      // meta (```ts title="…" never reaches this component), so the
+      // colon-in-info-string convention is the one filename channel that
+      // survives the pipeline: micromark treats the whole word as the
+      // language, MDX forwards it as language-ts:src/core.ts, and this
+      // split hands shiki the real language and Code the filename.
+      const info = className.replace("language-", "") || "typescript";
+      const colon = info.indexOf(":");
+      const lang = (colon === -1 ? info : info.slice(0, colon)) || "typescript";
+      const filename = colon === -1 ? undefined : info.slice(colon + 1) || undefined;
       const code = codeElement?.props?.children || "";
 
-      return <Code lang={lang}>{typeof code === "string" ? code : String(code)}</Code>;
+      return (
+        <Code lang={lang} filename={filename}>
+          {typeof code === "string" ? code : String(code)}
+        </Code>
+      );
     },
     blockquote: (props) => (
       <blockquote

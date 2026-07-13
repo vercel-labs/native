@@ -22,7 +22,7 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
     try testing.expectEqual(@as(usize, 65), schema.elements.len);
-    try testing.expectEqual(@as(usize, 78), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 79), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
     // The element table runs through the span composite (64) and the
     // bubble-reactions composite (65); the reaction pill's dock rides
@@ -35,10 +35,11 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // The attr table runs through the split layout-tween attributes
     // resize-duration (71) and resize-easing (72), the chart axis/hover
     // attributes x-labels (73), y-labels (74), and hover-details (75),
-    // the later span additions scale (76) and underline (77), and the
-    // split enter-from attribute resize-origin (78).
+    // the later span additions scale (76) and underline (77), the
+    // split enter-from attribute resize-origin (78), and the
+    // quiet-surface hover knob quiet-hover (79).
     try testing.expectEqual(
-        @as(u64, 0x13fddf21980756c0),
+        @as(u64, 0x3b439a78a91600b6),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     try testing.expectEqual(

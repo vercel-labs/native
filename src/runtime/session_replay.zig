@@ -226,7 +226,13 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // position ticks, completions, platform failures — is an
         // external input and must be fed.
         .audio => record.audio_kind == .rejected,
-        .line, .clock => false,
+        // Host-request rejections mark themselves with the exit reason
+        // (the `.host` record encoding); host answers must be fed.
+        .host => record.exit_reason == .rejected,
+        // Launch-env deliveries are exactly what must NOT regenerate:
+        // the recorded values feed the replayed envMsgs dispatch so the
+        // replay launch's environment is never consulted.
+        .line, .clock, .env => false,
     };
 }
 

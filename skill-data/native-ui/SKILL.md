@@ -760,6 +760,18 @@ try harness.runtime.dispatchPlatformEvent(app, .wake);   // Msg{ .fetched = ... 
 
 The `.wake` platform event is how live platforms marshal worker completions onto the loop thread (macOS main-queue dispatch, GTK `g_idle_add`, Win32 `PostMessage`); dispatching it in tests exercises the same drain path. Note that after `fx.cancel(key)` runs in `update`, a subsequent `feedExit(key)` correctly fails with `error.EffectNotFound` — the cancel already delivered the terminal `.cancelled` exit, so there is no active effect left to feed. See `examples/effects-probe` for the complete pattern, including the live cancel flow.
 
+> **Effects test surface — exact signatures.** These are the complete fake-executor entry points; do not excavate the SDK source. Harness and switch: `const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(w, h) });` then `app_state.effects.executor = .fake;` before dispatching. Every `feed*`/`fire*` returns `error{EffectNotFound}!void`; every `pending*At(index: usize)` returns an optional request record; each family's `pending*Count()` returns `usize`.
+>
+> - Spawn: `pendingSpawnAt(index: usize) ?SpawnRequest` · `feedLine(key: u64, bytes: []const u8)` · `feedStderr(key: u64, bytes: []const u8)` · `feedExit(key: u64, code: i32)` · `feedExitReason(key: u64, code: i32, reason: EffectExitReason)` (`feedExit` is the clean-exit sugar; the reason enum covers `signaled`/`cancelled`/...) · `feedOutput(key: u64, bytes: []const u8)` (raw collect-stdout append, no line framing).
+> - Fetch: `pendingFetchAt(index: usize) ?FetchRequest` · `feedResponse(key: u64, status: u16, body: []const u8)` · `feedResponseOutcome(key: u64, outcome: EffectFetchOutcome, status: u16, body: []const u8)`.
+> - Files: `pendingFileAt(index: usize) ?FileRequest` · `feedFileResult(key: u64, outcome: EffectFileOutcome, bytes: []const u8)`.
+> - Clipboard: `pendingClipboardAt(index: usize) ?ClipboardRequest` · `feedClipboardResult(key: u64, outcome: EffectClipboardOutcome, text: []const u8)`.
+> - Host commands: `pendingHostAt(index: usize) ?HostRequest` · `feedHostResult(key: u64, ok: bool, bytes: []const u8)`.
+> - Timers: `pendingTimerAt(index: usize) ?TimerRequest` · `fireTimer(key: u64)` (one-shot slots retire after the fire).
+> - Audio (one channel): `pendingAudio() ?AudioRequest` · `feedAudioEvent(kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool)` · `feedAudioEventBuffering(kind, position_ms, duration_ms, playing, buffering: bool)` · `feedAudioSpectrum(bands: [32]u8, position_ms: u64, duration_ms: u64)` · `audioSnapshot() AudioSnapshot`.
+>
+> After feeding, drain with `try harness.runtime.dispatchPlatformEvent(app, .wake);` — results become Msgs through the same path live platforms use.
+
 ## Secondary windows: model-declared (`windows_fn` + `window_view`)
 
 Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is visibility — no `visible` flag; the platform window channel has no hide); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model.
@@ -1069,6 +1081,8 @@ main.update(&model, tree.msgForPointer(button.id, .up).?);        // dispatch ex
 ```
 
 Two `msgForPointer` traps: a **disabled** control yields `null` (assert `== null` rather than unwrapping when testing disabled states), and the tree is a snapshot — after each dispatch, rebuild the view before pressing anything again.
+
+One widget-field trap: there is no `Widget.enabled` — enabled-ness is spelled `widget.state.disabled` (a `bool`, disabled-positive), so a test asserts `try testing.expect(!button.state.disabled);` for an enabled control and `try testing.expect(save.state.disabled);` for a disabled one.
 
 `msgForPointer` has a sibling for every handler channel — use the one matching the interaction under test, all on the finalized `Tree`: `msgForKeyboard(id, keyboard_event)` (activation keys, slider steps, enter-to-submit, text edits), `msgForResize(id, fraction)` (the split-divider round-trip: dispatch the fraction, assert the model stored it, rebuild, assert the `value` echo), `msgForDismiss(id)` (an anchored surface's `on-dismiss`), `msgForHold(id)` (`on-hold`), `msgForTextEdit(id, edit)` (text entry), `msgForValue(id, value)` (BUILDER views only — it fires the `on_value` constructor, so it returns null for a markup slider; a markup slider binds a plain `on-change`, so assert its dispatch with `msgFor(id, .change)` — the accessibility set-value intent falls back to the same handler), `msgForScroll(id, state)`, and `msgForContextMenu(id, item_index)`. For tree keyboard NAVIGATION there is nothing app-side to unit test: Up/Down/Left/Right/Home/End run engine-side over `role="treeitem"` rows and dispatch the landed row's `on-press`/`on-toggle` — assert those Msgs (via `msgForPointer`/`msgFor(id, .toggle)`) and the model transitions; the keymap itself is runtime behavior (drive it live with `native automate widget-key`).
 

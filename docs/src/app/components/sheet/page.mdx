@@ -18,7 +18,7 @@ A bottom-anchored surface with the same contract as [dialog](/components/dialog)
         <spacer height="34"></spacer>
         <text wrap="true" foreground="text_muted">Anyone with the link can view this board.</text>
         <row gap="8">
-          <input text="{share_url}" grow="1"></input>
+          <input text="{share_url}" label="Share link" grow="1"></input>
           <button variant="secondary" icon="copy" on-press="copy_link">Copy</button>
         </row>
       </column>
@@ -27,7 +27,9 @@ A bottom-anchored surface with the same contract as [dialog](/components/dialog)
 </column>
 ```
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.el(.sheet, .{ .text = "Share", .height = 190, .padding = 24, .on_dismiss = .close_share }, .{
@@ -35,7 +37,7 @@ ui.el(.sheet, .{ .text = "Share", .height = 190, .padding = 24, .on_dismiss = .c
         ui.column(.{ .height = 34 }, .{}), // clears the engine-drawn title line
         ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
         ui.row(.{ .gap = 8 }, .{
-            ui.el(.input, .{ .text = model.share_url, .grow = 1 }, .{}),
+            ui.el(.input, .{ .text = model.share_url, .grow = 1, .semantics = .{ .label = "Share link" } }, .{}),
             ui.button(.{ .variant = .secondary, .icon = "copy", .on_press = .copy_link }, "Copy"),
         }),
     }),

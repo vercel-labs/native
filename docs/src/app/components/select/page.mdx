@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Select
 
@@ -26,7 +27,34 @@ The keyboard rides the same composition with no extra wiring: on the focused tri
 </stack>
 ```
 
-## Zig builder
+The core side is the open flag, the committed choice, and three arms:
+
+<CodeToggle>
+
+```ts
+// model: { readonly env_id: number; readonly env_picker_open: boolean }
+case "toggle_env_picker":
+  return { ...model, env_picker_open: !model.env_picker_open };
+case "close_env_picker":
+  return { ...model, env_picker_open: false };
+case "pick_env":
+  return { ...model, env_id: msg.id, env_picker_open: false };
+```
+
+```zig
+.toggle_env_picker => model.env_picker_open = !model.env_picker_open,
+.close_env_picker => model.env_picker_open = false,
+.pick_env => |id| {
+    model.env_id = id;
+    model.env_picker_open = false;
+},
+```
+
+</CodeToggle>
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.stack(.{ .width = 240 }, .{
@@ -40,9 +68,9 @@ ui.stack(.{ .width = 240 }, .{
         .anchor_alignment = .stretch,
         .on_dismiss = .close_env_picker,
     }, .{
-        ui.el(.menu_item, .{ .text = "Production", .selected = model.env == .production, .on_press = .{ .pick_env = .production } }, .{}),
-        ui.el(.menu_item, .{ .text = "Staging", .selected = model.env == .staging, .on_press = .{ .pick_env = .staging } }, .{}),
-        ui.el(.menu_item, .{ .text = "Development", .selected = model.env == .development, .on_press = .{ .pick_env = .development } }, .{}),
+        ui.el(.menu_item, .{ .text = "Production", .selected = model.env_id == 0, .on_press = .{ .pick_env = 0 } }, .{}),
+        ui.el(.menu_item, .{ .text = "Staging", .selected = model.env_id == 1, .on_press = .{ .pick_env = 1 } }, .{}),
+        ui.el(.menu_item, .{ .text = "Development", .selected = model.env_id == 2, .on_press = .{ .pick_env = 2 } }, .{}),
     }) else ui.spacer(0),
 })
 ```

@@ -1219,15 +1219,21 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         .fill = colorFill(disabledWash(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle), washed, tokens.states.disabled_alpha)),
     });
     const active_rest = widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = active,
-        .radius = track_radius,
-        .fill = colorFill(if (widget.state.disabled)
-            visual.disabled_background orelse disabledWash(active_rest, true, tokens.states.disabled_alpha)
-        else
-            active_rest),
-    });
+    // Zero range paints NOTHING — same guard the progress bar wears. A
+    // width-zero pill still owns anti-aliased edge coverage, so an idle
+    // transport slider (value 0, disabled) showed a one-pixel filled
+    // sliver at the rail's start.
+    if (value > 0) {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 2),
+            .rect = active,
+            .radius = track_radius,
+            .fill = colorFill(if (widget.state.disabled)
+                visual.disabled_background orelse disabledWash(active_rest, true, tokens.states.disabled_alpha)
+            else
+                active_rest),
+        });
+    }
     // Paper-white in BOTH schemes: the thumb must read against the
     // filled range and the muted rail alike, and the palette carries no
     // scheme-invariant white token — so the emitter states it, and a

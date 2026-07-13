@@ -109,9 +109,14 @@ pub const validateUpdates = validation.validateUpdates;
 pub const validatePlatforms = validation.validatePlatforms;
 pub const validatePackageMetadata = validation.validatePackageMetadata;
 pub const versionString = validation.versionString;
+pub const shellConfigFrom = comptime_scene.shellConfigFrom;
+pub const firstGpuSurfaceLabel = comptime_scene.firstGpuSurfaceLabel;
+
+const comptime_scene = @import("comptime_scene.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = comptime_scene;
     _ = @import("web_layer.zig");
 }

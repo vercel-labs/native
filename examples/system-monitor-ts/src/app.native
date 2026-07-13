@@ -1,0 +1,170 @@
+<!-- The system monitor's whole view tier: one markup file over the TS
+     core's model, bound by the names core.ts wrote (fields and exported
+     helpers bind verbatim). The header IS the titlebar (tall hidden-inset chrome: the
+     row is the window's drag surface, leads with a spacer sized to the
+     traffic lights through the core's chromeMsg channel, and matches its
+     height to the titlebar band). Under it: the four stat tiles with
+     their <chart> sparklines binding the core's NaN-padded sample
+     windows, the toolbar (pause/resume, the filter field, the sort
+     chips), the top-CPU process table on the real table register with
+     per-row context menus, the status bar, and the modal SIGTERM
+     confirmation overlaid through the stack root. The sampling loop
+     itself is the core's - see src/core.ts. -->
+<stack>
+  <column background="background">
+    <row height="{headerHeight}" padding="12" gap="12" cross="center" background="surface" window-drag="true" label="Monitor header">
+      <spacer width="{chromeLeading}" />
+      <spacer grow="1" />
+      <text size="sm" foreground="text_muted" label="Sampling status">{headerStatus}</text>
+    </row>
+    <separator />
+    <column grow="1" padding="20" gap="16">
+      <row gap="12" label="Stat tiles">
+        <panel width="267" height="140" padding="14" background="surface" radius="lg" border-color="border" label="CPU tile">
+          <column gap="4">
+            <text size="sm" foreground="text_muted">CPU</text>
+            <text size="heading" width="239" label="{cpuValue}"><span weight="bold">{cpuValue}</span></text>
+            <text size="sm" foreground="text_muted">{cpuDetail}</text>
+            <!-- Zero-baseline bars pinned to the absolute 0..1 domain
+                 (percent of all cores); the values binding is the core's
+                 NaN-padded 60-sample window, so a filling history enters
+                 from the right edge. -->
+            <chart width="239" height="32" y-min="0" y-max="1" label="CPU history">
+              <series kind="bar" values="{cpuSpark}" />
+            </chart>
+          </column>
+        </panel>
+        <panel width="267" height="140" padding="14" background="surface" radius="lg" border-color="border" label="Memory tile">
+          <column gap="4">
+            <text size="sm" foreground="text_muted">Memory</text>
+            <text size="heading" width="239" label="{memValue}"><span weight="bold">{memValue}</span></text>
+            <text size="sm" foreground="text_muted">{memDetail}</text>
+            <chart width="239" height="32" y-min="0" y-max="1" label="Memory history">
+              <series kind="bar" values="{memSpark}" />
+            </chart>
+          </column>
+        </panel>
+        <panel width="267" height="140" padding="14" background="surface" radius="lg" border-color="border" label="Processes tile">
+          <column gap="4">
+            <text size="sm" foreground="text_muted">Processes</text>
+            <text size="heading" width="239" label="{procValue}"><span weight="bold">{procValue}</span></text>
+            <text size="sm" foreground="text_muted">top 14 by CPU shown</text>
+            <!-- A filled area against the chart's auto domain: counts
+                 have no natural ceiling, so an absolute scale would draw
+                 a featureless block. -->
+            <chart width="239" height="32" label="Processes history">
+              <series kind="area" values="{procSpark}" />
+            </chart>
+          </column>
+        </panel>
+        <panel width="267" height="140" padding="14" background="surface" radius="lg" border-color="border" label="Uptime tile">
+          <column gap="4">
+            <text size="sm" foreground="text_muted">Uptime</text>
+            <text size="heading" width="239" label="{uptimeValue}"><span weight="bold">{uptimeValue}</span></text>
+            <text size="sm" foreground="text_muted" width="239" wrap="false">since boot (pid 1 elapsed time)</text>
+            <column height="32" main="end" gap="3">
+              <text size="sm" foreground="text_muted" width="239" wrap="false">60 samples kept · 2 s cadence</text>
+            </column>
+          </column>
+        </panel>
+      </row>
+      <row gap="10" cross="center" label="Table toolbar">
+        <button size="sm" variant="outline" icon="{pauseIcon}" on-press="toggle_sampling" label="Pause or resume sampling">{pauseLabel}</button>
+        <!-- The search field carries the built-in trailing clear
+             affordance whenever it holds text - no external Clear chip. -->
+        <search-field size="sm" width="260" text="{searchText}" placeholder="Filter by name or pid" on-input="search_edit" label="Filter processes" />
+        <spacer grow="1" />
+        <text size="sm" foreground="text_muted">Sort</text>
+        <toggle-group gap="2" label="Sort key">
+          <toggle-button size="sm" selected="{sortKey == 'cpu'}" on-toggle="sort_cpu" label="Sort by CPU">CPU</toggle-button>
+          <toggle-button size="sm" selected="{sortKey == 'mem'}" on-toggle="sort_mem" label="Sort by Memory">Memory</toggle-button>
+          <toggle-button size="sm" selected="{sortKey == 'pid'}" on-toggle="sort_pid" label="Sort by PID">PID</toggle-button>
+          <toggle-button size="sm" selected="{sortKey == 'name'}" on-toggle="sort_name" label="Sort by Name">Name</toggle-button>
+        </toggle-group>
+        <icon name="{sortDirectionIcon}" width="14" height="14" foreground="text_muted" label="{sortDirectionLabel}" />
+      </row>
+      <column grow="1" gap="6">
+        <row gap="10" cross="center">
+          <text width="130" label="Processes"><span weight="bold" scale="1.2">Processes</span></text>
+          <badge variant="secondary">{shownCount} of {matchCount}</badge>
+          <spacer grow="1" />
+          <text width="380" size="sm" wrap="false" text-alignment="end" foreground="text_muted">right-click a row for SIGTERM (confirmed first)</text>
+        </row>
+        <if test="{shownCount == 0}">
+          <panel padding="24" background="surface" radius="lg" border-color="border" label="No processes match">
+            <column gap="6">
+              <text>{emptyTitle}</text>
+              <text size="sm" foreground="text_muted">Filter matches command names and pids.</text>
+            </column>
+          </panel>
+        </if>
+        <else>
+          <!-- Controlled scroll: the model echoes the applied offset, so
+               the 2 s sample rebuild never resets the table mid-gesture.
+               The table is the REAL table register - the engine owns the
+               hairline separators and the full-width hover washes. -->
+          <scroll grow="1" value="{tableScroll}" on-scroll="table_scrolled" label="Process table">
+            <table label="Processes by CPU">
+              <table-row height="32" gap="12" cross="center">
+                <table-cell width="80" size="sm" foreground="text_muted">PID</table-cell>
+                <table-cell grow="1" size="sm" foreground="text_muted">Command</table-cell>
+                <table-cell width="80" size="sm" text-alignment="end" foreground="text_muted">CPU %</table-cell>
+                <table-cell width="100" size="sm" text-alignment="end" foreground="text_muted">Memory</table-cell>
+              </table-row>
+              <for each="visibleRows" as="r" key="pid">
+                <!-- The row's press is absorbed by a no-op arm: a markup
+                     context menu needs a pressable host (the Zig builder's
+                     data_row is its own hit target). Terminate opens the
+                     confirmation dialog - never the signal directly. -->
+                <table-row global-key="{r.pid}" height="32" gap="12" cross="center" on-press="row_pressed" label="{r.rowLabel}">
+                  <table-cell width="80" size="sm" foreground="text_muted">{r.pidText}</table-cell>
+                  <table-cell grow="1">{r.name}</table-cell>
+                  <table-cell width="80" size="sm" text-alignment="end">{r.cpuText}</table-cell>
+                  <table-cell width="100" size="sm" text-alignment="end" foreground="text_muted">{r.memText}</table-cell>
+                  <context-menu>
+                    <menu-item on-press="request_kill:{r.pid}">Terminate (SIGTERM)…</menu-item>
+                    <separator />
+                    <menu-item on-press="copy_name:{r.pid}">Copy Name</menu-item>
+                  </context-menu>
+                </table-row>
+              </for>
+            </table>
+          </scroll>
+        </else>
+      </column>
+    </column>
+    <column>
+      <separator />
+      <row height="30" padding="8" cross="center" background="surface">
+        <!-- Full-width box, not grow: the host rasterizer measures text
+             slightly wider than layout and a tight box clips the tail. -->
+        <text width="1104" size="sm" foreground="text_muted" label="{statusLine}">{statusLine}</text>
+      </row>
+    </column>
+  </column>
+  <if test="{confirmingKill}">
+    <!-- The dialog's modal chrome paints the real scrim; this panel is
+         the outside-click cancel catcher, wearing the same scrim wash so
+         the pair reads as one overlay. Clicking outside the dialog never
+         terminates anything; the dialog body is its own hit target, so a
+         press inside it never falls through to the cancel. -->
+    <panel background="scrim" on-press="cancel_kill" label="Confirm termination">
+      <column grow="1" main="center" cross="center">
+        <dialog width="420" padding="20" background="surface" radius="lg" border-color="border" label="Send SIGTERM">
+          <column gap="12">
+            <row gap="10" cross="center">
+              <icon name="alert" width="20" height="20" foreground="warning" />
+              <text grow="1" label="Send SIGTERM?"><span weight="bold" scale="1.25">Send SIGTERM?</span></text>
+            </row>
+            <text wrap="true">{killPrompt}</text>
+            <text wrap="true" size="sm" foreground="text_muted">SIGTERM is the polite request — the process may save, clean up, or decline. This app never sends SIGKILL.</text>
+            <row gap="8" main="end">
+              <button variant="secondary" on-press="cancel_kill" label="Cancel termination">Cancel</button>
+              <button variant="destructive" on-press="confirm_kill" label="Confirm SIGTERM">Send SIGTERM</button>
+            </row>
+          </column>
+        </dialog>
+      </column>
+    </panel>
+  </if>
+</stack>

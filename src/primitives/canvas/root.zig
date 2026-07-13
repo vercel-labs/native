@@ -370,6 +370,7 @@ pub const PixelSnapTokenOverrides = token_model.PixelSnapTokenOverrides;
 pub const ControlVisualTokenOverrides = token_model.ControlVisualTokenOverrides;
 pub const ControlTokenOverrides = token_model.ControlTokenOverrides;
 pub const DesignTokenOverrides = token_model.DesignTokenOverrides;
+pub const accentOverrides = token_model.accentOverrides;
 pub const DesignTokens = token_model.DesignTokens;
 
 // Canvas widget model and built-in factories live in `widgets.zig`; root keeps the public API stable.

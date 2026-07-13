@@ -1,0 +1,68 @@
+{
+  "name": "dual-notes-autosave",
+  "description": "Wave-2 dual-track case: add debounced autosave to an existing notes app — the keyed one-shot timer surface (Cmd.delay re-arm / fx.startTimer replace), the file-write effect, a save-state machine, and the late-result race. Both tracks start from the same working app, each in its track's idiom.",
+  "prompt": "This workspace holds a small working notes app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Three seeded notes; the sidebar selects a note, and the editor edits the selected note's body through the toolkit's text-input events. Do not break any of that. Your task: add debounced autosave.\n\nRequirements:\n- Any edit marks the notes dirty and arms — or RE-arms — an 800 ms autosave timer through the toolkit's keyed one-shot timer surface: one timer, one key, so a burst of edits saves once, 800 ms after the last keystroke. Never a thread, never a sleep.\n- When the autosave fires and the notes are dirty, save: serialize ALL notes, in list order, one line per note as <id><TAB><title><TAB><body> with a newline after every line, and write the whole file to exactly notes.tsv through the toolkit's file effect.\n- A button named exactly \"Save now\" saves immediately (same serialization, same file) and DROPS the pending autosave — cancel the armed timer; do not leave it to fire into a no-op. Save now does nothing while there is nothing to save or while a save is already in flight.\n- The save lifecycle lives in the model as save_state, exactly one of \"clean\" | \"dirty\" | \"saving\" | \"saved\" | \"failed\": clean at boot; dirty on any edit; saving while a write is in flight; saved on a successful write; failed on any write failure — a failure is a state the user can see, never silence. An edit made WHILE a save is in flight returns the state to dirty (with its own re-armed autosave), and when that older save's result lands it must NOT flip the state — the newer edits are not saved yet.\n- The view shows the save state.\n\nThe exact contract for the additions (the grader compiles against it; keep every existing export, field, arm, and behavior working exactly as it is):\n- Model gains save_state (a SaveState enum / string-literal union with exactly the members above).\n- Msg gains: save_now (no payload); autosave_fired — the timer arm (in TypeScript one number field, the fire time; in Zig the toolkit's timer payload); and the write result routed per your track's effects surface — in TypeScript the ok arm saved (no payload fields) and the err arm save_failed (one bytes field reason); in Zig one file-result arm save_done carrying the toolkit's file result (its outcome covers success and every failure).\n- In Zig this moves update onto the effects channel: update(model, msg, fx) with pub const Effects = native_sdk.Effects(Msg); keep Model/Msg/update/initialModel and the helpers pub in src/main.zig.\n\nCheck your work with the loop in README.md until it is green, and make sure the behavior above actually holds. When you are done, summarize what changed.",
+  "frontend": "app-dual",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "Save now",
+      "expect": true,
+      "description": "the view carries the Save now control"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/*.zig",
+      "pattern": "std\\.Thread|std\\.Io\\.sleep|std\\.time\\.sleep",
+      "expect": false,
+      "description": "no threads or sleeps — the timer surface only"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The debounce is the keyed re-arm idiom: one stable timer key, re-issued on every edit (Cmd.delay re-arm on the ts track, one-shot startTimer replace on the zig track), cancelled on Save now — not a hand-rolled countdown in the model, not a fire-and-ignore.",
+        "The save-state machine is exactly the five pinned states with honest transitions, and the late-result race is handled: a result landing after newer edits does not mark them saved.",
+        "Serialization is a pure function of the notes (id/title/body, tab-separated, newline-terminated lines) built with the track's byte idioms, and the write goes through the file effect with a stable key.",
+        "The existing app is untouched where the spec says so: selection, text editing, seeded notes, and the existing helpers keep working, and the new code matches the file's existing style."
+      ],
+      "files": ["src/core.ts", "src/*.zig", "src/*.native"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the debounce, state machine, and integration beyond compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "edits arm and re-arm the keyed 800ms debounce, fires and Save now write the pinned serialization to notes.tsv, the five-state lifecycle holds including the late-result race, existing behavior intact"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": ["-Dplatform=null"],
+          "description": "edits arm and re-arm the keyed 800ms debounce, fires and Save now write the pinned serialization to notes.tsv, the five-state lifecycle holds including the late-result race, existing behavior intact"
+        }
+      ]
+    }
+  }
+}

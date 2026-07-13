@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Switch
 
-An on/off switch control. The label is the element's content, the model binds `checked`, and `on-toggle` dispatches its Msg — same contract as [checkbox](/components/checkbox), rendered as a sliding thumb. In the Zig builder the widget kind is `.switch_control`.
+An on/off switch control. The label is the element's content, the model binds `checked`, and `on-toggle` dispatches its Msg — same contract as [checkbox](/components/checkbox), rendered as a sliding thumb.
 
 <ComponentPreview name="switch" alt="Switches rendered by the engine" caption="on, off, and disabled switches" />
 
@@ -17,7 +17,9 @@ An on/off switch control. The label is the element's content, the model binds `c
 </column>
 ```
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically — the widget kind is `.switch_control`:
 
 ```zig
 ui.column(.{ .gap = 12 }, .{

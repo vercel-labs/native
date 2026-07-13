@@ -1,0 +1,24 @@
+<!-- The tasks view: filter chips, the task list, the draft entry, and the
+     open count. Markup binds the model's fields and pub methods; validate
+     with: native markup check src/app.native -->
+<column gap="12" padding="16" grow="1">
+  <row gap="8" cross="center">
+    <text size="heading" grow="1">Tasks</text>
+    <for each="filter_choices" as="f">
+      <toggle-button size="sm" selected="{f == filter}" on-toggle="set_filter:{f}">{f}</toggle-button>
+    </for>
+  </row>
+  <column gap="4" grow="1">
+    <for each="visibleTasks" as="t" key="id">
+      <list-item on-press="toggle:{t.id}" selected="{t.done}" label="{t.title}">
+        <text grow="1">{t.title}</text>
+        <button size="sm" variant="ghost" on-press="delete:{t.id}" label="Delete task">x</button>
+      </list-item>
+    </for>
+  </column>
+  <row gap="8" cross="center">
+    <text-field text="{draftText}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" label="New task" />
+    <button variant="primary" on-press="add">Add</button>
+  </row>
+  <status-bar>{openCount} open</status-bar>
+</column>

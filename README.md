@@ -4,7 +4,7 @@
 
 Native SDK exists because expressive UI and native performance should not be competing goals. Developers often choose web-based runtimes because they offer freedom, speed and control over the product experience. But that freedom often comes with a heavy runtime. Native SDK keeps the expressive authoring model and replaces the runtime with native rendering.
 
-Views are declarative markup in `.native` files, logic is plain Zig, and Native SDK's own engine draws every pixel into real OS windows — no browser, no WebView, no interpreter in the binary.
+Views are declarative markup in `.native` files, logic is plain TypeScript compiled to native code at build time — or Zig, first-class by choice — and Native SDK's own engine draws every pixel into real OS windows. No browser, no WebView, no JS runtime in the binary: Zig is how everything works, TypeScript and Native markup are how apps are authored.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/soundboard-dark.webp">
@@ -46,32 +46,34 @@ cd my_app
 native dev
 ```
 
-A native window opens with a working counter. The whole view is `src/app.native` — a markup file that binds values and dispatches messages:
+A native window opens with a working counter. The whole app is three files of truth — view, logic, manifest — and no build config. The view is `src/app.native`, a markup file that binds values and dispatches messages (the counter row at its heart):
 
 ```html
-<column gap="12" padding="16">
-  <row gap="8" main="center" cross="center" grow="1">
-    <button variant="secondary" on-press="decrement">-</button>
-    <text>{count}</text>
-    <button variant="primary" on-press="increment">+</button>
-  </row>
-  <status-bar>count: {count}</status-bar>
-</column>
+<row gap="8" main="center" cross="center" grow="1">
+  <button variant="secondary" on-press="decrement">-</button>
+  <text>{count}</text>
+  <button variant="primary" on-press="increment">+</button>
+</row>
 ```
 
-All logic lives in `src/main.zig`: a `Model` struct, a `Msg` union, and one `update` function — the only place state changes:
+All logic lives in `src/core.ts`: a `Model` interface, a `Msg` union, and one pure `update` function — the only place state changes, plain TypeScript compiled to native code at build time:
 
-```zig
-pub fn update(model: *Model, msg: Msg) void {
-    switch (msg) {
-        .increment => model.count += 1,
-        .decrement => model.count -= 1,
-        .reset => model.count = 0,
-    }
+```ts
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "increment":
+      return { ...model, count: model.count + 1 };
+    case "decrement":
+      return { ...model, count: model.count - 1 };
+    case "reset":
+      return { ...model, count: 0 };
+  }
 }
 ```
 
-Edit `src/app.native` while `native dev` runs and the window updates in place, keeping your state. `native check` validates every view in milliseconds without building, `native test` runs full-loop UI tests headlessly, and `native build` produces an optimized release binary.
+Prefer Zig for the core? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` — same loop, same runtime, first-class by choice.
+
+Edit `src/app.native` while `native dev` runs and the window updates in place, keeping your state. `native dev --core` runs the TypeScript core under node for instant logic checks, `native check` validates the core and every view in milliseconds without building, and `native build` produces an optimized release binary.
 
 Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick-start).
 
@@ -114,6 +116,7 @@ The full documentation is at [native-sdk.dev](https://native-sdk.dev).
 - [Quick Start](https://native-sdk.dev/quick-start) — install to a running, tested app
 - [Philosophy](https://native-sdk.dev/philosophy) — the six principles behind the toolkit
 - [App Model](https://native-sdk.dev/app-model) — the model/message/update loop, wiring, and hot reload
+- [TypeScript Cores](https://native-sdk.dev/typescript) — the app-core subset, effects, subscriptions, and the node dev loop
 - [Native UI](https://native-sdk.dev/native-ui) — every element, attribute, and pattern in the markup
 - [Components](https://native-sdk.dev/components) — the component catalog
 - [State & Data Flow](https://native-sdk.dev/state) — derive-don't-store, bindings, and text editing

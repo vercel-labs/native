@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Checkbox
 
@@ -17,7 +18,26 @@ A binary value control: the label rides the `text` attribute — checkbox is not
 </column>
 ```
 
-## Zig builder
+The core side is one boolean per box and one arm flipping it:
+
+<CodeToggle>
+
+```ts
+// model: { readonly accepted: boolean }
+case "toggle_terms":
+  return { ...model, accepted: !model.accepted };
+```
+
+```zig
+// model: accepted: bool = false,
+.toggle_terms => model.accepted = !model.accepted,
+```
+
+</CodeToggle>
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.column(.{ .gap = 12 }, .{

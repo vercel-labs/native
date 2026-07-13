@@ -240,6 +240,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The default scaffold is a TypeScript core: its build runs the
+      # @native-sdk/core transpiler from this checkout's own install.
+      - run: npm ci --prefix packages/core
       - run: zig build
       - name: Scaffold and test the zero-config native app
         run: |
@@ -250,8 +256,17 @@ jobs:
           # Slim scaffold: no build files — the CLI's generated graph drives it.
           test ! -f "$app/build.zig"
           test ! -f "$app/build.zig.zon"
+          # The editor surface landed: package.json + tsconfig.json + the
+          # materialized @native-sdk/core copy stock tsc resolves.
+          test -f "$app/package.json"
+          test -f "$app/tsconfig.json"
+          test -f "$app/node_modules/@native-sdk/core/sdk/core.ts"
+          # ...and none of it is build truth: every verb works without it.
+          rm -rf "$app/node_modules"
           ./zig-out/bin/native test "$app" -Dplatform=null
           ./zig-out/bin/native check "$app"
+          # check self-healed the editor copy back into place.
+          test -f "$app/node_modules/@native-sdk/core/sdk/core.ts"
           ./zig-out/bin/native eject "$app"
           (cd "$app" && zig build test -Dplatform=null)
       - name: Scaffold and test frontend templates

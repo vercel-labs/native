@@ -1,0 +1,54 @@
+{
+  "name": "dual-list-delete-fix",
+  "description": "Wave-2 dual-track case: a realistic seeded bug — the task list keeps showing deleted tasks because the visible list is a hand-maintained cache that delete forgot. The fix wants the derive-don't-store idiom; the harness pins list correctness across delete/toggle/filter/add. Both tracks start from the same buggy app, each in its track's idiom.",
+  "prompt": "This workspace holds a small working task-list app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Tasks with open/done state, filter chips (all / open / done), a draft entry to add tasks, and an open-count in the status bar.\n\nUsers report this bug: \"When I delete a task, the open count updates but the task is still in the list. It only disappears after I click a different filter.\" Find the root cause and fix it properly — the list must be correct after EVERY change (delete, toggle, add, filter switch), not just after the one reported step. The toolkit's guidance on derived state applies: prefer a fix that makes this whole class of bug impossible over one that patches the reported symptom. Extend the app's tests to cover the delete path so it stays fixed.\n\nKeep the app's public surface and behavior otherwise unchanged (the grader compiles against it):\n- Model fields: tasks, next_id, filter (exactly one of \"all\" | \"open\" | \"done\"), plus the draft state. Internal bookkeeping you clean up in the fix is yours to remove.\n- Task fields: id (integer), title (bytes), done (boolean).\n- Helpers: visibleTasks — the tasks the current filter shows (in TypeScript visibleTasks(model); in Zig a pub method ON the Model, slice-returning, arena-taking if you derive it) — and openCount.\n- Msg arms: draft_edit (the text-input event arm), add, toggle (id), delete (id), set_filter (the filter).\n- In Zig keep Model/Msg/update/initialModel pub in src/main.zig.\n\nCheck your work with the loop in README.md until it is green. When you are done, explain the root cause and what you changed.",
+  "frontend": "app-dual",
+  "timeoutMs": 1200000,
+  "maxTurns": 80,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": ["-Dplatform=null"]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The fix addresses the root cause — a hand-maintained visible-list cache that one transition forgot — rather than patching the symptom: the strongest fix derives the visible list from tasks + filter at view time and deletes the cache entirely; recomputing the cache in delete merely works.",
+        "No collateral damage: add (trimmed draft, blank rejected), toggle, filter switching, ids, and the open count all behave exactly as before the fix.",
+        "The explanation names the actual root cause (stale derived state cached in the model), and the added tests cover deleting under each filter so the bug cannot return silently.",
+        "The diff is minimal and idiomatic for its track — no drive-by refactors beyond removing the failure-prone cache."
+      ],
+      "files": ["src/core.ts", "src/*.zig", "src/*.native"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "root-cause quality of the fix beyond behavioral compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "the visible list is correct after delete under every filter, toggle and add stay consistent, unknown ids are no-ops, starter behavior intact"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": ["-Dplatform=null"],
+          "description": "the visible list is correct after delete under every filter, toggle and add stay consistent, unknown ids are no-ops, starter behavior intact"
+        }
+      ]
+    }
+  }
+}

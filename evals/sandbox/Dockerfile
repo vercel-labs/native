@@ -79,6 +79,9 @@ RUN zig build \
     && cd /opt/native-sdk/repo \
     && rm -rf evals/.workspaces
 RUN cd evals && pnpm install --frozen-lockfile
+# The @native-sdk/core transpiler's installed dependency: the TS track's
+# check/dev/build graphs and the ts_transpile/ts_harness graders all run it.
+RUN cd packages/core && npm ci --silent
 
 RUN printf '%s\n' "${BAKED_REF}" > /opt/native-sdk/baked-ref \
     && chmod -R a+rwX /opt/native-sdk

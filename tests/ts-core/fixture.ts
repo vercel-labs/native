@@ -1,0 +1,183 @@
+// The end-to-end fixture core: a small status poller exercising every
+// v2 effect record — an init-command request, keyed replace and cancel,
+// a fire-and-forget bytes command, Cmd.now, a model-gated timer
+// subscription, the named engine ops (readFile/writeFile/fetch/
+// clipboard) plus the one-shot delay, and the streaming ops (a real
+// subprocess spawn with line/exit routing and mid-stream cancel, and
+// the audio event stream with its control verbs). Transpiled at build
+// time by the repo's own transpiler (never committed as Zig) and driven
+// through the real runtime by tests/ts-core/host_e2e_tests.zig.
+
+import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
+
+export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+
+export interface Model {
+  readonly polling: boolean;
+  readonly ticks: number;
+  readonly lastTickAt: number;
+  readonly stampMs: number;
+  readonly failures: number;
+  readonly status: Uint8Array;
+  readonly lastErr: Uint8Array;
+  readonly saved: number;
+  readonly code: number;
+  readonly firedAt: number;
+  readonly lines: number;
+  readonly lastLine: Uint8Array;
+  readonly exitCode: number;
+  readonly audioState: AudioState;
+  readonly posMs: number;
+  readonly durMs: number;
+  readonly playing: boolean;
+  readonly bands: Uint8Array;
+  readonly audioEvents: number;
+}
+
+export type Msg =
+  | { readonly kind: "toggle" }
+  | { readonly kind: "refresh" }
+  | { readonly kind: "abort" }
+  | { readonly kind: "stamp" }
+  | { readonly kind: "note" }
+  | { readonly kind: "loaded"; readonly body: Uint8Array }
+  | { readonly kind: "failed"; readonly why: Uint8Array }
+  | { readonly kind: "tick"; readonly at: number }
+  | { readonly kind: "stamped"; readonly at: number }
+  | { readonly kind: "save" }
+  | { readonly kind: "load" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "get" }
+  | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "share" }
+  | { readonly kind: "paste" }
+  | { readonly kind: "later" }
+  | { readonly kind: "halt" }
+  | { readonly kind: "boomed"; readonly at: number }
+  | { readonly kind: "run" }
+  | { readonly kind: "hang" }
+  | { readonly kind: "kill" }
+  | { readonly kind: "lined"; readonly text: Uint8Array }
+  | { readonly kind: "ended"; readonly code: number }
+  | { readonly kind: "play" }
+  | { readonly kind: "pause_music" }
+  | { readonly kind: "set_volume" }
+  | { readonly kind: "stop_music" }
+  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array };
+
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [
+    {
+      polling: true,
+      ticks: 0,
+      lastTickAt: -1,
+      stampMs: -1,
+      failures: 0,
+      status: new Uint8Array(0),
+      lastErr: new Uint8Array(0),
+      saved: 0,
+      code: -1,
+      firedAt: -1,
+      lines: 0,
+      lastLine: new Uint8Array(0),
+      exitCode: -1,
+      audioState: "rejected",
+      posMs: -1,
+      durMs: -1,
+      playing: false,
+      bands: new Uint8Array(0),
+      audioEvents: 0,
+    },
+    Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
+  ];
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "toggle":
+      return { ...model, polling: !model.polling };
+    case "refresh":
+      return [model, Cmd.request("status.read", model.status, { key: "status", ok: "loaded", err: "failed" })];
+    case "abort":
+      return [model, Cmd.cancel("status")];
+    case "stamp":
+      return [model, Cmd.now("stamped")];
+    case "note":
+      return [model, Cmd.host("blob.put", asciiBytes("hi"))];
+    case "loaded":
+      return { ...model, status: msg.body };
+    case "failed":
+      return { ...model, failures: model.failures + 1, lastErr: msg.why };
+    case "tick":
+      return { ...model, ticks: model.ticks + 1, lastTickAt: msg.at };
+    case "stamped":
+      return { ...model, stampMs: msg.at };
+    case "save":
+      // The e2e suite runs with the repo root as cwd; the store lives
+      // under the zig cache like every tmp-dir test artifact.
+      return [model, Cmd.writeFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "load":
+      return [model, Cmd.readFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), { key: "file", ok: "loaded", err: "failed" })];
+    case "wrote":
+      return { ...model, saved: model.saved + 1 };
+    case "get":
+      return [
+        model,
+        Cmd.fetch(
+          { url: asciiBytes("https://status.test/feed"), method: "POST", headers: { accept: "text/plain" }, body: model.status, timeoutMs: 750 },
+          { key: "get", ok: "fetched", err: "failed" },
+        ),
+      ];
+    case "fetched":
+      return { ...model, code: msg.status, status: msg.body };
+    case "share":
+      return [model, Cmd.clipboardWrite(model.status)];
+    case "paste":
+      return [model, Cmd.clipboardRead({ key: "clip", ok: "loaded", err: "failed" })];
+    case "later":
+      return [model, Cmd.delay("boom", 150, "boomed")];
+    case "halt":
+      return [model, Cmd.cancel("boom")];
+    case "boomed":
+      return { ...model, firedAt: msg.at };
+    case "run":
+      // A real, hermetic child: two stdout lines, then a clean exit.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("printf 'one\\ntwo\\n'")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "hang":
+      // A child that outlives the test unless cancelled mid-stream.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("sleep 30")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "kill":
+      return [model, Cmd.cancel("job")];
+    case "lined":
+      return { ...model, lines: model.lines + 1, lastLine: msg.text };
+    case "ended":
+      return { ...model, exitCode: msg.code };
+    case "play":
+      return [model, Cmd.audioPlay("track", { path: asciiBytes("music/track.mp3") }, { event: "audio_evt" })];
+    case "pause_music":
+      return [model, Cmd.audioPause("track")];
+    case "set_volume":
+      // The engine's remembered volume verb (0..1), on the fixture's
+      // test-only path: the soundboard example carries no volume control
+      // (parity with its Zig original), so the capability stays proven
+      // here.
+      return [model, Cmd.audioSetVolume("track", 0.8)];
+    case "stop_music":
+      return [model, Cmd.audioStop("track")];
+    case "audio_evt":
+      return {
+        ...model,
+        audioState: msg.state,
+        posMs: msg.positionMs,
+        durMs: msg.durationMs,
+        playing: msg.playing,
+        bands: msg.bands,
+        audioEvents: model.audioEvents + 1,
+      };
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.polling) return Sub.none;
+  return Sub.timer("tick", 100, "tick");
+}

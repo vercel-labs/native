@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Avatar
 
-A pill-clipped image leaf with an initials fallback: the element's content renders as initials, and `image` takes one `{binding}` to a `u64` ImageId the app registered at runtime (`fx.registerImageBytes`). The id `0` is the "no image" sentinel, so an app shows initials while the image loads — and keeps them on a failed fetch or decode — by only writing the id into its model on successful registration.
+A pill-clipped image leaf with an initials fallback: the element's content renders as initials, and `image` takes one `{binding}` to a `u64` ImageId the app registered at runtime — from a Zig core with `fx.registerImageBytes`, or declared once in `app.zon`'s `assets.images`, which registers each file at launch. The id `0` is the "no image" sentinel, so an app shows initials while the image loads — and keeps them on a failed fetch or decode — by only writing the id into its model on successful registration.
 
 <ComponentPreview name="avatar" alt="Avatars rendered by the engine" caption="initials fallbacks" />
 
@@ -17,7 +17,9 @@ A pill-clipped image leaf with an initials fallback: the element's content rende
 </row>
 ```
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.avatar(.{}, "ZN")

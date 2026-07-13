@@ -1,0 +1,245 @@
+<!-- The soundboard's whole view tier: one markup file over the TS core's
+     model, bound by the names core.ts wrote (fields and exported helpers
+     bind verbatim: {libraryScrollTop}, {visibleTracks}). The
+     header switches the Albums/Songs pages, the album grid opens the
+     detail page, track rows play on press and carry the native context
+     menu (Play Next / Copy Title), and the now-playing bar is the
+     transport: prev/play-pause/next, the rendered playback clock against
+     the manifest total, and the play-next queue badge. Playback is REAL
+     audio through the core's Cmd.audioPlay stream — see src/core.ts. -->
+<column background="background">
+  <!-- The header IS the titlebar (tall hidden-inset chrome, the Zig
+       original's treatment): it is the window's drag surface, leads with
+       a spacer sized to the traffic lights via the chromeMsg channel, and
+       matches its height to the titlebar band so its controls and the
+       lights share a centerline. -->
+  <row height="{headerHeight}" padding="12" gap="12" cross="center" background="surface" window-drag="true" label="Soundboard header">
+    <spacer width="{chromeLeading}" />
+    <button-group>
+      <button size="sm" selected="{albumsShowing}" on-press="show_albums">Albums</button>
+      <button size="sm" selected="{songsShowing}" on-press="show_songs">Songs</button>
+    </button-group>
+    <spacer grow="1" />
+    <!-- Clearing is the search field's own affordance: the built-in
+         trailing x (and Escape) clear through the standard edit path. -->
+    <search-field size="sm" text="{searchText}" placeholder="Search albums, artists, songs…" width="280" on-input="search_edit" label="Search library" />
+    <!-- The leading spacer's trailing twin: zero on macOS, sized to the
+         min/max/close cluster on Windows so search clears the buttons. -->
+    <spacer width="{chromeTrailing}" />
+  </row>
+  <separator />
+  <if test="{songsShowing}">
+    <!-- Controlled scroll: the offset is model state (echoed through
+         on-scroll's declared ScrollState mirror), so every page change
+         resets it to the top. -->
+    <scroll grow="1" label="All songs" value="{libraryScrollTop}" on-scroll="library_scrolled">
+      <column padding="24" gap="18">
+        <row gap="10" cross="center">
+          <text label="Songs"><span weight="bold" scale="1.45">Songs</span></text>
+          <badge variant="secondary">{visibleTrackCount} of {trackCount}</badge>
+          <spacer grow="1" />
+        </row>
+        <if test="{noTrackMatches}">
+          <panel padding="24" background="surface" radius="lg" border-color="border" label="No songs match">
+            <column gap="6">
+              <text>{noMatchesLabel}</text>
+              <text size="sm" foreground="text_muted">Try an album, artist, or song title.</text>
+            </column>
+          </panel>
+        </if>
+        <else>
+          <list label="Songs" role="list">
+            <for each="visibleTracks" as="t" key="id">
+              <!-- The loaded row wears the INVERTED register exactly
+                   like the original's played row: accent fill under the
+                   accent's knockout ink (play selects there; press plays
+                   here, so loaded IS selected). Markup has no
+                   conditional attributes, so the two registers are two
+                   keyed branches. -->
+              <if test="{t.now}">
+                <list-item key="{t.id}" height="44" padding="10" gap="12" cross="center" selected="true" background="accent" on-press="play_track:{t.id}" role="listitem" label="{t.title}">
+                  <row width="24" cross="center">
+                    <icon name="{t.stateIcon}" width="14" height="14" foreground="accent_text" />
+                  </row>
+                  <column gap="1" grow="1">
+                    <text wrap="false" foreground="accent_text">{t.title}</text>
+                    <text size="sm" foreground="accent_text" wrap="false">{t.subtitle}</text>
+                  </column>
+                  <if test="{t.queued}">
+                    <badge variant="secondary">Up next</badge>
+                  </if>
+                  <text width="44" size="sm" foreground="accent_text" wrap="false" text-alignment="end">{t.duration}</text>
+                  <context-menu>
+                    <menu-item on-press="queue_track:{t.id}">Play Next</menu-item>
+                    <menu-item on-press="copy_title:{t.id}">Copy Title</menu-item>
+                  </context-menu>
+                </list-item>
+              </if>
+              <else>
+                <list-item key="{t.id}" height="44" padding="10" gap="12" cross="center" on-press="play_track:{t.id}" role="listitem" label="{t.title}">
+                  <text width="24" size="sm" foreground="text_muted">{t.number}</text>
+                  <column gap="1" grow="1">
+                    <text wrap="false">{t.title}</text>
+                    <text size="sm" foreground="text_muted" wrap="false">{t.subtitle}</text>
+                  </column>
+                  <if test="{t.queued}">
+                    <badge variant="secondary">Up next</badge>
+                  </if>
+                  <text width="44" size="sm" foreground="text_muted" wrap="false" text-alignment="end">{t.duration}</text>
+                  <!-- Two items per row, the desktop conventions: queue a
+                       track behind the current one, or copy its title. -->
+                  <context-menu>
+                    <menu-item on-press="queue_track:{t.id}">Play Next</menu-item>
+                    <menu-item on-press="copy_title:{t.id}">Copy Title</menu-item>
+                  </context-menu>
+                </list-item>
+              </else>
+            </for>
+          </list>
+        </else>
+      </column>
+    </scroll>
+  </if>
+  <else>
+    <if test="{detailPage}">
+      <scroll grow="1" label="Album detail" value="{libraryScrollTop}" on-scroll="library_scrolled">
+        <column padding="24" gap="18">
+          <row>
+            <button size="sm" variant="ghost" icon="chevron-left" on-press="close_album">Back to albums</button>
+            <spacer grow="1" />
+          </row>
+          <row gap="20">
+            <avatar width="184" height="184" radius="lg" image="{openAlbumCover}" label="Album cover">{openAlbumInitials}</avatar>
+            <column gap="8" grow="1" main="end">
+              <text size="sm" foreground="text_muted">Album</text>
+              <text label="{openAlbumTitle}"><span weight="bold" scale="1.9">{openAlbumTitle}</span></text>
+              <text foreground="text_muted">{openAlbumMeta}</text>
+              <row gap="8" cross="center">
+                <button variant="primary" icon="play" on-press="play_album:{openAlbumId}">Play album</button>
+                <spacer grow="1" />
+              </row>
+            </column>
+          </row>
+          <list label="Album tracks" role="list">
+            <for each="openAlbumRows" as="t" key="id">
+              <!-- The inverted register on the loaded row (see the songs
+                   list's branches). -->
+              <if test="{t.now}">
+                <list-item key="{t.id}" height="44" padding="10" gap="12" cross="center" selected="true" background="accent" on-press="play_track:{t.id}" role="listitem" label="{t.title}">
+                  <row width="24" cross="center">
+                    <icon name="{t.stateIcon}" width="14" height="14" foreground="accent_text" />
+                  </row>
+                  <text grow="1" wrap="false" foreground="accent_text">{t.title}</text>
+                  <if test="{t.queued}">
+                    <badge variant="secondary">Up next</badge>
+                  </if>
+                  <text width="44" size="sm" foreground="accent_text" wrap="false" text-alignment="end">{t.duration}</text>
+                  <context-menu>
+                    <menu-item on-press="queue_track:{t.id}">Play Next</menu-item>
+                    <menu-item on-press="copy_title:{t.id}">Copy Title</menu-item>
+                  </context-menu>
+                </list-item>
+              </if>
+              <else>
+                <list-item key="{t.id}" height="44" padding="10" gap="12" cross="center" on-press="play_track:{t.id}" role="listitem" label="{t.title}">
+                  <text width="24" size="sm" foreground="text_muted">{t.number}</text>
+                  <text grow="1" wrap="false">{t.title}</text>
+                  <if test="{t.queued}">
+                    <badge variant="secondary">Up next</badge>
+                  </if>
+                  <text width="44" size="sm" foreground="text_muted" wrap="false" text-alignment="end">{t.duration}</text>
+                  <context-menu>
+                    <menu-item on-press="queue_track:{t.id}">Play Next</menu-item>
+                    <menu-item on-press="copy_title:{t.id}">Copy Title</menu-item>
+                  </context-menu>
+                </list-item>
+              </else>
+            </for>
+          </list>
+        </column>
+      </scroll>
+    </if>
+    <else>
+      <scroll grow="1" label="Album grid" value="{libraryScrollTop}" on-scroll="library_scrolled">
+        <column padding="24" gap="18">
+          <row gap="10" cross="center">
+            <text label="Albums"><span weight="bold" scale="1.45">Albums</span></text>
+            <badge variant="secondary">{visibleAlbumCount} of {albumCount}</badge>
+            <spacer grow="1" />
+          </row>
+          <if test="{noAlbumMatches}">
+            <panel padding="24" background="surface" radius="lg" border-color="border" label="No albums match">
+              <column gap="6">
+                <text>{noMatchesLabel}</text>
+                <text size="sm" foreground="text_muted">Try an album, artist, or song title.</text>
+              </column>
+            </panel>
+          </if>
+          <else>
+            <!-- The adaptive rack: the frameMsg channel mirrors the
+                 canvas width into the model and the grid helpers derive
+                 the Zig original's width rule from it — the grid takes
+                 an EXACT width (shown columns of evenly-grown tiles) so
+                 the engine's even column split makes each cell exactly
+                 one tile wide, and every tile dimension derives from the
+                 same split (cover = tile - 16, height = tile + 44). -->
+            <grid width="{gridRowWidth}" columns="{gridShownColumns}" gap="12" role="list" label="Albums">
+              <for each="visibleAlbums" as="a" key="id">
+                <!-- The quiet-surface knob: no hover wash on an
+                     image-forward tile (the pointer rests on cover art,
+                     not a control register — the original's quiet-tile
+                     treatment). Press feedback, cursor intent, the focus
+                     ring, and hit testing all keep their own channels. -->
+                <list-item key="{a.id}" height="{gridTileHeight}" padding="8" quiet-hover="true" on-press="open_album:{a.id}" role="listitem" label="{a.title}">
+                  <column gap="8" grow="1">
+                    <avatar width="{gridCoverSize}" height="{gridCoverSize}" radius="md" image="{a.cover}" label="Album cover art">{a.initials}</avatar>
+                    <row gap="8" cross="center">
+                      <column gap="1" grow="1">
+                        <text wrap="false">{a.title}</text>
+                        <text size="sm" foreground="text_muted" wrap="false">{a.artist}</text>
+                      </column>
+                      <if test="{a.playing}">
+                        <badge variant="primary">Playing</badge>
+                      </if>
+                    </row>
+                  </column>
+                  <context-menu>
+                    <menu-item on-press="play_album:{a.id}">Play Album</menu-item>
+                    <menu-item on-press="open_album:{a.id}">Open Album</menu-item>
+                  </context-menu>
+                </list-item>
+              </for>
+            </grid>
+          </else>
+        </column>
+      </scroll>
+    </else>
+  </else>
+  <separator />
+  <row height="76" padding="12" gap="14" cross="center" background="surface" label="Now playing bar">
+    <avatar width="52" height="52" image="{nowPlayingCover}" label="Now playing cover">{nowPlayingInitials}</avatar>
+    <column width="220" gap="2">
+      <row gap="6" cross="center">
+        <text wrap="false" label="Now playing title">{nowPlayingTitle}</text>
+        <icon name="music" width="14" height="14" foreground="text_muted" />
+      </row>
+      <!-- The artist line doubles as the status surface: buffering, the
+           stream notice, and the assets notice all read here. -->
+      <text size="sm" foreground="text_muted" wrap="false">{nowPlayingArtist}</text>
+    </column>
+    <row gap="6" cross="center">
+      <button size="sm" variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="Previous track"></button>
+      <button size="sm" variant="ghost" icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
+      <button size="sm" variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
+    </row>
+    <text size="sm" foreground="text_muted" width="46" wrap="false" overflow="clip">{elapsedLabel}</text>
+    <!-- Scrub-to-seek: the slider's on-change is the value-payload
+         change event — the applied 0..1 fraction dispatches through the
+         core's one-number float arm, and the core seeks the player. -->
+    <slider grow="1" value="{progressFraction}" disabled="{idle}" on-change="scrubbed" label="Seek" />
+    <text size="sm" foreground="text_muted" width="46" wrap="false" overflow="clip">{durationLabel}</text>
+    <if test="{queueLen > 0}">
+      <badge variant="secondary">{queueLen} queued</badge>
+    </if>
+  </row>
+</column>

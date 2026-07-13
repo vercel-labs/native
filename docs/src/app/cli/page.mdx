@@ -7,12 +7,14 @@ The `native` CLI provides project scaffolding, markup validation, automation, pa
 ### `native init`
 
 ```sh
-native init [path] [--frontend <native|next|vite|react|svelte|vue>] [--full]
+native init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--full]
 ```
 
-Scaffold a new Native SDK project. The default `native` frontend scaffolds a native-rendered markup app with no web frontend and no build files — the CLI owns the build. Omit `path` to scaffold into the current directory.
+Scaffold a new Native SDK project. The default `native` frontend scaffolds a native-rendered markup app with no web frontend and no build files — the CLI owns the build. The default core is TypeScript: `src/core.ts`, `src/app.native`, `app.zon`, and no language flag anywhere else — the build detects which core the tree carries. Omit `path` to scaffold into the current directory.
 
 <dl>
+  <dt><code>--template</code></dt>
+  <dd>Which core to scaffold: <code>ts-core</code> (default) for <code>src/core.ts</code>, or <code>zig-core</code> for <code>src/main.zig</code> plus generated full-loop tests. Applies to the native frontend only.</dd>
   <dt><code>--frontend</code></dt>
   <dd>What to scaffold: <code>native</code> (default) for a native-rendered markup app, or <code>next</code>, <code>vite</code>, <code>react</code>, <code>svelte</code>, <code>vue</code> for a web frontend in a WebView shell.</dd>
   <dt><code>--full</code></dt>
@@ -23,12 +25,19 @@ Scaffold a new Native SDK project. The default `native` frontend scaffolds a nat
 
 ```sh
 native dev [dir]
+native dev [dir] --core [--script msgs.ndjson] [--watch]
 native dev --binary <path> [--manifest app.zon] [--url <url>] [--command "<cmd>"] [--timeout-ms <n>]
 ```
 
 Build and run the app in the current (or given) app directory — a Debug build by default, printing a one-line completion and naming any failing step. The markup hot-reload watcher and the Debug-only teaching diagnostics are compiled in only in Debug; pass `-Doptimize=...` to override. Apps with a frontend dev config also get the managed dev server — see [Dev Server](/cli/dev).
 
 <dl>
+  <dt><code>--core</code></dt>
+  <dd>Run the TypeScript core's logic loop under node instead of building the app: dispatch Msgs as JSON lines on stdin, watch the committed model and effect transcript, advance a virtual clock to fire timers. Honestly not a renderer — plain <code>native dev</code> runs the real app. See <a href="/typescript#the-dev-loop">TypeScript Cores</a>.</dd>
+  <dt><code>--script</code></dt>
+  <dd>With <code>--core</code>: replay a newline-delimited JSON message file instead of reading stdin.</dd>
+  <dt><code>--watch</code></dt>
+  <dd>With <code>--core</code>: re-run the script on every <code>src/core.ts</code> edit.</dd>
   <dt><code>--binary</code></dt>
   <dd>Path to a prebuilt app binary — the legacy prebuilt-shell form: the build step is skipped and only the frontend dev flow runs. Ordinary <code>native dev</code> builds the app itself.</dd>
   <dt><code>--manifest</code></dt>
@@ -63,7 +72,7 @@ Run the app's test suite, printing the zig build summary (step/test tally) plus 
 native check [dir] [--strict]
 ```
 
-Validate `src/**.native` markup and `app.zon` without building. With a fresh `zig-out/model-contract.zon` (refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` and warns on model state no view uses. Without the artifact it degrades to structural checking and says so loudly: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
+Validate the whole tree without building the app. A TypeScript core (`src/core.ts`) runs the subset checker first — real tsc semantics plus the app-core rules, diagnostics verbatim — then every `src/**.native` markup file and `app.zon` are checked as before. With a fresh model contract (`zig-out/model-contract.zon`, refreshed by `native test`) it also checks bindings, iterables, and message tags against your `Model`/`Msg` — for a TypeScript core, against its emitted model — and warns on model state no view uses. Without the artifact it degrades to structural checking and says so loudly: "model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks". Markup accessibility findings are reported per file in full, and a failing `src/*.native` file that no Zig source embeds gets a leftover-file hint.
 
 <dl>
   <dt><code>--strict</code></dt>

@@ -16,6 +16,7 @@
         "build.zig.zon",
         "docs",
         "examples",
+        "packages",
         "src",
         "templates",
         "tests",

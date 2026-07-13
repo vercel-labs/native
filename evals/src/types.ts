@@ -6,13 +6,53 @@ export interface EvalCase {
   description: string;
   /** The task prompt handed to the agent-under-test. Describes app requirements, never the solution. */
   prompt: string;
-  /** Scaffold frontend passed to `native init --frontend <frontend>`. */
-  frontend: "native";
+  /**
+   * Workspace shape. "native" scaffolds with `native init --frontend native`
+   * (the Zig-core app template); "ts-core" scaffolds a core-only TypeScript
+   * workspace (src/core.ts starter, README, the ts-core skill) graded
+   * through the @native-sdk/core transpiler; "app-dual" is a wave-2
+   * dual-track case: ONE language-blind spec that runs on both authoring
+   * tracks — the ts track scaffolds a full TypeScript app
+   * (`native init --frontend native --template ts-core`), the zig track the
+   * Zig app template (`--template zig-core`) — with a shared check list plus
+   * thin per-track additions under `tracks`.
+   */
+  frontend: "native" | "ts-core" | "app-dual";
+  /**
+   * app-dual only: per-track configuration. The shared `checks` run on both
+   * tracks; each track's `checks` are appended after them. Starters are
+   * discovered by convention: `cases/<name>/starter-ts/` overlays the ts
+   * workspace, `starter-zig/` the zig workspace.
+   */
+  tracks?: { ts: TrackSpec; zig: TrackSpec };
   /** Wall-clock budget for the agent run, in milliseconds. */
   timeoutMs: number;
   /** `--max-turns` for the claude invocation. */
   maxTurns: number;
   /** Deterministic graders, run in order after the agent finishes. */
+  checks: CheckSpec[];
+}
+
+/** The authoring track of one app-dual run. */
+export type Track = "ts" | "zig";
+
+/** Thin per-track configuration of an app-dual case. */
+export interface TrackSpec {
+  /** Track-specific graders, appended after the case's shared checks. */
+  checks?: CheckSpec[];
+}
+
+/**
+ * One schedulable unit: a case on a concrete track. Non-dual cases produce
+ * exactly one runnable with `track` undefined; app-dual cases produce one
+ * per selected track (label `<case>@<track>`).
+ */
+export interface RunnableCase {
+  evalCase: EvalCase;
+  track?: Track | undefined;
+  /** `<case>` or `<case>@<track>`: results dir and log prefix. */
+  label: string;
+  /** The merged check list this run grades with. */
   checks: CheckSpec[];
 }
 
@@ -38,6 +78,9 @@ export type CheckSpec =
   | MarkupCheckCheck
   | FileGrepCheck
   | SnapshotGrepCheck
+  | TsTranspileCheck
+  | TsHarnessCheck
+  | ZigHarnessCheck
   | LlmJudgeCheck;
 
 /** Run `native test <args>` in the workspace (zero-config app test suite). */
@@ -50,6 +93,53 @@ export interface BuildTestCheck extends CheckCommon {
 /** Run `native markup check` on every `src/**\/*.native` in the workspace. */
 export interface MarkupCheckCheck extends CheckCommon {
   type: "markup_check";
+}
+
+/**
+ * Run the @native-sdk/core transpiler on the workspace core (ts-core cases).
+ * Pass = the module typechecks (tsc semantics), passes every subset rule
+ * (NS1001-NS1050), and emits Zig. The diagnostics tail is kept as evidence,
+ * so violation taxonomy can be read off failing runs.
+ */
+export interface TsTranspileCheck extends CheckCommon {
+  type: "ts_transpile";
+  /** Core module path relative to the workspace. Default "src/core.ts". */
+  entry?: string;
+}
+
+/**
+ * Behavioral grading for ts-core cases: transpile the workspace core, then
+ * `zig test` the case's harness.zig (from cases/<name>/) against the emitted
+ * core and the rt kernel in a scratch directory. The harness drives the real
+ * dispatch cycle (update -> commitModelRoot -> frameReset) and asserts the
+ * case's required behavior.
+ */
+export interface TsHarnessCheck extends CheckCommon {
+  type: "ts_harness";
+  /** Core module path relative to the workspace. Default "src/core.ts". */
+  entry?: string;
+  /** Harness file name inside the case dir. Default "harness.zig". */
+  harness?: string;
+  description: string;
+}
+
+/**
+ * Behavioral grading for the zig track of app-dual cases: copy the case's
+ * Zig harness (default "harness-zig.zig") into the workspace as
+ * `src/eval_behavior_spec.zig`, append a test import of it to src/main.zig,
+ * run `native test` (the workspace's zero-config test graph, so the harness
+ * compiles against the agent's real Model/Msg/update with the SDK modules
+ * available), then restore the workspace. The harness drives update — the
+ * fake effects executor included — and asserts the same behavioral spec the
+ * ts track's harness asserts.
+ */
+export interface ZigHarnessCheck extends CheckCommon {
+  type: "zig_harness";
+  /** Harness file name inside the case dir. Default "harness-zig.zig". */
+  harness?: string;
+  /** Extra zig build flags for the `native test` run, e.g. ["-Dplatform=null"]. */
+  args?: string[];
+  description: string;
 }
 
 /** Grep workspace files for a pattern. */
@@ -112,10 +202,29 @@ export interface CheckResult {
 }
 
 export interface AgentRunResult {
-  status: "completed" | "timeout" | "error" | "dry_run";
+  /**
+   * "capped" = the run ended by hitting --max-turns. The workspace still
+   * grades, and green-at-cap counts as a task pass: 17 of 20 wave-2
+   * failures were runs whose every check passed but whose agent burned
+   * the cap on extra verification — friction, not semantics. The cap
+   * shows up as cost (turns, cappedAtTurns), never as a task failure.
+   */
+  status: "completed" | "capped" | "timeout" | "error" | "dry_run";
   model: string;
   numTurns?: number;
   totalCostUsd?: number;
+  /**
+   * Token totals from the CLI's terminal result event. Absent when the run
+   * was killed before emitting one (wall-clock timeout). `inputTokens` is
+   * uncached input only; cache reads/creations are broken out because they
+   * dominate volume (and are billed differently).
+   */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  /** True exactly when status is "capped": a per-trial cost metric. */
+  cappedAtTurns?: boolean;
   durationMs: number;
   sessionId?: string;
   /** Path to the captured stream-json transcript. */
@@ -141,8 +250,46 @@ export interface MarkupShare {
   share: number | null;
 }
 
+/**
+ * Efficiency read derived from the trial's transcript (see efficiency.ts for
+ * the full epistemics). The first-green fields are the AGENT-VERIFICATION
+ * PROXY: the graded checks run once, post-trial, so "first green" here means
+ * the first time the agent's OWN verification command (`native test`,
+ * `zig build test`, `native check`, the core transpiler CLI, `markup check`)
+ * exited green after the first source edit — NOT the first time the full
+ * graded check set passed. On trials whose graded checks ultimately passed
+ * it is a defensible estimate of "when the work was actually done"; on
+ * failing trials it only records the agent's belief.
+ */
+export interface EfficiencyMetrics {
+  /**
+   * Distinct assistant API messages in the transcript; tracks the CLI's
+   * num_turns within ±1 and is the one consistent basis for the
+   * firstGreenTurn/turnsAfterGreen subtraction.
+   */
+  observedTurns: number;
+  /** Agent-run verification commands observed after the first source edit. */
+  verificationRuns: number;
+  /** Turn index of the first green agent verification; null = never went green. */
+  firstGreenTurn: number | null;
+  /**
+   * ms from the first timestamped transcript event to the first green
+   * verification (assistant events carry no timestamps, so the clock starts
+   * at the first tool result — early in turn 1); null when never green.
+   */
+  firstGreenMs: number | null;
+  /**
+   * observedTurns − firstGreenTurn: the post-green tail. Turns spent after
+   * the agent's own checks were already green — the "verification theater"
+   * measure the stop-when-green harness note exists to shrink.
+   */
+  turnsAfterGreen: number | null;
+}
+
 export interface CaseResult {
   case: string;
+  /** Authoring track of an app-dual run ("ts" | "zig"); absent otherwise. */
+  track?: Track;
   /** 1-based trial number; only present when the run had --trials > 1. */
   trial?: number;
   /** Where the case ran and got graded. */
@@ -153,6 +300,8 @@ export interface CaseResult {
   agent: AgentRunResult;
   /** Absent only when the run crashed before a workspace existed. */
   markupShare?: MarkupShare;
+  /** Transcript-derived efficiency; absent in --dry-run and crashed trials. */
+  efficiency?: EfficiencyMetrics;
   checks: CheckResult[];
   passed: boolean;
 }
@@ -174,17 +323,30 @@ export interface CheckAggregate {
  * results/<stamp>/<case>/trial-<n>/). Only produced when --trials > 1.
  */
 export interface CaseAggregate {
+  /** `<case>` or `<case>@<track>` for app-dual runs. */
   case: string;
+  /** Authoring track of an app-dual case ("ts" | "zig"); absent otherwise. */
+  track?: Track;
   trials: number;
-  /** Trials where every non-advisory check passed and the agent completed. */
+  /** Trials where every non-advisory check passed and the agent completed (or capped at --max-turns with green checks). */
   passedTrials: number;
+  /** Trials that hit --max-turns (a cost signal, independent of pass/fail); absent when zero. */
+  cappedTrials?: number;
   checks: CheckAggregate[];
   /** Mean of all recorded llm_judge overall scores across trials. */
   meanJudgeScore?: number;
   /** Mean markup share across trials that measured one (see MarkupShare). */
   meanMarkupShare?: number;
   meanTurns?: number;
+  /** Mean turn of the first green agent verification, over trials that had one (see EfficiencyMetrics). */
+  meanFirstGreenTurn?: number;
+  /** Mean post-green tail (turnsAfterGreen), over trials that went green. */
+  meanTurnsAfterGreen?: number;
   totalCostUsd?: number;
+  /** Summed token totals across trials that recorded them (see AgentRunResult). */
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  totalCacheReadTokens?: number;
   /** Sum of per-trial durations (agent + checks); trials may overlap in wall-clock. */
   totalDurationMs: number;
   results: CaseResult[];
@@ -194,6 +356,12 @@ export interface RunnerOptions {
   repoRoot: string;
   evalsRoot: string;
   caseNames: string[];
+  /**
+   * Track filter for app-dual cases: run only the named track. Default
+   * (undefined) runs both tracks of every selected dual case. Non-dual
+   * cases ignore the filter.
+   */
+  track: Track | undefined;
   model: string;
   judgeModel: string;
   dryRun: boolean;

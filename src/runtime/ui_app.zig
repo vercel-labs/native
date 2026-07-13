@@ -390,6 +390,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// The scaffold wires this to app.zon's `theme` field
             /// through `app_runner.manifestThemePack()`.
             theme: canvas.ThemePack = .house,
+            /// The app's ONE-accent brand statement over the stock
+            /// tokens: when set (and the app claims neither `tokens`
+            /// nor `tokens_fn` — apps that own their tokens own their
+            /// brand), the accent identity bundle
+            /// (`canvas.accentOverrides`: accent + derived knockout
+            /// ink, focus ring, slider active range) layers over the
+            /// resolved pack on every rebuild. High-contrast requests
+            /// skip it — accessibility beats brand, the same rule an
+            /// app-owned tokens_fn states by hand. The scaffold wires
+            /// this to app.zon's `theme_accent` field through
+            /// `app_runner.manifestThemeAccent()`.
+            theme_accent: ?canvas.Color = null,
             /// App font faces registered once, on the installing frame,
             /// BEFORE the first view build — so the very first layout
             /// already measures (and the first paint inks) with them.
@@ -1047,7 +1059,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .response => try self.effects.feedResponseOutcome(record.key, record.fetch_outcome, record.status, record.payload),
                     .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
+                    // `.host` records ride the route in `code` (0 ok / 1
+                    // err); rejections never reach here — they carry
+                    // `.rejected` and regenerate from the same
+                    // deterministic validation, like `.timer` records.
+                    .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
                     .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
+                    // `.env` records carry the arm name in `stderr_tail`
+                    // and the value in `payload`; the TS adapter's
+                    // envMsgs dispatch consumes the queue on the
+                    // replayed installing frame (zero env reads).
+                    .env => try self.effects.pushReplayEnv(record.stderr_tail, record.payload),
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every
                     // other audio kind rides the plain shape.
@@ -1164,6 +1186,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .reduce_motion = self.system_appearance.reduce_motion,
                 .pack = self.options.theme,
             });
+            if (self.options.theme_accent) |accent| {
+                // The manifest accent layers over the resolved pack —
+                // except under high contrast, where the pack's own loud
+                // register wins untouched (accessibility beats brand).
+                if (!self.system_appearance.high_contrast) {
+                    tokens = tokens.withOverrides(canvas.accentOverrides(accent));
+                }
+            }
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             return tokens;
         }
@@ -2800,6 +2830,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // against the new grid.
                 self.pixel_snap_scale = scale;
                 try self.rebuild(runtime, frame_event.window_id);
+            } else if (frame_event.size.width != self.canvas_size.width or
+                frame_event.size.height != self.canvas_size.height)
+            {
+                // The presented frame IS the drawable's honest size:
+                // during a live resize the frames carry the new size
+                // before the window-manager resize event lands, and
+                // every dispatch-driven rebuild inside that gap (a
+                // playback clock tick, a frame-channel Msg) would lay
+                // out at the STALE bounds — content anchored to the old
+                // bottom edge paints below (or short of) a window that
+                // already shrank or grew. Adopt the size and rebuild,
+                // exactly what `handleResize` does when the event
+                // arrives; the resize event that follows becomes a
+                // no-reflow confirmation (its rebuild lays out the same
+                // bounds), and fullscreen chrome re-queries stay its
+                // job.
+                self.canvas_size = frame_event.size;
+                try self.rebuild(runtime, frame_event.window_id);
             } else if (self.options.web_panes != null) {
                 // Re-snap the webview panes each presented frame: a shell
                 // relayout that stomped a pane frame also invalidated the
@@ -2843,6 +2891,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // static-token apps included, because the stored copy
                 // holds the stale scale (`rebuildEmitsTokens`).
                 slot.pixel_snap_scale = scale;
+                try self.rebuildWindowSlot(runtime, slot);
+            } else if (frame_event.size.width != slot.canvas_size.width or
+                frame_event.size.height != slot.canvas_size.height)
+            {
+                // The slot's drawable resized before its resize event
+                // landed (the same live-resize gap the main canvas
+                // closes above): adopt the presented size and rebuild so
+                // dispatch-driven rebuilds never lay this window out at
+                // stale bounds.
+                slot.canvas_size = frame_event.size;
                 try self.rebuildWindowSlot(runtime, slot);
             }
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);

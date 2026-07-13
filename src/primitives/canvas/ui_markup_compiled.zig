@@ -1245,7 +1245,12 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
 
         /// Resolve a series `values` binding through the same sources
         /// `for each` accepts (scope slice args shadow model iterables),
-        /// requiring an f32 element type at comptime.
+        /// requiring an f32 or f64 element type at comptime. f64
+        /// iterables narrow into a build-arena f32 copy per sample (the
+        /// interpreter's `f32Items` rule): transpiled TS cores carry
+        /// every number array as f64 — the subset's one float class —
+        /// and refusing them would leave markup charts unreachable from
+        /// a TS model.
         fn chartValuesItems(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) []const f32 {
             const path = comptime blk: {
                 const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.series_values_message);
@@ -1256,17 +1261,31 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime (scope_index_opt != null)) {
                 const scope_index = comptime scope_index_opt.?;
                 comptime {
-                    if (entries[scope_index].kind != .slice_arg or entries[scope_index].Item != f32) {
+                    if (entries[scope_index].kind != .slice_arg or
+                        (entries[scope_index].Item != f32 and entries[scope_index].Item != f64))
+                    {
                         fail(node, markup.series_values_message);
                     }
                 }
-                return scopePayload(entries, scope_index, scope);
+                return narrowedSeriesValues(entries[scope_index].Item, scopePayload(entries, scope_index, scope), ui);
             }
             const info = comptime (eachInfo(path) orelse fail(node, markup.series_values_message));
             comptime {
-                if (info.Item != f32) fail(node, markup.series_values_message);
+                if (info.Item != f32 and info.Item != f64) fail(node, markup.series_values_message);
             }
-            return eachItems(info, ui, model);
+            return narrowedSeriesValues(info.Item, eachItems(info, ui, model), ui);
+        }
+
+        /// f32 series values pass through; f64 values copy down into the
+        /// build arena (charts plot f32).
+        fn narrowedSeriesValues(comptime Item: type, items: []const Item, ui: *Ui) []const f32 {
+            if (comptime (Item == f32)) return items;
+            const narrowed = ui.arena.alloc(f32, items.len) catch {
+                ui.failed = true;
+                return &.{};
+            };
+            for (narrowed, items) |*slot, value| slot.* = @floatCast(value);
+            return narrowed;
         }
 
         /// Comptime icon-value classification with the invalid arm turned
@@ -1612,6 +1631,15 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         break :blk std.fmt.parseFloat(f32, attribute.value) catch
                             fail(node, markup.anchor_offset_value_message);
                     };
+                } else if (comptime std.mem.eql(u8, attribute.name, "quiet-hover")) {
+                    // The quiet-surface knob (`WidgetStyle.quiet_hover`)
+                    // for image-forward content tiles: hover wash off,
+                    // press/selection fills, focus ring, cursor intent,
+                    // and hit testing untouched. Hit-target elements only
+                    // (interpreter and validator parity); applied to
+                    // `options.style`, so no flat option field backs it.
+                    comptime if (!markup.hitTargetElement(node.name)) fail(node, markup.quiet_hover_element_message);
+                    options.style.quiet_hover = evalExpr(node, entries, attribute.value, ui, model, scope).truthy();
                 } else if (comptime (colorStyleField(attribute.name) != null)) {
                     // Style token refs resolve entirely at comptime: a typo
                     // in a token name is a compile error.
@@ -1787,6 +1815,17 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 options.on_resize = comptime (resizeConstructor(expression.tag) orelse fail(node, markup.on_resize_payload_message));
                 return;
             }
+            // The value-payload change event: a slider's `on-change` with a
+            // bare tag naming a value-carrying arm dispatches the APPLIED
+            // value through the `on_value` constructor (the `on-resize`
+            // fraction mechanism) instead of a static Msg. Void arms keep
+            // the static form below (interpreter parity).
+            if (comptime (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0)) {
+                if (comptime valueConstructor(expression.tag)) |make| {
+                    options.on_value = make;
+                    return;
+                }
+            }
             const msg = constructMessage(node, expression, entries, ui, model, scope);
             if (comptime std.mem.eql(u8, event, "press")) {
                 options.on_press = msg;
@@ -1827,6 +1866,12 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (field.type == canvas.TextInputEvent and std.mem.eql(u8, field.name, tag)) {
                         return Ui.inputMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                    // A declared mirror of the event union (transpiled
+                    // cores, where type identity cannot cross the emission
+                    // boundary): translated at dispatch, same handler shape.
+                    if (interpreter.declaredTextInputUnion(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedInputMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
                 return null;
             }
@@ -1838,6 +1883,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 for (@typeInfo(MsgT).@"union".fields) |field| {
                     if (field.type == canvas.ScrollState and std.mem.eql(u8, field.name, tag)) {
                         return Ui.scrollMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                    // A declared mirror of the scroll-state record
+                    // (transpiled cores, where type identity cannot cross
+                    // the emission boundary): translated at dispatch, same
+                    // handler shape.
+                    if (interpreter.declaredScrollStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
                     }
                 }
                 return null;
@@ -1851,6 +1903,32 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (field.type == f32 and std.mem.eql(u8, field.name, tag)) {
                         return Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                    // A declared one-number float arm (transpiled cores):
+                    // the fraction widens exactly at dispatch. Integer
+                    // arms stay excluded — a 0..1 fraction rounded into
+                    // an integer would be silently useless data.
+                    if (field.type == f64 and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+                return null;
+            }
+        }
+
+        /// The slider `on-change` value form: an arm carrying the applied
+        /// 0..1 fraction as `f32` (the canvas-native shape) or the
+        /// transpiled one-number float arm (`f64`, widened exactly).
+        /// Interpreter parity.
+        fn valueConstructor(comptime tag: []const u8) ?Ui.ValueMsgFn {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    const class = interpreter.valueArmClass(field.type) orelse continue;
+                    if (!std.mem.eql(u8, field.name, tag)) continue;
+                    return switch (class) {
+                        .identity => Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name)),
+                        .float => Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type),
+                    };
                 }
                 return null;
             }
@@ -2159,16 +2237,20 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         /// and (when `allow_arena`) arena-taking scalar methods — or null
         /// when the path names nothing `valueOf` can represent (which is
         /// exactly when the interpreter fails).
-        fn OnType(comptime T: type, comptime path: []const u8, comptime allow_arena: bool) ?type {
+        fn OnType(comptime OuterT: type, comptime path: []const u8, comptime allow_arena: bool) ?type {
             comptime {
                 @setEvalBranchQuota(10_000);
+                // Single-item const pointers are transparent
+                // (`reflect.Pointee`): a `*const Row` loop item or shared
+                // model node resolves like the struct it points at.
+                const T = interpreter.Pointee(OuterT);
                 if (@typeInfo(T) != .@"struct") return null;
                 const head = interpreter.pathHead(path);
                 const tail_opt = interpreter.pathTail(path);
                 for (@typeInfo(T).@"struct".fields) |field| {
                     if (!std.mem.eql(u8, field.name, head)) continue;
                     if (tail_opt) |tail| {
-                        if (@typeInfo(field.type) != .@"struct") return null;
+                        if (@typeInfo(interpreter.Pointee(field.type)) != .@"struct") return null;
                         return OnType(field.type, tail, allow_arena);
                     }
                     if (!supportedValue(field.type)) return null;
@@ -2202,6 +2284,14 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         /// to member access, method leaves to a direct call (arena-taking
         /// leaves receive the build arena).
         fn valueOn(comptime T: type, comptime path: []const u8, ptr: *const T, arena: std.mem.Allocator) (OnType(T, path, true).?) {
+            // Mirror OnType's `reflect.Pointee` transparency: a resolved
+            // path through a single-item const pointer dereferences it and
+            // continues on the struct it shares (OnType already proved the
+            // pointer shape, so only const single-item pointers reach this
+            // branch).
+            if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one)) {
+                return valueOn(@typeInfo(T).pointer.child, path, ptr.*, arena);
+            }
             const head = comptime interpreter.pathHead(path);
             if (comptime (interpreter.pathTail(path) != null)) {
                 const tail = comptime interpreter.pathTail(path).?;

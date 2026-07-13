@@ -1,0 +1,120 @@
+<!-- The chat client's whole view tier: one markup file over the TS core's
+     model, bound by the names core.ts wrote (fields and exported helpers
+     bind verbatim). The
+     header carries the model badge and Clear, the conversation is a
+     controlled scroll of role bubbles (user right/accent, assistant
+     left/surface) with honest sending and failed rows, and the composer
+     is a text-field on the core's byte-splice engine — Enter and the
+     Send button dispatch the same `send` arm. Until the three launch
+     variables arrive through the env channel, the teaching panel
+     explains the setup and the app issues zero requests. -->
+<column background="background">
+  <row height="52" padding="12" gap="10" cross="center" background="surface" label="Chat header">
+    <text label="AI Chat"><span weight="bold" scale="1.1">AI Chat</span></text>
+    <badge variant="secondary">{modelLabel}</badge>
+    <spacer grow="1" />
+    <if test="{sending}">
+      <text size="sm" foreground="text_muted">waiting for the model…</text>
+    </if>
+    <button size="sm" variant="ghost" icon="trash" disabled="{clearDisabled}" on-press="clear" label="Clear conversation">Clear</button>
+  </row>
+  <separator />
+  <if test="{unconfigured}">
+    <!-- The teaching state: no endpoint is baked in and no request ever
+         leaves an unconfigured app — the panel names exactly what is
+         missing. -->
+    <column grow="1" padding="24" main="center" cross="center" label="Setup">
+      <panel padding="24" background="surface" radius="lg" width="520" label="Connect a model">
+        <column gap="12">
+          <text><span weight="bold">Connect a model</span></text>
+          <text size="sm" foreground="text_muted">This app talks to an OpenAI-compatible chat-completions endpoint. Set all three variables and relaunch — the core reads them once, at install, through the env channel.</text>
+          <row gap="8" cross="center">
+            <text size="sm" grow="1">NATIVE_SDK_CHAT_ENDPOINT</text>
+            <if test="{endpointMissing}">
+              <text size="sm" foreground="destructive">missing</text>
+            </if>
+            <else>
+              <text size="sm" foreground="success">set</text>
+            </else>
+          </row>
+          <row gap="8" cross="center">
+            <text size="sm" grow="1">NATIVE_SDK_CHAT_MODEL</text>
+            <if test="{modelMissing}">
+              <text size="sm" foreground="destructive">missing</text>
+            </if>
+            <else>
+              <text size="sm" foreground="success">set</text>
+            </else>
+          </row>
+          <row gap="8" cross="center">
+            <text size="sm" grow="1">NATIVE_SDK_CHAT_API_KEY</text>
+            <if test="{keyMissing}">
+              <text size="sm" foreground="destructive">missing</text>
+            </if>
+            <else>
+              <text size="sm" foreground="success">set</text>
+            </else>
+          </row>
+          <text size="sm" foreground="text_muted">The README shows the full setup, including local OpenAI-compatible runtimes.</text>
+        </column>
+      </panel>
+    </column>
+  </if>
+  <else>
+    <scroll grow="1" label="Conversation" value="{chatScrollTop}" on-scroll="chat_scrolled">
+      <column padding="24" gap="10">
+        <if test="{emptyConversation}">
+          <panel padding="24" background="surface" radius="lg" label="Empty conversation">
+            <column gap="6">
+              <text>Ask anything</text>
+              <text size="sm" foreground="text_muted">The reply arrives whole — responses are buffered in v1, not streamed.</text>
+            </column>
+          </panel>
+        </if>
+        <for each="turnRows" as="t" key="id">
+          <if test="{t.user}">
+            <row key="{t.id}" gap="8" label="You said">
+              <spacer grow="1" min-width="64" />
+              <panel padding="12" background="accent" radius="lg">
+                <text wrap="true" foreground="accent_text">{t.text}</text>
+              </panel>
+            </row>
+          </if>
+          <else>
+            <row key="{t.id}" gap="8" label="The model said">
+              <panel padding="12" background="surface" radius="lg">
+                <text wrap="true">{t.text}</text>
+              </panel>
+              <spacer grow="1" min-width="64" />
+            </row>
+          </else>
+        </for>
+        <if test="{sending}">
+          <row gap="8" label="Reply pending">
+            <panel padding="12" background="surface" radius="lg">
+              <text foreground="text_muted">…</text>
+            </panel>
+            <spacer grow="1" min-width="64" />
+          </row>
+        </if>
+        <if test="{failed}">
+          <panel padding="12" background="surface" radius="lg" label="Request failed">
+            <row gap="10" cross="center">
+              <icon name="alert" width="14" height="14" foreground="destructive" />
+              <column gap="2" grow="1">
+                <text size="sm" foreground="destructive">Request failed</text>
+                <text size="sm" foreground="text_muted">{failReasonLabel}</text>
+              </column>
+              <button size="sm" variant="ghost" icon="refresh-cw" on-press="retry" label="Retry request">Retry</button>
+            </row>
+          </panel>
+        </if>
+      </column>
+    </scroll>
+    <separator />
+    <row padding="12" gap="8" cross="center" background="surface" label="Composer">
+      <text-field grow="1" text="{draftText}" placeholder="Message the model…" on-input="draft_edit" on-submit="send" label="Message" />
+      <button variant="primary" icon="send" disabled="{sendDisabled}" on-press="send" label="Send message">Send</button>
+    </row>
+  </else>
+</column>

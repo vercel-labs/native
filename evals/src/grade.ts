@@ -1,14 +1,18 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { exec, resolveFiles, tailLines } from "./util.ts";
 import { judgeWorkspace } from "./judge.ts";
-import type { CheckResult, CheckSpec, Lane, LlmJudgeCheck, SnapshotGrepCheck } from "./types.ts";
+import type { CheckResult, CheckSpec, Lane, LlmJudgeCheck, SnapshotGrepCheck, TsHarnessCheck, TsTranspileCheck, ZigHarnessCheck } from "./types.ts";
 import type { Workspace } from "./scaffold.ts";
 
 export interface GradeContext {
   workspace: Workspace;
+  /** SDK repo root (the @native-sdk/core transpiler and rt kernel live here). */
+  repoRoot: string;
+  /** The case directory (cases/<name>): ts_harness reads harness.zig from it. */
+  caseDir: string;
   /** Per-case logger (prefixes the case name when cases run in parallel). */
   log: (line: string) => void;
   /** Skip live snapshot checks (report "skipped"). */
@@ -62,6 +66,12 @@ function checkDescription(check: CheckSpec): string {
       return check.description;
     case "snapshot_grep":
       return `snapshot: ${check.description}`;
+    case "ts_transpile":
+      return `@native-sdk/core transpile ${check.entry ?? "src/core.ts"}`;
+    case "ts_harness":
+      return `harness: ${check.description}`;
+    case "zig_harness":
+      return `harness: ${check.description}`;
     case "llm_judge":
       return `judge${(check.advisory ?? true) ? " (advisory)" : ""}: ${check.description}`;
   }
@@ -87,8 +97,159 @@ async function runCheck(check: CheckSpec, context: GradeContext): Promise<Pendin
       return fileGrep(check.files, check.pattern, check.expect, check.description, context);
     case "snapshot_grep":
       return snapshotGrep(check, context);
+    case "ts_transpile":
+      return tsTranspile(check, context);
+    case "ts_harness":
+      return tsHarness(check, context);
+    case "zig_harness":
+      return zigHarness(check, context);
     case "llm_judge":
       return llmJudge(check, context);
+  }
+}
+
+/** Path to the @native-sdk/core transpiler CLI inside the SDK repo. */
+function transpilerCli(repoRoot: string): string {
+  return join(repoRoot, "packages", "core", "src", "cli.ts");
+}
+
+/**
+ * Compliance grading for ts-core cases: the core module must typecheck (tsc
+ * semantics), pass every subset rule, and emit Zig. Failing diagnostics stay
+ * in the detail — the NS rule IDs there are the violation taxonomy.
+ */
+async function tsTranspile(check: TsTranspileCheck, context: GradeContext): Promise<PendingResult> {
+  const entry = check.entry ?? "src/core.ts";
+  const description = `@native-sdk/core transpile ${entry}`;
+  const entryPath = join(context.workspace.path, entry);
+  if (!existsSync(entryPath)) {
+    return { type: "ts_transpile", description, status: "fail", detail: `${entry} not found in the workspace` };
+  }
+  const result = await exec("node", [transpilerCli(context.repoRoot), entryPath, "-o", "/dev/null"], {
+    cwd: context.workspace.path,
+    timeoutMs: 2 * 60 * 1000,
+  });
+  if (result.code === 0) return { type: "ts_transpile", description, status: "pass" };
+  return {
+    type: "ts_transpile",
+    description,
+    status: "fail",
+    detail: result.timedOut ? "timed out" : tailLines(result),
+  };
+}
+
+/**
+ * Behavioral grading for ts-core cases: transpile the core, assemble a
+ * scratch dir with the emitted core.zig, the rt kernel, and the case's
+ * harness.zig, then `zig test harness.zig`. The harness drives the real
+ * dispatch cycle and asserts the case's required behavior.
+ */
+async function tsHarness(check: TsHarnessCheck, context: GradeContext): Promise<PendingResult> {
+  const entry = check.entry ?? "src/core.ts";
+  const harnessName = check.harness ?? "harness.zig";
+  const description = `harness: ${check.description}`;
+  const harnessPath = join(context.caseDir, harnessName);
+  if (!existsSync(harnessPath)) {
+    return { type: "ts_harness", description, status: "fail", detail: `no ${harnessName} in ${context.caseDir}` };
+  }
+  const entryPath = join(context.workspace.path, entry);
+  if (!existsSync(entryPath)) {
+    return { type: "ts_harness", description, status: "fail", detail: `${entry} not found in the workspace` };
+  }
+  const scratch = join(context.workspace.path, ".harness");
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  const transpile = await exec(
+    "node",
+    [transpilerCli(context.repoRoot), entryPath, "-o", join(scratch, "core.zig")],
+    { cwd: context.workspace.path, timeoutMs: 2 * 60 * 1000 },
+  );
+  if (transpile.code !== 0) {
+    return {
+      type: "ts_harness",
+      description,
+      status: "fail",
+      detail: `transpile failed:\n${tailLines(transpile)}`,
+    };
+  }
+  copyFileSync(join(context.repoRoot, "packages", "core", "rt", "rt.zig"), join(scratch, "rt.zig"));
+  copyFileSync(harnessPath, join(scratch, "harness.zig"));
+  copyHarnessLib(context, scratch);
+  const test = await exec("zig", ["test", "harness.zig"], {
+    cwd: scratch,
+    timeoutMs: 10 * 60 * 1000,
+  });
+  if (test.code === 0) return { type: "ts_harness", description, status: "pass" };
+  return {
+    type: "ts_harness",
+    description,
+    status: "fail",
+    detail: test.timedOut ? "timed out" : tailLines(test),
+  };
+}
+
+/**
+ * Shared harness helpers (`evals/harness-lib/*.zig` — the Cmd wire-format
+ * decoder and friends) copied next to every ts harness, so case harnesses
+ * assert effects semantically instead of hand-parsing wire bytes.
+ */
+function copyHarnessLib(context: GradeContext, scratch: string): void {
+  const libDir = join(context.caseDir, "..", "..", "harness-lib");
+  if (!existsSync(libDir)) return;
+  for (const entry of readdirSync(libDir)) {
+    if (entry.endsWith(".zig")) copyFileSync(join(libDir, entry), join(scratch, entry));
+  }
+}
+
+/** The grader-owned file names the zig harness injects into the workspace. */
+const ZIG_HARNESS_SPEC = "eval_behavior_spec.zig";
+const ZIG_HARNESS_GLUE = `
+// Eval grader glue (injected after the agent run; removed before judging).
+test {
+    _ = @import("${ZIG_HARNESS_SPEC}");
+}
+`;
+
+/**
+ * Behavioral grading for the zig track of app-dual cases. The case's Zig
+ * harness is injected as src/eval_behavior_spec.zig, reached through a test
+ * import appended to src/main.zig (the same shape the scaffold's own
+ * `test { _ = @import("tests.zig"); }` uses), and run with `native test` so
+ * it compiles inside the workspace's real zero-config graph — native_sdk,
+ * the fake effects executor, and the agent's Model/Msg/update all in scope.
+ * The workspace is restored afterward so later checks (file greps, the
+ * judge) see exactly what the agent wrote.
+ */
+async function zigHarness(check: ZigHarnessCheck, context: GradeContext): Promise<PendingResult> {
+  const harnessName = check.harness ?? "harness-zig.zig";
+  const description = `harness: ${check.description}`;
+  const harnessPath = join(context.caseDir, harnessName);
+  if (!existsSync(harnessPath)) {
+    return { type: "zig_harness", description, status: "fail", detail: `no ${harnessName} in ${context.caseDir}` };
+  }
+  const mainPath = join(context.workspace.path, "src", "main.zig");
+  if (!existsSync(mainPath)) {
+    return { type: "zig_harness", description, status: "fail", detail: "src/main.zig not found in the workspace" };
+  }
+  const specPath = join(context.workspace.path, "src", ZIG_HARNESS_SPEC);
+  const originalMain = readFileSync(mainPath, "utf8");
+  copyFileSync(harnessPath, specPath);
+  appendFileSync(mainPath, ZIG_HARNESS_GLUE);
+  try {
+    const test = await exec(context.workspace.cliPath, ["test", ...(check.args ?? [])], {
+      cwd: context.workspace.path,
+      timeoutMs: 15 * 60 * 1000,
+    });
+    if (test.code === 0) return { type: "zig_harness", description, status: "pass" };
+    return {
+      type: "zig_harness",
+      description,
+      status: "fail",
+      detail: test.timedOut ? "timed out" : tailLines(test),
+    };
+  } finally {
+    writeFileSync(mainPath, originalMain);
+    rmSync(specPath, { force: true });
   }
 }
 

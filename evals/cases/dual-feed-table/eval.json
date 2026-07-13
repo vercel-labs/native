@@ -1,0 +1,76 @@
+{
+  "name": "dual-feed-table",
+  "description": "Wave-2 dual-track case: fetch JSON from an API and show it in a sortable table — the HTTP effect with routed ok/err results, byte-level JSON parsing, sort state, and honest idle/loading/loaded/failed/empty states. Same spec on both tracks; the grader feeds the responses, so no network is touched.",
+  "prompt": "This workspace is a freshly scaffolded Native SDK app (see README.md — it names the deliverable files and the check loop; the authoring guides are under .claude/skills/). Replace the starter counter with a small release-feed viewer.\n\nRequirements:\n- A button named exactly \"Refresh\" fetches JSON over HTTPS from exactly https://feeds.native-sdk.dev/releases.json through the toolkit's HTTP effect (a plain GET, buffered response) — never a hand-rolled socket or subprocess, and the UI never blocks.\n- The response body is a JSON array of release objects, each with exactly the fields \"name\" (a string of letters, digits, and dashes — no escapes), \"downloads\" (a non-negative integer), and \"size_kb\" (a non-negative integer), always in that field order; the whitespace between tokens varies. Parse it into release rows (your language's standard facilities are fine where they exist; parsing by hand is fine too).\n- Show the releases in a table (name, downloads, size) sorted by the active sort key: \"downloads\" (largest first — the default) or \"name\" (byte-ascending). The user switches the sort from the UI.\n- States, honestly: before the first load, an idle hint; while a request is in flight, a loading state — and Refresh must not start a second request; a delivered response with HTTP status 200 and a well-formed body is loaded (an EMPTY array is a legitimate loaded state — show \"No releases\" rather than nothing); a delivered response with any other status is failed (a 404 is a delivered response, not a transport error — it still means the load failed); a transport failure (timed out, connection refused, cancelled) is failed; a 200 whose body does not parse is failed, never a half-parsed table. A failed load keeps the previously loaded rows visible.\n\nThe exact contract (the grader compiles against it; message arms and model fields are snake_case, helpers camelCase):\n- Release record fields: name (bytes), downloads (integer), size_kb (integer).\n- Model fields: phase (exactly one of \"idle\" | \"loading\" | \"loaded\" | \"failed\"), sort_key (exactly one of \"downloads\" | \"name\"). How you store the rows is yours.\n- Helper: visibleRows — the rows the table shows, already in display order. In TypeScript: visibleRows(model) returning the release array. In Zig: a pub method ON the Model — pub fn visibleRows(model: *const Model, arena: std.mem.Allocator) []const Release — allocating the sorted copy from the arena (the markup for-each binds Model decls of exactly this shape).\n- Msg arms: refresh (no payload); set_sort carrying the sort key; the fetch result routed per your track's effects surface — in TypeScript the ok arm feed_loaded ({ status: number, body: Uint8Array }) and the err arm feed_failed ({ reason: Uint8Array }); in Zig one response arm feed_loaded carrying the toolkit's response payload (its outcome covers transport failures).\n- In Zig, keep Model/Msg/update/initialModel and the Release type pub in src/main.zig, with the effects-channel update shape (update(model, msg, fx) and pub const Effects = native_sdk.Effects(Msg)).\n\nKeep the logic out of the view: markup binds values and dispatches messages only. Check your work with the loop in README.md until it is green, and make sure the behavior above actually holds. When you are done, summarize what you built.",
+  "frontend": "app-dual",
+  "timeoutMs": 1500000,
+  "maxTurns": 100,
+  "checks": [
+    {
+      "type": "build_test",
+      "args": [
+        "-Dplatform=null"
+      ]
+    },
+    {
+      "type": "markup_check"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "<table",
+      "expect": true,
+      "description": "the view reaches the table grammar"
+    },
+    {
+      "type": "file_grep",
+      "files": "src/app.native",
+      "pattern": "<for\\b",
+      "expect": true,
+      "description": "rows render through a for binding, not hand-unrolled"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "The fetch goes through the HTTP effect with a stable key and honest routing: loading is entered exactly when the request is issued, a second Refresh while loading is impossible, and every failure shape — non-200 status, transport error, malformed body — lands in the failed state without corrupting the previously loaded rows.",
+        "The JSON handling is sound for the pinned schema: tolerant of whitespace, strict about structure (a truncated or malformed body is failed, never a partial table), and integer fields never pass through float-lossy paths.",
+        "Sorting is derived at view time from the rows plus sort_key (a sorted copy, never an in-place mutation of model state), with the pinned orders: downloads descending, name byte-ascending.",
+        "The view is honest about all five states (idle hint, loading, loaded table, explicit empty state, failed with rows kept) and stays declarative — markup binds values and dispatches messages only."
+      ],
+      "files": [
+        "src/core.ts",
+        "src/*.zig",
+        "src/*.native"
+      ],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the fetch flow, parsing, and states beyond compliance"
+    }
+  ],
+  "tracks": {
+    "ts": {
+      "checks": [
+        {
+          "type": "ts_transpile"
+        },
+        {
+          "type": "ts_harness",
+          "harness": "harness-ts.zig",
+          "description": "refresh issues one GET to the pinned URL, rows parse and sort both ways, non-200/transport/malformed loads fail while keeping rows, empty array is a loaded state"
+        }
+      ]
+    },
+    "zig": {
+      "checks": [
+        {
+          "type": "zig_harness",
+          "harness": "harness-zig.zig",
+          "args": [
+            "-Dplatform=null"
+          ],
+          "description": "refresh issues one GET to the pinned URL, rows parse and sort both ways, non-200/transport/malformed loads fail while keeping rows, empty array is a loaded state"
+        }
+      ]
+    }
+  }
+}

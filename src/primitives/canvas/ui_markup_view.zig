@@ -1171,13 +1171,26 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
 
         /// Resolve a series `values` binding to an f32 slice through the
         /// same sources `for each` accepts (scope slice args shadow model
-        /// fields, pub decls, and fns).
+        /// fields, pub decls, and fns). f64 iterables resolve too, copied
+        /// down into the build arena per sample: the chart pipeline is
+        /// f32, but transpiled TS cores carry every number array as f64
+        /// (the subset's one float class), and refusing them would leave
+        /// markup charts unreachable from a TS model.
         fn f32Items(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError![]const f32 {
             @setEvalBranchQuota(scan_quota);
             inline for (item_types, 0..) |Item, type_index| {
                 if (comptime (Item == f32)) {
                     if (try self.iterateItems(ui, f32, type_index, scope, path)) |items| {
                         return items;
+                    }
+                }
+                if (comptime (Item == f64)) {
+                    if (try self.iterateItems(ui, f64, type_index, scope, path)) |items| {
+                        const narrowed = ui.arena.alloc(f32, items.len) catch {
+                            return self.failText(node, markup.series_values_message);
+                        };
+                        for (narrowed, items) |*slot, value| slot.* = @floatCast(value);
+                        return narrowed;
                     }
                 }
             }
@@ -1505,6 +1518,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyAnchorOffsetAttr(node, options, attribute.value);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "quiet-hover")) {
+                    try self.applyQuietHoverAttr(scope, node, options, attribute);
+                    continue;
+                }
                 if (try self.applyStyleTokenAttr(node, options, attribute)) continue;
                 if (!try self.applyOptionAttr(scope, node, options, attribute)) {
                     return self.failVoid(node, "unknown attribute for this element");
@@ -1612,6 +1629,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
+        /// `quiet-hover="true"` on a hit-target element: the quiet-surface
+        /// knob (`WidgetStyle.quiet_hover`) for image-forward content
+        /// tiles — silences ONLY the hover wash; press/selection fills,
+        /// the focus ring, cursor intent, and hit testing keep their own
+        /// channels. Applied to `options.style`, so no flat option field
+        /// backs it (mirrors the validator and the compiled engine).
+        fn applyQuietHoverAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!markup.hitTargetElement(node.name)) {
+                return self.failVoid(node, markup.quiet_hover_element_message);
+            }
+            const value = try self.evalAttrExpression(scope, node, attribute);
+            options.style.quiet_hover = value.truthy();
+        }
+
         fn applyOptionAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!bool {
             inline for (attr_names) |name| {
                 if (std.mem.eql(u8, attribute.name, name.markup)) {
@@ -1698,6 +1729,19 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failVoid(node, markup.on_resize_payload_message);
                 };
                 return;
+            }
+            // The value-payload change event: a slider's `on-change` with a
+            // bare tag naming a value-carrying arm dispatches the APPLIED
+            // value through the `on_value` constructor (the `on-resize`
+            // fraction mechanism) instead of a static Msg. Void arms keep
+            // the static form below, so `on-change="volume_changed"` on a
+            // slider still means "something changed" when the arm carries
+            // nothing.
+            if (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0) {
+                if (valueConstructor(expression.tag)) |make| {
+                    options.on_value = make;
+                    return;
+                }
             }
             const msg = try self.constructMessage(scope, node, expression);
             if (std.mem.eql(u8, event, "press")) {
@@ -1787,6 +1831,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.inputMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                } else if (comptime reflect.declaredTextInputUnion(field.type)) {
+                    // A declared mirror of the event union (transpiled
+                    // cores): translated at dispatch, same handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedInputMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
             }
             return null;
@@ -1799,6 +1849,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.scrollMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
+                } else if (comptime reflect.declaredScrollStateRecord(field.type)) {
+                    // A declared mirror of the scroll-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
                 }
             }
             return null;
@@ -1810,6 +1867,34 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (field.type == f32) {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                } else if (field.type == f64) {
+                    // A declared one-number float arm (transpiled cores,
+                    // where f32 cannot be spelled): the fraction widens
+                    // exactly at dispatch. Integer arms stay excluded —
+                    // a 0..1 fraction rounded into an integer would be
+                    // silently useless data.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// The slider `on-change` value form: an arm carrying the applied
+        /// 0..1 fraction as `f32` (the canvas-native shape) or the
+        /// transpiled one-number float arm (`f64`, widened exactly).
+        fn valueConstructor(tag: []const u8) ?Ui.ValueMsgFn {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                const class = comptime reflect.valueArmClass(field.type);
+                if (comptime class != null) {
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return switch (comptime class.?) {
+                            .identity => Ui.valueMsg(@field(std.meta.Tag(MsgT), field.name)),
+                            .float => Ui.translatedValueMsg(@field(std.meta.Tag(MsgT), field.name), field.type),
+                        };
                     }
                 }
             }
@@ -2120,6 +2205,10 @@ pub const color_style_attr_fields: []const AttrName = &markup.schema.color_style
 /// definition of what markup can bind, three consumers).
 const reflect = @import("ui_markup_reflect.zig");
 pub const typeScanQuota = reflect.typeScanQuota;
+pub const Pointee = reflect.Pointee;
+pub const declaredTextInputUnion = reflect.declaredTextInputUnion;
+pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
+pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;
 pub const isItemFn = reflect.isItemFn;
 pub const isArenaScalarFn = reflect.isArenaScalarFn;
@@ -2209,6 +2298,15 @@ fn resolveOn(comptime T: type, value: *const T, path: []const u8, arena: ?std.me
             }
             return null;
         },
+        // Single-item const pointers are transparent (`reflect.Pointee`):
+        // a `*const Row` loop item or shared model node binds like the
+        // struct it points at.
+        .pointer => |info| {
+            if (info.size == .one and info.is_const) {
+                return resolveOn(info.child, value.*, path, arena);
+            }
+            return null;
+        },
         else => return null,
     }
 }
@@ -2231,6 +2329,12 @@ pub fn fieldIsTextBuffer(comptime T: type, head: []const u8) bool {
 fn resolveNested(comptime T: type, ptr: anytype, path: []const u8, arena: ?std.mem.Allocator) ?Value {
     return switch (@typeInfo(T)) {
         .@"struct" => resolveOn(T, ptr, path, arena),
+        // The `reflect.Pointee` transparency: traverse through a
+        // single-item const pointer field into the struct it shares.
+        .pointer => |info| if (info.size == .one and info.is_const)
+            resolveNested(info.child, ptr.*, path, arena)
+        else
+            null,
         else => null,
     };
 }

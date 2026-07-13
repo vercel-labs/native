@@ -19,18 +19,6 @@ A text-bearing press control. The label is the element's content, `on-press` dis
 </row>
 ```
 
-## Zig builder
-
-```zig
-ui.row(.{ .gap = 12, .cross = .center }, .{
-    ui.button(.{ .variant = .primary, .on_press = .save }, "Save"),
-    ui.button(.{ .variant = .secondary, .on_press = .duplicate }, "Duplicate"),
-    ui.button(.{ .variant = .outline, .on_press = .preview }, "Preview"),
-    ui.button(.{ .variant = .ghost, .on_press = .dismiss }, "Dismiss"),
-    ui.button(.{ .variant = .destructive, .on_press = .delete_note }, "Delete"),
-})
-```
-
 ## Sizes
 
 Four sizes: `sm`, `default`, `lg`, and `icon` — the icon size renders a square, icon-only button (give it a `label` for accessibility).
@@ -69,6 +57,20 @@ Hover and press styling is engine-owned render state; `disabled` is a source att
 ## Button Group
 
 [`button-group`](/components/button-group) attaches related action buttons into one segmented bar — flush segments, one shared corner language, one interior seam. It has its own page.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.row(.{ .gap = 12, .cross = .center }, .{
+    ui.button(.{ .variant = .primary, .on_press = .save }, "Save"),
+    ui.button(.{ .variant = .secondary, .on_press = .duplicate }, "Duplicate"),
+    ui.button(.{ .variant = .outline, .on_press = .preview }, "Preview"),
+    ui.button(.{ .variant = .ghost, .on_press = .dismiss }, "Dismiss"),
+    ui.button(.{ .variant = .destructive, .on_press = .delete_note }, "Delete"),
+})
+```
 
 ## Attributes
 

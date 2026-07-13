@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Textarea
 
-Multi-line text entry. Like [input](/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a `canvas.TextInputEvent`. Enter (and Shift+Enter) inserts a newline instead of submitting; when a textarea carries `on-submit`, the submit rides the primary chord — Cmd+Enter on macOS, Ctrl+Enter elsewhere. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
+Multi-line text entry. Like [input](/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a text-input event — see [input](/components/input) for the core-side contract in both languages. Enter (and Shift+Enter) inserts a newline instead of submitting; when a textarea carries `on-submit`, the submit rides the primary chord — Cmd+Enter on macOS, Ctrl+Enter elsewhere. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
 
 <ComponentPreview name="textarea" alt="A textarea rendered by the engine" />
 
@@ -13,7 +13,9 @@ Multi-line text entry. Like [input](/components/input), `text` and `placeholder`
 <textarea width="320" height="96" placeholder="Write a release note" text="{draft}" on-input="draft_edited" />
 ```
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.el(.textarea, .{

@@ -142,6 +142,16 @@ const term = try child.wait(io);   // child.kill(io) to stop it
 
 `std.process.getEnvMap`, `argsAlloc`, and `argsWithAllocator` are gone. `main` already has both: `init.environ_map` (a `*std.process.Environ.Map`) and `init.minimal.args.toSlice(allocator)` (`tools/native-sdk/main.zig`). Building an environment from scratch — for a child process, or in tests — is `var env = std.process.Environ.Map.init(allocator); defer env.deinit(); try env.put("KEY", "value");` (`src/tooling/dev.zig`).
 
+## error: struct 'mem' has no member named 'trimRight' / 'trimLeft' — renamed `trimEnd` / `trimStart`
+
+The directional trims renamed to match the JS/string convention; arguments are unchanged:
+
+```zig
+const line = std.mem.trimEnd(u8, raw, "\r\n");     // was trimRight
+const body = std.mem.trimStart(u8, line, " \t");   // was trimLeft
+const both = std.mem.trim(u8, text, " ");          // unchanged
+```
+
 ## error: struct 'std' has no member named 'net' — sockets live on `std.Io.net`
 
 `std.net.Address` became `std.Io.net.IpAddress`, and connect/listen take `io`: `std.Io.net.IpAddress.resolve(io, host, port)`, then `IpAddress.connect(&address, io, .{ .mode = .stream, .protocol = .tcp })`; stream readers/writers follow the buffered-writer shape (`std.Io.net.Stream.writer(stream, io, &buffer)` then `.interface`). Live reference: `src/tooling/dev.zig` (`waitUntilReady`/`httpReady`). App-level HTTP belongs in `fx.fetch`, not hand-rolled sockets.

@@ -1,6 +1,6 @@
 # Building Components
 
-The library's built-ins cover the common register, and [theming](/theming) restyles all of them at once. This page is about the pieces the library does not hand you: how to build a component of your own — first as a markup template, then as a Zig view function when the shape needs one — how it themes, and how component files spread across an app. The mechanics (template grammar, import rules, slots) are specified in [Native UI](/native-ui#templates); this page builds one real component end to end.
+The library's built-ins cover the common register, and [theming](/theming) restyles all of them at once. This page is about the pieces the library does not hand you: how to build a component of your own — first as a markup template, then as a Zig view function when the shape needs one — how it themes, and how component files spread across an app. Component code is toolkit-extension territory, so the Zig here applies whatever language the app core is written in: a TypeScript app that needs one custom widget writes that widget in Zig and keeps its core in TypeScript. The mechanics (template grammar, import rules, slots) are specified in [Native UI](/native-ui#templates); this page builds one real component end to end.
 
 The ownership model in one line: **use and theme the built-ins by default; eject a library composite when you need to own its shape; build new composites from primitives when the library has no shape for it.** The last two are this page.
 

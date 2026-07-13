@@ -271,8 +271,8 @@ export default function HomePage() {
             native desktop apps
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            Write your interface in native markup and Zig. The toolkit&apos;s own engine renders
-            it into real OS windows — no browser, no WebView.
+            Write your app in native markup and TypeScript — or Zig. The toolkit&apos;s own
+            engine renders it into real OS windows — no browser, no WebView, no JS runtime.
           </p>
           <div className="mx-auto mt-8 w-full max-w-xs sm:max-w-sm">
             <InstallToggle />

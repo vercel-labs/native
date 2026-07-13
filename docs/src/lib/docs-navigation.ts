@@ -25,6 +25,8 @@ export const navSections: NavSection[] = [
     title: "Core Concepts",
     items: [
       { name: "App Model", href: "/app-model" },
+      { name: "TypeScript Cores", href: "/typescript" },
+      { name: "Where Packages Go", href: "/typescript/packages" },
       { name: "Native UI", href: "/native-ui" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },

@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Chart
 
@@ -20,6 +21,18 @@ A `<chart>` takes one or more `<series>` children. Each series binds its data wi
 
 The series set is static — the plot's shape is part of the design, and the data varies through the bindings. `NaN` samples pass through and draw nothing, so a history shorter than its window enters from the right edge: pad the leading gap in a model function.
 
+<CodeToggle>
+
+```ts
+/// The 60-sample window, NaN-padded at the front while samples accumulate.
+export function cpuSpark(model: Model): readonly number[] {
+  const out: number[] = [];
+  for (let i = model.cpuHistory.length; i < 60; i++) out.push(NaN);
+  for (const sample of model.cpuHistory) out.push(sample);
+  return out;
+}
+```
+
 ```zig
 /// The 60-sample window, NaN-padded at the front while samples accumulate.
 pub fn cpuSpark(model: *const Model, arena: std.mem.Allocator) []const f32 {
@@ -29,6 +42,8 @@ pub fn cpuSpark(model: *const Model, arena: std.mem.Allocator) []const f32 {
     return out;
 }
 ```
+
+</CodeToggle>
 
 Unlabeled charts get a generated series summary (`chart: line cpu 60 pts last 0.42`) as their accessible name, so automation can assert on the data without pixels; `label` replaces it.
 
@@ -74,7 +89,7 @@ Unlabeled charts get a generated series summary (`chart: line cpu 60 pts last 0.
 
 <AttrTable element="series" attrs={["kind", "values", "color", "label"]} />
 
-## Zig builder
+## Programmatic construction (Zig)
 
 The builder is the escape hatch for what markup deliberately excludes: `.band` series (a min/max envelope needs a paired lower-edge slice per point) and series sets composed dynamically at view time. `ui.chart` takes `ChartOptions` and a slice of `canvas.ChartSeries` (kinds `.line`, `.bar`, `.band`; `fill` shades the area under a line — markup's `kind="area"`).
 

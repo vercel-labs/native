@@ -11,8 +11,12 @@ var view = try canvas.MarkupView(Model, Msg).init(arena, main.app_markup);
 var ui = canvas.Ui(Msg).init(arena);
 const tree = try ui.finalize(try view.build(&ui, &model));
 
-const plus = findByText(tree.root, .button, "+").?;      // walk tree.root
-main.update(&model, tree.msgForPointer(plus.id, .up).?); // dispatch like the runtime
+var fx = main.Effects.init(testing.allocator);           // fake-executor effects channel
+defer fx.deinit();
+fx.executor = .fake;
+
+const plus = findByText(tree.root, .button, "+").?;           // walk tree.root
+main.update(&model, tree.msgForPointer(plus.id, .up).?, &fx); // dispatch like the runtime
 try testing.expectEqual(@as(i64, 1), model.count);
 ```
 

@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm typecheck && pnpm build"
+    "check": "pnpm typecheck && pnpm build && node scripts/check-code-toggle.mjs"
   },
   "dependencies": {
     "@mdx-js/loader": "^3",

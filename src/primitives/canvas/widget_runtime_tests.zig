@@ -1958,6 +1958,50 @@ test "widget emitter applies selection and range control tokens" {
     }
 }
 
+test "slider at value zero emits no filled range" {
+    // The same zero guard the progress bar wears: a width-zero pill still
+    // owns anti-aliased edge coverage, so an idle transport slider
+    // (value 0, disabled) painted a one-pixel filled sliver at the rail's
+    // start. Zero range must paint NOTHING — rail, thumb, and hairline
+    // only.
+    const tokens: DesignTokens = .{};
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0,
+        .state = .{ .disabled = true },
+    }, tokens);
+    const idle = builder.displayList();
+    for (idle.commands[0..idle.commandCount()]) |command| {
+        try std.testing.expect(command.objectId() != widgetPartId(70, 2));
+    }
+
+    // A nonzero value keeps the filled range exactly as before.
+    var active_commands: [8]CanvasCommand = undefined;
+    var active_builder = Builder.init(&active_commands);
+    try emitWidgetTree(&active_builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0.25,
+    }, tokens);
+    const active = active_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 1 + idle.commandCount()), active.commandCount());
+    var saw_range = false;
+    for (active.commands[0..active.commandCount()]) |command| {
+        if (command.objectId() == widgetPartId(70, 2)) {
+            saw_range = true;
+            try std.testing.expect(command == .fill_rounded_rect);
+            try std.testing.expectEqual(@as(f32, 160 * 0.25), command.fill_rounded_rect.rect.width);
+        }
+    }
+    try std.testing.expect(saw_range);
+}
+
 test "widget emitter applies radio control tokens" {
     const tokens = DesignTokens{
         .controls = .{

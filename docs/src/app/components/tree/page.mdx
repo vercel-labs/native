@@ -27,7 +27,9 @@ A disclosure-tree container. The rows are ordinary elements (usually [list items
 
 The indent is plain layout — a fixed-width spacer column beside the children. Omit `expanded` on leaf rows; only rows that bind it participate in Left/Right disclosure.
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.tree(.{ .width = 340, .gap = 2 }, .{

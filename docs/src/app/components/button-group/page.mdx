@@ -19,16 +19,6 @@ For an exclusive active segment use a [toggle-group](/components/toggle) (presse
 </button-group>
 ```
 
-## Zig builder
-
-```zig
-ui.el(.button_group, .{}, .{
-    ui.button(.{ .variant = .outline, .on_press = .cut }, "Cut"),
-    ui.button(.{ .variant = .outline, .on_press = .copy }, "Copy"),
-    ui.button(.{ .variant = .outline, .on_press = .paste }, "Paste"),
-})
-```
-
 ## Variants and icon segments
 
 Grouped buttons keep their variant's fill — a primary or secondary group reads as one filled bar with the same seam collapse — and `icon`-sized segments make compact tool clusters (a pager, a zoom control). Mixing variants inside one group is possible but usually reads as a mistake; pick one register per bar.
@@ -50,6 +40,18 @@ Grouped buttons keep their variant's fill — a primary or secondary group reads
   <button variant="outline" on-press="approve">Approve</button>
   <button variant="outline" on-press="reject">Reject</button>
 </button-group>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.button_group, .{}, .{
+    ui.button(.{ .variant = .outline, .on_press = .cut }, "Cut"),
+    ui.button(.{ .variant = .outline, .on_press = .copy }, "Copy"),
+    ui.button(.{ .variant = .outline, .on_press = .paste }, "Paste"),
+})
 ```
 
 ## Attributes

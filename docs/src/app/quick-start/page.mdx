@@ -1,10 +1,13 @@
+import { CodeToggle } from "@/components/code-toggle";
+
 # Quick Start
 
-Native SDK is the complete toolkit for building beautiful native desktop applications: declarative markup, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — no browser or WebView in the binary. This page takes you from install to a running, tested app.
+Native SDK is the complete toolkit for building beautiful native desktop applications: declarative markup, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — no browser or WebView in the binary. Apps are authored in TypeScript and Native markup by default, or in Zig — same loop, same runtime, your choice. This page takes you from install to a running app.
 
 ## Prerequisites
 
 - macOS 11 or newer, Linux, or Windows
+- Node.js 22 or newer for the default TypeScript scaffold — the TypeScript-to-native transpiler and the core dev loop run under it at build and dev time; the binary you ship carries no JS runtime. A Zig-core app (`--template zig-core`) does not need node.
 
 ## Get the CLI
 
@@ -25,7 +28,7 @@ native init my_app
 cd my_app
 ```
 
-This scaffolds a native-rendered app — and nothing else. There are no build files to maintain: the CLI owns the build graph, generating it under `.native/build/` (gitignored) on each run.
+This scaffolds a native-rendered app — and nothing else. There are no build files to maintain: the CLI owns the build graph, generating it under `.native/build/` (gitignored) on each run. The app itself is three files of truth:
 
 <table>
   <thead>
@@ -36,16 +39,12 @@ This scaffolds a native-rendered app — and nothing else. There are no build fi
   </thead>
   <tbody>
     <tr>
+      <td><code>src/core.ts</code></td>
+      <td>The logic: <code>Model</code>, <code>Msg</code>, <code>update</code> — plain TypeScript, compiled to native code at build time</td>
+    </tr>
+    <tr>
       <td><code>src/app.native</code></td>
       <td>The entire UI: elements, layout, bindings, and message dispatch</td>
-    </tr>
-    <tr>
-      <td><code>src/main.zig</code></td>
-      <td>The logic: <code>Model</code>, <code>Msg</code>, <code>update</code>, and the window scene</td>
-    </tr>
-    <tr>
-      <td><code>src/tests.zig</code></td>
-      <td>Full-loop UI tests that click buttons through typed dispatch — no GUI needed</td>
     </tr>
     <tr>
       <td><code>app.zon</code></td>
@@ -56,13 +55,19 @@ This scaffolds a native-rendered app — and nothing else. There are no build fi
       <td>The app icon source: one square image packaging turns into every platform's icon artifacts</td>
     </tr>
     <tr>
+      <td><code>package.json</code>, <code>tsconfig.json</code></td>
+      <td>The editor surface: stock editor TypeScript resolves <code>@native-sdk/core</code> with full IntelliSense, and the tsconfig mirrors the checker's own compiler options</td>
+    </tr>
+    <tr>
       <td><code>.gitignore</code>, <code>README.md</code></td>
       <td>Ignores for generated directories, and the commands on this page</td>
     </tr>
   </tbody>
 </table>
 
-Prefer to own `build.zig` from day one? `native init my_app --full` scaffolds the expanded shape (build files, editor config, a ready-made CI workflow) and you drive it with `zig build` directly.
+Editor support is stock tsc — no extension, no plugin. `package.json` and `tsconfig.json` exist for editors and versioning only, and `node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package: materialized at init, kept fresh by `native check`/`dev`/`build`, and replaced transparently by `npm install` once the package is published to npm. None of it is build truth — builds transpile against the SDK the CLI ships with and never read node_modules; delete it and every `native` verb still works.
+
+There is no Zig in this tree and no language flag anywhere: the build detects `src/core.ts` and wires everything (`package.json` is not a language marker). Prefer to write the core in Zig? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` (plus generated full-loop tests in `src/tests.zig`) — the tree is the truth, and the build detects whichever core it carries. Zig is the language the whole toolkit is built in, and a Zig core is first-class by choice, not a fallback. Prefer to own `build.zig` from day one? Add `--full` to either template.
 
 ## Run it
 
@@ -72,7 +77,7 @@ native dev
 
 The first run compiles the app and the SDK, so give it a minute; subsequent runs are incremental. A native window opens with a working counter. The whole view is `src/app.native` — a Native markup file:
 
-```html
+```html:src/app.native
 <column gap="12" padding="16">
   <row gap="8" cross="center">
     <text grow="1">Counter</text>
@@ -83,59 +88,199 @@ The first run compiles the app and the SDK, so give it a minute; subsequent runs
     <text>{count}</text>
     <button variant="primary" on-press="increment">+</button>
   </row>
-  <status-bar>count: {count}</status-bar>
+  <row gap="8" cross="center">
+    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    <text grow="1">ticks {tickCount}</text>
+    <button size="sm" on-press="stamp">Stamp</button>
+  </row>
+  <status-bar>total: {total} | stamped: {stampedMs}ms</status-bar>
 </column>
 ```
 
-The markup binds values (`{count}`) and dispatches messages (`on-press="increment"`); it can never mutate state. All logic lives in `src/main.zig`:
+The markup binds values (`{count}`) and dispatches messages (`on-press="increment"`); it can never mutate state. All logic lives in the core — the scaffolded one already exercises the whole surface: state, messages, one pure `update`, a clock effect, and a repeating one-second timer. Both templates scaffold this same app. Here is its logic verbatim — the TypeScript template's `src/core.ts`, and the model-and-update section of the Zig template's `src/main.zig` (the rest of that file is the window and wiring declaration the TypeScript build generates for you). In TypeScript, effects are returned `Cmd` data and the timer is a declared `Sub`; in Zig, the same two ride the effects channel (`fx.wallMs`, `fx.startTimer`):
 
-```zig
+<CodeToggle>
+
+```ts:src/core.ts
+import { Cmd, Sub } from "@native-sdk/core";
+
+export interface Model {
+  readonly count: number;
+  readonly ticking: boolean;
+  readonly tickCount: number;
+  readonly stampedMs: number;
+}
+
+export type Msg =
+  | { readonly kind: "increment" }
+  | { readonly kind: "decrement" }
+  | { readonly kind: "reset" }
+  | { readonly kind: "toggle_ticking" }
+  | { readonly kind: "stamp" }
+  | { readonly kind: "stamped"; readonly at: number }
+  | { readonly kind: "tick"; readonly at: number };
+
+// `tick` and `stamped` are dispatched by the host (timer fires and the
+// Cmd.now result), never from markup - this list keeps `native check`'s
+// unbound-state lint honest about that.
+export const viewUnbound = ["tick", "stamped"] as const;
+
+export function initialModel(): Model {
+  return { count: 0, ticking: false, tickCount: 0, stampedMs: -1 };
+}
+
+// Exported single-model helpers become bindings too: `{total}` in
+// app.native reads this.
+export function total(model: Model): number {
+  return model.count + model.tickCount;
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "increment":
+      return { ...model, count: model.count + 1 };
+    case "decrement":
+      return { ...model, count: model.count - 1 };
+    case "reset":
+      return { ...model, count: 0, tickCount: 0 };
+    case "toggle_ticking":
+      return { ...model, ticking: !model.ticking };
+    case "stamp":
+      // Effects are data: the host performs this after commit and
+      // dispatches `stamped` with the time.
+      return [model, Cmd.now("stamped")];
+    case "stamped":
+      return { ...model, stampedMs: msg.at };
+    case "tick":
+      return { ...model, tickCount: model.tickCount + 1 };
+  }
+}
+
+// Recurring effects are declared from the model: while `ticking` holds,
+// the host fires `tick` every second; flip it off and the timer stops.
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.ticking) return Sub.none;
+  return Sub.timer("tick", 1000, "tick");
+}
+```
+
+```zig:src/main.zig
 pub const Msg = union(enum) {
     increment,
     decrement,
     reset,
+    toggle_ticking,
+    stamp,
+    tick: native_sdk.EffectTimer,
+
+    // `tick` is dispatched by the host (the repeating timer fires),
+    // never from markup - this keeps the unbound-state lint honest
+    // about that.
+    pub const view_unbound = .{"tick"};
 };
 
 pub const Model = struct {
     count: i64 = 0,
+    ticking: bool = false,
+    tick_count: i64 = 0,
+    stamped_ms: i64 = -1,
+
+    // Public single-model helpers become bindings too: `{total}` in
+    // app.native reads this.
+    pub fn total(model: *const Model) i64 {
+        return model.count + model.tick_count;
+    }
 };
 
-pub fn update(model: *Model, msg: Msg) void {
+pub const Effects = native_sdk.Effects(Msg);
+
+/// The repeating tick's effects-channel key: starting an active key
+/// replaces the timer in place, so toggling never double-registers.
+pub const tick_timer_key: u64 = 1;
+
+pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .increment => model.count += 1,
         .decrement => model.count -= 1,
-        .reset => model.count = 0,
+        .reset => {
+            model.count = 0;
+            model.tick_count = 0;
+        },
+        .toggle_ticking => {
+            model.ticking = !model.ticking;
+            // Recurring effects are timers on the effects channel: while
+            // `ticking` holds, the host fires `tick` every second; flip
+            // it off and the timer stops.
+            if (model.ticking) {
+                fx.startTimer(.{
+                    .key = tick_timer_key,
+                    .interval_ms = 1000,
+                    .mode = .repeating,
+                    .on_fire = Effects.timerMsg(.tick),
+                });
+            } else {
+                fx.cancelTimer(tick_timer_key);
+            }
+        },
+        // The journaled clock read - deterministic under session replay,
+        // the Zig equivalent of the TypeScript starter's `Cmd.now`.
+        .stamp => model.stamped_ms = fx.wallMs(),
+        .tick => |timer| {
+            if (timer.outcome != .fired) return;
+            model.tick_count += 1;
+        },
     }
 }
 ```
 
-That is the whole loop: the model holds state, messages describe what happened, `update` is the only place state changes, and the view re-derives from the model. [App Model](/app-model) walks through how the pieces connect.
+</CodeToggle>
+
+That is the whole loop: the model holds state, messages describe what happened, `update` is the only place state changes, and the view re-derives from the model. Markup binds the core's own field names exactly as written — `tickCount` → `{tickCount}` in TypeScript, `tick_count` → `{tick_count}` in Zig — and single-model helpers bind as derived values (`{total}`) in both. [App Model](/app-model) walks through how the pieces connect, and [TypeScript Cores](/typescript) covers the authoring tier in depth.
 
 ## Edit while it runs
 
 `src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen.
 
-## Check and test
+## The fastest loop: the core under node
+
+Logic changes have an even faster loop than rebuilding the app. `native dev --core` runs `src/core.ts` under node with a virtual host — no window, no renderer, just the dispatch cycle: send messages as JSON lines, watch the committed model and the effect transcript, and advance a virtual clock to fire timers deterministically:
+
+```bash
+printf '%s\n' '{"kind":"increment"}' '{"kind":"toggle_ticking"}' '{"advance":3000}' | native dev --core
+```
+
+```
+native dev --core: the core-logic loop under node (update/effects, virtual clock) - not a renderer; `native dev` runs the app
+model {"count":0,"ticking":false,"tickCount":0,"stampedMs":-1}
+model {"count":1,"ticking":false,"tickCount":0,"stampedMs":-1}
+model {"count":1,"ticking":true,"tickCount":0,"stampedMs":-1}
+sub arm tick every 1000ms -> tick
+fire tick -> tick @ 1000
+model {"count":1,"ticking":true,"tickCount":1,"stampedMs":-1}
+fire tick -> tick @ 2000
+model {"count":1,"ticking":true,"tickCount":2,"stampedMs":-1}
+fire tick -> tick @ 3000
+model {"count":1,"ticking":true,"tickCount":3,"stampedMs":-1}
+```
+
+Because the subset is executable TypeScript, the same file runs unmodified under node and compiles to the same behavior natively. Pair it with `--script msgs.ndjson --watch` to replay a scenario on every edit.
+
+## Check it
 
 ```bash
 native check
 ```
 
-`native check` validates every `.native` file under `src/` plus `app.zon` without building anything:
+`native check` validates the whole tree without building anything: `src/core.ts` runs the subset checker (typecheck plus the app-core rules, with teaching diagnostics that name the rule, the fix, and the reason), then every `.native` file under `src/` and `app.zon`:
 
 ```
+model contract: not yet built - bindings and app: icon names checked structurally only; run `native test` to enable typed checks
 src/app.native: ok
 info[manifest.valid]: app.zon is valid
-checked 1 markup file and app.zon
+checked 1 markup file, app.zon and src/core.ts (subset checker clean)
 ```
 
-Markup errors come back with `file:line:column` and a teaching message (`native markup lsp` provides the same diagnostics plus completion and hover in your editor). Then run the real tests:
-
-```bash
-native test
-```
-
-The generated `src/tests.zig` builds the real view from the markup, finds the `+` button, dispatches its press exactly like the runtime would, and asserts on the model and the rebuilt view — headless, on any machine. See [Testing](/testing) for the full tiers, including driving the live app from the outside with [automation](/automation).
+The first line is honest about what a fresh tree can check: once a build has produced the model contract, the markup pass also verifies bindings, iterables, and message tags against the core's emitted `Model`/`Msg`. Markup errors come back with `file:line:column` and a teaching message (`native markup lsp` provides the same diagnostics plus completion and hover in your editor). `native test` runs the app's test suite; the Zig template additionally scaffolds `src/tests.zig` — full-loop UI tests that click buttons through typed dispatch, headless, on any machine. See [Testing](/testing) for the full tiers, including driving the live app from the outside with [automation](/automation).
 
 ## Build a release binary
 
@@ -149,7 +294,7 @@ This produces an optimized binary and tells you where it landed:
 built zig-out/bin/my-app (ReleaseFast)
 ```
 
-(The binary name comes from `app.zon`: `native init my_app` sets `.name = "my-app"`.) Where `native dev` runs a Debug build to arm hot reload, `native build` produces an optimized ReleaseFast binary. From there, [Packaging](/packaging) turns it into a distributable app bundle with `native package`.
+(The binary name comes from `app.zon`: `native init my_app` sets `.name = "my-app"`.) Where `native dev` runs a Debug build to arm hot reload, `native build` produces an optimized ReleaseFast binary. The TypeScript core compiles to native code inside it — no JS engine, no interpreter. From there, [Packaging](/packaging) turns it into a distributable app bundle with `native package`.
 
 ## Escape hatch: own the build
 
@@ -158,6 +303,7 @@ If the app outgrows the managed graph — extra build steps, custom sources — 
 ## Next steps
 
 - [App Model](/app-model) — the model/message/update loop, wiring, and hot reload
+- [TypeScript Cores](/typescript) — the app-core subset, effects, subscriptions, and the dev loop in depth
 - [Native UI](/native-ui) — every element, attribute, and pattern in the markup
 - [Components](/components) — the component catalog
 - [State & Data Flow](/state) — derive-don't-store, bindings, and text editing state

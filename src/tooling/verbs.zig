@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const buildgraph = @import("buildgraph.zig");
+const ts_core = @import("ts_core.zig");
 const toolchain = @import("toolchain.zig");
 const manifest_tool = @import("manifest.zig");
 const dev_tool = @import("dev.zig");
@@ -49,6 +50,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         return error.MissingManifest;
     }
     const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+
+    // Tree detection happens here too (the build graph re-derives it), so
+    // a both-cores tree fails with one clean teaching message before any
+    // zig invocation.
+    const core_tree = ts_core.detect(io);
+    if (core_tree == .both) return ts_core.failBothCores();
+    if (core_tree == .ts) {
+        // Keep the app's editor surface fresh (node_modules/@native-sdk/core,
+        // the pre-publish copy stock tsc resolves): best-effort by design —
+        // build truth never depends on it, so an unresolvable framework here
+        // is not this verb's failure (the graph below reports its own).
+        if (buildgraph.resolveFrameworkRoot(allocator, io, options.base_env) catch null) |framework_root| {
+            defer allocator.free(framework_root);
+            ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        }
+    }
 
     const zig_exe = try toolchain.resolveZig(allocator, io, options.base_env, .{ .assume_yes = options.assume_yes });
     defer allocator.free(zig_exe);

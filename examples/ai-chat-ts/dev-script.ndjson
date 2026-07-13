@@ -1,0 +1,39 @@
+# The chat client's core-logic loop, headless: replay with
+#   native dev --core --script dev-script.ndjson
+# Msgs dispatch into update; the endpoint's answers are ordinary Msgs, so
+# the responses are fed back by hand exactly as the transcript's
+# `cmd fetch ...` lines invite — the same loop the native app runs, with
+# you standing in for the network.
+
+# The launch configuration arrives through the env channel as ordinary
+# Msgs (under the real app the generated wiring dispatches these from the
+# environment at install). A local placeholder endpoint - nothing dials
+# out under the core host.
+{"kind":"endpoint_set","value":{"$bytes":"http://127.0.0.1:11434/v1/chat/completions"}}
+{"kind":"model_set","value":{"$bytes":"local-model"}}
+{"kind":"key_set","value":{"$bytes":"local"}}
+
+# Type a message (the composer runs the SDK byte-splice text engine) and
+# send. The transcript shows the fetch command whole: POST, the endpoint,
+# the runtime-built "authorization: Bearer <key>" header, and the JSON
+# body - system prompt first, then the history.
+{"kind":"draft_edit","edit":{"kind":"insert_text","text":{"$bytes":"Say hi in two words"}}}
+{"kind":"send"}
+
+# The endpoint's answer, fed back by hand: choices[0].message.content
+# parses into the assistant turn (escapes decode - note the \n).
+{"kind":"chat_response","status":200,"body":{"$bytes":"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\\nthere!\"}}]}"}}
+
+# A second turn grows the history: watch the request body carry both
+# earlier turns before the new question.
+{"kind":"draft_edit","edit":{"kind":"insert_text","text":{"$bytes":"And a follow-up?"}}}
+{"kind":"send"}
+
+# This time the endpoint fails with its own error body - the failed
+# state keeps the history and surfaces error.message as the reason.
+{"kind":"chat_response","status":500,"body":{"$bytes":"{\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\"}}"}}
+
+# Retry re-sends the SAME conversation (no new turn); a success resolves
+# it into the fourth turn.
+{"kind":"retry"}
+{"kind":"chat_response","status":200,"body":{"$bytes":"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Certainly.\"}}]}"}}

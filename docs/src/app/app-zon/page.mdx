@@ -6,7 +6,7 @@ The `app.zon` manifest declares app metadata, permissions, security rules, windo
 
 The manifest `native init` generates — identity, one shell window with a GPU surface view, and the minimal permission set:
 
-```zig
+```zig:app.zon
 .{
     .id = "dev.native_sdk.my-app",
     .name = "my-app",
@@ -47,7 +47,7 @@ The manifest `native init` generates — identity, one shell window with a GPU s
 
 A fuller manifest for an app that also [embeds web content](/frontend) and declares commands, shortcuts, menus, and packaging metadata:
 
-```zig
+```zig:app.zon
 .{
     .id = "dev.native_sdk",
     .name = "native-sdk",
@@ -177,8 +177,16 @@ A fuller manifest for an app that also [embeds web content](/frontend) and decla
       <td>Built-in theme pack: <code>house</code> (default) or <code>geist</code>; an unknown name is a build/check error (see <a href="/theming">Theming</a>)</td>
     </tr>
     <tr>
+      <td><code>theme_accent</code></td>
+      <td>Optional <code>#rrggbb</code> accent layered over the pack — recolors the accent, its knockout ink, the focus ring, and the slider active range together; skipped under high contrast; a malformed value is a build/check error</td>
+    </tr>
+    <tr>
       <td><code>cef</code></td>
       <td>CEF runtime config for Chromium apps: <code>dir</code> and <code>auto_install</code></td>
+    </tr>
+    <tr>
+      <td><code>assets</code></td>
+      <td>Launch-registered assets for TypeScript-core apps: <code>images</code> entries (<code>.&#123; .id = 1, .path = "assets/art/cover.jpg" &#125;</code>) are read once at launch and registered on the installing frame; the <code>id</code> is the <code>ImageId</code> markup avatar bindings reference</td>
     </tr>
     <tr>
       <td><code>windows</code></td>

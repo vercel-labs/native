@@ -1,9 +1,10 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Slider
 
-A draggable value control. The model owns `value` as a 0..1 fraction and renders it back on every rebuild; `on-change` dispatches when the user moves the thumb (drag, keyboard step, or accessibility set-value). In markup, the dispatched Msg is PLAIN — it carries no value payload, because message payloads are bindings, not runtime values. To read where the thumb landed, supply the UiApp `Options.sync` hook: it runs with the laid-out widget tree before every update, so mirror the slider's reconciled `value` into a model field there and let the Msg arm read it. In the Zig builder, bind `on_value = Ui.valueMsg(.tag)` instead — it delivers the applied value as the Msg's `f32` payload, which `update` echoes back into the model field. Reconcile follows the scroll rule: a source-side move wins (a model-driven value — playback progress on a seek bar — renders every rebuild), a source replaying the same value keeps the user's drag, and a live drag is never yanked mid-gesture. For a display-only bar, use [progress](/components/progress).
+A draggable value control. The model owns `value` as a 0..1 fraction and renders it back on every rebuild; `on-change` dispatches when the user moves the thumb (drag, keyboard step, or accessibility set-value). In markup, `on-change` resolves by the named Msg arm's shape: a bare tag naming a VALUE arm — `f32`, or a transpiled core's one-number float arm — dispatches the applied fraction as its payload (the seek-bar shape), while a bare tag naming a void arm stays the plain "something changed" signal. Either way, `update` echoes the delivered value back into the model field. Reconcile follows the scroll rule: a source-side move wins (a model-driven value — playback progress on a seek bar — renders every rebuild), a source replaying the same value keeps the user's drag, and a live drag is never yanked mid-gesture. For a display-only bar, use [progress](/components/progress).
 
 <ComponentPreview name="slider" alt="Sliders rendered by the engine" caption="a bound slider and a disabled slider" />
 
@@ -12,24 +13,32 @@ A draggable value control. The model owns `value` as a 0..1 fraction and renders
 ```html
 <column gap="20" width="280">
   <slider value="{volume}" on-change="volume_changed" label="Volume" />
-  <slider value="0.7" disabled="true" />
+  <slider value="0.7" disabled="true" label="Balance" />
 </column>
 ```
 
-The `volume_changed` Msg carries no payload; the `sync` mirror is where the applied value reaches the model (the `examples/soundboard` seek bar is the live pattern):
+With a one-number float arm — `{ kind: "volume_changed"; fraction: number }` in a TypeScript core, `volume_changed: f32` in a Zig core — the arm receives the applied fraction directly (the `examples/soundboard-ts` seek bar is the live pattern):
 
-```zig
-// UiApp options: .sync = sync — runs before every update dispatch
-fn sync(model: *Model, layout: canvas.WidgetLayoutTree) void {
-    for (layout.nodes) |node| {
-        if (node.widget.kind == .slider) model.volume = node.widget.value;
-    }
-}
-// in update: the plain Msg arm reads the mirrored field
-.volume_changed => model.applyVolume(model.volume),
+<CodeToggle>
+
+```ts
+// in update: the value event delivers the applied fraction
+case "volume_changed":
+  return { ...model, volume: msg.fraction };
 ```
 
-## Zig builder
+```zig
+// in update: the value event delivers the applied fraction
+.volume_changed => |fraction| model.volume = fraction,
+```
+
+</CodeToggle>
+
+A void `volume_changed` arm keeps the older plain form; the `Options.sync` hook remains available to Zig apps that mirror runtime widget state wholesale.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically; `on_value = Ui.valueMsg(.tag)` is the value channel:
 
 ```zig
 ui.column(.{ .gap = 20, .width = 280 }, .{
@@ -37,7 +46,7 @@ ui.column(.{ .gap = 20, .width = 280 }, .{
         .value = model.volume,
         .on_value = Ui.valueMsg(.volume_changed),
     }, .{}),
-    ui.el(.slider, .{ .value = 0.7, .disabled = true }, .{}),
+    ui.el(.slider, .{ .value = 0.7, .disabled = true, .semantics = .{ .label = "Balance" } }, .{}),
 })
 ```
 

@@ -33,6 +33,21 @@ pub fn typeScanQuota(comptime T: type) u32 {
     return 2000 + entries * 64 + entries * entries;
 }
 
+/// Single-item const pointers are transparent in binding traversal: a
+/// `*const Row` nested-record field or list element binds exactly like
+/// the struct it points at. This is the committed-model idiom — shared
+/// nodes referenced by pointer, the shape transpiled cores emit for
+/// records and record arrays — and it mirrors `sliceElement`'s existing
+/// pointer transparency for iterables. Mutable single-item pointers stay
+/// opaque: markup reads models, so a bindable path must not smuggle a
+/// mutation channel.
+pub fn Pointee(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |info| if (info.size == .one and info.is_const) Pointee(info.child) else T,
+        else => T,
+    };
+}
+
 /// The element type a `for each` can iterate from this declaration:
 /// slices, arrays, and single-item pointers to either.
 pub fn sliceElement(comptime T: type) ?type {
@@ -85,6 +100,205 @@ pub fn isZeroArgFn(comptime T: type, comptime DeclType: type) bool {
         else => return false,
     };
     return info.params.len == 1 and info.return_type != null and info.params[0].type == *const T;
+}
+
+/// The canvas `TextInputEvent` union's tag vocabulary, pinned here so the
+/// declared-shape predicate below stays std-only. A drift test in
+/// `ui_markup_contract_tests.zig` holds this list equal to the real union.
+pub const text_input_event_tags = [_][]const u8{
+    "insert_text",     "delete_backward",     "delete_forward", "delete_word_backward",
+    "delete_word_forward", "clear",           "move_caret",     "set_selection",
+    "set_composition", "commit_composition",  "cancel_composition",
+};
+
+/// The caret-direction member vocabulary (`canvas.TextCaretDirection`).
+pub const text_caret_direction_members = [_][]const u8{
+    "previous", "next", "previous_word", "next_word", "start", "end",
+};
+
+/// A Msg arm payload union DECLARING the text-input event shape rather than
+/// being `canvas.TextInputEvent` by identity — the transpiled-core case,
+/// where the emitted module declares its own mirror union (type identity
+/// cannot cross the emission boundary). Matched structurally, by the same
+/// contract everywhere markup resolves `on-input`:
+///   - a tagged union carrying exactly the eleven canvas event tags;
+///   - `insert_text` a bytes payload; the seven verb arms void;
+///   - `move_caret` a record of `direction` (an enum with exactly the six
+///     caret-direction member names) and `extend: bool`;
+///   - `set_selection` a record of numeric `anchor`/`focus`;
+///   - `set_composition` a record of bytes `text` and optional numeric
+///     `cursor`.
+/// Numeric fields accept integer or float (the transpiler's number model
+/// classes each slot); the dispatch translation widens accordingly.
+pub fn declaredTextInputUnion(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"union" => |u| u,
+        else => return false,
+    };
+    if (info.tag_type == null) return false;
+    if (info.fields.len != text_input_event_tags.len) return false;
+    inline for (text_input_event_tags) |tag| {
+        if (!@hasField(T, tag)) return false;
+    }
+    inline for (info.fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "insert_text")) {
+            if (!isBytes(field.type)) return false;
+        } else if (comptime std.mem.eql(u8, field.name, "move_caret")) {
+            if (!isCaretMoveRecord(field.type)) return false;
+        } else if (comptime std.mem.eql(u8, field.name, "set_selection")) {
+            if (!isSelectionRecord(field.type)) return false;
+        } else if (comptime std.mem.eql(u8, field.name, "set_composition")) {
+            if (!isCompositionRecord(field.type)) return false;
+        } else if (field.type != void) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The canvas `ScrollState` field vocabulary, pinned here so the
+/// declared-shape predicate below stays std-only. A drift test in
+/// `ui_markup_contract_tests.zig` holds this list equal to the real
+/// struct's fields (names and f32 types alike).
+pub const scroll_state_field_names = [_][]const u8{
+    "offset", "velocity", "viewport_extent", "content_extent",
+};
+
+/// The same vocabulary in the TS SDK's spelling (`@native-sdk/core/events`
+/// `ScrollState`): transpiled cores emit their mirror record with the
+/// field names the TS source wrote — your names are your names — so the
+/// structural match accepts either spelling, never a mix.
+pub const scroll_state_field_names_ts = [_][]const u8{
+    "offset", "velocity", "viewportExtent", "contentExtent",
+};
+
+/// A Msg arm payload record DECLARING the scroll-state shape rather than
+/// being `canvas.ScrollState` by identity — the transpiled-core case,
+/// where the emitted module declares its own mirror record (type identity
+/// cannot cross the emission boundary). Matched structurally, the
+/// `declaredTextInputUnion` contract applied to `on-scroll`: a struct of
+/// exactly the four field names in either the canvas spelling
+/// (`viewport_extent`, Zig-declared mirrors and `canvas.ScrollState`
+/// itself) or the TS SDK spelling (`viewportExtent`, the emitted-core
+/// mirror — transpiled fields keep their TS names), each numeric. Integer
+/// or float per field (the transpiler's number model classes each slot);
+/// the dispatch translation widens floats exactly and rounds
+/// integer-classed fields to the nearest whole number.
+pub fn declaredScrollStateRecord(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len != scroll_state_field_names.len) return false;
+    const canvas_spelling = comptime blk: {
+        for (scroll_state_field_names) |name| {
+            if (!@hasField(T, name)) break :blk false;
+        }
+        break :blk true;
+    };
+    const ts_spelling = comptime blk: {
+        for (scroll_state_field_names_ts) |name| {
+            if (!@hasField(T, name)) break :blk false;
+        }
+        break :blk true;
+    };
+    if (!canvas_spelling and !ts_spelling) return false;
+    inline for (info.fields) |field| {
+        if (!isNumeric(field.type)) return false;
+    }
+    return true;
+}
+
+/// The machine classes a value-carrying Msg arm may declare for the
+/// markup value events (slider `on-change`, split `on-resize`): `f32` is
+/// the canvas-native payload Zig cores declare; `f64` is the one-number
+/// float arm transpiled cores emit (the timestamp-arm shape, float side),
+/// matched structurally because type identity cannot cross the emission
+/// boundary — the dispatch translation widens the runtime's applied f32
+/// exactly. Integer arms are deliberately excluded: both value events
+/// deliver a clamped 0..1 fraction (the slider and split contracts), so
+/// an integer arm could only ever receive 0 or 1 — silently useless data
+/// the teaching message refuses instead.
+pub const ValueArmClass = enum { identity, float };
+
+/// Classify a Msg arm payload as a value arm, or null when the arm
+/// cannot carry the control's applied value.
+pub fn valueArmClass(comptime T: type) ?ValueArmClass {
+    if (T == f32) return .identity;
+    if (T == f64) return .float;
+    return null;
+}
+
+fn isBytes(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |info| info.size == .slice and info.child == u8 and info.is_const,
+        else => false,
+    };
+}
+
+fn isNumeric(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float => true,
+        else => false,
+    };
+}
+
+fn isCaretMoveRecord(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len != 2) return false;
+    if (!@hasField(T, "direction") or !@hasField(T, "extend")) return false;
+    inline for (info.fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "extend")) {
+            if (field.type != bool) return false;
+        } else {
+            const members = switch (@typeInfo(field.type)) {
+                .@"enum" => |e| e.fields,
+                else => return false,
+            };
+            if (members.len != text_caret_direction_members.len) return false;
+            inline for (text_caret_direction_members) |name| {
+                if (!@hasField(field.type, name)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn isSelectionRecord(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len != 2) return false;
+    if (!@hasField(T, "anchor") or !@hasField(T, "focus")) return false;
+    inline for (info.fields) |field| {
+        if (!isNumeric(field.type)) return false;
+    }
+    return true;
+}
+
+fn isCompositionRecord(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len != 2) return false;
+    if (!@hasField(T, "text") or !@hasField(T, "cursor")) return false;
+    inline for (info.fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "text")) {
+            if (!isBytes(field.type)) return false;
+        } else {
+            const inner = switch (@typeInfo(field.type)) {
+                .optional => |o| o.child,
+                else => return false,
+            };
+            if (!isNumeric(inner)) return false;
+        }
+    }
+    return true;
 }
 
 /// Types a binding leaf can produce a `Value` from, mirroring the

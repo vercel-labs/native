@@ -3036,6 +3036,64 @@ test "the chart element builds the hand-written Ui.chart tree with series bindin
     try testing.expectEqual(@as(?f32, 2), latency_chart.style.stroke_width);
 }
 
+// ------------------------------------------------------ f64 chart fixture
+
+/// A model shaped the way TRANSPILED TS cores emit theirs: every number
+/// array is `[]const f64` (the subset's one float class). Series bindings
+/// must narrow these into arena f32 copies — without that rule markup
+/// charts would be unreachable from a TS model.
+pub const ChartF64Model = struct {
+    samples: []const f64 = &.{ 0.25, std.math.nan(f64), 0.5, 1 },
+
+    /// Arena-computed f64 series: the emitted shape of an exported TS
+    /// model helper returning `readonly number[]`.
+    pub fn halved(model: *const ChartF64Model, arena: std.mem.Allocator) []const f64 {
+        const out = arena.alloc(f64, model.samples.len) catch return &.{};
+        for (model.samples, out) |sample, *slot| slot.* = sample / 2;
+        return out;
+    }
+};
+
+pub const chart_f64_markup_source =
+    \\<column>
+    \\  <chart width="120" height="32" y-min="0" y-max="1" label="F64 history">
+    \\    <series kind="bar" values="{samples}" />
+    \\    <series kind="area" values="{halved}" />
+    \\  </chart>
+    \\</column>
+;
+
+test "chart series bind f64 iterables (the transpiled-core float class) by narrowing into the arena" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = ChartF64Model{};
+    const ChartMarkup = markup_view.MarkupView(ChartF64Model, ChartMsg);
+    var view = try ChartMarkup.init(arena, chart_f64_markup_source);
+    var markup_ui = ChartUi.init(arena);
+    const tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    const chart = findByKind(tree.root, .chart).?;
+    try testing.expectEqual(@as(usize, 2), chart.chart.series.len);
+
+    // The field-bound series: exact f32 casts of the f64 samples, NaN
+    // gaps passed through as gaps.
+    const bars = chart.chart.series[0];
+    try testing.expectEqual(@as(usize, 4), bars.values.len);
+    try testing.expectEqual(@as(f32, 0.25), bars.values[0]);
+    try testing.expect(std.math.isNan(bars.values[1]));
+    try testing.expectEqual(@as(f32, 1), bars.values[3]);
+
+    // The arena-fn-bound series narrows the same way.
+    const area = chart.chart.series[1];
+    try testing.expectEqual(canvas.ChartSeriesKind.line, area.kind);
+    try testing.expect(area.fill);
+    try testing.expectEqual(@as(f32, 0.125), area.values[0]);
+    try testing.expect(std.math.isNan(area.values[1]));
+    try testing.expectEqual(@as(f32, 0.5), area.values[3]);
+}
+
 test "chart misuse fails the build with teaching messages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -3706,4 +3764,282 @@ test "reactions misuse fails the build with the pinned teaching messages" {
     const document = try parser.parse();
     const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(canvas.ui_markup.font_coverage_message, info.message);
+}
+
+// ----------------------------------------------- declared text-input unions
+
+/// The transpiled-core mirror of `canvas.TextInputEvent`: the shape the
+/// @native-sdk/core emitter produces for a core-declared event union. Matched
+/// structurally by `declaredTextInputUnion` — type identity cannot cross
+/// the emission boundary.
+pub const MirrorCaretDirection = enum(u8) { previous = 0, next = 1, previous_word = 2, next_word = 3, start = 4, end = 5 };
+pub const MirrorCaretMove = struct { direction: MirrorCaretDirection, extend: bool };
+pub const MirrorSelection = struct { anchor: i64, focus: i64 };
+pub const MirrorTextInputEvent = union(enum) {
+    insert_text: []const u8,
+    delete_backward,
+    delete_forward,
+    delete_word_backward,
+    delete_word_forward,
+    clear,
+    move_caret: MirrorCaretMove,
+    set_selection: MirrorSelection,
+    set_composition: struct { text: []const u8, cursor: ?i64 },
+    commit_composition,
+    cancel_composition,
+};
+
+pub const MirrorModel = struct {
+    draft: []const u8 = "",
+};
+
+pub const MirrorMsg = union(enum) {
+    submit,
+    edit: MirrorTextInputEvent,
+};
+
+test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-misses" {
+    try testing.expect(markup_view.declaredTextInputUnion(MirrorTextInputEvent));
+    // The canvas union itself matches structurally too (usize numerics).
+    try testing.expect(markup_view.declaredTextInputUnion(canvas.TextInputEvent));
+    // Near-misses stay out: a missing arm, a non-bytes insert payload, a
+    // wrong caret vocabulary.
+    const MissingArm = union(enum) {
+        insert_text: []const u8,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        clear,
+        move_caret: MirrorCaretMove,
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(MissingArm));
+    const WrongInsert = union(enum) {
+        insert_text: i64,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        clear,
+        move_caret: MirrorCaretMove,
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+        cancel_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(WrongInsert));
+    const WrongDirection = enum { up, down, left, right, home, end_key };
+    const WrongMove = union(enum) {
+        insert_text: []const u8,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        clear,
+        move_caret: struct { direction: WrongDirection, extend: bool },
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+        cancel_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(WrongMove));
+    try testing.expect(!markup_view.declaredTextInputUnion(i64));
+}
+
+// ------------------------------------- declared scroll-state + value arms
+
+/// The transpiled-core mirror of `canvas.ScrollState`: the record shape the
+/// @native-sdk/core emitter produces for a core-declared scroll payload —
+/// fields keep their TS names (`viewportExtent`), so the mirror carries the
+/// TS SDK spelling. Matched structurally by `declaredScrollStateRecord` —
+/// type identity cannot cross the emission boundary. Fields class
+/// independently (the number tier): float fields widen exactly, integer
+/// fields round.
+pub const MirrorScrollState = struct {
+    offset: f64,
+    velocity: f64,
+    viewportExtent: i64,
+    contentExtent: i64,
+};
+
+pub const MirrorControlsModel = struct {
+    scroll_top: f64 = 0,
+    seek_fraction: f64 = 0,
+    volume: f64 = 0.5,
+};
+
+pub const MirrorControlsMsg = union(enum) {
+    library_scrolled: MirrorScrollState,
+    scrubbed: f64,
+    set_volume: f32,
+    stepped: i64,
+    nudged,
+};
+
+test "declaredScrollStateRecord accepts the emitted mirror shape and rejects near-misses" {
+    try testing.expect(markup_view.declaredScrollStateRecord(MirrorScrollState));
+    // The canvas struct itself matches structurally too (four f32 fields).
+    try testing.expect(markup_view.declaredScrollStateRecord(canvas.ScrollState));
+    // A Zig-declared mirror in the canvas spelling stays accepted.
+    try testing.expect(markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    // Near-misses stay out: a missing field, a renamed field, a non-numeric
+    // field, an extra field, a spelling mix.
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_size: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: []const u8, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64, extra: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, contentExtent: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(i64));
+}
+
+test "valueArmClass classifies exactly the value-carrying arm shapes" {
+    try testing.expect(markup_view.valueArmClass(f32) == .identity);
+    try testing.expect(markup_view.valueArmClass(f64) == .float);
+    // Integer arms stay out: the value events deliver a clamped 0..1
+    // fraction, so an integer arm could only ever carry 0 or 1.
+    try testing.expect(markup_view.valueArmClass(i64) == null);
+    try testing.expect(markup_view.valueArmClass(u32) == null);
+    try testing.expect(markup_view.valueArmClass(bool) == null);
+    try testing.expect(markup_view.valueArmClass([]const u8) == null);
+}
+
+test "the interpreter binds on-scroll to a declared mirror record and translates the state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<scroll value="{scroll_top}" on-scroll="library_scrolled">
+        \\  <text>rows</text>
+        \\</scroll>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const region = findByKind(tree.root, .scroll_view).?;
+    const msg = tree.msgForScroll(region.id, .{
+        .offset = 41.5,
+        .velocity = -3.25,
+        .viewport_extent = 480.4,
+        .content_extent = 2000.6,
+    }).?;
+    // Float fields widen exactly; integer-classed fields round to the
+    // nearest whole number.
+    try testing.expectEqual(@as(f64, 41.5), msg.library_scrolled.offset);
+    try testing.expectEqual(@as(f64, -3.25), msg.library_scrolled.velocity);
+    try testing.expectEqual(@as(i64, 480), msg.library_scrolled.viewportExtent);
+    try testing.expectEqual(@as(i64, 2001), msg.library_scrolled.contentExtent);
+}
+
+test "the interpreter binds slider on-change value arms and keeps the void static form" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<column>
+        \\  <slider value="{seek_fraction}" label="Seek" on-change="scrubbed" />
+        \\  <slider value="{volume}" label="Volume" on-change="set_volume" />
+        \\  <slider value="{volume}" label="Nudge" on-change="nudged" />
+        \\</column>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    var sliders: [3]canvas.Widget = undefined;
+    var count: usize = 0;
+    collectByKind(tree.root, .slider, &sliders, &count);
+    try testing.expectEqual(@as(usize, 3), count);
+    // The f64 arm receives the applied fraction widened exactly.
+    try testing.expectEqual(@as(f64, 0.25), tree.msgForChange(sliders[0].id, 0.25).?.scrubbed);
+    // The f32 arm keeps the identity path.
+    try testing.expectEqual(@as(f32, 0.5), tree.msgForChange(sliders[1].id, 0.5).?.set_volume);
+    // A void arm keeps the static "something changed" form.
+    try testing.expectEqual(MirrorControlsMsg.nudged, tree.msgForChange(sliders[2].id, 0.9).?);
+    // An integer arm is not a value target: the bare form stays the
+    // static-message error path ("message requires a payload").
+    var bad_view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<slider value="{volume}" label="Step" on-change="stepped" />
+    );
+    var bad_ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    try testing.expectError(error.MarkupBuild, bad_view.build(&bad_ui, &model));
+    try testing.expectEqualStrings("message requires a payload", bad_view.diagnostic.message);
+}
+
+fn collectByKind(widget: canvas.Widget, kind: canvas.WidgetKind, out: []canvas.Widget, count: *usize) void {
+    if (widget.kind == kind and count.* < out.len) {
+        out[count.*] = widget;
+        count.* += 1;
+    }
+    for (widget.children) |child| collectByKind(child, kind, out, count);
+}
+
+test "the interpreter binds split on-resize to a declared one-number float arm" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<split value="{seek_fraction}" on-resize="scrubbed">
+        \\  <column><text>left</text></column>
+        \\  <column><text>right</text></column>
+        \\</split>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const fraction = tree.msgForResize(tree.root.id, 0.25).?.scrubbed;
+    try testing.expectApproxEqAbs(@as(f64, 0.25), fraction, 0.0000001);
+}
+
+test "on-resize with an integer arm keeps the payload teaching message" {
+    // on-resize stays float-only: an i64 arm is not a fraction target.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = "<split value=\"0.5\" on-resize=\"stepped\"><column></column><column></column></split>";
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena, source);
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.on_resize_payload_message, view.diagnostic.message);
+}
+
+test "the interpreter binds on-input to a declared mirror union and translates every event" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorModel{ .draft = "hi" };
+    var view = try markup_view.MarkupView(MirrorModel, MirrorMsg).init(arena,
+        \\<column>
+        \\  <text-field text="{draft}" label="Draft" on-input="edit" on-submit="submit" />
+        \\</column>
+    );
+    var ui = canvas.Ui(MirrorMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const field = findByKind(tree.root, .text_field).?;
+
+    // Bytes ride through unchanged.
+    const inserted = tree.msgForTextEdit(field.id, .{ .insert_text = "abc" }).?;
+    try testing.expectEqualStrings("abc", inserted.edit.insert_text);
+    // Void verbs map by tag.
+    try testing.expectEqual(MirrorTextInputEvent.delete_backward, tree.msgForTextEdit(field.id, .delete_backward).?.edit);
+    // Caret moves translate the direction enum by member name.
+    const moved = tree.msgForTextEdit(field.id, .{ .move_caret = .{ .direction = .previous_word, .extend = true } }).?;
+    try testing.expectEqual(MirrorCaretDirection.previous_word, moved.edit.move_caret.direction);
+    try testing.expect(moved.edit.move_caret.extend);
+    // Selections widen into the declared integer fields.
+    const selected = tree.msgForTextEdit(field.id, .{ .set_selection = .{ .anchor = 1, .focus = 4 } }).?;
+    try testing.expectEqual(@as(i64, 1), selected.edit.set_selection.anchor);
+    try testing.expectEqual(@as(i64, 4), selected.edit.set_selection.focus);
+    // Compositions carry text and the optional cursor.
+    const composed = tree.msgForTextEdit(field.id, .{ .set_composition = .{ .text = "é", .cursor = 2 } }).?;
+    try testing.expectEqualStrings("é", composed.edit.set_composition.text);
+    try testing.expectEqual(@as(?i64, 2), composed.edit.set_composition.cursor);
+    const cleared = tree.msgForTextEdit(field.id, .{ .set_composition = .{ .text = "", .cursor = null } }).?;
+    try testing.expectEqual(@as(?i64, null), cleared.edit.set_composition.cursor);
 }

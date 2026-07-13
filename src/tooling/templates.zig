@@ -1,5 +1,6 @@
 const std = @import("std");
 const junction = @import("junction.zig");
+const ts_core = @import("ts_core.zig");
 
 /// The SDK's default app icon, rendered from vector source by
 /// `zig build generate-icon` (tools/generate_app_icon.zig). Embedded so
@@ -64,11 +65,32 @@ pub const Shape = enum {
     full,
 };
 
+/// Which core the native-frontend scaffold writes. No language flag and no
+/// persistent config anywhere: the choice leaves NOTHING behind but the
+/// tree itself (src/core.ts vs src/main.zig) - the build graph detects the
+/// core from the tree on every build.
+pub const CoreTemplate = enum {
+    /// TypeScript core (src/core.ts) + markup view - the default.
+    ts,
+    /// Zig core (src/main.zig) + markup view - the same starter app,
+    /// authored in Zig.
+    zig,
+
+    pub fn parse(value: []const u8) ?CoreTemplate {
+        if (std.mem.eql(u8, value, "ts-core")) return .ts;
+        if (std.mem.eql(u8, value, "zig-core")) return .zig;
+        return null;
+    }
+};
+
 pub const InitOptions = struct {
     app_name: []const u8,
     framework_path: []const u8 = ".",
     frontend: Frontend = .vite,
     shape: Shape = .slim,
+    /// Applies to the native frontend only (web frontends have no core
+    /// tier to scaffold).
+    core: CoreTemplate = .ts,
 };
 
 pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []const u8, options: InitOptions) !void {
@@ -86,6 +108,15 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try app_dir.createDirPath(io, "assets");
 
     if (options.frontend == .native) {
+        if (options.core == .ts) {
+            if (options.shape == .slim) {
+                return writeTsAppSlim(allocator, io, app_dir, names, destination, options.framework_path);
+            }
+            // build.zig.zon path dependencies must be relative to the app root.
+            const dependency_path = try nativeDependencyPath(allocator, io, destination, framework_path);
+            defer allocator.free(dependency_path);
+            return writeTsApp(allocator, io, app_dir, names, dependency_path, destination, options.framework_path);
+        }
         if (options.shape == .slim) {
             return writeNativeAppSlim(allocator, io, app_dir, names);
         }
@@ -149,6 +180,314 @@ fn slimGitignore() []const u8 {
     \\.zig-cache/
     \\
     ;
+}
+
+/// The TypeScript-core zero-config scaffold - the `native init` default:
+/// core.ts (logic), app.native (view), app.zon (manifest). ZERO Zig in the
+/// tree; the build graph detects src/core.ts, transpiles it, and stages the
+/// generated wiring outside the app on every build.
+///
+/// The tree also carries the EDITOR surface: package.json + tsconfig.json,
+/// so stock editor TypeScript resolves `@native-sdk/core` with full
+/// IntelliSense, plus a materialized node_modules copy of the SDK package
+/// (ts_core.zig owns that contract). None of it is build truth — the tree
+/// detection above keys on src/core.ts alone, and every `native` verb
+/// works with node_modules deleted.
+fn writeTsAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, destination: []const u8, sdk_source: []const u8) !void {
+    const app_zon = try nativeAppZon(allocator, names);
+    defer allocator.free(app_zon);
+    const readme_md = try tsSlimReadme(allocator, names);
+    defer allocator.free(readme_md);
+
+    try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
+    try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
+    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
+    try writeFile(app_dir, io, ".gitignore", tsGitignore());
+    try writeFile(app_dir, io, "README.md", readme_md);
+    try writeTsEditorSurface(allocator, io, app_dir, names, destination, sdk_source);
+}
+
+/// The `--full` twin: the same TS tree plus an owned build.zig/zon pair
+/// (the plain addApp call - the build graph's tree detection does the
+/// rest), for users who want to own the build from day one.
+fn writeTsApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, framework_path: []const u8, destination: []const u8, sdk_source: []const u8) !void {
+    const build_zig = try nativeBuildZig(allocator, names);
+    defer allocator.free(build_zig);
+    const build_zon = try nativeBuildZon(allocator, names, framework_path);
+    defer allocator.free(build_zon);
+    const app_zon = try nativeAppZon(allocator, names);
+    defer allocator.free(app_zon);
+    const readme_md = try tsSlimReadme(allocator, names);
+    defer allocator.free(readme_md);
+
+    try writeFile(app_dir, io, "build.zig", build_zig);
+    try writeFile(app_dir, io, "build.zig.zon", build_zon);
+    try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
+    try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
+    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
+    try writeFile(app_dir, io, ".gitignore", tsGitignore());
+    try writeFile(app_dir, io, "README.md", readme_md);
+    try writeTsEditorSurface(allocator, io, app_dir, names, destination, sdk_source);
+}
+
+/// The editor-and-versioning surface of a TS scaffold: package.json (the
+/// app's name and its `@native-sdk/core` dependency at the SDK's bundled
+/// version), tsconfig.json (the checker's own compiler options, so editor
+/// errors match `native check` reality), and a materialized
+/// node_modules/@native-sdk/core so resolution works BEFORE the package is
+/// published to npm. `sdk_source` is the framework checkout as reachable
+/// from the CLI's cwd (unlike the destination-relative build.zig.zon path).
+fn writeTsEditorSurface(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, destination: []const u8, sdk_source: []const u8) !void {
+    const sdk_version = ts_core.bundledSdkVersion(allocator, io, sdk_source) catch |err| {
+        std.debug.print("the Native SDK at {s} is missing packages/core/package.json - is the checkout complete?\n", .{sdk_source});
+        return err;
+    };
+    defer allocator.free(sdk_version);
+    const package_json = try tsPackageJson(allocator, names, sdk_version);
+    defer allocator.free(package_json);
+    try writeFile(app_dir, io, "package.json", package_json);
+    try writeFile(app_dir, io, "tsconfig.json", tsTsconfig());
+    _ = try ts_core.ensureEditorPackage(allocator, io, sdk_source, destination);
+}
+
+/// The app's package.json: name + the pinned `@native-sdk/core` dependency,
+/// nothing else. It exists for editors and versioning only — the `native`
+/// verbs never read it (tree detection keys on src/core.ts; the build
+/// transpiles against the SDK checkout) — and the pin is exact so the
+/// post-publish `npm install` resolves the same content the CLI
+/// materialized.
+fn tsPackageJson(allocator: std.mem.Allocator, names: TemplateNames, sdk_version: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\n  \"name\": ");
+    try appendJsonString(&out, allocator, names.package_name);
+    try out.appendSlice(allocator,
+        \\,
+        \\  "private": true,
+        \\  "description": "Editor and versioning surface only: stock TypeScript tooling resolves @native-sdk/core from here. The native CLI never reads it and builds with node_modules absent.",
+        \\  "dependencies": {
+        \\    "@native-sdk/core":
+    );
+    try out.appendSlice(allocator, " ");
+    try appendJsonString(&out, allocator, sdk_version);
+    try out.appendSlice(allocator,
+        \\
+        \\  }
+        \\}
+        \\
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+/// The editor tsconfig: the same compiler options the @native-sdk/core
+/// checker builds its program with (typed_ast.ts subsetCompilerOptions), so
+/// what the editor flags is what `native check` flags — minus the SDK
+/// `paths` injection: editors resolve `@native-sdk/core` through
+/// node_modules like any package.
+fn tsTsconfig() []const u8 {
+    return
+    \\{
+    \\  // Mirrors the compiler options the @native-sdk/core checker enforces,
+    \\  // so editor diagnostics match `native check` reality. @native-sdk/core
+    \\  // resolves from node_modules: the native CLI materializes the SDK's
+    \\  // copy there (and keeps it fresh) until the package is on npm.
+    \\  "compilerOptions": {
+    \\    "strict": true,
+    \\    "target": "esnext",
+    \\    "module": "esnext",
+    \\    "moduleResolution": "bundler",
+    \\    "lib": ["esnext"],
+    \\    "types": [],
+    \\    "allowImportingTsExtensions": true,
+    \\    "verbatimModuleSyntax": true,
+    \\    "exactOptionalPropertyTypes": true,
+    \\    "noFallthroughCasesInSwitch": true,
+    \\    "isolatedModules": true,
+    \\    "noEmit": true,
+    \\    "skipLibCheck": true
+    \\  },
+    \\  "include": ["src/**/*.ts"]
+    \\}
+    \\
+    ;
+}
+
+/// TS scaffolds ignore node_modules on top of the slim set: the
+/// @native-sdk/core copy in there is CLI-managed (npm-managed after
+/// publish), never source. `.native/` stays: `native check` stages the
+/// emitted core there for --full trees too.
+fn tsGitignore() []const u8 {
+    return
+    \\.native/
+    \\zig-out/
+    \\.zig-cache/
+    \\node_modules/
+    \\
+    ;
+}
+
+/// The starter core: a counter with a repeating tick (Sub.timer) and a
+/// timestamp request (Cmd.now) - one of each effect surface, small enough
+/// to read whole.
+fn tsCoreStarter() []const u8 {
+    return
+    \\// The app core: Model, Msg, update, and the pure helpers they call -
+    \\// plain TypeScript in the app-core subset, compiled to native Zig at
+    \\// build time (no JS runtime ships in the binary). The view lives in
+    \\// app.native and binds this model by its own field names exactly as
+    \\// written here (`tickCount` binds as `{tickCount}`).
+    \\//
+    \\// The loop: edit here -> `native dev --core` for instant logic checks
+    \\// under node -> `native dev` to run the real app. `native check`
+    \\// verifies this file and the markup together.
+    \\
+    \\import { Cmd, Sub } from "@native-sdk/core";
+    \\
+    \\export interface Model {
+    \\  readonly count: number;
+    \\  readonly ticking: boolean;
+    \\  readonly tickCount: number;
+    \\  readonly stampedMs: number;
+    \\}
+    \\
+    \\export type Msg =
+    \\  | { readonly kind: "increment" }
+    \\  | { readonly kind: "decrement" }
+    \\  | { readonly kind: "reset" }
+    \\  | { readonly kind: "toggle_ticking" }
+    \\  | { readonly kind: "stamp" }
+    \\  | { readonly kind: "stamped"; readonly at: number }
+    \\  | { readonly kind: "tick"; readonly at: number };
+    \\
+    \\// `tick` and `stamped` are dispatched by the host (timer fires and the
+    \\// Cmd.now result), never from markup - this list keeps `native check`'s
+    \\// unbound-state lint honest about that.
+    \\export const viewUnbound = ["tick", "stamped"] as const;
+    \\
+    \\export function initialModel(): Model {
+    \\  return { count: 0, ticking: false, tickCount: 0, stampedMs: -1 };
+    \\}
+    \\
+    \\// Exported single-model helpers become bindings too: `{total}` in
+    \\// app.native reads this.
+    \\export function total(model: Model): number {
+    \\  return model.count + model.tickCount;
+    \\}
+    \\
+    \\export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+    \\  switch (msg.kind) {
+    \\    case "increment":
+    \\      return { ...model, count: model.count + 1 };
+    \\    case "decrement":
+    \\      return { ...model, count: model.count - 1 };
+    \\    case "reset":
+    \\      return { ...model, count: 0, tickCount: 0 };
+    \\    case "toggle_ticking":
+    \\      return { ...model, ticking: !model.ticking };
+    \\    case "stamp":
+    \\      // Effects are data: the host performs this after commit and
+    \\      // dispatches `stamped` with the time.
+    \\      return [model, Cmd.now("stamped")];
+    \\    case "stamped":
+    \\      return { ...model, stampedMs: msg.at };
+    \\    case "tick":
+    \\      return { ...model, tickCount: model.tickCount + 1 };
+    \\  }
+    \\}
+    \\
+    \\// Recurring effects are declared from the model: while `ticking` holds,
+    \\// the host fires `tick` every second; flip it off and the timer stops.
+    \\export function subscriptions(model: Model): Sub<Msg> {
+    \\  if (!model.ticking) return Sub.none;
+    \\  return Sub.timer("tick", 1000, "tick");
+    \\}
+    \\
+    ;
+}
+
+fn tsAppMarkup() []const u8 {
+    return
+    \\<!-- The whole view: markup over the core's emitted model. Embedded at
+    \\     build time and hot-reloaded while `native dev` runs. Fields bind
+    \\     by the names core.ts wrote ({tickCount}); exported single-model
+    \\     helpers bind too ({total}). Validate with: native check -->
+    \\<column gap="12" padding="16">
+    \\  <row gap="8" cross="center">
+    \\    <text grow="1">Counter</text>
+    \\    <button size="sm" variant="ghost" on-press="reset">Reset</button>
+    \\  </row>
+    \\  <row gap="8" main="center" cross="center" grow="1">
+    \\    <button variant="secondary" on-press="decrement">-</button>
+    \\    <text>{count}</text>
+    \\    <button variant="primary" on-press="increment">+</button>
+    \\  </row>
+    \\  <row gap="8" cross="center">
+    \\    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    \\    <text grow="1">ticks {tickCount}</text>
+    \\    <button size="sm" on-press="stamp">Stamp</button>
+    \\  </row>
+    \\  <status-bar>total: {total} | stamped: {stampedMs}ms</status-bar>
+    \\</column>
+    \\
+    ;
+}
+
+fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "# ");
+    try out.appendSlice(allocator, names.display_name);
+    try out.appendSlice(allocator,
+        \\
+        \\
+        \\A native app authored in TypeScript and markup: the logic lives in
+        \\`src/core.ts` (Model, Msg, update - the app-core subset, compiled to
+        \\native code at build time; no JS runtime ships in the binary) and the
+        \\view in `src/app.native`. There is no Zig in this tree and nothing to
+        \\configure: the build detects `src/core.ts` and wires everything.
+        \\
+        \\## The loop
+        \\
+        \\```sh
+        \\native dev --core   # fastest: run the core's logic under node -
+        \\                    # dispatch messages as JSON lines, watch the model
+        \\                    # and effect transcript (not a renderer)
+        \\native dev          # build and run the real app (markup hot reload)
+        \\native check        # verify core.ts (subset checker) + markup + app.zon
+        \\native build        # ReleaseFast binary in zig-out/bin/
+        \\native test         # the app's test suite
+        \\```
+        \\
+        \\Edit `src/core.ts` for behavior, `src/app.native` for the view, and
+        \\`app.zon` for windows/identity/permissions. Markup binds the model's
+        \\field names exactly as core.ts wrote them (`tickCount` -> `{tickCount}`),
+        \\and exported single-model helpers bind as derived values (`{total}`).
+        \\
+        \\## Try the core loop
+        \\
+        \\```sh
+        \\printf '%s\n' '{"kind":"increment"}' '{"kind":"toggle_ticking"}' '{"advance":3000}' | native dev --core
+        \\```
+        \\
+        \\## Editor support
+        \\
+        \\Stock editor TypeScript just works: `package.json` and `tsconfig.json`
+        \\are the editor-and-versioning surface (the tsconfig mirrors the checker's
+        \\own options, so editor errors match `native check`), and
+        \\`node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package
+        \\so `@native-sdk/core` resolves with full IntelliSense. Builds never read
+        \\any of it — delete node_modules and every `native` verb still works; the
+        \\next `native check`/`dev`/`build` puts it back.
+        \\
+        \\## Requirements
+        \\
+        \\Node.js 22+ on PATH (the TypeScript-to-native transpiler runs at build
+        \\time; your shipped binary carries none of it).
+        \\
+    );
+    return out.toOwnedSlice(allocator);
 }
 
 fn slimNativeReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
@@ -277,9 +616,11 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
-        \\//! A minimal native-rendered Native SDK app: the view lives in
-        \\//! `app.native` (embedded into the binary, and watched for hot reload in
-        \\//! dev); this file is the logic: `Model`, `Msg`, and `update`.
+        \\//! The app core in Zig: `Model`, `Msg`, and `update` - the same
+        \\//! counter-with-effects starter the TypeScript template builds. The view
+        \\//! lives in `app.native` (embedded into the binary, and watched for hot
+        \\//! reload in dev); recurring work and clock reads ride the effects
+        \\//! channel, so `update` stays a plain function of model + message.
         \\
         \\const std = @import("std");
         \\const runner = @import("runner");
@@ -319,17 +660,66 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\    increment,
         \\    decrement,
         \\    reset,
+        \\    toggle_ticking,
+        \\    stamp,
+        \\    tick: native_sdk.EffectTimer,
+        \\
+        \\    // `tick` is dispatched by the host (the repeating timer fires),
+        \\    // never from markup - this keeps the unbound-state lint honest
+        \\    // about that.
+        \\    pub const view_unbound = .{"tick"};
         \\};
         \\
         \\pub const Model = struct {
         \\    count: i64 = 0,
+        \\    ticking: bool = false,
+        \\    tick_count: i64 = 0,
+        \\    stamped_ms: i64 = -1,
+        \\
+        \\    // Public single-model helpers become bindings too: `{total}` in
+        \\    // app.native reads this.
+        \\    pub fn total(model: *const Model) i64 {
+        \\        return model.count + model.tick_count;
+        \\    }
         \\};
         \\
-        \\pub fn update(model: *Model, msg: Msg) void {
+        \\pub const Effects = native_sdk.Effects(Msg);
+        \\
+        \\/// The repeating tick's effects-channel key: starting an active key
+        \\/// replaces the timer in place, so toggling never double-registers.
+        \\pub const tick_timer_key: u64 = 1;
+        \\
+        \\pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         \\    switch (msg) {
         \\        .increment => model.count += 1,
         \\        .decrement => model.count -= 1,
-        \\        .reset => model.count = 0,
+        \\        .reset => {
+        \\            model.count = 0;
+        \\            model.tick_count = 0;
+        \\        },
+        \\        .toggle_ticking => {
+        \\            model.ticking = !model.ticking;
+        \\            // Recurring effects are timers on the effects channel: while
+        \\            // `ticking` holds, the host fires `tick` every second; flip
+        \\            // it off and the timer stops.
+        \\            if (model.ticking) {
+        \\                fx.startTimer(.{
+        \\                    .key = tick_timer_key,
+        \\                    .interval_ms = 1000,
+        \\                    .mode = .repeating,
+        \\                    .on_fire = Effects.timerMsg(.tick),
+        \\                });
+        \\            } else {
+        \\                fx.cancelTimer(tick_timer_key);
+        \\            }
+        \\        },
+        \\        // The journaled clock read - deterministic under session replay,
+        \\        // the Zig equivalent of the TypeScript starter's `Cmd.now`.
+        \\        .stamp => model.stamped_ms = fx.wallMs(),
+        \\        .tick => |timer| {
+        \\            if (timer.outcome != .fired) return;
+        \\            model.tick_count += 1;
+        \\        },
         \\    }
         \\}
         \\
@@ -360,7 +750,7 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\,
         \\        .scene = shell_scene,
         \\        .canvas_label = canvas_label,
-        \\        .update = update,
+        \\        .update_fx = update,
         \\        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
         \\    });
         \\    defer app_state.destroy();
@@ -406,9 +796,11 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
 
 fn nativeAppMarkup() []const u8 {
     return
-    \\<!-- The whole view. Embedded into the binary and hot-reloaded in dev:
-    \\     edit this file while the app runs and the window updates without
-    \\     losing the count. Validate with: native markup check src/app.native -->
+    \\<!-- The whole view: markup over the core's model. Embedded into the
+    \\     binary and hot-reloaded in dev: edit this file while the app runs
+    \\     and the window updates without losing the count. Fields bind by
+    \\     the names main.zig wrote ({tick_count}); public single-model
+    \\     helpers bind too ({total}). Validate with: native check -->
     \\<column gap="12" padding="16">
     \\  <row gap="8" cross="center">
     \\    <text grow="1">Counter</text>
@@ -419,7 +811,12 @@ fn nativeAppMarkup() []const u8 {
     \\    <text>{count}</text>
     \\    <button variant="primary" on-press="increment">+</button>
     \\  </row>
-    \\  <status-bar>count: {count}</status-bar>
+    \\  <row gap="8" cross="center">
+    \\    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    \\    <text grow="1">ticks {tick_count}</text>
+    \\    <button size="sm" on-press="stamp">Stamp</button>
+    \\  </row>
+    \\  <status-bar>total: {total} | stamped: {stamped_ms}ms</status-bar>
     \\</column>
     \\
     ;
@@ -440,6 +837,7 @@ fn nativeTestsZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
         \\const AppUi = main.AppUi;
         \\const Model = main.Model;
         \\const Msg = main.Msg;
+        \\const Effects = main.Effects;
         \\
         \\const AppMarkup = canvas.MarkupView(Model, Msg);
         \\
@@ -481,37 +879,106 @@ fn nativeTestsZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
         \\    defer arena_state.deinit();
         \\    const arena = arena_state.allocator();
         \\
+        \\    // A real effects channel in fake-executor mode: requests are
+        \\    // recorded for assertions instead of touching the OS.
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\
         \\    var model = main.initialModel();
         \\
         \\    var tree = try buildTree(arena, &model);
         \\    _ = try expectByText(tree.root, .text, "0");
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 0");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: -1ms");
         \\
         \\    // Click "+": the count increments and the view rebuilds with the
         \\    // new value, keeping widget ids stable.
         \\    const plus = try expectByText(tree.root, .button, "+");
-        \\    main.update(&model, tree.msgForPointer(plus.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(plus.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, 1), model.count);
         \\
         \\    tree = try buildTree(arena, &model);
         \\    _ = try expectByText(tree.root, .text, "1");
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 1");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 1 | stamped: -1ms");
         \\    try testing.expectEqual(plus.id, (try expectByText(tree.root, .button, "+")).id);
         \\
         \\    // Click "-" twice: the count goes negative.
         \\    const minus = try expectByText(tree.root, .button, "-");
-        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?);
-        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?, &fx);
+        \\    main.update(&model, tree.msgForPointer(minus.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, -1), model.count);
         \\
-        \\    // Click "Reset": back to zero.
+        \\    // Click "Reset": the count and the tick tally both go back to zero.
         \\    tree = try buildTree(arena, &model);
         \\    const reset = try expectByText(tree.root, .button, "Reset");
-        \\    main.update(&model, tree.msgForPointer(reset.id, .up).?);
+        \\    main.update(&model, tree.msgForPointer(reset.id, .up).?, &fx);
         \\    try testing.expectEqual(@as(i64, 0), model.count);
         \\
         \\    tree = try buildTree(arena, &model);
-        \\    _ = try expectByText(tree.root, .status_bar, "count: 0");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: -1ms");
+        \\}
+        \\
+        \\test "the ticking switch drives the repeating timer through the effects channel" {
+        \\    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        \\    defer arena_state.deinit();
+        \\    const arena = arena_state.allocator();
+        \\
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\
+        \\    var model = main.initialModel();
+        \\    var tree = try buildTree(arena, &model);
+        \\
+        \\    // Flip the switch on: the model tracks it and one repeating 1s
+        \\    // timer is registered on the effects channel.
+        \\    const ticker = try expectByText(tree.root, .switch_control, "Tick every second");
+        \\    main.update(&model, tree.msgForPointer(ticker.id, .up).?, &fx);
+        \\    try testing.expect(model.ticking);
+        \\    try testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+        \\    const request = fx.pendingTimerAt(0).?;
+        \\    try testing.expectEqual(main.tick_timer_key, request.key);
+        \\    try testing.expectEqual(@as(u64, 1000), request.interval_ms);
+        \\
+        \\    // Each timer fire arrives as an ordinary `tick` Msg through the
+        \\    // same update path as a click.
+        \\    main.update(&model, .{ .tick = .{ .key = main.tick_timer_key } }, &fx);
+        \\    main.update(&model, .{ .tick = .{ .key = main.tick_timer_key } }, &fx);
+        \\    try testing.expectEqual(@as(i64, 2), model.tick_count);
+        \\
+        \\    tree = try buildTree(arena, &model);
+        \\    _ = try expectByText(tree.root, .text, "ticks 2");
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 2 | stamped: -1ms");
+        \\
+        \\    // Flip it off: the timer is cancelled, nothing left armed.
+        \\    main.update(&model, tree.msgForPointer(ticker.id, .up).?, &fx);
+        \\    try testing.expect(!model.ticking);
+        \\    try testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+        \\}
+        \\
+        \\test "stamp reads the journaled wall clock" {
+        \\    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        \\    defer arena_state.deinit();
+        \\    const arena = arena_state.allocator();
+        \\
+        \\    var fx = Effects.init(testing.allocator);
+        \\    defer fx.deinit();
+        \\    fx.executor = .fake;
+        \\    // Swap the clock seam for a hand-cranked one: `fx.wallMs()`
+        \\    // becomes deterministic, exactly like session replay.
+        \\    var test_clock = native_sdk.TestClock{};
+        \\    test_clock.setWallMs(4200);
+        \\    fx.clock = test_clock.clock();
+        \\
+        \\    var model = main.initialModel();
+        \\    var tree = try buildTree(arena, &model);
+        \\
+        \\    const stamp = try expectByText(tree.root, .button, "Stamp");
+        \\    main.update(&model, tree.msgForPointer(stamp.id, .up).?, &fx);
+        \\    try testing.expectEqual(@as(i64, 4200), model.stamped_ms);
+        \\
+        \\    tree = try buildTree(arena, &model);
+        \\    _ = try expectByText(tree.root, .status_bar, "total: 0 | stamped: 4200ms");
         \\}
         \\
         \\test "the view lays out through the canvas engine" {
@@ -743,7 +1210,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\          pid=$!
         \\          trap 'kill "$pid" >/dev/null 2>&1 || true' EXIT
         \\          "$cli" automate wait
-        \\          "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
+        \\          "$cli" automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'total: 0'
         \\          "$cli" automate screenshot main-canvas
         \\          test -s .zig-cache/native-sdk-automation/screenshot-main-canvas.png
         \\
@@ -3101,14 +3568,110 @@ test "writeDefaultApp emits frontend-specific Next paths" {
     try std.testing.expect(std.mem.indexOf(u8, tsconfig_text, "\"@/*\": [\"./app/*\"]") != null);
 }
 
-test "writeDefaultApp emits a slim native scaffold by default" {
-    const destination = ".zig-cache/test-native-slim-template";
+test "writeDefaultApp emits the TS-core scaffold by default: three files of truth, zero Zig" {
+    const destination = ".zig-cache/test-ts-slim-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native });
+
+    const core_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/core.ts");
+    defer std.testing.allocator.free(core_text);
+    const markup_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/app.native");
+    defer std.testing.allocator.free(markup_text);
+    const ts_app_zon = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    defer std.testing.allocator.free(ts_app_zon);
+    const ts_readme = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
+    defer std.testing.allocator.free(ts_readme);
+
+    // ZERO Zig in the tree, no build files: the build graph detects
+    // src/core.ts and stages the wiring outside the app.
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig"));
+
+    // The starter uses one Cmd and one Sub, declares the lint opt-out, and
+    // exports a bindable helper.
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "Cmd.now(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "Sub.timer(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "export const viewUnbound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, core_text, "export function total(") != null);
+    // The markup binds the model's own TS field names and the helper.
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{tickCount}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{total}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_app_zon, "gpu_surface") != null);
+    // The README teaches the loop, node-first.
+    try std.testing.expect(std.mem.indexOf(u8, ts_readme, "native dev --core") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_readme, "native check") != null);
+
+    // The editor surface: package.json pins @native-sdk/core at the SDK's
+    // bundled version, tsconfig.json mirrors the checker's options, and
+    // node_modules carries the materialized SDK package so stock tsc
+    // resolves both entry points before the npm publish exists.
+    const package_json = try readTestFile(std.testing.allocator, std.testing.io, destination, "package.json");
+    defer std.testing.allocator.free(package_json);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"name\": \"my-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"private\": true") != null);
+    const bundled_version = try ts_core.bundledSdkVersion(std.testing.allocator, std.testing.io, ".");
+    defer std.testing.allocator.free(bundled_version);
+    const pinned = try std.fmt.allocPrint(std.testing.allocator, "\"@native-sdk/core\": \"{s}\"", .{bundled_version});
+    defer std.testing.allocator.free(pinned);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, pinned) != null);
+
+    const tsconfig = try readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json");
+    defer std.testing.allocator.free(tsconfig);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"strict\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"moduleResolution\": \"bundler\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"noEmit\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"exactOptionalPropertyTypes\": true") != null);
+
+    const editor_manifest = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/package.json");
+    defer std.testing.allocator.free(editor_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, editor_manifest, "\"@native-sdk/core\"") != null);
+    const editor_core = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/core.ts");
+    defer std.testing.allocator.free(editor_core);
+    try std.testing.expect(editor_core.len > 0);
+    const editor_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/text.ts");
+    defer std.testing.allocator.free(editor_text);
+    try std.testing.expect(editor_text.len > 0);
+    const editor_events = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/events.ts");
+    defer std.testing.allocator.free(editor_events);
+    try std.testing.expect(editor_events.len > 0);
+
+    // node_modules is generated surface: ignored, never source.
+    const ts_gitignore = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
+    defer std.testing.allocator.free(ts_gitignore);
+    try std.testing.expect(std.mem.indexOf(u8, ts_gitignore, "node_modules/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ts_gitignore, ".native/") != null);
+}
+
+test "writeDefaultApp --full ts-core carries the same editor surface" {
+    const destination = ".zig-cache/test-ts-full-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+
+    const build_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig");
+    defer std.testing.allocator.free(build_zig_text);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "native_sdk.addApp") != null);
+    const package_json = try readTestFile(std.testing.allocator, std.testing.io, destination, "package.json");
+    defer std.testing.allocator.free(package_json);
+    try std.testing.expect(std.mem.indexOf(u8, package_json, "\"@native-sdk/core\"") != null);
+    const tsconfig = try readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json");
+    defer std.testing.allocator.free(tsconfig);
+    try std.testing.expect(std.mem.indexOf(u8, tsconfig, "\"moduleResolution\": \"bundler\"") != null);
+    const editor_core = try readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/sdk/core.ts");
+    defer std.testing.allocator.free(editor_core);
+    try std.testing.expect(editor_core.len > 0);
+    const gitignore_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
+    defer std.testing.allocator.free(gitignore_text);
+    try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "node_modules/") != null);
+}
+
+test "writeDefaultApp --template zig-core emits the slim Zig scaffold at ts-core parity" {
+    const destination = ".zig-cache/test-native-slim-template";
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .core = .zig });
 
     const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
     defer std.testing.allocator.free(app_zon_text);
     const main_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig");
     defer std.testing.allocator.free(main_zig_text);
+    const markup_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/app.native");
+    defer std.testing.allocator.free(markup_text);
     const gitignore_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".gitignore");
     defer std.testing.allocator.free(gitignore_text);
     const readme_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
@@ -3116,14 +3679,34 @@ test "writeDefaultApp emits a slim native scaffold by default" {
     const icon = try readTestFile(std.testing.allocator, std.testing.io, destination, "assets/icon.png");
     defer std.testing.allocator.free(icon);
 
-    // Zero-config: no build files, no editor config, no CI workflow.
+    // Zero-config: no build files, no editor config, no CI workflow — and
+    // none of the TS scaffold's editor surface: a Zig app carries no
+    // package.json/tsconfig/node_modules (zero residue; the tree is the
+    // only language marker).
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig.zon"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".vscode/settings.json"));
     try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "package.json"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "tsconfig.json"));
+    try std.testing.expectError(error.FileNotFound, readTestFile(std.testing.allocator, std.testing.io, destination, "node_modules/@native-sdk/core/package.json"));
 
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "native_sdk.UiApp(Model, Msg)") != null);
+    // Feature parity with the ts-core starter: the same counter app with a
+    // repeating fx timer (the Sub.timer equivalent), a journaled clock
+    // read (the Cmd.now equivalent), the lint opt-out for the host-fired
+    // arm, and a bindable single-model helper.
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "fx.startTimer(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "fx.wallMs()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, ".update_fx = update,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "pub const view_unbound = .{\"tick\"};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "pub fn total(") != null);
+    // The markup is the ts starter's view over the Zig core's own field
+    // names, bound exactly as main.zig wrote them.
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{tick_count}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "{total}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markup_text, "on-toggle=\"toggle_ticking\"") != null);
     // The generated + derived state is ignored wholesale.
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, ".native/") != null);
     try std.testing.expect(std.mem.indexOf(u8, gitignore_text, "zig-out/") != null);
@@ -3138,7 +3721,7 @@ test "writeDefaultApp emits a slim native scaffold by default" {
 
 test "writeDefaultApp emits native project files" {
     const destination = ".zig-cache/test-native-init-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full, .core = .zig });
 
     const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
     defer std.testing.allocator.free(app_zon_text);
@@ -3184,7 +3767,7 @@ test "writeDefaultApp emits native project files" {
 
 test "writeDefaultApp emits a CI workflow for native apps" {
     const destination = ".zig-cache/test-native-ci-template";
-    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full });
+    try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full, .core = .zig });
 
     const ci_yaml_text = try readTestFile(std.testing.allocator, std.testing.io, destination, ".github/workflows/ci.yml");
     defer std.testing.allocator.free(ci_yaml_text);
@@ -3206,7 +3789,7 @@ test "writeDefaultApp emits a CI workflow for native apps" {
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "zig build -Dplatform=linux -Dweb-engine=system -Dautomation=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate wait") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'count: 0'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate assert 'gpu_nonblank=true' 'role=button name=\"Reset\"' 'total: 0'") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "automate screenshot main-canvas") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "test -s .zig-cache/native-sdk-automation/screenshot-main-canvas.png") != null);
     // The framework fetch step reuses the build.zig.zon dependency path.

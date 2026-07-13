@@ -46,6 +46,15 @@ const Profile = struct {
     age: u32 = 30,
 };
 
+/// The transpiled-core mirror of `canvas.ScrollState` (field names pinned
+/// by the reflect drift test below; classes per field).
+const MirrorScroll = struct {
+    offset: f64,
+    velocity: f64,
+    viewport_extent: f64,
+    content_extent: f64,
+};
+
 const Msg = union(enum) {
     add,
     remove: u32,
@@ -54,7 +63,9 @@ const Msg = union(enum) {
     scale: f32,
     draft: canvas.TextInputEvent,
     scrolled: canvas.ScrollState,
+    mirror_scrolled: MirrorScroll,
     pane: f32,
+    pane_wide: f64,
     tick,
 };
 
@@ -68,6 +79,7 @@ const Model = struct {
     cards: [2]Card = .{ .{ .id = 1 }, .{ .id = 2 } },
     hidden: u8 = 0,
     history: [4]f32 = .{ 0.1, 0.4, 0.2, 0.8 },
+    samples: [3]f64 = .{ 0.25, 0.5, 1 },
     stages: [4][]const u8 = .{ "one", "two", "three", "four" },
     draft_buffer: canvas.TextBuffer(16) = .{},
 
@@ -341,6 +353,64 @@ const fixtures = [_]Fixture{
         .expect = "expected a number",
     },
     .{
+        // The value-payload change event: a slider's bare on-change tag
+        // naming an f32 arm dispatches the applied fraction.
+        .name = "a slider on-change value arm (f32) accepts",
+        .source =
+        \\<slider value="{ratio}" on-change="scale" label="Weight" />
+        ,
+        .expect = null,
+    },
+    .{
+        // The transpiled one-number float arm matches structurally.
+        .name = "a slider on-change value arm (f64) accepts",
+        .source =
+        \\<slider value="{ratio}" on-change="pane_wide" label="Weight" />
+        ,
+        .expect = null,
+    },
+    .{
+        // A non-value payload arm keeps the static-form contract: a bare
+        // tag with a payload the value event cannot fill is the ordinary
+        // missing-payload teaching.
+        .name = "a slider on-change naming a non-value payload arm rejects",
+        .source =
+        \\<slider value="{ratio}" on-change="remove" label="Weight" />
+        ,
+        .expect = "message requires a payload",
+    },
+    .{
+        // The declared scroll-state mirror binds on-scroll like the canvas
+        // type (transpiled cores).
+        .name = "a declared scroll-state mirror arm accepts on-scroll",
+        .source =
+        \\<scroll on-scroll="mirror_scrolled">
+        \\  <column><text>body</text></column>
+        \\</scroll>
+        ,
+        .expect = null,
+    },
+    .{
+        .name = "an on-scroll tag without a scroll-state payload rejects",
+        .source =
+        \\<scroll on-scroll="pane">
+        \\  <column><text>body</text></column>
+        \\</scroll>
+        ,
+        .expect = markup.on_scroll_payload_message,
+    },
+    .{
+        // The transpiled one-number float arm carries the split fraction.
+        .name = "a split on-resize f64 arm accepts",
+        .source =
+        \\<split value="{ratio}" on-resize="pane_wide">
+        \\  <panel><text>a</text></panel>
+        \\  <panel><text>b</text></panel>
+        \\</split>
+        ,
+        .expect = null,
+    },
+    .{
         .name = "a whole-number binding in resize-duration accepts",
         .source =
         \\<split value="{ratio}" resize-duration="{count}" resize-easing="standard" on-resize="pane">
@@ -464,6 +534,19 @@ const fixtures = [_]Fixture{
         \\<column>
         \\  <chart y-min="0" y-max="{ratio}" grid-lines="2" baseline="true" label="History">
         \\    <series kind="area" values="{history}" color="accent" label="load" />
+        \\  </chart>
+        \\</column>
+        ,
+        .expect = null,
+    },
+    .{
+        // f64 is the transpiled-core float class: TS number arrays emit
+        // as []const f64 and both engines narrow them per sample.
+        .name = "a chart with f64 series bindings (the transpiled-core float class) accepts",
+        .source =
+        \\<column>
+        \\  <chart y-min="0" y-max="1" label="Window">
+        \\    <series kind="bar" values="{samples}" />
         \\  </chart>
         \\</column>
         ,
@@ -909,7 +992,7 @@ fn findMsg(c: contract.Contract, name: []const u8) ?contract.MsgTag {
 
 // ------------------------------------------------------------- staleness
 
-test "hashSourceDir changes when a source file changes and ignores non-Zig files" {
+test "hashSourceDir changes when a source file changes and ignores non-core files" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -923,13 +1006,42 @@ test "hashSourceDir changes when a source file changes and ignores non-Zig files
     const first = try contract.hashSourceDirAt(arena, io, tmp.dir, ".");
 
     // A markup edit must not invalidate the contract (it is derived from
-    // the Zig side only)...
+    // the core side only)...
     try tmp.dir.writeFile(io, .{ .sub_path = "view.native", .data = "<row/>" });
     try testing.expectEqual(first, try contract.hashSourceDirAt(arena, io, tmp.dir, "."));
 
     // ...while any Zig edit must.
     try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "pub const x = 2;\n" });
     try testing.expect(first != try contract.hashSourceDirAt(arena, io, tmp.dir, "."));
+}
+
+test "hashSourceDir: a core.ts edit invalidates the contract on the TS track" {
+    // The wave-2 trap: `src/core.ts` is the Model/Msg truth on the TS
+    // track, but it is not a `.zig` file — a hash over Zig sources only
+    // kept a scaffold-era contract "fresh" through every core edit, and
+    // `native check` reported phantom unknown-tag/unknown-field errors
+    // naming the user's NEW state. TypeScript sources must invalidate.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "core.ts", .data = "export const model = { count: 0 };\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.native", .data = "<column/>" });
+
+    const first = try contract.hashSourceDirAt(arena, io, tmp.dir, ".");
+
+    // Editing the TypeScript core must change the hash...
+    try tmp.dir.writeFile(io, .{ .sub_path = "core.ts", .data = "export const model = { count: 0, phase: \"rest\" };\n" });
+    const second = try contract.hashSourceDirAt(arena, io, tmp.dir, ".");
+    try testing.expect(first != second);
+
+    // ...and a new imported .ts module under src/ must too (the checker
+    // runs the core's whole import graph).
+    try tmp.dir.writeFile(io, .{ .sub_path = "timers.ts", .data = "export const tick = 1;\n" });
+    try testing.expect(second != try contract.hashSourceDirAt(arena, io, tmp.dir, "."));
 }
 
 test "a wrong-typed series values binding names the model item type" {
@@ -950,4 +1062,147 @@ test "a wrong-typed series values binding names the model item type" {
     try testing.expect(std.mem.startsWith(u8, message, markup.series_values_message));
     try testing.expect(std.mem.indexOf(u8, message, "\"cards\" iterates") != null);
     try testing.expect(std.mem.indexOf(u8, message, "Card") != null);
+}
+
+// -------------------------------------------- committed-model (pointer) shape
+
+const PointerMeta = struct {
+    title: []const u8 = "lib",
+    total: i64 = 0,
+};
+
+/// A self-referential pointer node: legal in committed models (shared
+/// nodes may link), and the describe walk must stop at the cycle instead
+/// of recursing forever.
+const PointerNode = struct {
+    id: i64 = 0,
+    next: ?*const PointerNode = null,
+    parent: *const PointerMeta = &.{},
+};
+
+const PointerModel = struct {
+    meta: *const PointerMeta = &.{},
+    rows: []const *const PointerNode = &.{},
+    head: *const PointerNode = &.{},
+};
+
+const PointerMsg = union(enum) { open: i64 };
+
+test "describe traverses *const record fields and pointer-item lists like the engines" {
+    const c = comptime contract.describe(PointerModel, PointerMsg, specials);
+
+    // The `*const` record field is a traversable group named for the
+    // struct it shares.
+    var found_meta = false;
+    for (c.model.groups) |group| {
+        if (std.mem.eql(u8, group.name, "meta")) {
+            found_meta = true;
+            try testing.expect(findScalar(group.group, "title").?.kind == .string);
+            try testing.expect(findScalar(group.group, "total").?.kind == .integer);
+        }
+    }
+    try testing.expect(found_meta);
+
+    // A `[]const *const T` iterable binds item fields like `[]const T`.
+    var found_rows = false;
+    for (c.iterables) |iterable| {
+        if (std.mem.eql(u8, iterable.name, "rows")) {
+            found_rows = true;
+            try testing.expect(!iterable.item_scalar);
+            try testing.expect(findScalar(iterable.item, "id").?.kind == .integer);
+        }
+    }
+    try testing.expect(found_rows);
+
+    // The cyclic `next` pointer stopped the walk (the group exists via
+    // `head`, but no infinite nesting), and the optional pointer stayed
+    // unbindable — optionals of records gate through scalar flags.
+    var found_head = false;
+    for (c.model.groups) |group| {
+        if (std.mem.eql(u8, group.name, "head")) {
+            found_head = true;
+            var nested_next = false;
+            for (group.group.groups) |nested| {
+                if (std.mem.eql(u8, nested.name, "next")) nested_next = true;
+            }
+            try testing.expect(!nested_next);
+        }
+    }
+    try testing.expect(found_head);
+}
+
+// ----------------------------------------------- declared text-input unions
+
+test "the reflect tag vocabulary never drifts from canvas.TextInputEvent" {
+    const reflect = @import("ui_markup_reflect.zig");
+    const event_fields = @typeInfo(canvas.TextInputEvent).@"union".fields;
+    try testing.expectEqual(reflect.text_input_event_tags.len, event_fields.len);
+    inline for (event_fields) |field| {
+        var found = false;
+        for (reflect.text_input_event_tags) |tag| {
+            if (std.mem.eql(u8, tag, field.name)) found = true;
+        }
+        try testing.expect(found);
+    }
+    const direction_fields = @typeInfo(canvas.TextCaretDirection).@"enum".fields;
+    try testing.expectEqual(reflect.text_caret_direction_members.len, direction_fields.len);
+    inline for (direction_fields) |field| {
+        var found = false;
+        for (reflect.text_caret_direction_members) |member| {
+            if (std.mem.eql(u8, member, field.name)) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "the reflect field vocabulary never drifts from canvas.ScrollState" {
+    const reflect = @import("ui_markup_reflect.zig");
+    const state_fields = @typeInfo(canvas.ScrollState).@"struct".fields;
+    try testing.expectEqual(reflect.scroll_state_field_names.len, state_fields.len);
+    inline for (state_fields) |field| {
+        // Every real field appears in the pinned vocabulary, and every
+        // real field is the f32 the translation widens from — a canvas
+        // field changing type (or gaining a sibling) fails here first.
+        try testing.expectEqual(f32, field.type);
+        var found = false;
+        for (reflect.scroll_state_field_names) |name| {
+            if (std.mem.eql(u8, name, field.name)) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "a declared scroll-state mirror classifies as a scroll_state payload" {
+    var saw_mirror = false;
+    var saw_wide_pane = false;
+    for (model_contract.msgs) |tag| {
+        if (std.mem.eql(u8, tag.name, "mirror_scrolled")) {
+            saw_mirror = true;
+            try testing.expectEqual(contract.PayloadClass.scroll_state, tag.payload);
+        }
+        if (std.mem.eql(u8, tag.name, "pane_wide")) {
+            saw_wide_pane = true;
+            try testing.expectEqual(contract.PayloadClass.float, tag.payload);
+            try testing.expectEqualStrings("f64", tag.payload_type);
+        }
+    }
+    try testing.expect(saw_mirror);
+    try testing.expect(saw_wide_pane);
+}
+
+test "a declared mirror union classifies as a text_input payload" {
+    const mirror_fixture = @import("ui_markup_view_tests.zig");
+    const mirror_contract = comptime contract.describe(
+        mirror_fixture.MirrorModel,
+        mirror_fixture.MirrorMsg,
+        specials,
+    );
+    var saw_edit = false;
+    for (mirror_contract.msgs) |tag| {
+        if (std.mem.eql(u8, tag.name, "edit")) {
+            saw_edit = true;
+            try testing.expectEqual(contract.PayloadClass.text_input, tag.payload);
+        }
+    }
+    try testing.expect(saw_edit);
 }

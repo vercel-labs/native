@@ -13,7 +13,9 @@ A display-only value control: bind `value` as a 0..1 fraction and the engine fil
 <progress value="{upload_fraction}" width="280" />
 ```
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.el(.progress, .{ .value = model.upload_fraction, .width = 280 }, .{})

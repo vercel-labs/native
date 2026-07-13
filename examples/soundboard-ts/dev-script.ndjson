@@ -1,0 +1,40 @@
+# The soundboard's core-logic loop, headless: replay with
+#   native dev --core --script dev-script.ndjson
+# Msgs dispatch into update; `advance` runs the virtual clock (firing the
+# playclock subscription that advances the rendered position); audio
+# events are ordinary Msgs, so the engine's reports are fed back by hand
+# exactly as the transcript's `cmd audio_play ...` lines invite.
+
+# Play track 2 (Harvest Lot) - the transcript shows the audio_play command
+# with the prepared path, the hosted URL, and the manifest byte size.
+{"kind":"play_track","id":2}
+
+# The engine acknowledges the load; the platform's duration report (47s -
+# an estimate) must NOT replace the manifest total of 46944ms.
+{"kind":"audio_event","state":"loaded","positionMs":0,"durationMs":47000,"playing":true,"buffering":false,"bands":{"$bytes":""}}
+
+# One second of virtual time: the playclock subscription fires 4x250ms and
+# the rendered elapsed_ms walks forward between position ticks.
+{"advance":1000}
+
+# A real position tick corrects the clock (forward corrections apply;
+# small backward ones hold flat - the never-rewind rule).
+{"kind":"audio_event","state":"position","positionMs":1500,"durationMs":47000,"playing":true,"buffering":false,"bands":{"$bytes":""}}
+
+# Queue Velvet Jackpot (track 16) behind the current track, then let the
+# current track complete: the queue wins the advance and a fresh
+# audio_play for track 16 appears in the transcript.
+{"kind":"queue_track","id":16}
+{"kind":"audio_event","state":"completed","positionMs":46944,"durationMs":47000,"playing":false,"buffering":false,"bands":{"$bytes":""}}
+{"kind":"audio_event","state":"loaded","positionMs":0,"durationMs":131000,"playing":true,"buffering":false,"bands":{"$bytes":""}}
+
+# Transport verbs ride the same stream.
+{"kind":"toggle_play"}
+{"kind":"toggle_play"}
+
+# Copy Title puts the track title on the clipboard (fire-and-forget).
+{"kind":"copy_title","id":16}
+
+# Search narrows both libraries; the committed model shows the new draft.
+{"kind":"search_edit","edit":{"kind":"insert_text","text":{"$bytes":"night"}}}
+{"kind":"search_edit","edit":{"kind":"clear"}}

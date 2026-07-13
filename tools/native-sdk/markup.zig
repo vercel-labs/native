@@ -84,7 +84,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
             .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .stale => std.debug.print(
-            "model contract: {s} is stale (the app's Zig sources changed since it was emitted) - bindings and app: icon names checked structurally only; {s} to refresh it\n",
+            "model contract: {s} is stale (the app's core sources changed since it was emitted) - bindings and app: icon names checked structurally only; {s} to refresh it\n",
             .{ ui_markup.contract.default_artifact_path, refresh_hint },
         ),
         .ok => |parsed| contract_value = parsed,
@@ -132,19 +132,66 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
 /// After a markup file fails inside an app directory, say out loud when
 /// NOTHING under src/ embeds it: a failing file no Zig source references
 /// is usually a refactor leftover, and fixing its errors is wasted work.
-/// The embed scan runs once per check run, on the first failure.
+/// The embed scan runs once per check run, on the first failure. On the
+/// TypeScript track (src/core.ts is the app core) the scan proves
+/// nothing — the generated wiring embeds src/app.native from OUTSIDE the
+/// app tree, so "nothing embeds this" is a false signal that once cost a
+/// user their view.
 fn printOrphanHint(arena: std.mem.Allocator, io: std.Io, file_path: []const u8, cache: *?[]const []const u8) void {
     if (!fileExists(io, "app.zon")) return;
-    const basenames = cache.* orelse blk: {
+    const ts_track = fileExists(io, "src/core.ts");
+    const basenames: []const []const u8 = if (ts_track) &.{} else cache.* orelse blk: {
         const collected = collectEmbeddedBasenames(arena, io) catch return;
         cache.* = collected;
         break :blk collected;
     };
-    const failing = std.fs.path.basename(file_path);
-    for (basenames) |name| {
-        if (std.mem.eql(u8, name, failing)) return;
+    const note = orphanNote(ts_track, basenames, std.fs.path.basename(file_path)) orelse return;
+    std.debug.print("{s}: {s}\n", .{ file_path, note });
+}
+
+/// The orphan-hint disposition, separated from IO so tests can pin it.
+/// Zig track: hint only when no `@embedFile` under src/ names the failing
+/// file. TS track: `@embedFile` is not a concept the app tree owns, so
+/// the leftover heuristic never fires; the one wired view (src/app.native)
+/// instead gets a keep-your-view note, because the old hint led an agent
+/// to delete it.
+fn orphanNote(ts_track: bool, embedded_basenames: []const []const u8, failing_basename: []const u8) ?[]const u8 {
+    if (ts_track) {
+        if (std.mem.eql(u8, failing_basename, "app.native")) {
+            return "note: src/app.native is this app's view, wired to src/core.ts automatically - fix the errors above; do not delete it";
+        }
+        return null;
     }
-    std.debug.print("{s}: note: no Zig source under src/ embeds this file - if it is a leftover, delete it; otherwise embed it with @embedFile\n", .{file_path});
+    for (embedded_basenames) |name| {
+        if (std.mem.eql(u8, name, failing_basename)) return null;
+    }
+    return "note: no Zig source under src/ embeds this file - if it is a leftover, delete it; otherwise embed it with @embedFile";
+}
+
+test "orphanNote: TS track never suggests deleting the wired view" {
+    // Pin the TS-track text: it must reassure, never say "delete", and
+    // never mention @embedFile (a Zig-track concept the TS tree does not
+    // own). The scaffold-era hint led an agent to delete src/app.native.
+    const note = orphanNote(true, &.{}, "app.native") orelse return error.TestExpectedNote;
+    try std.testing.expectEqualStrings(
+        "note: src/app.native is this app's view, wired to src/core.ts automatically - fix the errors above; do not delete it",
+        note,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, note, "delete it; otherwise") == null);
+    try std.testing.expect(std.mem.indexOf(u8, note, "@embedFile") == null);
+}
+
+test "orphanNote: TS track stays silent for other markup files" {
+    // The embed scan proves nothing on the TS track, so no leftover
+    // verdict is honest there.
+    try std.testing.expectEqual(@as(?[]const u8, null), orphanNote(true, &.{}, "extra.native"));
+}
+
+test "orphanNote: Zig track hints only for unembedded files" {
+    const embedded = [_][]const u8{"app.native"};
+    try std.testing.expectEqual(@as(?[]const u8, null), orphanNote(false, &embedded, "app.native"));
+    const note = orphanNote(false, &embedded, "leftover.native") orelse return error.TestExpectedNote;
+    try std.testing.expect(std.mem.indexOf(u8, note, "@embedFile") != null);
 }
 
 /// The basename of every `@embedFile("...")` argument across the .zig

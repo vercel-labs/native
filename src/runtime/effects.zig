@@ -157,6 +157,22 @@ pub const max_effect_file_bytes: usize = 1024 * 1024;
 /// must never pass for the whole one).
 pub const max_effect_clipboard_bytes: usize = platform.max_clipboard_data_bytes;
 
+/// Maximum bytes of a host request's (or fire-and-forget host send's)
+/// name. Mirrors the transpiled-core command wire format, whose name
+/// field carries a one-byte length.
+pub const max_effect_host_name_bytes: usize = 255;
+
+/// Maximum bytes of a host request's outbound payload (mirrors
+/// `max_effect_fetch_payload_bytes`: a command argument, not a bulk
+/// transfer).
+pub const max_effect_host_payload_bytes: usize = 64 * 1024;
+
+/// Maximum bytes of a host request's result. Mirrors the fetch body
+/// bound: the result lands in `update` as one bytes payload, sized for
+/// API-shaped answers. An over-bound feed delivers the err route with a
+/// teaching message, never a silent cut.
+pub const max_effect_host_result_bytes: usize = 256 * 1024;
+
 /// The exit `code` reported for every non-`.exited` reason.
 pub const effect_error_exit_code: i32 = -1;
 
@@ -188,6 +204,29 @@ pub const WindowActionBinding = struct {
     context: *anyopaque,
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+};
+
+/// Type-erased handle to the embedding host's named-command services,
+/// bound onto the effects channel (`bindHostCalls`). This is the seam
+/// behind `hostRequest`/`hostSend` — the generic named host call a
+/// transpiled app core's command channel (`host`/`host_bytes`/`request`
+/// wire records) rides into the host. Both callbacks run on the loop
+/// thread during dispatch; `name` and `payload` are valid only for the
+/// duration of the call (copy what outlives it). A host answers a
+/// request by calling `Effects.feedHostResult(key, ok, bytes)` on the
+/// loop thread — synchronously from `request_fn`, or later from an
+/// event the host marshals back.
+pub const HostCallBinding = struct {
+    context: *anyopaque,
+    /// Fire-and-forget named host command: no key, no result, no Msg.
+    send_fn: *const fn (context: *anyopaque, name: []const u8, payload: []const u8) void,
+    /// Keyed routed host command: perform `name` and answer through
+    /// `feedHostResult` with this `key`.
+    request_fn: *const fn (context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void,
+    /// Optional abort notice: the request with `key` was replaced or
+    /// cancelled — any late `feedHostResult` for it reports
+    /// `error.EffectNotFound` and delivers nothing.
+    cancel_fn: ?*const fn (context: *anyopaque, key: u64) void = null,
 };
 
 /// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`):
@@ -436,6 +475,26 @@ pub const EffectClipboardResult = struct {
     dropped_before: u32 = 0,
 };
 
+/// Payload for `on_result` Msg constructors of host requests
+/// (`hostRequest` — the generic named host call behind transpiled
+/// cores' `request` wire records). Exactly one terminal per request,
+/// routed by `ok`: true is the success route with the result bytes,
+/// false the error route with the error bytes. Unlike the other keyed
+/// effects there is no outcome enum and no cancelled terminal — the
+/// request contract is REPLACE on key reuse and SILENT drop on cancel,
+/// so the only deliveries are the host's answer and the loud rejection
+/// (`ok = false`, bytes `"rejected"`) for a request the channel refused
+/// (over-bound payload, key collision with another effect kind, no
+/// slot, no bound host service).
+pub const EffectHostResult = struct {
+    key: u64,
+    /// True routes the request's ok arm; false its err arm.
+    ok: bool = true,
+    /// Result (or error) bytes; drain scratch — copy what the model
+    /// keeps.
+    bytes: []const u8 = "",
+};
+
 /// Maximum concurrently armed fx timers per app. Timers are their own
 /// fixed table: they do NOT consume `max_effects` slots or worker
 /// threads (a timer is a platform service arm, not a blocking effect),
@@ -579,12 +638,41 @@ pub const EffectResultKind = enum(u8) {
     timer = 6,
     clock = 7,
     audio = 8,
+    /// A host-request terminal (`EffectHostResult`). Additive over the
+    /// v3 journal layout — no new record fields: the ok/err route rides
+    /// `code` (0 ok, 1 err) and a channel-refused rejection is marked
+    /// by `exit_reason == .rejected` (rejections regenerate from the
+    /// same deterministic validation under replay and are never fed).
+    host = 9,
+    /// One launch-environment delivery (the TS adapter's `envMsgs`
+    /// channel): journaled as the adapter dispatches each launch value,
+    /// so replay feeds the RECORDED values instead of re-reading the
+    /// replay launch's environment. Additive over the v3 journal layout
+    /// — no new record fields: the value rides `payload`, the target
+    /// Msg arm name rides `stderr_tail`, and `key` is the dispatch
+    /// index. Journals without env records (older recordings, or
+    /// launches with no variables set) re-derive from the launch
+    /// configuration exactly as before.
+    env = 10,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
 /// Bounded like everything else: more reads per drain window than this
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
+
+/// Journaled launch-env deliveries buffered for replay (the `.env`
+/// record feed). Bounded like the clock queue: more launch variables
+/// than this is a wiring bug, not a session shape.
+pub const max_effect_replay_env_entries: usize = 32;
+
+/// One queued launch-env delivery: the target Msg arm name and the
+/// recorded value bytes (both reference the journal, which outlives the
+/// replay).
+pub const ReplayEnvEntry = struct {
+    msg: []const u8,
+    value: []const u8,
+};
 
 /// One drained effect result, flattened for the session journal: the
 /// exact payload `update` received, Msg-type-erased so the recorder and
@@ -732,6 +820,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -812,6 +901,18 @@ pub fn Effects(comptime Msg: type) type {
             return struct {
                 fn make(event: EffectAudio) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_result` of host requests:
+        /// `hostMsg(.store_answered)` builds
+        /// `Msg{ .store_answered = result }` — the variant's payload
+        /// type must be `native_sdk.EffectHostResult`.
+        pub fn hostMsg(comptime tag: std.meta.Tag(Msg)) HostMsgFn {
+            return struct {
+                fn make(result: EffectHostResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
         }
@@ -972,6 +1073,32 @@ pub fn Effects(comptime Msg: type) type {
             op: EffectClipboardOp,
             /// The text a `writeClipboard` would write; `""` for reads.
             text: []const u8 = "",
+        };
+
+        pub const HostRequestOptions = struct {
+            /// Caller-chosen identity. Same key space and slots as
+            /// spawn/fetch/file/clipboard, but with the request key
+            /// discipline: issuing a key whose HOST request is still in
+            /// flight REPLACES it (the old result is dropped, silently),
+            /// while a collision with another effect kind rejects.
+            key: u64,
+            /// Host service name (what the host dispatches on), at most
+            /// `max_effect_host_name_bytes`; copied into slot storage.
+            name: []const u8,
+            /// Outbound payload, at most
+            /// `max_effect_host_payload_bytes`; copied into the slot's
+            /// buffer at call time.
+            payload: []const u8 = "",
+            on_result: ?HostMsgFn = null,
+        };
+
+        /// A recorded host request, exposed by the fake executor for
+        /// test assertions. Slices point into slot storage and stay
+        /// valid until the request retires.
+        pub const HostRequest = struct {
+            key: u64,
+            name: []const u8,
+            payload: []const u8 = "",
         };
 
         pub const StartTimerOptions = struct {
@@ -1139,9 +1266,9 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file, clipboard };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host };
 
-        const EntryKind = enum(u8) { line, exit, response, file, clipboard };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host };
 
         const Entry = struct {
             kind: EntryKind = .line,
@@ -1171,6 +1298,11 @@ pub fn Effects(comptime Msg: type) type {
             /// `line_len`.
             clipboard_op: EffectClipboardOp = .write,
             clipboard_outcome: EffectClipboardOutcome = .ok,
+            /// `.host` entries: which route the result takes (true = the
+            /// ok arm). The bytes stay in the slot's heap buffer (taken
+            /// at drain, like a fetch body) with their length in
+            /// `line_len`.
+            host_ok: bool = true,
             /// `.exit` entries of `.collect` spawns: the collected stdout
             /// stays in the slot's heap buffer (taken at drain, like a
             /// fetch body); the stderr tail rides in `line_bytes` with
@@ -1184,6 +1316,7 @@ pub fn Effects(comptime Msg: type) type {
             response_fn: ?ResponseMsgFn = null,
             file_fn: ?FileMsgFn = null,
             clipboard_fn: ?ClipboardMsgFn = null,
+            host_fn: ?HostMsgFn = null,
             /// `.line` entries whose payload exceeds the inline buffer
             /// (a raised `max_line_bytes` bound): the bytes ride in this
             /// heap allocation instead of `line_bytes`. Owned by the
@@ -1202,6 +1335,11 @@ pub fn Effects(comptime Msg: type) type {
             file: struct { result: EffectFileResult, file_fn: ?FileMsgFn },
             clipboard: struct { result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn },
             timer: struct { timer: EffectTimer, timer_fn: ?TimerMsgFn },
+            /// `.host` terminals produced on the loop thread: rejections
+            /// (`rejected = true`, static bytes, regenerated under
+            /// replay) and feed fallbacks. Bytes here are never a host
+            /// answer's — those ride the queue with their slot buffer.
+            host: struct { result: EffectHostResult, host_fn: ?HostMsgFn, rejected: bool },
             /// `resolve`: a fed audio event (fake executor / replay)
             /// whose key and handler come from the live channel at
             /// delivery time — exactly how a platform event resolves in
@@ -1221,6 +1359,9 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    // EffectHostResult carries none: its terminals are
+                    // one-per-request by construction.
+                    .host => {},
                 }
             }
 
@@ -1232,6 +1373,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
+                    .host => 0,
                 };
             }
         };
@@ -1247,6 +1389,7 @@ pub fn Effects(comptime Msg: type) type {
             on_response: ?ResponseMsgFn = null,
             on_file: ?FileMsgFn = null,
             on_clipboard: ?ClipboardMsgFn = null,
+            on_host: ?HostMsgFn = null,
             /// Set by `cancel` before any kill attempt; read by the
             /// worker so a cancel that lands before the process spawns
             /// still kills it.
@@ -1357,6 +1500,12 @@ pub fn Effects(comptime Msg: type) type {
             fn filePath(slot: *const Slot) []const u8 {
                 return slot.url_storage[0..slot.url_len];
             }
+
+            /// A host request's service name (they share the fetch URL
+            /// storage — a slot is one occupancy at a time).
+            fn hostName(slot: *const Slot) []const u8 {
+                return slot.url_storage[0..slot.url_len];
+            }
         };
 
         allocator: std.mem.Allocator,
@@ -1386,6 +1535,14 @@ pub fn Effects(comptime Msg: type) type {
         /// divergence signal (the replayed update read the clock more
         /// often than the recorded one). Reported loudly once.
         replay_clock_underflows: u64 = 0,
+        /// Journaled launch-env deliveries queued for the replay-mode
+        /// envMsgs dispatch (FIFO; fed from `.env` records before the
+        /// installing event dispatches). Empty under replay means the
+        /// journal carried none — the adapter re-derives from the
+        /// launch configuration, the pre-`.env`-record behavior.
+        replay_env: [max_effect_replay_env_entries]ReplayEnvEntry = undefined,
+        replay_env_head: usize = 0,
+        replay_env_len: usize = 0,
         /// Set once from the loop thread before the first dispatch;
         /// workers call `services.wake()` through it (the one
         /// thread-safe PlatformServices entry).
@@ -1398,6 +1555,12 @@ pub fn Effects(comptime Msg: type) type {
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
         window_actions: ?WindowActionBinding = null,
+        /// The embedding host's named-command services (`hostSend` /
+        /// `hostRequest`), bound by whoever hosts a transpiled app core
+        /// (loop-thread only). Null means no host services: sends drop,
+        /// requests reject loudly in real mode, and the fake executor
+        /// parks requests for `feedHostResult` regardless.
+        host_calls: ?HostCallBinding = null,
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
@@ -1482,6 +1645,16 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            // Host requests park on the loop thread with no worker to
+            // wait for: retire them here so the worker wait below never
+            // stalls on one, and any late host answer reports
+            // EffectNotFound instead of touching a freed buffer.
+            for (&self.slots) |*slot| {
+                if (slot.kind == .host and slot.state.load(.acquire) == .running) {
+                    self.releaseFetchSlot(slot);
+                    slot.generation = 0;
+                }
+            }
             for (&self.slots) |*slot| {
                 if (slot.state.load(.acquire) == .running and !slot.fake) {
                     slot.cancel_requested.store(true, .release);
@@ -1545,6 +1718,9 @@ pub fn Effects(comptime Msg: type) type {
             // transport command inert through its existing no-services
             // paths instead of dereferencing freed memory.
             self.services = null;
+            // Sever the host-call binding for the same reason: its
+            // context belongs to the embedding host.
+            self.host_calls = null;
         }
 
         /// Discard every queued completion, freeing heap line payloads
@@ -1603,6 +1779,13 @@ pub fn Effects(comptime Msg: type) type {
             if (self.window_actions == null) self.window_actions = binding;
         }
 
+        /// Point named host commands at the embedding host's services
+        /// (see `HostCallBinding`). Loop-thread only; the first bind
+        /// sticks.
+        pub fn bindHostCalls(self: *Self, binding: HostCallBinding) void {
+            if (self.host_calls == null) self.host_calls = binding;
+        }
+
         /// Switch this channel into session-replay mode: the fake
         /// executor (no processes, no network, no file or pasteboard
         /// I/O — requests park in their slots) with journaled results as
@@ -1658,6 +1841,36 @@ pub fn Effects(comptime Msg: type) type {
             const index = (self.replay_clock_head + self.replay_clock_len) % max_effect_replay_clock_entries;
             self.replay_clock[index] = value;
             self.replay_clock_len += 1;
+        }
+
+        /// Journal one launch-env delivery (an `.env` record): the TS
+        /// adapter reports each `envMsgs` value as it dispatches it, so
+        /// replay carries the recorded values instead of re-reading the
+        /// environment. No-op when no session is being recorded.
+        pub fn journalEnvValue(self: *Self, index: u64, msg: []const u8, value: []const u8) void {
+            self.journalNote(.{ .kind = .env, .key = index, .payload = value, .stderr_tail = msg });
+        }
+
+        /// Queue one journaled launch-env delivery for the replay-mode
+        /// envMsgs dispatch (the `.env` record feed). The slices must
+        /// outlive the replay (journal bytes do).
+        pub fn pushReplayEnv(self: *Self, msg: []const u8, value: []const u8) error{EffectNotFound}!void {
+            if (self.replay_env_len >= max_effect_replay_env_entries) return error.EffectNotFound;
+            const index = (self.replay_env_head + self.replay_env_len) % max_effect_replay_env_entries;
+            self.replay_env[index] = .{ .msg = msg, .value = value };
+            self.replay_env_len += 1;
+        }
+
+        /// Pop the next journaled launch-env delivery (FIFO), or null
+        /// when none remain. An empty queue at the first pop means the
+        /// journal carried no `.env` records — the caller re-derives
+        /// from the launch configuration (older recordings).
+        pub fn takeReplayEnv(self: *Self) ?ReplayEnvEntry {
+            if (self.replay_env_len == 0) return null;
+            const entry = self.replay_env[self.replay_env_head];
+            self.replay_env_head = (self.replay_env_head + 1) % max_effect_replay_env_entries;
+            self.replay_env_len -= 1;
+            return entry;
         }
 
         // ------------------------------------------------------------- API
@@ -2110,6 +2323,157 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Fire-and-forget named host command: hand `name` + `payload`
+        /// to the bound host services and move on — no key, no result,
+        /// no Msg. This is the delivery path of a transpiled core's
+        /// `host`/`host_bytes` wire records. A channel without bound
+        /// host services drops the send (there is no result route to
+        /// reject into — the honest degrade, documented rather than
+        /// silent-by-accident); session replay never calls the host
+        /// (the send's observable consequences replay through whatever
+        /// results it caused, which ARE journaled).
+        pub fn hostSend(self: *Self, name: []const u8, payload: []const u8) void {
+            if (self.replay) return;
+            if (name.len == 0 or name.len > max_effect_host_name_bytes) return;
+            const binding = self.host_calls orelse return;
+            binding.send_fn(binding.context, name, payload);
+        }
+
+        /// A keyed, routed host command — the generic named host call
+        /// behind a transpiled core's `request` wire records: the host
+        /// performs `name` with `payload` and answers with exactly one
+        /// `feedHostResult(key, ok, bytes)`, delivered as one
+        /// `on_result` Msg (`EffectHostResult`) on the next drain. Key
+        /// discipline differs from spawn/fetch/file/clipboard on
+        /// purpose (the wire contract): issuing a key whose host
+        /// request is still in flight REPLACES it — the old request's
+        /// result is dropped, silently — and `cancelHostRequest` drops
+        /// one without dispatching anything. Rejection is never silent:
+        /// an over-bound name/payload, a key colliding with another
+        /// effect kind, a full slot table, or a real-mode channel with
+        /// no bound host services delivers exactly one err-route Msg
+        /// (`ok = false`, bytes `"rejected"`). Under the fake executor
+        /// the request parks in its slot (inspect with `pendingHostAt`,
+        /// answer with `feedHostResult`).
+        pub fn hostRequest(self: *Self, options: HostRequestOptions) void {
+            self.reclaimSlots();
+            const fake = self.executor == .fake;
+            if (options.name.len == 0 or options.name.len > max_effect_host_name_bytes or
+                options.payload.len > max_effect_host_payload_bytes)
+            {
+                return self.rejectHost(options.key, options.on_result);
+            }
+            if (!fake and self.host_calls == null) return self.rejectHost(options.key, options.on_result);
+            const slot_index = blk: {
+                // In flight = running (no answer yet) OR draining with
+                // an undelivered answer: both are replaced, dropping
+                // the old result silently (its queued entry dies by
+                // generation mismatch at drain). A running occupancy of
+                // another kind is a key collision and rejects; a
+                // draining one is already terminal — its key is free.
+                var replaced: ?usize = null;
+                for (&self.slots, 0..) |*slot, index| {
+                    const state = slot.state.load(.acquire);
+                    if (state != .running and state != .draining) continue;
+                    if (slot.key != options.key) continue;
+                    if (slot.kind != .host) {
+                        if (state == .running) return self.rejectHost(options.key, options.on_result);
+                        continue;
+                    }
+                    // Tell the host first: a late answer for the old
+                    // occupancy must find nothing.
+                    if (state == .running and !slot.fake) self.notifyHostCancel(options.key);
+                    self.releaseFetchSlot(slot);
+                    slot.generation = 0;
+                    replaced = index;
+                }
+                break :blk replaced orelse
+                    (self.findIdleSlot() orelse return self.rejectHost(options.key, options.on_result));
+            };
+
+            const slot = &self.slots[slot_index];
+            // The buffer holds the payload copy, then the result space.
+            const buffer = self.allocator.alloc(u8, options.payload.len + max_effect_host_result_bytes) catch {
+                return self.rejectHost(options.key, options.on_result);
+            };
+            slot.generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.key = options.key;
+            slot.kind = .host;
+            slot.on_line = null;
+            slot.on_exit = null;
+            slot.on_response = null;
+            slot.on_file = null;
+            slot.on_clipboard = null;
+            slot.on_host = options.on_result;
+            slot.cancel_requested.store(false, .release);
+            // `cancelled_generation` stays sticky, exactly as in `spawn`.
+            slot.child_id = null;
+            slot.reaping = false;
+            slot.dropped_pending = 0;
+            slot.dropped_total = 0;
+            @memcpy(slot.url_storage[0..options.name.len], options.name);
+            slot.url_len = options.name.len;
+            if (slot.line_buffer) |old| {
+                self.allocator.free(old);
+                slot.line_buffer = null;
+            }
+            if (slot.fetch_buffer) |old| self.allocator.free(old);
+            slot.fetch_buffer = buffer;
+            @memcpy(buffer[0..options.payload.len], options.payload);
+            slot.payload_len = options.payload.len;
+            slot.body_len = 0;
+            slot.fake = fake;
+            slot.state.store(.running, .release);
+
+            // Fake mode (tests and session replay) parks here: the feed
+            // is the only terminal source.
+            if (fake) return;
+            const binding = self.host_calls.?;
+            binding.request_fn(binding.context, slot.hostName(), options.key, slot.fetchPayload());
+        }
+
+        /// Drop the in-flight host request with `key` without
+        /// dispatching either route — the wire contract's `cancel`
+        /// record. Silent by design (unlike `cancel`, which delivers a
+        /// `.cancelled` terminal): the request's own issuer asked for
+        /// the drop, so there is nothing to report. Also drops a result
+        /// already completed but not yet drained. Unknown keys (and
+        /// keys naming a non-host effect) are a no-op.
+        pub fn cancelHostRequest(self: *Self, key: u64) void {
+            for (&self.slots) |*slot| {
+                const state = slot.state.load(.acquire);
+                if (state != .running and state != .draining) continue;
+                if (slot.kind != .host or slot.key != key) continue;
+                if (state == .running and !slot.fake) self.notifyHostCancel(key);
+                self.releaseFetchSlot(slot);
+                // A queued result entry (fed, undrained) dies by
+                // generation mismatch; zero marks "no occupancy".
+                slot.generation = 0;
+            }
+        }
+
+        /// Tell the bound host services a request key is dead so the
+        /// host can abort work; best effort, real executor only.
+        fn notifyHostCancel(self: *Self, key: u64) void {
+            const binding = self.host_calls orelse return;
+            const cancel_fn = binding.cancel_fn orelse return;
+            cancel_fn(binding.context, key);
+        }
+
+        fn rejectHost(self: *Self, key: u64, host_fn: ?HostMsgFn) void {
+            self.deliverLoopHost(.{ .key = key, .ok = false, .bytes = "rejected" }, host_fn, true);
+        }
+
+        /// Queue a host terminal produced on the loop thread
+        /// (rejections and feed fallbacks) for the next drain. Bytes
+        /// here are always static.
+        fn deliverLoopHost(self: *Self, result: EffectHostResult, host_fn: ?HostMsgFn, rejected: bool) void {
+            if (host_fn == null) return;
+            self.deliverPending(.{ .host = .{ .result = result, .host_fn = host_fn, .rejected = rejected } });
+        }
+
         /// Cancel a running effect by key. After this returns, no
         /// further `on_line` Msgs for that spawn are dispatched; one
         /// `on_exit` Msg with reason `.cancelled` follows once the
@@ -2117,6 +2481,8 @@ pub fn Effects(comptime Msg: type) type {
         /// (worker finished, completions still queued) keeps the same
         /// promise: queued lines are discarded and the queued exit is
         /// reported as `.cancelled`. Unknown keys are a no-op.
+        /// Host-request slots keep their own contract instead: a cancel
+        /// aimed at one drops it silently (`cancelHostRequest`).
         pub fn cancel(self: *Self, key: u64) void {
             const slot_index = self.findActiveSlot(key) orelse {
                 // The worker may have finished with its exit still in
@@ -2129,6 +2495,7 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             const slot = &self.slots[slot_index];
+            if (slot.kind == .host) return self.cancelHostRequest(key);
             slot.cancelled_generation = slot.generation;
             slot.cancel_requested.store(true, .release);
             if (slot.fake) {
@@ -2638,6 +3005,20 @@ pub fn Effects(comptime Msg: type) type {
                             });
                             return timer_fn(entry.timer);
                         },
+                        .host => |entry| {
+                            const host_fn = entry.host_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .host,
+                                .key = entry.result.key,
+                                .payload = entry.result.bytes,
+                                // `.host` journal encoding (no new record
+                                // fields): the route rides `code`, and
+                                // rejections are marked regenerable.
+                                .code = @intFromBool(!entry.result.ok),
+                                .exit_reason = if (entry.rejected) .rejected else .exited,
+                            });
+                            return host_fn(entry.result);
+                        },
                         .audio => |entry| {
                             var event = entry.event;
                             var audio_fn = entry.audio_fn;
@@ -2864,6 +3245,41 @@ pub fn Effects(comptime Msg: type) type {
                             .clipboard_outcome = result.outcome,
                         });
                         return clipboard_fn(result);
+                    },
+                    .host => {
+                        // One terminal per host occupancy, mirroring
+                        // `.response`: a mismatched generation means the
+                        // occupant was already retired (replaced or
+                        // cancelled — its result drops silently, per the
+                        // request contract).
+                        if (entry.generation != slot.generation) continue;
+                        // Take buffer ownership so the slot can be
+                        // reused while `update` still reads the bytes.
+                        if (self.drain_fetch_body) |old| self.allocator.free(old);
+                        self.drain_fetch_body = slot.fetch_buffer;
+                        slot.fetch_buffer = null;
+                        const payload_len = slot.payload_len;
+                        // A cancel that raced the feed (the entry was
+                        // already queued) still drops silently.
+                        if (cancelled) continue;
+                        const host_fn = entry.host_fn orelse continue;
+                        const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
+                            buffer[payload_len .. payload_len + entry.line_len]
+                        else
+                            "";
+                        const result: EffectHostResult = .{
+                            .key = entry.key,
+                            .ok = entry.host_ok,
+                            .bytes = bytes,
+                        };
+                        self.journalNote(.{
+                            .kind = .host,
+                            .key = result.key,
+                            .payload = result.bytes,
+                            // `.host` journal encoding: route in `code`.
+                            .code = @intFromBool(!result.ok),
+                        });
+                        return host_fn(result);
                     },
                 }
             }
@@ -3237,6 +3653,78 @@ pub fn Effects(comptime Msg: type) type {
                     .op = op,
                     .outcome = if (op == .read and delivered_len > 0) .failed else delivered_outcome,
                 }, clipboard_fn);
+            }
+            self.wakeHost();
+        }
+
+        /// Number of parked (still-active) fake host requests.
+        pub fn pendingHostCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (slot.fake and slot.kind == .host and slot.state.load(.acquire) == .running) count += 1;
+            }
+            return count;
+        }
+
+        /// The `index`-th parked fake host request (slot order).
+        pub fn pendingHostAt(self: *Self, index: usize) ?HostRequest {
+            var seen: usize = 0;
+            for (&self.slots) |*slot| {
+                if (!(slot.fake and slot.kind == .host and slot.state.load(.acquire) == .running)) continue;
+                if (seen == index) {
+                    return .{
+                        .key = slot.key,
+                        .name = slot.hostName(),
+                        .payload = slot.fetchPayload(),
+                    };
+                }
+                seen += 1;
+            }
+            return null;
+        }
+
+        /// The host's (or the test's, or session replay's) answer to
+        /// the in-flight host request with `key`, retiring its slot:
+        /// one terminal Msg through `on_result`, `ok` choosing the
+        /// route and `bytes` riding along. Works for fake-parked AND
+        /// real-bound requests — this is the completion path
+        /// `HostCallBinding.request_fn` answers through. A result over
+        /// `max_effect_host_result_bytes` delivers the err route with a
+        /// teaching message (an opaque payload must never pass for the
+        /// whole one); if the completion queue is somehow full, the
+        /// terminal still lands through the pending ring as an err —
+        /// never a silent ok with lost bytes.
+        pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{EffectNotFound}!void {
+            const slot_index = blk: {
+                const index = self.findActiveSlot(key) orelse return error.EffectNotFound;
+                if (self.slots[index].kind != .host) return error.EffectNotFound;
+                break :blk index;
+            };
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
+            const capacity = buffer.len - slot.payload_len;
+            var delivered_ok = ok;
+            var delivered: []const u8 = bytes;
+            if (bytes.len > capacity) {
+                delivered_ok = false;
+                delivered = "host result over budget";
+            }
+            @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
+            slot.body_len = delivered.len;
+            var entry: Entry = .{
+                .kind = .host,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .line_len = @intCast(delivered.len),
+                .host_ok = delivered_ok,
+                .host_fn = slot.on_host,
+            };
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                const host_fn = slot.on_host;
+                self.releaseFetchSlot(slot);
+                self.deliverLoopHost(.{ .key = entry.key, .ok = false }, host_fn, false);
             }
             self.wakeHost();
         }

@@ -1118,10 +1118,10 @@ pub const known_events = schema.event_names;
 
 pub const on_scroll_element_message = "on-scroll is only supported on scroll - the runtime emits scroll offsets for scroll containers, so the handler belongs on the scroll element itself";
 pub const on_reach_end_element_message = "on-reach-end is only supported on scroll - the runtime emits the approach-end signal for scroll containers, so the handler belongs on the scroll element itself";
-pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState)";
+pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState, or a declared record of its offset/velocity/viewport_extent/content_extent fields for transpiled cores)";
 
 pub const on_resize_element_message = "on-resize is only supported on split - the runtime emits fraction changes for split dividers, so the handler belongs on the split element itself";
-pub const on_resize_payload_message = "on-resize takes a bare Msg tag whose payload is the new first-pane fraction (an f32 variant, like sidebar_resized: f32)";
+pub const on_resize_payload_message = "on-resize takes a bare Msg tag whose payload is the new first-pane fraction (an f32 variant, like sidebar_resized: f32; transpiled cores declare a one-number float arm)";
 pub const split_children_message = "split takes exactly two element children (the panes) - put conditional or repeated content inside a pane container, and nest splits for more panes";
 
 /// Elements the runtime's dismissal machinery closes (Escape, click
@@ -1212,6 +1212,8 @@ pub const text_size_element_message = "heading and display are typography rungs 
 pub const grid_columns_element_message = "columns is only supported on grid - it fixes the grid's column count (omit it for the derived near-square grid)";
 
 pub const overscroll_element_message = "overscroll is only supported on scroll - it names a scroll region's edge behavior (none pins at the content edges, rubber_band lets the region bounce past them, default follows the ScrollPhysics.overscroll token); anywhere else it would be silently inert";
+
+pub const quiet_hover_element_message = "quiet-hover is only supported on pressable elements (hit targets like list-item, button, panel) - it opts an image-forward content tile out of the HOVER wash while press feedback, the focus ring, cursor intent, and hit testing keep their own channels; on a non-interactive element it would be silently inert";
 
 /// The `overscroll` attribute's closed value vocabulary: the member names
 /// of `canvas.WidgetOverscroll`, mirrored as data here (this layer stays
@@ -1348,6 +1350,15 @@ pub fn iconAttrElement(name: []const u8) bool {
 
 pub fn anchorElement(name: []const u8) bool {
     return nameInList(name, &known_anchor_element_names);
+}
+
+/// Whether the engine hit-tests this element's widget kind — the surface
+/// the hover/press wash ladder exists on, and so the scope of the
+/// `quiet-hover` knob (registry `hit_target`; composites resolve through
+/// their library views and are out of scope).
+pub fn hitTargetElement(name: []const u8) bool {
+    const entry = schema.elementByName(name) orelse return false;
+    return entry.rule_hook == null and entry.hit_target;
 }
 
 pub fn dismissEventElement(name: []const u8) bool {
@@ -1832,7 +1843,7 @@ pub const chart_display_only_message = "chart is display-only - presses fall thr
 pub const series_parent_message = "series is only allowed inside a chart";
 pub const series_attr_message = "unknown attribute for series - it takes kind, values, color, and label";
 pub const series_kind_message = "series kind takes a literal: line, area, or bar (area is a line filled to the baseline; band envelopes need a paired lower-edge slice per point and stay with the Zig builder, ui.chart)";
-pub const series_values_message = "series requires a values attribute with one {binding} naming a []const f32 iterable (a model field, pub decl, or fn - the same sources for each accepts); pad the window's leading gap with NaN samples, which draw nothing";
+pub const series_values_message = "series requires a values attribute with one {binding} naming a []const f32 or []const f64 iterable (a model field, pub decl, or fn - the same sources for each accepts; transpiled TS number arrays are f64); pad the window's leading gap with NaN samples, which draw nothing";
 pub const series_color_message = "series color takes a literal color token name (a canvas ColorTokens field, e.g. accent, info, success, text_muted)";
 pub const series_label_message = "series label expects text (a literal or one {binding}) - it names the series in the chart's semantics summary";
 pub const series_children_message = "series is a leaf - it takes no children; the values binding carries its data";
@@ -3130,6 +3141,14 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         if (expression == .literal and !nameInList(expression.literal, &overscroll_value_names)) {
                             return attrError(node, attribute, overscroll_value_message);
                         }
+                    }
+                }
+                if (std.mem.eql(u8, attribute.name, "quiet-hover")) {
+                    // The hover wash exists only on hit-tested elements:
+                    // anywhere else the knob is silently inert (same
+                    // policy as overscroll off scroll).
+                    if (!hitTargetElement(node.name)) {
+                        return attrError(node, attribute, quiet_hover_element_message);
                     }
                 }
                 if (std.mem.eql(u8, attribute.name, "resize-duration")) {

@@ -34,14 +34,22 @@ pub fn main(init: std.process.Init) !void {
         try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
         checkVerbFlags("init", args[2..], .{
-            .usage = "init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
-            .value_flags = &.{ "--frontend", "--framework" },
+            .usage = "init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
+            .value_flags = &.{ "--frontend", "--framework", "--template" },
             .bool_flags = &.{"--full"},
         });
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
         const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
         const shape: tooling.templates.Shape = if (flagBool(args, "--full")) .full else .slim;
+        // Which core the native template writes (ts-core is the default).
+        // The choice leaves no residue: the tree IS the truth, and the
+        // build graph re-detects it on every build.
+        const core: tooling.templates.CoreTemplate = if (flagValue(args, "--template") catch fail("--template requires a value: ts-core (default) or zig-core")) |value|
+            tooling.templates.CoreTemplate.parse(value) orelse fail("invalid --template value: use ts-core (default) or zig-core")
+        else
+            .ts;
+        if (core == .zig and frontend != .native) fail("--template applies to the native frontend (web frontends have no core tier)");
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const explicit_framework = try flagValue(args, "--framework");
@@ -61,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(1);
         }
-        tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape }) catch |err| return failVerb(err);
+        tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape, .core = core }) catch |err| return failVerb(err);
         std.debug.print("created Native SDK app at {s} ({s})\n", .{ destination, frontend_str });
         printInitNextSteps(destination, frontend, shape);
     } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
@@ -85,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
-        runCheck(allocator, init.io, flagBool(args, "--strict")) catch |err| return failVerb(err);
+        runCheck(allocator, init.io, init.environ_map, flagBool(args, "--strict")) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "eject")) {
         // `eject component <name>` is dispatched before the plain build
         // eject so `component` is never mistaken for an app directory.
@@ -225,11 +233,33 @@ pub fn main(init: std.process.Init) !void {
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
         checkVerbFlags("dev", args[2..], .{
-            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
-            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device" },
-            .bool_flags = &.{"--yes"},
+            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [dir] --core [--script msgs.ndjson] [--watch]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
+            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device", "--script" },
+            .bool_flags = &.{ "--yes", "--core", "--watch" },
             .forwards_build_flags = true,
         });
+        if (flagBool(args, "--core")) {
+            // The TypeScript core-logic loop under node (update/effects on a
+            // virtual host) - not a renderer; plain `native dev` runs the app.
+            const verb_args = parseVerbArgs(allocator, args[2..], &.{"--script"}) catch fail("usage: native dev [dir] --core [--script msgs.ndjson] [--watch]");
+            try enterAppDir(init.io, verb_args.dir);
+            const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse {
+                std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(framework_root);
+            // The editor surface rides along with the dev loop too (TS
+            // trees only — never leave node_modules in a non-app dir).
+            if (tooling.ts_core.detect(init.io) == .ts) {
+                tooling.ts_core.selfHealEditorPackage(allocator, init.io, framework_root);
+            }
+            tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
+                .base_env = init.environ_map,
+                .script = try flagValue(args, "--script"),
+                .watch = flagBool(args, "--watch"),
+            }) catch |err| return failVerb(err);
+            return;
+        }
         if (try flagValue(args, "--target")) |dev_target| {
             // The mobile dev loop: build the embed library for the
             // simulator/emulator, wrap it in the toolkit-owned host,
@@ -345,13 +375,14 @@ fn usage() void {
         \\usage: native <command>
         \\
         \\commands:
-        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (default: native)
+        \\  init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (defaults: native + ts-core)
         \\  dev [dir] [--yes] [-D... zig build flags]      build a Debug binary and run it (markup hot reload)
         \\  dev [dir] --target ios [--device name]         build for the iOS simulator, install + launch, stream the log (experimental)
         \\  dev [dir] --target android [--device name]     build a debug APK, install + launch on an emulator via adb, stream the log (experimental)
+        \\  dev [dir] --core [--script msgs.ndjson] [--watch]   run the TypeScript core's logic loop under node (update/effects transcript; not a renderer)
         \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
-        \\  check [dir] [--strict]                         validate src/*.native markup and app.zon (uses zig-out/model-contract.zon when fresh)
+        \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.zon
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
@@ -438,6 +469,12 @@ fn failVerb(err: anyerror) anyerror!void {
         error.ZigBuildFailed,
         error.InvalidManifest,
         error.MarkupCheckFailed,
+        error.BothCores,
+        error.MissingTsCore,
+        error.MissingNode,
+        error.MissingTranspiler,
+        error.CoreCheckFailed,
+        error.DevHostFailed,
         error.HostCompileFailed,
         error.SimulatorUnavailable,
         error.SimulatorCommandFailed,
@@ -481,6 +518,8 @@ fn parseVerbArgs(allocator: std.mem.Allocator, args: []const []const u8, value_f
         }
         // Verb-specific boolean flags read by the caller via flagBool.
         if (std.mem.eql(u8, arg, "--strict")) continue;
+        if (std.mem.eql(u8, arg, "--core")) continue;
+        if (std.mem.eql(u8, arg, "--watch")) continue;
         if (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release")) {
             try forwarded.append(allocator, arg);
             continue;
@@ -515,10 +554,29 @@ fn enterAppDir(io: std.Io, dir: []const u8) !void {
 /// bindings, iterables, message tags, and expression types against the
 /// app's actual Model/Msg, and reports unused model state as warnings
 /// (--strict promotes warnings to failures).
-fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
+fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, strict: bool) !void {
     if (!tooling.buildgraph.fileExists(io, "app.zon")) {
         std.debug.print("no app.zon here — `native check` runs inside an app directory (or pass one: `native check path/to/app`)\n", .{});
         return error.MissingManifest;
+    }
+
+    // The core tier first: a TypeScript core runs the @native-sdk/core checker
+    // (subset rules + tsc), whose NS diagnostics surface verbatim - the
+    // same teaching UX Zig apps get from `zig build`/`native test`.
+    const core_tree = tooling.ts_core.detect(io);
+    if (core_tree == .both) return tooling.ts_core.failBothCores();
+    if (core_tree == .ts) {
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+            std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+            return error.MissingFramework;
+        };
+        defer allocator.free(framework_root);
+        // Self-heal the editor surface first: node_modules/@native-sdk/core
+        // (the pre-publish copy stock tsc resolves) refreshes whenever it is
+        // missing or version-skewed vs the SDK — one info line, never a
+        // check failure.
+        tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        try tooling.ts_core.checkCore(allocator, io, env_map, framework_root);
     }
 
     var markup_files: std.ArrayList([]const u8) = .empty;
@@ -546,7 +604,8 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
     }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
-    std.debug.print("checked {d} markup file{s}{s} and app.zon\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note });
+    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean)" else "";
+    std.debug.print("checked {d} markup file{s}{s}, app.zon{s}\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note, core_note });
     if (strict and outcome.warnings > 0) {
         std.debug.print("{d} warning{s} promoted to errors (--strict)\n", .{ outcome.warnings, if (outcome.warnings == 1) "" else "s" });
         return error.MarkupCheckFailed;
@@ -756,6 +815,8 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, arg, "--")) {
             if (std.mem.eql(u8, arg, "--frontend") or
                 std.mem.eql(u8, arg, "--framework") or
+                std.mem.eql(u8, arg, "--template") or
+                std.mem.eql(u8, arg, "--script") or
                 std.mem.eql(u8, arg, "--manifest") or
                 std.mem.eql(u8, arg, "--target") or
                 std.mem.eql(u8, arg, "--output") or

@@ -1,5 +1,6 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Accordion
 
@@ -20,7 +21,28 @@ A disclosure surface with a header. The header label comes from the `text` attri
 </column>
 ```
 
-## Zig builder
+The core side is one flag and one arm flipping it:
+
+<CodeToggle>
+
+```ts
+// model: { readonly faq_open: boolean }
+case "toggle_faq":
+  return { ...model, faq_open: !model.faq_open };
+```
+
+```zig
+// model: faq_open: bool = false,
+.toggle_faq => model.faq_open = !model.faq_open,
+```
+
+</CodeToggle>
+
+A one-open-at-a-time group is a model decision: store the open item's id and compute each item's `selected` from an equality, flipping it in `update`.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.column(.{ .width = 380 }, .{
@@ -36,8 +58,6 @@ ui.column(.{ .width = 380 }, .{
     ui.el(.accordion, .{ .text = "Is it styled?", .on_toggle = .toggle_styling }, .{}),
 })
 ```
-
-A one-open-at-a-time group is a model decision: store the open item's id and compute each item's `selected` from an equality, flipping it in `update`.
 
 ## Attributes
 

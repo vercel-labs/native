@@ -1,0 +1,32 @@
+{
+  "name": "@native-sdk/core",
+  "private": true,
+  "version": "0.0.1",
+  "description": "The TypeScript authoring tier: the app-core subset, its dev-time transpiler to arena-backed Zig, and the SDK module cores import",
+  "type": "module",
+  "types": "./sdk/core.ts",
+  "files": [
+    "sdk"
+  ],
+  "exports": {
+    ".": {
+      "types": "./sdk/core.ts",
+      "default": "./sdk/core.ts"
+    },
+    "./text": {
+      "types": "./sdk/text.ts",
+      "default": "./sdk/text.ts"
+    },
+    "./events": {
+      "types": "./sdk/events.ts",
+      "default": "./sdk/events.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "gate": "node scripts/gate.mjs"
+  },
+  "devDependencies": {
+    "@typescript/typescript6": "^6.0.2"
+  }
+}

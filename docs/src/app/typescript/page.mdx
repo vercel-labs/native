@@ -1,0 +1,451 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# TypeScript Cores
+
+An app core is the logic tier of a Native SDK app: `Model` (the app state), `Msg` (a discriminated union of everything that can happen), `update(model, msg)` (the one pure transition function), and the pure helpers they call. By default you write it as one TypeScript module — `src/core.ts` — and the `@native-sdk/core` transpiler compiles it to native code at build time. No JS engine ships in the binary: the program either passes the subset checker and compiles to native, or you get a teaching error naming the rule, the fix, and the reason.
+
+This is the two-tier shape of the toolkit: Zig is how everything works — the engine, the runtime, every widget — and TypeScript plus [Native markup](/native-ui) are how applications are authored. A whole app is three files and zero Zig: `src/core.ts`, `src/app.native`, and `app.zon`. Writing the core in Zig instead ([App Model](/app-model)) is first-class by choice — same loop, same runtime — and extending the toolkit itself (custom widgets, host services, render passes) is always Zig.
+
+The same `core.ts` is executable TypeScript: it typechecks with stock tsc and runs unmodified under node, which is what makes the fastest dev loop possible:
+
+```bash
+native dev --core   # run the core under node's virtual host: dispatch Msgs as
+                    # JSON lines, watch the model + effect transcript
+native dev          # build and run the real app (markup hot reload)
+native check        # subset-check core.ts + validate markup + app.zon
+native build        # ReleaseFast binary; native test runs the app's tests
+```
+
+## The contract
+
+```ts:src/core.ts
+// Model: readonly data fields only.
+export interface Model {
+  readonly count: number;
+}
+
+// Msg: one arm per thing that can happen, at least two arms.
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "reset" };
+
+// Pure: the same model every time.
+export function initialModel(): Model {
+  return { count: 0 };
+}
+
+// One case per arm; the switch must be exhaustive (no default needed once
+// every arm is present — a missing arm is a teaching error at build time).
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "add":
+      return { ...model, count: model.count + 1 };
+    case "reset":
+      return { ...model, count: 0 };
+  }
+}
+```
+
+`update` is pure and synchronous: it never mutates `model` or `msg`, never performs IO, and returns the next model — plus optionally command data describing effects (below). Purity is what makes the core testable as a plain function, replayable deterministically, and identical in behavior under node and native.
+
+A complete core in the idiom — readonly interfaces, a tagged Msg, spread updates, map/filter, bytes for text, derived exports:
+
+```ts:src/core.ts
+import { asciiBytes } from "@native-sdk/core";
+
+export type Bytes = Uint8Array;
+export type Filter = "all" | "active" | "done";
+
+export interface Task {
+  readonly id: number;
+  readonly title: Bytes;
+  readonly done: boolean;
+}
+
+export interface Model {
+  readonly tasks: readonly Task[];
+  readonly nextId: number;
+  readonly filter: Filter;
+  readonly draft: Bytes;
+}
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "toggle"; readonly id: number }
+  | { readonly kind: "set_filter"; readonly filter: Filter }
+  | { readonly kind: "draft_edit"; readonly text: Bytes };
+
+export function initialModel(): Model {
+  return {
+    tasks: [{ id: 1, title: asciiBytes("Ship the core"), done: false }],
+    nextId: 2,
+    filter: "all",
+    draft: new Uint8Array(0),
+  };
+}
+
+export function visibleTasks(model: Model): readonly Task[] {
+  if (model.filter === "active") return model.tasks.filter((t) => !t.done);
+  if (model.filter === "done") return model.tasks.filter((t) => t.done);
+  return model.tasks;
+}
+
+export function doneCount(model: Model): number {
+  return model.tasks.filter((t) => t.done).length;
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "add": {
+      if (model.draft.length === 0) return model;
+      const task: Task = { id: model.nextId, title: model.draft, done: false };
+      return {
+        ...model,
+        tasks: [...model.tasks, task],
+        nextId: model.nextId + 1,
+        draft: new Uint8Array(0),
+      };
+    }
+    case "toggle":
+      return {
+        ...model,
+        tasks: model.tasks.map((t) => (t.id === msg.id ? { ...t, done: !t.done } : t)),
+      };
+    case "set_filter":
+      return { ...model, filter: msg.filter };
+    case "draft_edit":
+      return { ...model, draft: msg.text };
+  }
+}
+```
+
+Markup binds your model's field names exactly as you wrote them: `nextId` binds as `{nextId}` (the emitted Zig keeps the TS spellings), string-literal unions bind as their member name (`{filter}` renders `all`), and record arrays iterate with `<for each="tasks" as="t" key="id">`. Exported helpers taking exactly one `Model` parameter join the binding surface as derived values — `{doneCount}` reads `doneCount`, and slice-returning ones like `visibleTasks` drive `for each` — so derived data needs no model field. Update-only state nothing in markup binds (host-fired timer arms, bookkeeping fields) is declared once as `export const viewUnbound = ["tick"] as const;` so `native check`'s unbound-state lint stays honest.
+
+## Why the immutable style is free
+
+Everything `update` builds lives in a per-dispatch arena that is freed wholesale after the returned model is committed. At commit, only nodes your update actually created are copied into the persistent model heap — everything you spread through unchanged is shared with the previous model. `{ ...model, tasks: model.tasks.map(...) }` copies one small struct and one pointer array, never the world.
+
+Both regions have fixed, build-time capacities (1 MiB each by default): the frame arena bounds one dispatch's transients, the model heap bounds the committed model. They are knobs of the emitted core — `--frame-cap <bytes>` / `--heap-cap <bytes>` on the transpiler CLI — and never grow at runtime, so binaries stay allocation-free and replay stays trivially deterministic. Overflowing one is a loud runtime panic naming the knob to raise, never silent corruption.
+
+## The subset posture
+
+App cores are written in a closed subset of TypeScript, and the subset means one precise thing: TypeScript minus the ecosystem minus the purity violations — never minus basic syntax. Every basic statement, operator, and declaration form compiles: plain interfaces, discriminated unions, `switch` (with `default` arms), every loop shape (`for`, `for...of`, `while`, `do...while`, labels with labeled `break`/`continue`), the full operator and assignment family (`**`, shifts, `+=` through `??=`), const record destructuring, namespace imports, spreads, the array methods (`.map`/`.filter`/`.find`/`.reduce`/`.toSorted`/...), `Math`, template literals — everything with exact JS semantics, pinned so node and native always agree (a machine-checked grammar matrix classifies every production of the language, so nothing is missing by accident). Classes and exceptions compile too: data classes (fields, a constructor, methods, `static` methods and `static readonly` consts, erased `private`/`protected` — `new Task(...)`, `this.count`, `Task.fromRow(...)`, mutation under the same local-ownership rule as arrays) emit as plain structs plus functions, and `throw`/`try`/`catch`/`finally` is deterministic control flow — a thrown kind-tagged subset value unwinds to the nearest catch (several distinct shapes may throw; the checker collects them into the core's thrown union, and `catch (e)` narrows it with plain kind tests, no `as` ceremony), `finally` runs on every path, and an uncaught throw is a defined panic exactly where node would crash. What isn't available is exactly two families: the ecosystem the binary cannot carry (npm packages, regexes, `JSON`, Promises, `eval` — no JS engine ships) and constructs that would break the core's guarantees (class inheritance, `async`/`await` — asynchrony is command data, `Map`/`Set`, module-level `let`, `Date.now()`/`Math.random()` inside `update`, runtime type tests, text as indexable strings — a core's text is bytes). Each has an idiomatic replacement the checker teaches by ID (NS1001–NS1059) — kind-tagged error shapes narrowed in the catch, time and randomness arrive as message payloads, keyed data is an id-keyed array. Immutability is a rule about SHARED data, not a style: mutation is legal on locally-owned arrays — a scratch array your function creates (a literal or a `.slice()` copy) takes `push`/`pop`/`splice`/in-place `sort`, the `xs[xs.length] = v` append, and the rest with exact JS semantics until the value escapes; a `let` reassigned only from fresh copies stays owned, passing into a `readonly T[]` reader parameter borrows instead of escaping, and the checker teaches only at the real boundaries. Generics are ordinary TypeScript too: a module-level generic function, interface, or type alias monomorphizes per call site from tsc's own resolved type arguments — one readable native function per instantiation. These rules scope to app cores, the logic tier; they say nothing about the TypeScript you write anywhere else. Where the npm ecosystem fits — calling APIs (AI endpoints included), embedding npm-heavy web UIs, running node as a worker, vendoring utilities — has its own page: [Where Packages Go](/typescript/packages).
+
+<CodeToggle>
+
+```ts
+// One generic helper; tsc resolves each call's type arguments.
+export interface Task { readonly id: number; readonly done: boolean; }
+export function pick<T>(xs: readonly T[], i: number): T {
+  return xs[i];
+}
+export function firstTask(tasks: readonly Task[]): Task { return pick(tasks, 0); }
+export function lastNum(ns: readonly number[]): number { return pick(ns, ns.length - 1); }
+```
+
+```zig
+// The emitted core: one monomorphic fn per distinct instantiation, deduped.
+pub fn pick__Task(xs: []const Task, i: i64) Task {
+    return xs[uz(i)];
+}
+pub fn pick__f64(xs: []const f64, i: i64) f64 {
+    return xs[uz(i)];
+}
+```
+
+</CodeToggle>
+
+One rule deserves calling out early: **text is bytes**. Dynamic, user-visible text lives in the Model as `Uint8Array` — `string` is for literals, string-literal-union tags, and `===` comparisons. Turn literals and templates into bytes with the `asciiBytes` intrinsic:
+
+```ts
+import { asciiBytes } from "@native-sdk/core";
+
+const label = asciiBytes(`${done} of ${total} done`); // per-dispatch bytes
+const seed = asciiBytes("Stretch");                   // rodata, free to commit
+```
+
+The transpiler folds every `asciiBytes` call at compile time; under node the same import runs as a plain function with the same result. Observing a `string`'s code units (`.length`, `s[i]`) is a taught error because UTF-16 and UTF-8 would disagree, and `+` concatenation is taught away because runtime string building needs a JS string heap the binary does not carry.
+
+Bytes still read like text: the everyday string methods work directly on `Uint8Array` values, with **byte-honest semantics** — every length, offset, and index is a BYTE length/offset (never a character count: `é` measures 2), search is byte-wise, and case mapping is Unicode simple case mapping (code point to code point from the Unicode tables, locale-free, no special casing — `ß` stays `ß`; invalid UTF-8 passes through unchanged). The native build lowers each call onto the runtime kernel and node runs the same methods from the same generated tables, so both produce identical bytes by construction.
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Byte-honest meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>toUpperCase()</code> / <code>toLowerCase()</code></td>
+      <td>Unicode simple case mapping over UTF-8 (locale-free); fresh bytes</td>
+    </tr>
+    <tr>
+      <td><code>repeat(n)</code></td>
+      <td>The bytes repeated <code>n</code> times; <code>repeat(0)</code> is empty, a negative literal is a build error (JS throws RangeError there)</td>
+    </tr>
+    <tr>
+      <td><code>startsWith(b)</code> / <code>endsWith(b)</code> / <code>includes(b)</code></td>
+      <td>Byte-wise prefix/suffix/substring tests with a bytes needle; <code>includes(65)</code> with a number keeps TypedArray element search — one byte value</td>
+    </tr>
+    <tr>
+      <td><code>indexOf(b)</code> / <code>lastIndexOf(b)</code></td>
+      <td>First/last BYTE offset of the byte substring, -1 when absent (a number argument searches one byte value)</td>
+    </tr>
+    <tr>
+      <td><code>padStart(n, fill?)</code> / <code>padEnd(n, fill?)</code></td>
+      <td>Pad to <code>n</code> BYTES (not characters) with fill bytes (default <code>" "</code>), last repetition truncated by bytes</td>
+    </tr>
+    <tr>
+      <td><code>trim()</code> / <code>trimStart()</code> / <code>trimEnd()</code></td>
+      <td>Strip the JS whitespace set decoded over UTF-8; a view, no copy</td>
+    </tr>
+    <tr>
+      <td><code>split(sep)</code></td>
+      <td>Split on a bytes separator into <code>Uint8Array[]</code> (String.split shapes; the parts array is yours to mutate); an empty separator literal is a taught stop</td>
+    </tr>
+    <tr>
+      <td><code>at(i)</code></td>
+      <td>The byte value at a byte index (negatives count from the end), or <code>undefined</code> out of range</td>
+    </tr>
+  </tbody>
+</table>
+
+What stays out teaches its reason and the byte-honest alternative by name: `charCodeAt`/`charAt`/`codePointAt` read UTF-16 code units bytes do not have (read `b[i]`/`.at(i)`), the locale family (`localeCompare`, `toLocaleUpperCase`) depends on ambient locale state, the regex-taking methods (`match`, `search`) need a regex engine the binary does not carry, and `normalize`/`replace`/`replaceAll` are named deferrals with their rewrites.
+
+## Effects are Cmd data
+
+`update` never performs an effect — it can return one, as inert data, alongside the next model. Declare the pair-return type and build commands inline in the return path (never stored in the model, a message, or a local — that is what keeps replay honest):
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export interface Model {
+  readonly count: number;
+  readonly lastTick: number;
+}
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "request_time" }
+  | { readonly kind: "tick"; readonly at: number };
+
+export const viewUnbound = ["tick", "lastTick"] as const;
+
+export function initialModel(): Model {
+  return { count: 0, lastTick: -1 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add":
+      return { ...model, count: model.count + 1 };
+    case "request_time":
+      return [model, Cmd.now("tick")]; // dispatches { kind: "tick", at: <ms> }
+    case "tick":
+      return { ...model, lastTick: msg.at }; // bare model = [model, Cmd.none]
+  }
+}
+```
+
+The runtime interprets the command after the model commits and dispatches any result back as an ordinary `Msg` — routing is data (string-literal arm names, never callbacks), so the result decoder derives from your Msg types at build time. `initialModel` may return the same pair to run one boot effect before the first view build (loading a store is the canonical use). The vocabulary:
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Cmd.none</code></td>
+      <td>No effects; returning a bare <code>Model</code> is sugar for it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.now("tick")</code></td>
+      <td>Request a timestamp; dispatches the named arm with the time (ms) as its one number payload</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.delay(key, ms, "fired")</code></td>
+      <td>A keyed one-shot timer; re-issuing a live key re-arms it from now — the debounce discipline</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.readFile(path, &#123; key?, ok, err &#125;)</code></td>
+      <td>Read a whole file; <code>ok</code> carries the content bytes, <code>err</code> a reason (<code>not_found</code>, <code>io_failed</code>, <code>truncated</code>, ...)</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.writeFile(path, bytes, &#123; key?, ok, err &#125;)</code></td>
+      <td>Write a whole file (parents created, replaced whole); <code>ok</code> carries no payload — a successful write has nothing to report</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.fetch(spec, &#123; key?, ok, err &#125;)</code></td>
+      <td>A buffered HTTP(S) exchange; <code>ok</code> carries <code>&#123; status, body &#125;</code> (a 404 is still <code>ok</code> — a delivered response), <code>err</code> the transport reason</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.clipboardWrite(bytes)</code> / <code>Cmd.clipboardRead(&#123; key?, ok, err &#125;)</code></td>
+      <td>System clipboard: write is fire-and-forget, read routes the text bytes back</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.spawn(argv, &#123; key?, stdin?, line?, exit, err &#125;)</code></td>
+      <td>Run a subprocess, streaming stdout line by line; <code>collect: true</code> buffers whole stdout into the <code>exit</code> arm instead</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.audioPlay(key, source, &#123; event &#125;)</code> + <code>audioPause</code>/<code>audioResume</code>/<code>audioStop</code>/<code>audioSeek</code>/<code>audioSetVolume</code></td>
+      <td>The audio player: one event stream (<code>loaded</code>, <code>position</code>, <code>completed</code>, <code>failed</code>, <code>spectrum</code>, ...) until <code>audioStop</code> closes it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
+      <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.cancel(key)</code> / <code>Cmd.batch([a, b])</code></td>
+      <td>Drop an in-flight keyed effect; issue several commands from one dispatch, in order</td>
+    </tr>
+  </tbody>
+</table>
+
+Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for `fetch`'s — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, the named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. The one exception is a live `Cmd.spawn` key, which rejects the duplicate (`err` gets `rejected`) — a running subprocess is never killed implicitly; cancel it first, and that cancel is loud (`err` gets `cancelled`) because killing a process is an observable event. Every `err` arm receives a machine-readable reason, so failure is never silence. Persistence today is `Cmd.writeFile` + a boot-time `Cmd.readFile` — the pattern every real app uses.
+
+The debounced-autosave shape, in full — edits re-arm a one-shot; one write lands after the pause:
+
+```ts:src/core.ts
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export interface Model {
+  readonly draft: Uint8Array;
+  readonly dirty: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "draft_edit"; readonly text: Uint8Array }
+  | { readonly kind: "save_now"; readonly at: number }
+  | { readonly kind: "saved" }
+  | { readonly kind: "save_failed"; readonly reason: Uint8Array };
+
+export const viewUnbound = ["save_now", "saved", "save_failed", "dirty"] as const;
+
+export function initialModel(): Model {
+  return { draft: new Uint8Array(0), dirty: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "draft_edit":
+      return [
+        { ...model, draft: msg.text, dirty: true },
+        Cmd.delay("autosave", 800, "save_now"),
+      ];
+    case "save_now":
+      return [
+        model,
+        Cmd.writeFile(asciiBytes("draft.bin"), model.draft, { key: "save", ok: "saved", err: "save_failed" }),
+      ];
+    case "saved":
+      return { ...model, dirty: false };
+    case "save_failed":
+      return model;
+  }
+}
+```
+
+## Subscriptions are Sub data
+
+Recurring effects are declared, not issued: export `subscriptions(model): Sub<Msg>` and return descriptors derived from the current model. After every commit the host reconciles the returned set against its active timers by key — a new key (or a changed interval) arms a timer, a missing key cancels it — so starting, stopping, and re-tuning timers is just returning different data:
+
+```ts:src/core.ts
+import { Sub } from "@native-sdk/core";
+
+export interface Model {
+  readonly running: boolean;
+  readonly fast: boolean;
+  readonly ticks: number;
+}
+
+export type Msg =
+  | { readonly kind: "toggle" }
+  | { readonly kind: "set_fast" }
+  | { readonly kind: "tick"; readonly at: number };
+
+export const viewUnbound = ["tick"] as const;
+
+export function initialModel(): Model {
+  return { running: false, fast: false, ticks: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "toggle":
+      return { ...model, running: !model.running };
+    case "set_fast":
+      return { ...model, fast: true };
+    case "tick":
+      return { ...model, ticks: model.ticks + 1 };
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.running) return Sub.none;
+  return Sub.batch([
+    Sub.timer("tick", model.fast ? 250 : 1000, "tick"),
+    Sub.timer("autosave", 30000, "tick"),
+  ]);
+}
+```
+
+Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
+
+## Text input from markup
+
+A markup text control (`<text-field text="{draft}" on-input="draft_edit" />`) needs a bytes field the control renders and a Msg arm carrying the text-input event. The event union mirrors the runtime's event vocabulary structurally — import it (`import { type TextInputEvent } from "@native-sdk/core/text"`, also re-exported by `@native-sdk/core/events`) or declare the same shape in your core; the pairing rules are in [Native UI: Messages](/native-ui#messages). Your `update` reduces the events over the draft bytes; a minimal reducer (append / backspace / clear) covers simple fields. Full caret/selection/IME fidelity is one import: the SDK ships the byte-splice text engine as `@native-sdk/core/text` (below).
+
+## Splitting a core into modules
+
+A core that outgrows one file splits into modules under `src/`: relative imports spelled with their real filenames (`./parsers.ts` — the same file runs under node, whose loader resolves real files), `src/` as the hard boundary (`../` and npm packages are teaching errors), and no runtime cycles (`import type` back-edges are fine and idiomatic — a helper module typically type-imports `Model` from the entry). Export lists and value re-exports are ordinary module surface: `export { helper, doneCount as remaining }` binds names over existing declarations, and `export { parsePs } from "./parsers.ts"` forwards another module's export by name — what stays out is `export default`, `export =`, and `export * from` (the flat emitted namespace resolves by name, so every export names what it binds). `core.ts` stays the entry module and the app's public face: `update`, `initialModel`, `subscriptions`, the wiring channels, and the exported binding helpers live there (declared and exported under their own names — a rename or re-export cannot bind an entry point), and imported modules hold the machinery they call. The SDK also ships library modules in the same subset — `@native-sdk/core/text` is the byte-splice text engine (caret, selection, IME composition, ASCII case-insensitive compare), and `@native-sdk/core/events` is the canonical event record types (`TextInputEvent` re-exported, `ScrollState`, `FrameEvent`, `KeyEvent`, `ColorScheme`, the chrome records, `AudioState`/`AudioEvent`) so no core re-types the vocabulary — transpiled into your core when imported and absent when not. Everything still emits as ONE readable native module, one section per source file.
+
+<CodeToggle>
+
+```ts
+// src/core.ts — the entry module: Model, Msg, update, and the exports
+// markup binds. Imports feed them.
+import { parseSample, type Sample } from "./parsers.ts";
+import { containsIgnoreCase } from "@native-sdk/core/text";
+
+// src/parsers.ts — a module of the same core, plain subset TypeScript:
+import type { Model } from "./core.ts"; // type-only back-edges are legal
+export interface Sample { readonly value: number; }
+export function parseSample(bytes: Uint8Array): Sample | null { /* ... */ }
+```
+
+```zig
+// src/main.zig — a Zig core splits the ordinary way:
+const parsers = @import("parsers.zig");
+
+// src/parsers.zig
+pub const Sample = struct { value: i64 };
+pub fn parseSample(bytes: []const u8) ?Sample { ... }
+```
+
+</CodeToggle>
+
+## The dev loop
+
+`native dev --core` is the fastest loop for logic work: the core runs under node with a virtual host — dispatch Msgs as JSON lines (`{"kind":"add"}`, `{"$bytes":"…"}` for bytes payloads), advance a virtual clock (`{"advance":1000}`) to fire timers deterministically, and watch the committed model and effect transcript. Effects the virtual host does not perform (files, fetch, spawn) print as `cmd ...` lines — feed their results back yourself as ordinary Msg lines; that is the point, results are plain messages. Pair `--script msgs.ndjson` with `--watch` to replay a scenario on every edit. [Quick Start](/quick-start#the-fastest-loop-the-core-under-node) shows a full transcript.
+
+`native check` runs the subset checker (real tsc semantics plus the app-core rules) over `src/core.ts` and its whole import graph (diagnostics carry each module's own path), then validates markup and `app.zon`. Every diagnostic names the rule, the idiomatic rewrite, and the reason — write to them up front and the loop stays fast.
+
+## Editor support
+
+Editor support is stock tsc — no extension, no plugin. The scaffold ships `package.json` and `tsconfig.json` as the editor-and-versioning surface: the tsconfig mirrors the compiler options the checker itself builds its program with (strict, `moduleResolution: "bundler"`, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`, …), so what your editor flags is what `native check` flags, and `@native-sdk/core` (plus subpaths like `@native-sdk/core/text`) resolves through `node_modules` like any package. Until `@native-sdk/core` is published to npm, the CLI materializes that `node_modules` copy itself — exactly the files the published package will contain — and `native check`/`dev`/`build` keep it fresh against the SDK (`native doctor` reports skew). After the publish, a plain `npm install` writes identical content and takes over. None of it is build truth: builds transpile against the SDK the CLI ships with and never read `node_modules` — delete it and every `native` verb still works.
+
+## Reading the output: the eject story
+
+The transpiler emits ordinary, readable Zig — your names are your names (fields, helpers, and locals keep their TS spellings), your switch arms become tagged-union switches, one commented module. `native check` leaves the latest emission in `.native/check/core.zig`, and the transpiler CLI writes it wherever you point `-o`. If an app outgrows the subset, that emitted module is the migration path: adopt it as handwritten source (the [App Model](/app-model) page covers the Zig wiring) and keep building — nothing about the runtime changes, because the emitted core was already an ordinary Zig app core.
+
+## Where the subset ends
+
+The core tier covers app logic. The toolkit-extension tier — custom widgets, rasterizer work, host services, platform integration — is Zig by design: that layer is the machinery itself, and [Building Components](/building-components) is its guide. A TypeScript app that needs one custom widget does not switch tiers wholesale; the widget is Zig, the core stays TypeScript.
+
+## Reference
+
+The complete authoring guide — every rule ID, every Cmd shape, every subset corner with its idiom — ships as the `ts-core` agent skill: `native skills get ts-core`. It is written for AI agents and precise enough for humans.

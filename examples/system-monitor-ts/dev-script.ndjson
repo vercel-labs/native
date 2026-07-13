@@ -1,0 +1,45 @@
+# The monitor's core-logic loop, headless: replay with
+#   native dev --core --script dev-script.ndjson
+# Msgs dispatch into update; `advance` runs the virtual clock (firing the
+# sample-cadence subscription); the sampler exits are ordinary Msgs, so the
+# engine's collected stdout is fed back by hand exactly as the transcript's
+# `cmd spawn ...` lines invite.
+
+# The boot probe answers with macOS conventions (sysctl: 10 cores, 32 GiB)
+# - the core selects vm_stat sampling and issues the eager first sample
+# (watch the transcript for the ps + vm_stat spawn pair).
+{"kind":"info_done","code":0,"output":{"$bytes":"10\n34359738368\n"}}
+
+# The eager sample's ps block: three rows - launchd (pid 1, whose etime IS
+# the uptime), a busy renderer, and a quiet daemon.
+{"kind":"ps_done","code":0,"output":{"$bytes":"    1   0.0  0.1  25824 02:49:06 /sbin/launchd\n  842  85.0  4.2 1048576 12-23:59:59 /usr/local/bin/renderfarm-worker\n 2048   0.0  0.0      0 05:00 /usr/libexec/idle-daemon\n"}}
+
+# The vm_stat block: 794612 active + 136740 wired + 58399 compressor pages
+# at 16384 bytes = ~15.1 GB used of the probe's 32 GiB.
+{"kind":"mem_done","code":0,"output":{"$bytes":"Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 128230.\nPages active: 794612.\nPages wired down: 136740.\nPages occupied by compressor: 58399.\n"}}
+
+# Two seconds of virtual time fires the sample subscription once; the tick
+# lands while nothing is in flight, so a fresh spawn pair appears.
+{"advance":2000}
+
+# Filter to the busy row, sort by PID, then back to CPU.
+{"kind":"search_edit","edit":{"kind":"insert_text","text":{"$bytes":"render"}}}
+{"kind":"sort_pid"}
+{"kind":"sort_cpu"}
+{"kind":"search_edit","edit":{"kind":"clear"}}
+
+# The confirmed SIGTERM: request copies the target out of the row, confirm
+# spawns exactly `/bin/kill -TERM 842` (watch the transcript), and the
+# kill exit lands as a status note.
+{"kind":"request_kill","pid":842}
+{"kind":"confirm_kill"}
+{"kind":"kill_done","code":0,"output":{"$bytes":""}}
+
+# Pause cancels the subscription (watch `sub cancel sample`; no tick fires
+# during the next advance), resume re-arms it — and because this script
+# never fed the second round's spawns, the eager resume sample lands
+# mid-flight and is SKIPPED AND COUNTED (ticksSkipped: 1), never
+# overlapped.
+{"kind":"toggle_sampling"}
+{"advance":4000}
+{"kind":"toggle_sampling"}

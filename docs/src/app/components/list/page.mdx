@@ -18,17 +18,6 @@ A vertical stack of items. The rows are `list-item` text leaves — the label is
 </list>
 ```
 
-## Zig builder
-
-```zig
-ui.list(.{ .width = 340, .gap = 2 }, .{
-    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .report, .on_press = .open_report }, "Quarterly report.md"),
-    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .checklist, .on_press = .open_checklist }, "Launch checklist.md"),
-    ui.listItem(.{ .icon = "folder", .on_press = .open_archive }, "Archive"),
-    ui.listItem(.{ .icon = "music", .disabled = true }, "demo-track.wav"),
-})
-```
-
 ## Selection and activation
 
 When selection is model state — the accent row your app owns — rows use the desktop gesture split: a single click selects (`on-press`), and the primary action (open the record, play the track) rides the double click and Enter. Bind the primary action twice — `on_double_press` for the pointer (Zig builder only; markup has no double-click event) and `on-submit` for the keyboard:
@@ -56,6 +45,19 @@ For long row sets, turn on `virtualized` and give each row a fixed `virtual-item
     <list-item on-press="open_row:{row.id}">{row.title}</list-item>
   </for>
 </list>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.list(.{ .width = 340, .gap = 2 }, .{
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .report, .on_press = .open_report }, "Quarterly report.md"),
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .checklist, .on_press = .open_checklist }, "Launch checklist.md"),
+    ui.listItem(.{ .icon = "folder", .on_press = .open_archive }, "Archive"),
+    ui.listItem(.{ .icon = "music", .disabled = true }, "demo-track.wav"),
+})
 ```
 
 ## Attributes

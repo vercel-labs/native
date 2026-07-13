@@ -33,9 +33,15 @@ Both forms resolve at draw time with an honest failure mode: a name that resolve
 <button icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
 ```
 
-## Zig builder
+## Registry
 
-`ui.icon` takes the name as a comptime argument — an unknown name is a compile error pointing at `canvas.icons.known_icon_names`.
+The full built-in set (`canvas.icons.known_icon_names`), rendered by the engine.
+
+<IconGallery />
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically. `ui.icon` takes the name as a comptime argument — an unknown name is a compile error pointing at `canvas.icons.known_icon_names`.
 
 ```zig
 ui.row(.{ .gap = 20, .cross = .center }, .{
@@ -45,12 +51,6 @@ ui.row(.{ .gap = 20, .cross = .center }, .{
     ui.icon(.{ .style_tokens = .{ .foreground = .success } }, "check-circle"),
 })
 ```
-
-## Registry
-
-The full built-in set (`canvas.icons.known_icon_names`), rendered by the engine.
-
-<IconGallery />
 
 ## Attributes
 

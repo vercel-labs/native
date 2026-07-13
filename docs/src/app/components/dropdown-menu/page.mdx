@@ -26,7 +26,9 @@ A vertical menu surface whose children are `menu-item` elements. Setting `anchor
 
 Handle the item's Msg in `update` and clear the open flag there — a menu press does not dismiss implicitly. [Select](/components/select) and [combobox](/components/combobox) build their option lists from exactly this pattern (with `anchor-alignment="stretch"` for the select-menu width).
 
-## Zig builder
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
 
 ```zig
 ui.stack(.{}, .{

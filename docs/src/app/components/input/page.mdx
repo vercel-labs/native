@@ -1,9 +1,10 @@
 import { ComponentPreview } from "@/components/component-preview";
 import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
 
 # Input
 
-Single-line text entry. `input` and `text-field` are the same foundation under two names: `text` and `placeholder` bind from the model, `on-input` names a Msg variant that receives every edit as a `canvas.TextInputEvent`, and `on-submit` dispatches on enter. `search-field` is the same control styled for search.
+Single-line text entry. `input` and `text-field` are the same foundation under two names: `text` and `placeholder` bind from the model, `on-input` names a Msg variant that receives every edit as a text-input event (the `TextInputEvent` union from `@native-sdk/core/text` in a TypeScript core; `canvas.TextInputEvent` in a Zig core), and `on-submit` dispatches on enter. `search-field` is the same control styled for search.
 
 <ComponentPreview name="input" alt="Text inputs rendered by the engine" caption="placeholder, bound text, and disabled states" />
 
@@ -12,27 +13,35 @@ Single-line text entry. `input` and `text-field` are the same foundation under t
 ```html
 <column gap="12" width="280">
   <input placeholder="Email address" text="{email}" on-input="email_edited" on-submit="subscribe" />
-  <text-field text="{project_name}" on-input="name_edited" />
+  <text-field placeholder="Project name" text="{project_name}" on-input="name_edited" />
   <input placeholder="Disabled" disabled="true" />
 </column>
 ```
 
-## Zig builder
+The core side is a text field the control renders and one arm reducing each edit over it — [Native UI § Messages](/native-ui#messages) walks the whole contract:
 
-`on_input` takes a comptime message constructor: `Ui.inputMsg(.tag)` builds `Msg{ .tag = edit }` for each `canvas.TextInputEvent`.
+<CodeToggle>
+
+```ts
+import { type TextInputEvent } from "@native-sdk/core/text";
+// the same module ships the full byte-splice reducer (applyTextInputEvent)
+// for update to fold each edit over the model's draft bytes
+
+export type Msg =
+  | { readonly kind: "subscribe" }
+  | { readonly kind: "email_edited"; readonly edit: TextInputEvent };
+```
 
 ```zig
-ui.column(.{ .gap = 12, .width = 280 }, .{
-    ui.el(.input, .{
-        .placeholder = "Email address",
-        .text = model.email,
-        .on_input = Ui.inputMsg(.email_edited),
-        .on_submit = .subscribe,
-    }, .{}),
-    ui.textField(.{ .text = model.project_name, .on_input = Ui.inputMsg(.name_edited) }),
-    ui.el(.input, .{ .placeholder = "Disabled", .disabled = true }, .{}),
-})
+email_buffer: canvas.TextBuffer(128) = .{},
+pub fn email(model: *const Model) []const u8 {
+    return model.email_buffer.text();
+}
+// in update:
+.email_edited => |edit| model.email_buffer.apply(edit),
 ```
+
+</CodeToggle>
 
 ## Search field
 
@@ -43,6 +52,25 @@ ui.column(.{ .gap = 12, .width = 280 }, .{
 ```html
 <search-field width="280" placeholder="Search notes" text="{query}" on-input="query_edited" />
 ```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically. `on_input` takes a comptime message constructor: `Ui.inputMsg(.tag)` builds `Msg{ .tag = edit }` for each `canvas.TextInputEvent`.
+
+```zig
+ui.column(.{ .gap = 12, .width = 280 }, .{
+    ui.el(.input, .{
+        .placeholder = "Email address",
+        .text = model.email,
+        .on_input = Ui.inputMsg(.email_edited),
+        .on_submit = .subscribe,
+    }, .{}),
+    ui.textField(.{ .placeholder = "Project name", .text = model.project_name, .on_input = Ui.inputMsg(.name_edited) }),
+    ui.el(.input, .{ .placeholder = "Disabled", .disabled = true }, .{}),
+})
+```
+
+The search field builds the same way:
 
 ```zig
 ui.el(.search_field, .{
