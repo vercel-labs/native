@@ -43,7 +43,7 @@
   },
   "homepage": "https://native-sdk.dev",
   "scripts": {
-    "version": "npm run version:sync && git add ../../tools/native-sdk/main.zig npm/*/package.json package.json",
+    "version": "npm run version:sync && git add ../../tools/native-sdk/main.zig ../../packages/core/package.json ../../packages/core/package-lock.json ../../examples/soundboard-ts/package.json ../../examples/system-monitor-ts/package.json npm/*/package.json package.json",
     "version:sync": "node scripts/sync-version.js",
     "version:check": "node scripts/check-version-sync.js",
     "scripts:check": "node --check bin/native.js && node --check scripts/copy-native.js && node --check scripts/copy-framework.js && node --check scripts/sync-version.js && node --check scripts/check-version-sync.js && node --check scripts/check-framework-sync.js && node --check scripts/check-runtime-types.js && node scripts/copy-framework.js && node scripts/check-framework-sync.js && node scripts/check-runtime-types.js",

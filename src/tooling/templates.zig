@@ -484,7 +484,10 @@ fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\`node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package
         \\so `@native-sdk/core` resolves with full IntelliSense. Builds never read
         \\any of it — delete node_modules and every `native` verb still works; the
-        \\next `native check`/`dev`/`build` puts it back.
+        \\next `native check`/`dev`/`build` puts it back. Running `npm install`
+        \\is optional for the same reason: the CLI materializes and refreshes the
+        \\package itself, and an install simply lands the identical content once
+        \\`@native-sdk/core` is on npm.
         \\
         \\## Requirements
         \\

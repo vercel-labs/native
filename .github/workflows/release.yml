@@ -169,6 +169,10 @@ jobs:
       # npm publish fails loudly with an OIDC authentication error before
       # anything is uploaded for that package. Trusted publishing requires
       # npm >= 11.5.1, satisfied by the npm bundled with Node 24.
+      # @native-sdk/core (packages/core) joins that publish set the moment
+      # its "private" flag drops (see the publish step below) — its
+      # npmjs.com trusted-publisher configuration must exist BEFORE that
+      # flip lands.
 
       - name: Check version sync
         run: npm --prefix packages/native-sdk run version:check
@@ -227,4 +231,25 @@ jobs:
           for dir in packages/native-sdk/npm/*/; do
             publish_dir "${dir%/}"
           done
+
+          # @native-sdk/core (packages/core) rides the same version and
+          # release gate as the CLI (sync-version.js stamps it; the
+          # version check above refuses a half-bumped tree).
+          #
+          # ============================ LOUD FLIP REQUIREMENT ==========
+          # packages/core/package.json keeps "private": true until the
+          # 0.5.0 cut BY DESIGN, and that field IS the publish switch:
+          # while private, the guard below skips the package (npm would
+          # refuse to publish it anyway); the 0.5.0 change that drops
+          # "private" makes this same step start publishing it with no
+          # workflow edit. Before dropping the flag, configure the
+          # @native-sdk/core trusted publisher on npmjs.com (see the note
+          # above) or the first public release fails here.
+          # =============================================================
+          if [ "$(node -p "require('./packages/core/package.json').private === true")" = "true" ]; then
+            echo "@native-sdk/core is private (pre-0.5.0): skipping publish by design"
+          else
+            publish_dir packages/core
+          fi
+
           publish_dir packages/native-sdk

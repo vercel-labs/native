@@ -2,7 +2,9 @@
 
 // Verify every version stamped by sync-version.js matches
 // packages/native-sdk/package.json: the CLI source, the per-platform
-// binary packages, and the optionalDependencies pins. Also verify each
+// binary packages, the bundled @native-sdk/core (manifest + lockfile,
+// the version every TS scaffold and example pin follows), and the
+// optionalDependencies pins. Also verify each
 // platform package's repository.url and homepage match the main package,
 // because npm validates repository.url against publish provenance and a
 // repository rename that only updates the main package fails the publish.
@@ -67,6 +69,29 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
 for (const [name, pin] of Object.entries(packageJson.optionalDependencies ?? {})) {
   if (pin !== expectedVersion) {
     console.error(`Version mismatch: optionalDependencies["${name}"]=${pin}, expected ${expectedVersion}`);
+    errors++;
+  }
+}
+
+// The bundled @native-sdk/core rides the release version (manifest and
+// lockfile own-package fields), and the committed TS examples pin it
+// exactly — half-bumped, a published CLI would scaffold pins npm cannot
+// resolve to the matching @native-sdk/core release.
+const coreJson = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package.json'), 'utf-8'));
+if (coreJson.version !== expectedVersion) {
+  console.error(`Version mismatch: packages/core/package.json=${coreJson.version}, expected ${expectedVersion}`);
+  errors++;
+}
+const coreLock = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package-lock.json'), 'utf-8'));
+if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !== expectedVersion) {
+  console.error(`Version mismatch: packages/core/package-lock.json=${coreLock.version}/${coreLock.packages?.['']?.version}, expected ${expectedVersion}`);
+  errors++;
+}
+for (const example of ['examples/soundboard-ts', 'examples/system-monitor-ts']) {
+  const exampleJson = JSON.parse(readFileSync(join(repoRoot, ...example.split('/'), 'package.json'), 'utf-8'));
+  const pin = exampleJson.dependencies?.['@native-sdk/core'];
+  if (pin !== expectedVersion) {
+    console.error(`Version mismatch: ${example}/package.json pins @native-sdk/core ${pin}, expected ${expectedVersion}`);
     errors++;
   }
 }
