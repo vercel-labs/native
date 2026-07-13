@@ -2,9 +2,33 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.5.0
+## 0.5.1
 
 <!-- release:start -->
+
+### Improvements
+
+- **The TS scaffold's status bar earns its empty state**: a fresh scaffold said "stamped: -1ms" until the first Stamp press; the template's markup now branches on `{stampedMs < 0}` and says "press Stamp for a timestamp" instead — teaching the if/else markup shape in the starter while it's at it.
+
+### Bug Fixes
+
+- **Exact-fit text no longer elides under geometry pixel snapping on Windows**: edge snapping rounds a frame's two edges independently, so a hug-sized text box at a fractional position could come back up to a full device pixel narrower than the label it was measured for — past the elision slack, so the TS scaffold's centered counter painted "…" instead of its digit at 100% scale. The wrap/elision budget (`textWrapMaxWidth`) now hands back the full snap quantum (1/scale, was 0.5/scale), and the epsilon policy is documented at the seam: painted width may exceed the snapped frame by less than `1/scale + text_elision_slack`, always below the smallest real overflow (a glyph).
+- **Spawn teardown crash window closed**: the effects channel now joins every spawn, fetch, and file worker thread that converges before its teardown returns (previously it gave up after ~5s and abandoned them), so cancelling or quitting while a real child is still streaming can no longer leave a stale worker writing into freed memory.
+- **Spawn cancel reaches the whole process tree**: each spawned child runs in its own process group and cancel/teardown signals the group (POSIX), so shell-wrapped commands (`sh -c "a; b"`) no longer leave orphaned grandchildren holding the stream open past the cancel.
+- **Every worker class tears down bounded**: spawn, fetch, and file workers now share one terminal guarantee — teardown returns within a budget and never frees memory a live thread can still touch. A file worker stuck in blocking I/O that nothing can converge (a write to a FIFO with no reader, a stalled network filesystem), or a spawn worker held hostage by a descendant that escaped the kill's process group (`setsid` daemonization, a shell's `set -m` background job) while holding the stdout pipe open, no longer hangs teardown: teardown interrupts the blocked syscall best-effort at half its budget and, past the full 15s, abandons the worker with one warning and a small deliberate leak. Everything an abandoned worker can still reach lives in process-lifetime storage, so the leak stays safe even when the app tears down the allocator behind the channel right after.
+- **A fetch that cannot start cancellably is rejected, never run inline**: when the executor cannot start the exchange as a cancelable task, the fetch now delivers one honest `.rejected` terminal instead of silently running an exchange that would evade `cancel`, the timeout, and teardown's join.
+- **The npm-installed CLI carries its TypeScript toolchain**: @typescript/typescript6 — and @typescript/old, the exactly-pinned alias of the real compiler its one-line entrypoint re-exports — are now regular dependencies of `@native-sdk/cli`, installed by npm in the same transaction as the CLI itself. The first `native check|dev|build|test` on a TypeScript app needs no network and no install step, and never runs npm: it works offline right after install, on read-only (system-owned) prefixes, and under `NODE_ENV=production` alike, because the bundled transpiler resolves the toolchain by node's own ancestor `node_modules` walk across every layout npm or pnpm produces. A repo checkout whose `packages/core` install hasn't happened yet is taught the one command (`cd <sdk>/packages/core && npm ci --include=dev`), and a direct `zig build` against an unresolvable toolchain fails with the same clean teaching and a resolved SDK path instead of a panic stack trace. TypeScript apps need Node.js 22.15+ (on the 23 line: 23.5+) on every layout — repo checkouts included, because every .ts module rides the same `module.registerHooks` type stripping: on a node without the hook the runner fails fast with a one-line upgrade teaching instead of node's raw `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`.
+- **Drag headers lay out clear of the Windows caption buttons**: on hidden-titlebar windows, a `window-drag` header whose app never consumed the chrome channel's trailing inset rendered right-aligned content UNDER the DWM min/max/close cluster (system-monitor-ts's status text was truncated by the caption punch-out). The runtime now detects the collision after layout and re-lays the view once with the cluster reserved (`DesignTokens.window_controls`, stamped like `text_measure`), so drag-header content stops at the cluster's edge on every app — markup and builder, Zig and TS — while headers that already pad through the chrome insets (soundboard's trailing spacer) keep a byte-identical layout. The same mechanism covers the macOS mirror (a leading traffic-light cluster). Anchored floating children of the drag header resolve against the cleared rect too, so an end-aligned floater moves out from under the buttons just like flow content; anchored children of non-drag widgets keep byte-identical placement.
+- **Standard titlebars follow dark mode on Windows**: windows with standard chrome now set `DWMWA_USE_IMMERSIVE_DARK_MODE` from the OS app color scheme — at creation (before first show, so a dark launch never flashes a light caption) and again on every appearance broadcast — so a dark-themed app no longer sits under a glaring white titlebar. Hidden-titlebar windows keep their higher-fidelity pixel-sampled caption color, and chromeless windows have no caption to tint.
+- **Windows release exes are GUI-subsystem**: `native build` (and therefore everything `native package --target windows` wraps) no longer produces console-subsystem binaries, so launching a packaged app never flashes a terminal window behind it. Debug exes keep the console — the dev loop's logs live there — and redirected logging (`app.exe > log 2>&1`) still works on GUI exes. Packaging now reads the exe's PE subsystem, warns loudly when a console-subsystem binary is wrapped (stale zig-out or hand-supplied `--binary`), and carries the finding in the package stats, pinned by tests over synthetic PE headers. The web-frontend scaffold's standalone `build.zig` (Next/Vite/React/Svelte/Vue and `native init --full`) emits the same release-only assignment, so scaffolded apps get the posture without the SDK build graph.
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.5.0
 
 ### New Features
 
@@ -69,7 +93,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - @ctate
 - @SunkenInTime
 - @sepehr-safari
-<!-- release:end -->
 
 ## 0.4.4
 

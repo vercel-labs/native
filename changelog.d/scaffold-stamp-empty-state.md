@@ -1,1 +1,0 @@
-improvement: **The TS scaffold's status bar earns its empty state**: a fresh scaffold said "stamped: -1ms" until the first Stamp press; the template's markup now branches on `{stampedMs < 0}` and says "press Stamp for a timestamp" instead — teaching the if/else markup shape in the starter while it's at it.
