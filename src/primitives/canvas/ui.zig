@@ -598,6 +598,17 @@ pub fn Ui(comptime Msg: type) type {
             /// Negative (the default) declares no origin. Only
             /// meaningful with a nonzero `resize_duration`.
             resize_origin: f32 = -1,
+            /// Hover-intent show delay for an ANCHORED tooltip (markup
+            /// `tooltip-delay`), in milliseconds: the runtime shows the
+            /// tooltip only after its trigger has been hovered this
+            /// long on the recorded frame clock. 0 shows the instant
+            /// the trigger is hovered. Negative (the default) follows
+            /// the token default
+            /// (`ControlMetricTokens.tooltip_show_delay_ms`). Only
+            /// meaningful on a tooltip with `anchor` — the markup
+            /// validator rejects it anywhere else as silently-inert
+            /// data.
+            tooltip_delay: i32 = -1,
             style: canvas.WidgetStyle = .{},
             /// Named token references resolved against design tokens in
             /// `finalizeWithTokens`; explicit `style` values win.
@@ -2697,6 +2708,7 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_duration_ms = options.resize_duration,
                 .resize_easing = options.resize_easing,
                 .resize_origin = options.resize_origin,
+                .tooltip_delay_ms = options.tooltip_delay,
             };
             applyKindDefaultLayout(kind, options, &widget.layout);
             return widget;

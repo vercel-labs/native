@@ -249,7 +249,13 @@ pub const elements = [_]ElementInfo{
     .{ .code = 36, .name = "switch", .widget_kind = "switch_control", .takes_text = true, .a11y_name = .control },
     .{ .code = 37, .name = "table-cell", .widget_kind = "data_cell", .takes_text = true },
     .{ .code = 38, .name = "toggle-button", .widget_kind = "toggle_button", .takes_text = true, .icon_attr = true, .a11y_name = .control },
-    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false },
+    // Tooltip is anchorable: `anchor="above|below"` floats it against
+    // its PARENT's frame (the trigger, or the stack wrapping trigger +
+    // tooltip), and the RUNTIME owns its visibility — hidden until the
+    // hover-intent delay on the trigger fires (see `tooltip-delay`).
+    // Without `anchor` it stays the classic static text leaf that
+    // paints whenever the view renders it.
+    .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false, .anchorable = true },
     // Value controls and text entry.
     .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .a11y_name = .control },
     .{ .code = 41, .name = "radio", .widget_kind = "radio", .a11y_name = .control },
@@ -450,6 +456,14 @@ pub const attrs = [_]AttrInfo{
     // silently inert). No `field`: the engines apply it to
     // `ElementOptions.style`, not a flat option field.
     .{ .code = 79, .name = "quiet-hover", .class = .flag, .group = .option },
+    // Hover-intent show delay for ANCHORED tooltips (tooltip only, and
+    // only beside `anchor`; the validator scopes both), in whole
+    // milliseconds. The runtime shows an anchored tooltip after its
+    // trigger has been hovered this long on the recorded frame clock —
+    // 0 shows the instant the trigger is hovered. Negative is
+    // unreachable from markup; absent keeps the token default
+    // (`ControlMetricTokens.tooltip_show_delay_ms`).
+    .{ .code = 80, .name = "tooltip-delay", .class = .whole, .group = .option, .field = "tooltip_delay" },
 };
 
 // ----------------------------------------------------------------- events

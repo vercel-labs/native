@@ -841,6 +841,18 @@ pub const Widget = struct {
     /// origin: mounts land at their value, exactly as before. Ignored
     /// on splits that already have a retained fraction.
     resize_origin: f32 = -1,
+    /// Hover-intent show delay for an ANCHORED `.tooltip` widget
+    /// (`tooltip_delay:` in the builder, `tooltip-delay=` in markup),
+    /// in milliseconds. An anchored tooltip is runtime-owned hover
+    /// chrome: it stays hidden until its trigger (the anchor parent's
+    /// subtree) has been hovered this long on the recorded frame
+    /// clock, shows while the hover holds, and hides when the pointer
+    /// leaves — the model never hears hover. 0 shows the instant the
+    /// trigger is hovered. Negative (the default) follows the token
+    /// default (`ControlMetricTokens.tooltip_show_delay_ms`). Ignored
+    /// on every other kind, and on tooltips without an anchor (those
+    /// stay static leaves that paint whenever the view renders them).
+    tooltip_delay_ms: i32 = -1,
     /// Window-drag surface (`window-drag="true"` / `.window_drag`): a
     /// pointer press that lands here — or falls through plain text /
     /// icons / decorations onto it — moves the WINDOW instead of

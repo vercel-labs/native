@@ -795,6 +795,53 @@ test "overscroll validates as scroll-scoped with a closed value vocabulary" {
     }
 }
 
+test "tooltip-delay validates as tooltip-scoped beside anchor, and anchor accepts tooltip" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: an anchored tooltip with a literal delay, a zero delay
+    // (instant show), a binding (resolved by the engines at build), and
+    // an anchored tooltip with no delay at all (the token default).
+    const valid_sources = [_][]const u8{
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\" tooltip-delay=\"500\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\" tooltip-delay=\"0\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"below\" tooltip-delay=\"{delay}\">Bold the selection</tooltip>\n</stack>",
+        "<stack>\n  <button on-press=\"pressed\">Bold</button>\n  <tooltip anchor=\"above\">Bold the selection</tooltip>\n</stack>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Hover intent exists only where the runtime owns visibility;
+        // anywhere else the delay is silently inert.
+        .{
+            .source = "<column>\n  <button on-press=\"pressed\" tooltip-delay=\"500\">Bold</button>\n</column>",
+            .message = markup.tooltip_delay_element_message,
+        },
+        // A delay beside no anchor shapes a hover-show that never
+        // happens: a static tooltip paints whenever the view renders it.
+        .{
+            .source = "<column>\n  <tooltip tooltip-delay=\"500\">Bold the selection</tooltip>\n</column>",
+            .message = markup.tooltip_delay_dependent_attr_message,
+        },
+        // Anchor stays scoped to its registry set; tooltip joining it
+        // must not open other elements.
+        .{
+            .source = "<column>\n  <badge anchor=\"above\">3</badge>\n</column>",
+            .message = markup.anchor_element_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
 test "overflow validates as text-scoped with a closed value vocabulary" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

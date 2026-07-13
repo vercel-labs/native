@@ -1133,13 +1133,15 @@ pub const known_dismiss_element_names = schema.dismiss_element_names;
 
 pub const on_dismiss_element_message = "on-dismiss is only supported on dismissible surfaces (dialog, drawer, sheet, dropdown-menu) - Escape and click-outside dismiss those, and the Msg lets the model own the close (clear the open flag in update)";
 
-/// Elements that may float as anchored surfaces. dropdown-menu is the
-/// markup channel; popover/menu-surface stay Zig views (documented
-/// exclusions) and dialogs/drawers/sheets place themselves.
+/// Elements that may float as anchored surfaces. dropdown-menu and
+/// tooltip are the markup channels; popover/menu-surface stay Zig views
+/// (documented exclusions) and dialogs/drawers/sheets place themselves.
+/// An anchored tooltip's visibility is RUNTIME-owned (hover intent on
+/// its trigger), unlike the model-owned dropdown.
 /// Registry-derived from the `anchorable` element predicate.
 pub const known_anchor_element_names = schema.anchor_element_names;
 
-pub const anchor_element_message = "anchor is only supported on dropdown-menu - it floats the surface against its PARENT's frame (put the dropdown beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
+pub const anchor_element_message = "anchor is only supported on dropdown-menu and tooltip - it floats the surface against its PARENT's frame (put the dropdown or tooltip beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
 pub const anchor_value_message = "anchor takes a literal placement: below or above (either side flips automatically when the surface does not fit and the other side has more room)";
 pub const anchor_alignment_value_message = "anchor-alignment takes a literal alignment: start, end, or stretch (stretch also widens the surface to at least the anchor's width)";
 pub const anchor_offset_value_message = "anchor-offset takes a literal number: the gap in points between the anchor edge and the surface";
@@ -1240,6 +1242,10 @@ pub const resize_easing_dependent_attr_message = "resize-easing needs a nonzero 
 pub const resize_origin_element_message = "resize-origin is only supported on split - it names the fraction a freshly mounted split's pane boundary slides in from (its children keep the declared value's pose); anywhere else it would be silently inert";
 
 pub const resize_origin_dependent_attr_message = "resize-origin needs a nonzero resize-duration on the same split - without a duration a mount lands on its value and the origin is silently inert";
+
+pub const tooltip_delay_element_message = "tooltip-delay is only supported on tooltip - it sets the hover-intent show delay (milliseconds; 0 shows the instant the trigger is hovered) the runtime waits before showing an ANCHORED tooltip; anywhere else it would be silently inert";
+
+pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on the same tooltip - only an anchored tooltip is hover-shown by the runtime (a static tooltip paints whenever the view renders it), so without anchor the delay is silently inert";
 
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
 pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
@@ -3209,6 +3215,23 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                                 return attrError(node, attribute, resize_origin_dependent_attr_message);
                             }
                         }
+                    }
+                }
+                if (std.mem.eql(u8, attribute.name, "tooltip-delay")) {
+                    // Hover intent exists only where the runtime owns
+                    // visibility: anywhere but a tooltip the delay is
+                    // silently inert (same policy as resize-duration
+                    // off split).
+                    if (!std.mem.eql(u8, node.name, "tooltip")) {
+                        return attrError(node, attribute, tooltip_delay_element_message);
+                    }
+                    // The delay shapes a hover-show that exists only on
+                    // an ANCHORED tooltip: a static tooltip paints
+                    // whenever the view renders it, so a delay beside
+                    // no anchor is silently inert — a teaching error
+                    // (the anchor-alignment-without-anchor policy).
+                    if (node.attr("anchor") == null) {
+                        return attrError(node, attribute, tooltip_delay_dependent_attr_message);
                     }
                 }
                 if (std.mem.eql(u8, attribute.name, "size")) {

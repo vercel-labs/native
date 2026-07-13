@@ -65,7 +65,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "select", .doc = "Select trigger only (no options attribute): content is the current value, placeholder while empty, on-press opens. Compose the options as an ANCHORED dropdown-menu of menu-items under an if, beside the trigger in a stack (anchor=\"below\" + on-dismiss; model-owned open state)." },
     .{ .name = "switch", .doc = "Switch control; label is the text content, bind checked, dispatch with on-toggle." },
     .{ .name = "toggle-button", .doc = "Pressed-state toggle button; label is the text content, dispatch with on-toggle." },
-    .{ .name = "tooltip", .doc = "Tooltip text leaf; content supports {} interpolation." },
+    .{ .name = "tooltip", .doc = "Tooltip text leaf; content supports {} interpolation. anchor=\"above|below\" floats it against its parent (put it beside its trigger in a stack) and hands visibility to the RUNTIME: it shows after the trigger has been hovered tooltip-delay milliseconds (default 700; a shared 300ms warm window after any tooltip hides shows the next one instantly) and hides when the pointer leaves - the model never hears hover. Without anchor it stays a static leaf that paints whenever the view renders it." },
     .{ .name = "input", .doc = "Single-line text entry; text and placeholder bindings, edits via on-input, enter via on-submit." },
     .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's anchored dropdown-menu pattern (filter the for-each source from the model as the user types)." },
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
@@ -132,6 +132,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "resize-easing", .doc = "split only, beside a nonzero resize-duration: easing curve of the layout tween - linear, standard (the default), emphasized, or spring. Easing without a duration is a teaching error (it would be silently inert)." },
     .{ .name = "resize-origin", .doc = "split only, beside a nonzero resize-duration: the fraction a freshly MOUNTED split's pane boundary slides in from toward its declared value (children keep the value's layout; the pane clips reveal them) - a pane expanding out of an unmounted collapsed state slides in instead of popping. An origin without a duration is a teaching error (it would be silently inert)." },
     .{ .name = "quiet-hover", .doc = "Pressable (hit-target) elements only: the quiet-surface knob for image-forward content tiles - the pointer resting on the element paints NO hover wash (the wash belongs to acting controls like rows, menu items, and buttons). Only the hover fill goes quiet: press and selection fills, the focus ring, cursor intent, and hit testing keep their own channels." },
+    .{ .name = "tooltip-delay", .doc = "tooltip only, beside anchor: hover-intent show delay in milliseconds (a plain number or one {binding}) - the runtime shows the anchored tooltip after its trigger has been hovered this long on the recorded frame clock. 0 shows the instant the trigger is hovered; absent follows the 700ms token default. A shared 300ms warm window after any tooltip hides skips the delay on the next trigger. A delay without an anchor is a teaching error (it would be silently inert)." },
     .{ .name = "background", .doc = "Background color token (literal ColorTokens field name: background, surface, surface_subtle, ...)." },
     .{ .name = "foreground", .doc = "Foreground/text color token (literal ColorTokens field name, e.g. text, text_muted, success, warning, info)." },
     .{ .name = "accent", .doc = "Accent color token (literal ColorTokens field name, e.g. accent, destructive, success, warning, info)." },
@@ -255,9 +256,9 @@ pub const reactions_attr_docs = [_]Doc{
 };
 
 pub const anchor_attr_docs = [_]Doc{
-    .{ .name = "anchor", .doc = "dropdown-menu: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the dropdown beside its trigger inside a stack." },
-    .{ .name = "anchor-alignment", .doc = "dropdown-menu (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
-    .{ .name = "anchor-offset", .doc = "dropdown-menu (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
+    .{ .name = "anchor", .doc = "dropdown-menu and tooltip: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
+    .{ .name = "anchor-alignment", .doc = "dropdown-menu and tooltip (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
+    .{ .name = "anchor-offset", .doc = "dropdown-menu and tooltip (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
 };
 
 pub const event_docs = [_]Doc{
