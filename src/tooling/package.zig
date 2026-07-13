@@ -98,6 +98,13 @@ pub const PackageStats = struct {
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
+    /// True when a Windows package wrapped a CONSOLE-subsystem exe: the
+    /// app will flash a terminal window behind itself on every launch.
+    /// Release-shaped `native build` exes are GUI-subsystem, so this
+    /// only fires for stale or hand-supplied binaries — the packager
+    /// warns and the report carries the truth (pinned by tests over a
+    /// synthetic PE header).
+    windows_console_subsystem: bool = false,
 };
 
 /// The web-layer verdict for a package, from the same declare-to-use
@@ -295,6 +302,18 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
             }
         }
     }
+    // The subsystem posture check: `native build` produces GUI-subsystem
+    // release exes on Windows, so a console-subsystem exe here is a stale
+    // zig-out binary or a hand-supplied --binary — packaged as-is it
+    // flashes a terminal window behind the app on every launch. Warn and
+    // carry the truth in the stats/report; the package still builds
+    // (the app works, it just looks unfinished).
+    const windows_console_subsystem = options.target == .windows and
+        if (options.binary_path) |binary_path| try peIsConsoleSubsystem(allocator, io, binary_path) else false;
+    if (windows_console_subsystem) {
+        std.debug.print("warning[package.console-subsystem]: {s} is a console-subsystem exe, so a terminal window will open behind the app on every launch\n" ++
+            "  rebuild with `native build` (release exes are GUI-subsystem) or pass a GUI-subsystem --binary\n", .{options.binary_path.?});
+    }
     if (options.binary_path) |binary_path| {
         const binary_subpath = try std.fmt.allocPrint(allocator, "bin/{s}", .{executable_name});
         defer allocator.free(binary_subpath);
@@ -344,7 +363,7 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try copyDesktopCefRuntime(allocator, io, dir, options.target, options.cef_dir);
     }
     try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_console_subsystem = windows_console_subsystem };
 }
 
 /// The iOS host tier: a COMPLETE Xcode project the user never edits —
@@ -1069,6 +1088,36 @@ fn peReferencesWebView2Loader(allocator: std.mem.Allocator, io: std.Io, path: []
     }
     return std.mem.indexOf(u8, bytes, &needle_wide) != null or
         std.mem.indexOf(u8, bytes, needle_ascii) != null;
+}
+
+/// The Windows subsystem a PE executable declares (IMAGE_OPTIONAL_HEADER
+/// Subsystem: 2 = GUI, 3 = console), or null when the file is not a PE
+/// with an optional header large enough to say. The packaging check
+/// reads this because a console-subsystem GUI app flashes a terminal
+/// window behind itself on every launch — `native build` produces
+/// GUI-subsystem release exes, so a console one here means a stale or
+/// hand-built binary.
+pub fn peSubsystem(bytes: []const u8) ?u16 {
+    if (bytes.len < 0x40 or bytes[0] != 'M' or bytes[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
+    if (pe_offset + 24 > bytes.len) return null;
+    if (!std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return null;
+    const optional_size = std.mem.readInt(u16, bytes[pe_offset + 20 ..][0..2], .little);
+    // Subsystem sits 68 bytes into the optional header (same offset in
+    // PE32 and PE32+).
+    if (optional_size < 70) return null;
+    const subsystem_offset = pe_offset + 24 + 68;
+    if (subsystem_offset + 2 > bytes.len) return null;
+    return std.mem.readInt(u16, bytes[subsystem_offset..][0..2], .little);
+}
+
+const pe_subsystem_gui: u16 = 2;
+const pe_subsystem_console: u16 = 3;
+
+fn peIsConsoleSubsystem(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = readPath(allocator, io, path) catch return false;
+    defer allocator.free(bytes);
+    return (peSubsystem(bytes) orelse return false) == pe_subsystem_console;
 }
 
 /// Whether a Linux executable carries the embedded web layer: the GTK
@@ -2597,6 +2646,73 @@ fn testWebLayerPeBytes() [0x80 + "WebView2Loader.dll".len * 2]u8 {
         bytes[0x80 + index * 2] = ch;
     }
     return bytes;
+}
+
+/// A minimal Windows executable with a real optional header for the
+/// subsystem tests: MZ + PE + a COFF header declaring a 240-byte
+/// optional header, with the Subsystem field set as asked.
+fn testSubsystemPeBytes(subsystem: u16) [0x200]u8 {
+    var bytes = [_]u8{0} ** 0x200;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 0x40, .little);
+    bytes[0x40] = 'P';
+    bytes[0x41] = 'E';
+    // COFF SizeOfOptionalHeader (PE32+ is 240 bytes).
+    std.mem.writeInt(u16, bytes[0x54..0x56], 240, .little);
+    // Optional header starts at 0x58; Subsystem sits 68 bytes in.
+    std.mem.writeInt(u16, bytes[0x9c..0x9e], subsystem, .little);
+    return bytes;
+}
+
+test "peSubsystem reads the optional header and refuses non-PE bytes" {
+    const gui = testSubsystemPeBytes(2);
+    try std.testing.expectEqual(@as(?u16, 2), peSubsystem(&gui));
+    const console = testSubsystemPeBytes(3);
+    try std.testing.expectEqual(@as(?u16, 3), peSubsystem(&console));
+    // The loader-scan fixture has no optional header: no subsystem claim.
+    const headerless = testWebLayerPeBytes();
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem(&headerless));
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem("not a pe"));
+}
+
+test "windows package pins the exe's subsystem: GUI is quiet, console warns in the stats" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem",
+        .name = "subsystem-demo",
+        .version = "1.0.0",
+    };
+
+    // The exe `native build` installs: GUI subsystem, no console flash —
+    // the package carries no console finding.
+    const gui_bytes = testSubsystemPeBytes(2);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/gui.exe", .data = &gui_bytes });
+    const gui_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/gui-package",
+        .binary_path = root ++ "/gui.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!gui_stats.windows_console_subsystem);
+
+    // A stale or hand-built console-subsystem exe: packaged (the app
+    // still works), but the stats carry the finding the warning teaches.
+    const console_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/console.exe", .data = &console_bytes });
+    const console_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/console-package",
+        .binary_path = root ++ "/console.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(console_stats.windows_console_subsystem);
 }
 
 test "package --web-layer include on a canvas manifest stages the loader and names the flag" {

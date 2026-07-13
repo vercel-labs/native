@@ -388,6 +388,18 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .name = app_options.name,
         .root_module = app_mod,
     });
+    // Windows subsystem posture: release-shaped exes (`native build`,
+    // and therefore everything `native package --target windows` wraps)
+    // are GUI-subsystem, so launching the app never flashes a console
+    // window behind it. Debug exes keep the console subsystem — the dev
+    // loop's logs live there, and a double-clicked Debug binary opening
+    // its own log console is a feature. Redirected logging still works
+    // on GUI exes (handles inherit; only console AUTO-allocation is
+    // gated by the subsystem), so automation harnesses that pipe
+    // `app.exe > log 2>&1` keep their logs either way.
+    if (target.result.os.tag == .windows and app_optimize != .Debug) {
+        exe.subsystem = .windows;
+    }
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install);
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
