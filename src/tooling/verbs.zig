@@ -65,13 +65,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
             defer allocator.free(framework_root);
             ts_core.selfHealEditorPackage(allocator, io, framework_root);
             // The build graph runs the transpiler inside `zig build`; gate
-            // its toolchain resolution HERE, before any zig spawns, so an
-            // unresolvable toolchain fails with the CLI's teaching message
-            // (the checkout's one `npm ci --include=dev`, or the
-            // reinstall on an npm layout) instead of a configure-time
-            // error inside the graph. npm-installed CLIs always resolve —
-            // the toolchain ships as a CLI dependency.
-            try ts_core.ensureResolvedTranspiler(allocator, io, framework_root);
+            // its toolchain resolution before any zig spawns — but ONLY
+            // for graphs the CLI itself generates (see the preflight's own
+            // doc for why ejected apps must flow past it).
+            try tsToolchainPreflight(allocator, io, ".", framework_root);
         }
     }
 
@@ -82,7 +79,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{ zig_exe, "build" });
 
-    const ejected = buildgraph.fileExists(io, "build.zig");
+    const ejected = isEjectedAt(io, ".");
     var build_file: ?[]const u8 = null;
     defer if (build_file) |path| allocator.free(path);
     var prefix: ?[]const u8 = null;
@@ -180,6 +177,33 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     }
 }
 
+/// The one generated-vs-ejected decision the verbs make: an app that owns
+/// a build.zig at its root is EJECTED and the verbs drive it through plain
+/// `zig build`; otherwise the CLI synthesizes the graph into .native/build/
+/// (the module doc above). Named so the toolchain preflight and the argv
+/// assembly cannot drift onto different predicates.
+fn isEjectedAt(io: std.Io, app_root: []const u8) bool {
+    var buffer: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&buffer, "{s}/build.zig", .{app_root}) catch return false;
+    return buildgraph.fileExists(io, path);
+}
+
+/// The pre-spawn TS toolchain gate, scoped to graphs the CLI generates.
+/// Generated graphs wire `framework_root` — the CLI's own SDK — as the
+/// app's dependency, so an unresolvable toolchain there fails HERE with
+/// the CLI's teaching (the checkout's one `npm ci --include=dev`, or the
+/// reinstall on an npm layout) instead of a configure-time error inside
+/// the graph. npm-installed CLIs always resolve — the toolchain ships as
+/// a CLI dependency. EJECTED apps own their build.zig.zon and may pin a
+/// DIFFERENT SDK checkout than the CLI resolves, so gating the CLI's SDK
+/// would false-fail a healthy app (direct `zig build` works); they flow
+/// straight to the zig spawn, where build/app.zig's tsCoreStage safety
+/// net teaches against the app's ACTUAL dependency SDK.
+fn tsToolchainPreflight(allocator: std.mem.Allocator, io: std.Io, app_root: []const u8, framework_root: []const u8) !void {
+    if (isEjectedAt(io, app_root)) return;
+    try ts_core.ensureResolvedTranspiler(allocator, io, framework_root);
+}
+
 fn hasOptimizeFlag(args: []const []const u8) bool {
     for (args) |arg| {
         if (std.mem.startsWith(u8, arg, "-Doptimize")) return true;
@@ -224,6 +248,56 @@ fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
     // read "no member named 'cwd'/'init'/'io'" on std types.
     std.debug.print("if the errors above name missing std members, the code may use pre-0.16 Zig idioms - run `native skills get zig` or see https://native-sdk.dev/zig\n", .{});
     return error.ZigBuildFailed;
+}
+
+test "toolchain preflight: ejected TS apps skip the CLI-SDK gate, generated ones keep it" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-verbs-ts-preflight";
+    const sdk = root ++ "/sdk-checkout";
+    const ejected_app = root ++ "/ejected-app";
+    const generated_app = root ++ "/generated-app";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    // A CLI framework root whose toolchain is ABSENT: packages/core/test
+    // marks the checkout layout, and no node_modules ever lands — the gate
+    // teaches `npm ci --include=dev` whenever it actually runs.
+    try cwd.createDirPath(io, sdk ++ "/packages/core/test");
+
+    // The ejected-shaped TS layout: an app-owned build.zig (+ build.zig.zon)
+    // at the root, src/core.ts present. Its zon may pin a DIFFERENT SDK
+    // than the CLI's, so the preflight must NOT fail on the CLI SDK's
+    // missing toolchain — the verb reaches the spawn decision, where
+    // build/app.zig's in-graph teaching names the app's actual dependency.
+    try cwd.createDirPath(io, ejected_app ++ "/src");
+    try cwd.writeFile(io, .{ .sub_path = ejected_app ++ "/build.zig", .data = "// app-owned graph" });
+    try cwd.writeFile(io, .{ .sub_path = ejected_app ++ "/build.zig.zon", .data = ".{ .dependencies = .{ .native_sdk = .{ .path = \"../elsewhere\" } } }" });
+    try cwd.writeFile(io, .{ .sub_path = ejected_app ++ "/src/core.ts", .data = "// ts core" });
+    try std.testing.expectEqual(ts_core.CoreTree.ts, ts_core.detectAt(io, ejected_app));
+    try std.testing.expect(isEjectedAt(io, ejected_app));
+    try tsToolchainPreflight(allocator, io, ejected_app, sdk);
+
+    // The generated-shaped layout (no build.zig: the CLI synthesizes the
+    // graph against ITS OWN SDK) keeps the friendly pre-spawn gate: the
+    // absent toolchain still teaches before any zig spawn.
+    try cwd.createDirPath(io, generated_app ++ "/src");
+    try cwd.writeFile(io, .{ .sub_path = generated_app ++ "/src/core.ts", .data = "// ts core" });
+    try std.testing.expect(!isEjectedAt(io, generated_app));
+    try std.testing.expectError(error.MissingTranspiler, tsToolchainPreflight(allocator, io, generated_app, sdk));
+
+    // And a resolvable CLI SDK passes the generated gate silently: land the
+    // wrapper AND the aliased real compiler it re-exports, as npm does.
+    const toolchain_manifest = "{ \"name\": \"@typescript/typescript6\", \"main\": \"./lib/typescript.js\" }";
+    const compiler_manifest = "{ \"name\": \"typescript\", \"main\": \"./lib/typescript.js\" }";
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/typescript6/lib");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/typescript6/package.json", .data = toolchain_manifest });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/typescript6/lib/typescript.js", .data = "// fake wrapper" });
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/old/lib");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/old/package.json", .data = compiler_manifest });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/old/lib/typescript.js", .data = "// fake compiler" });
+    try tsToolchainPreflight(allocator, io, generated_app, sdk);
 }
 
 test "optimize flags are detected among forwarded args" {
