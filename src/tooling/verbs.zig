@@ -123,7 +123,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         .build => {
             if (!hasOptimizeFlag(options.forwarded_args)) {
                 // Both build shapes register -Doptimize (addApp and the
-                // expanded template's standardOptimizeOption).
+                // expanded template each b.option it by hand).
                 try argv.append(allocator, "-Doptimize=ReleaseFast");
                 release_fast = true;
             }

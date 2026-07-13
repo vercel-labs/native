@@ -1396,7 +1396,14 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\
         \\pub fn build(b: *std.Build) void {
         \\    const target = nativeSdkTarget(b);
-        \\    const optimize = b.standardOptimizeOption(.{});
+        \\    // -Doptimize is registered by hand (not the std helper) so the
+        \\    // graph can tell "unset" from "explicit": run/dev default to
+        \\    // Debug for the edit loop, while `zig build package` wraps its own
+        \\    // release-shaped exe — the same split `native dev`/`native build`
+        \\    // apply. An explicit -Doptimize (or --release) pins both roles.
+        \\    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+        \\    const optimize = optimizeMode(b, optimize_request, .Debug);
+        \\    const package_optimize = optimizeMode(b, optimize_request, .ReleaseFast);
         \\    const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
         \\    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
         \\    const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
@@ -1408,7 +1415,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
         \\    const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
         \\    const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse default_native_sdk_path;
-        \\    const optimize_name = @tagName(optimize);
+        \\    const package_optimize_name = @tagName(package_optimize);
         \\    const selected_platform: PlatformOption = switch (platform_option) {
         \\        .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
         \\        else => platform_option,
@@ -1495,6 +1502,33 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const dev_step = b.step("dev", "Run the frontend dev server and native shell");
         \\    dev_step.dependOn(&dev.step);
         \\
+        \\    // `zig build package` wraps its own exe: release-shaped by default
+        \\    // (ReleaseFast, GUI subsystem on Windows) so the packaged artifact
+        \\    // is never a Debug console binary just because the dev loop
+        \\    // defaults to Debug. When -Doptimize/--release pinned one mode for
+        \\    // everything, the roles agree and the dev exe is reused as-is.
+        \\    const package_exe = if (package_optimize == optimize) exe else pkg: {
+        \\        const package_sdk_mod = nativeSdkModule(b, target, package_optimize, native_sdk_path);
+        \\        const package_runner_mod = localModule(b, target, package_optimize, "src/runner.zig");
+        \\        package_runner_mod.addImport("native_sdk", package_sdk_mod);
+        \\        package_runner_mod.addImport("build_options", options_mod);
+        \\        package_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
+        \\        package_app_mod.addImport("native_sdk", package_sdk_mod);
+        \\        package_app_mod.addImport("runner", package_runner_mod);
+        \\        const built = b.addExecutable(.{
+        \\            .name = app_exe_name,
+        \\            .root_module = package_app_mod,
+        \\        });
+        \\        // Same subsystem posture as the dev exe above, keyed on this
+        \\        // exe's own mode: release-shaped Windows exes are GUI-subsystem.
+        \\        if (target.result.os.tag == .windows and package_optimize != .Debug) {
+        \\            built.subsystem = .windows;
+        \\        }
+        \\        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+        \\        break :pkg built;
+        \\    };
+        \\
         \\    const package = b.addSystemCommand(&.{
         \\        "native",
         \\        "package",
@@ -1508,9 +1542,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
     try out.appendSlice(allocator,
         \\,
         \\        "--optimize",
-        \\        optimize_name,
+        \\        package_optimize_name,
         \\        "--output",
-        \\        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+        \\        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), package_optimize_name, packageSuffix(package_target) }),
         \\        "--binary",
         \\    });
         \\    // The CLI resolves SDK-owned package inputs (the vendored WebView2
@@ -1518,7 +1552,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // belong to a different checkout than the one this build compiled
         \\    // against, so hand the same root over explicitly.
         \\    package.setEnvironmentVariable("NATIVE_SDK_PATH", b.pathFromRoot(native_sdk_path));
-        \\    package.addFileArg(exe.getEmittedBin());
+        \\    package.addFileArg(package_exe.getEmittedBin());
         \\    package.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
         \\    // Forward the RESOLVED web-layer decision, never the raw inputs:
         \\    // this graph already decided web vs native-only for the exe it is
@@ -1528,7 +1562,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // exe/package agreement structural.
         \\    package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         \\    if (cef_auto_install) package.addArg("--cef-auto-install");
-        \\    package.step.dependOn(&exe.step);
+        \\    package.step.dependOn(&package_exe.step);
         \\    package.step.dependOn(&frontend_build.step);
         \\    const package_step = b.step("package", "Create a local package artifact");
         \\    package_step.dependOn(&package.step);
@@ -1536,6 +1570,21 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const tests = b.addTest(.{ .root_module = app_mod });
         \\    const test_step = b.step("test", "Run tests");
         \\    test_step.dependOn(&b.addRunArtifact(tests).step);
+        \\}
+        \\
+        \\// Resolve the optimize mode for one exe role (mirrors the Native SDK
+        \\// build graph): an explicit -Doptimize wins for every role, --release
+        \\// resolves through zig's release_mode, and only when neither was
+        \\// passed does the role keep its own default — Debug for the dev loop,
+        \\// ReleaseFast for the exe `zig build package` wraps.
+        \\fn optimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
+        \\    if (requested) |mode| return mode;
+        \\    return switch (b.release_mode) {
+        \\        .off => default_mode,
+        \\        .any, .fast => .ReleaseFast,
+        \\        .safe => .ReleaseSafe,
+        \\        .small => .ReleaseSmall,
+        \\    };
         \\}
         \\
         \\fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
@@ -3569,6 +3618,25 @@ test "writeDefaultApp emits Vite project files" {
     // the SDK build graph) so packaged scaffold apps never flash a console.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and optimize != .Debug) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "exe.subsystem = .windows;") != null);
+    // The package step wraps its own release-shaped exe: Debug stays the
+    // run/dev default, but `zig build package` must never ship a Debug
+    // (console-subsystem) binary unless the user pinned the mode
+    // explicitly. The --optimize arg and the artifact name follow the
+    // package exe's actual mode, and the exe carries its own
+    // subsystem-posture check keyed on that mode.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const optimize_request = b.option(std.builtin.OptimizeMode, \"optimize\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const optimize = optimizeMode(b, optimize_request, .Debug);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const package_optimize = optimizeMode(b, optimize_request, .ReleaseFast);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const package_exe = if (package_optimize == optimize) exe else pkg: {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "if (target.result.os.tag == .windows and package_optimize != .Debug) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "built.subsystem = .windows;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addFileArg(package_exe.getEmittedBin());") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.step.dependOn(&package_exe.step);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package_optimize_name,") != null);
+    // No stale wiring: the package step must not reference the dev exe
+    // or the old single-mode name.
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addFileArg(exe.getEmittedBin());") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "standardOptimizeOption") == null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "127.0.0.1:5173") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@import(\"app_manifest_zon\")") != null);
