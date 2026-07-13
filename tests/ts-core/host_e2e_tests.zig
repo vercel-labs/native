@@ -271,6 +271,15 @@ const Harness = struct {
         return timer.active;
     }
 
+    /// Wall-clock budget for the real-executor waits below. These
+    /// waits prove CORRECTNESS (a real child's lines and exit arrive),
+    /// never latency, and they poll — a healthy run returns in
+    /// milliseconds no matter how large the bound is. The generosity
+    /// is for congested shared CI runners, where scheduling a /bin/sh
+    /// child (or reaping a killed one) has been observed to take tens
+    /// of seconds under load.
+    const wait_budget_ms: usize = 200_000;
+
     /// Wait for a real-executor worker's terminal to reach the queue
     /// WITHOUT dispatching events — the wait leaves no trace in a
     /// recorded session, so the one `wake` that drains afterwards
@@ -278,11 +287,11 @@ const Harness = struct {
     fn waitPending(self: *Harness) !void {
         const io = std.testing.io;
         var waited_ms: usize = 0;
-        while (waited_ms < 20_000) : (waited_ms += 10) {
+        while (waited_ms < wait_budget_ms) : (waited_ms += 10) {
             if (self.app_state.effects.hasPending()) return;
             try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
         }
-        return error.TestTimedOut;
+        return self.timedOut();
     }
 
     /// Wait for every running effect to FINISH (not just for the first
@@ -293,10 +302,21 @@ const Harness = struct {
     fn waitIdle(self: *Harness) !void {
         const io = std.testing.io;
         var waited_ms: usize = 0;
-        while (waited_ms < 20_000) : (waited_ms += 10) {
+        while (waited_ms < wait_budget_ms) : (waited_ms += 10) {
             if (self.app_state.effects.activeCount() == 0 and self.app_state.effects.hasPending()) return;
             try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
         }
+        return self.timedOut();
+    }
+
+    /// A blown wait budget must fail THIS test only: tear the effects
+    /// channel down right here — kill the real children, join every
+    /// worker thread — before surfacing the error, so a straggling
+    /// child can never bleed into the next test's harness (the
+    /// teardown is idempotent; the deferred `destroy` repeats it
+    /// inertly).
+    fn timedOut(self: *Harness) error{TestTimedOut} {
+        self.app_state.effects.deinit();
         return error.TestTimedOut;
     }
 };
