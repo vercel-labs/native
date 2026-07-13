@@ -1114,10 +1114,50 @@ pub fn peSubsystem(bytes: []const u8) ?u16 {
 const pe_subsystem_gui: u16 = 2;
 const pe_subsystem_console: u16 = 3;
 
-fn peIsConsoleSubsystem(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
-    const bytes = readPath(allocator, io, path) catch return false;
+/// The farthest into a file a real executable's PE header is allowed to
+/// start for the subsystem probe: linkers place `e_lfanew` right after
+/// the DOS stub (well under a page), so an offset past this ceiling is
+/// not a real Windows exe and proves nothing about the subsystem —
+/// exactly like non-PE bytes.
+const max_pe_header_offset: usize = 1024 * 1024;
+
+/// The Subsystem field's distance past the PE signature: 24 header
+/// bytes (signature + COFF), then 68 bytes into the optional header,
+/// plus the field's own 2 bytes.
+const pe_subsystem_span: usize = 24 + 70;
+
+/// `peSubsystem` over a file, reading ONLY the headers: the DOS header
+/// names where the PE header starts (`e_lfanew` at 0x3c), and the
+/// Subsystem field sits a fixed `pe_subsystem_span` past that — so
+/// `min(file size, e_lfanew + span)` bytes bound the read no matter how
+/// large the executable is. The whole-file slurp this replaces
+/// (`readPath`, capped at 128 MiB) allocated the entire binary to read
+/// 2 bytes and silently skipped exes over its cap.
+fn peSubsystemAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?u16 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var dos_header: [0x40]u8 = undefined;
+    if (try reader.interface.readSliceShort(&dos_header) < dos_header.len) return null;
+    if (dos_header[0] != 'M' or dos_header[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
+    if (pe_offset > max_pe_header_offset) return null;
+    const bytes = try allocator.alloc(u8, pe_offset + pe_subsystem_span);
     defer allocator.free(bytes);
-    return (peSubsystem(bytes) orelse return false) == pe_subsystem_console;
+    @memcpy(bytes[0..dos_header.len], &dos_header);
+    const rest = try reader.interface.readSliceShort(bytes[dos_header.len..]);
+    return peSubsystem(bytes[0 .. dos_header.len + rest]);
+}
+
+fn peIsConsoleSubsystem(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    // Only a genuinely-unreadable file degrades to "no claim"; a real
+    // read that proves non-PE (or headerless) already answers null.
+    const subsystem = peSubsystemAtPath(allocator, io, path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    return (subsystem orelse return false) == pe_subsystem_console;
 }
 
 /// Whether a Linux executable carries the embedded web layer: the GTK
@@ -2674,6 +2714,50 @@ test "peSubsystem reads the optional header and refuses non-PE bytes" {
     const headerless = testWebLayerPeBytes();
     try std.testing.expectEqual(@as(?u16, null), peSubsystem(&headerless));
     try std.testing.expectEqual(@as(?u16, null), peSubsystem("not a pe"));
+}
+
+test "the subsystem probe reads only the headers, so an exe past the old slurp cap still warns" {
+    // A console-subsystem exe stretched past readPath's 128 MiB cap
+    // (sparse: valid headers, then a hole). The whole-file slurp this
+    // probe replaced hit the cap's StreamTooLong, swallowed it as
+    // false, and packaged the exe WITHOUT the promised console warning
+    // — the bounded header read answers from the first 94-ish bytes and
+    // never sees the far end of the file.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-huge";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    const console_bytes = testSubsystemPeBytes(3);
+    const path = root ++ "/huge-console.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &console_bytes });
+    {
+        var file = try cwd.openFile(std.testing.io, path, .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, 128 * 1024 * 1024 + 4096);
+    }
+    try std.testing.expect(try peIsConsoleSubsystem(std.testing.allocator, std.testing.io, path));
+}
+
+test "a PE offset past the header ceiling proves nothing and allocates nothing" {
+    // An `e_lfanew` claiming the PE header sits 8 MiB into the file is
+    // not a real Windows exe (linkers put it right after the DOS stub):
+    // the probe answers null before sizing any buffer to the claimed
+    // offset — the failing allocator turns any allocation into a test
+    // failure — and packaging treats it like non-PE bytes: no claim,
+    // no warning.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-offset";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    var bytes = [_]u8{0} ** 0x40;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 8 * 1024 * 1024, .little);
+    const path = root ++ "/bogus-offset.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &bytes });
+    try std.testing.expect(!try peIsConsoleSubsystem(std.testing.failing_allocator, std.testing.io, path));
 }
 
 test "windows package pins the exe's subsystem: GUI is quiet, console warns in the stats" {
