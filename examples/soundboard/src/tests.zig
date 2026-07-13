@@ -1912,6 +1912,39 @@ fn expectChunking(rows: usize, counts: []const usize, first_x: []const f32, colu
     }
 }
 
+test "a search narrowed below the column count keeps natural tile size" {
+    const live = try LiveApp.start(true);
+    defer live.stop();
+
+    // Establish the four-column desktop fit, then search down to ONE
+    // matching album (the last album's title matches "channel" and
+    // nothing else does — see the typed-dispatch search test).
+    try resizeTo(live, main.window_width, main.window_height, 2);
+    const fit = view_mod.gridFit(main.window_width);
+    try testing.expect(fit.columns > 1);
+    try live.dispatch(.{ .search_edit = .{ .insert_text = "channel" } });
+
+    // The lone tile keeps the fit's natural tile width — image-forward
+    // covers never balloon across the freed row — and stays pinned to
+    // the leading content edge, leaving the trailing space empty.
+    var layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    var tiles: usize = 0;
+    for (layout.nodes) |node| {
+        if (node.widget.kind != .list_item or node.widget.semantics.role != .listitem) continue;
+        tiles += 1;
+        try testing.expectApproxEqAbs(fit.tile_width, node.frame.width, 0.5);
+    }
+    try testing.expectEqual(@as(usize, 1), tiles);
+
+    // Clearing the search restores the full four-wide chunking.
+    try live.dispatch(.{ .search_edit = .clear });
+    var counts: [8]usize = undefined;
+    var first_x: [8]f32 = undefined;
+    layout = try live.harness.runtime.canvasWidgetLayout(1, main.canvas_label);
+    const rows = gridRowCounts(layout, &counts, &first_x);
+    try expectChunking(rows, counts[0..rows], first_x[0..rows], fit.columns);
+}
+
 test "chrome geometry pads the header and matches its height to the tall band" {
     var fx = model_mod.Effects.init(testing.allocator);
     defer fx.deinit();

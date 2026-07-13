@@ -854,6 +854,42 @@ test "the frame channel adapts the album grid to the canvas width" {
     try std.testing.expectEqual(@as(usize, 5), findGrid(h.app_state.tree.?.root).?.layout.columns);
 }
 
+test "a search narrowed below the column count keeps natural tile size" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // Establish the presented 1080pt frame: the width rule answers four
+    // columns and a 249pt evenly-grown tile.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(1080, 720),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000,
+    } });
+    const full_tile = core.gridTileWidth(Bridge.model());
+
+    // Search down to ONE matching album: the grid narrows to one shown
+    // column and its exact one-tile width, so the lone cover keeps the
+    // fit's natural tile size (never ballooning across the freed row).
+    try h.click(h.findId(.search_field, "").?);
+    try h.textInput("night");
+    try std.testing.expect(h.hasText("1 of 8"));
+    const grid = findGrid(h.app_state.tree.?.root).?;
+    try std.testing.expectEqual(@as(usize, 1), grid.layout.columns);
+    try std.testing.expectApproxEqAbs(full_tile, @as(f64, grid.layout.max_size.width), 0.5);
+
+    // The laid-out tile takes exactly that width.
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var tiles: usize = 0;
+    for (layout.nodes) |node| {
+        if (node.widget.kind != .list_item or node.widget.semantics.role != .listitem) continue;
+        tiles += 1;
+        try std.testing.expectApproxEqAbs(@as(f32, @floatCast(full_tile)), node.frame.width, 0.5);
+    }
+    try std.testing.expectEqual(@as(usize, 1), tiles);
+}
+
 test "the key fallback drives the transport: space toggles, arrows change tracks" {
     const h = try Harness.create();
     defer h.destroy();

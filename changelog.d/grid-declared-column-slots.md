@@ -1,0 +1,1 @@
+fix: **Grids keep their declared column slots**: children fewer than a grid's declared `columns` now keep the column-slot width and fill the leading slots, instead of stretching across the freed row — a search that narrows the soundboard album grid below its column count leaves image-forward tiles at their natural size.

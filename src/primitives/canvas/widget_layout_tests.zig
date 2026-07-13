@@ -935,6 +935,30 @@ test "widget grid layout places children in deterministic cells" {
     try std.testing.expectEqual(@as(usize, 8), builder.displayList().commandCount());
 }
 
+test "widget grid keeps declared column slots when children run short" {
+    // Fewer children than the declared columns (a filtered grid): each
+    // child keeps the column-slot width the declared count derives —
+    // never stretching across the freed row — filling the leading slots
+    // and leaving the trailing slots empty.
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "One" },
+        .{ .id = 3, .kind = .text, .text = "Two" },
+    };
+    const grid = Widget{
+        .id = 1,
+        .kind = .grid,
+        .layout = .{ .gap = 8, .columns = 4 },
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(grid, geometry.RectF.init(0, 0, 424, 40), &nodes);
+    try std.testing.expectEqual(@as(usize, 3), layout.nodeCount());
+    // Slot width = (424 - 3 gaps of 8) / 4 declared columns = 100.
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 100, 40));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(108, 0, 100, 40));
+}
+
 test "widget virtualized grid lays out visible cells by row" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .text = "Zero" },

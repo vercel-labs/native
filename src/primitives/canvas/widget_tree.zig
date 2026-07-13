@@ -217,9 +217,14 @@ pub fn isWidgetConcealedByDisclosure(layout: anytype, node_index: usize) bool {
     return false;
 }
 
+/// The column count a grid lays out, measures, and reports: the DECLARED
+/// count when one is set — even when fewer children remain (a filtered
+/// grid keeps its column-slot geometry; children fill the leading slots
+/// and the trailing slots stay empty, they never stretch to fill missing
+/// columns) — and one column per child when unset (the single-row grid).
 pub fn gridColumnCount(child_count: usize, requested_columns: usize) usize {
     if (child_count == 0) return 0;
-    return if (requested_columns > 0) @min(requested_columns, child_count) else child_count;
+    return if (requested_columns > 0) requested_columns else child_count;
 }
 
 pub fn gridRowCount(child_count: usize, columns: usize) usize {
