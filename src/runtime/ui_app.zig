@@ -1274,13 +1274,77 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.reloadMarkup(self.options.markup.?.source) catch {};
                 }
             }
-            const tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
+            var tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
             const next_index = self.arena_index ^ 1;
             // Widget layout is inset by the runtime's viewport chrome
             // (safe areas + keyboard on mobile, zero on desktop); the
             // canvas itself stays surface-sized so chrome and the clear
             // color still paint edge to edge under notches and bars.
             const bounds = geometry.RectF.fromSize(self.canvas_size).deflate(self.layoutViewportInsets(runtime, window_id));
+            var built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
+            // Window-control clearance is a one-retry pass like the
+            // virtual-window coverage retry inside the build: only when
+            // the finished layout left a drag header's CONTENT under the
+            // OS window-control cluster (Windows caption buttons
+            // trailing, macOS traffic lights leading) is the cluster
+            // stamped into the tokens for one more build — drag rows
+            // then lay their content out clear of it
+            // (`canvas.windowControlsClearedContent` inside layout).
+            // Apps whose headers already pad through the chrome
+            // channel's insets never collide, never retry, and keep a
+            // byte-identical layout.
+            if (self.windowControlsReservation(runtime, window_id, built.layout)) |controls| {
+                tokens.window_controls = controls;
+                built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
+            }
+            const tree = built.tree;
+            const layout = built.layout;
+            launch_timing.lapOnce("first_view_built");
+
+            if (self.options.chrome) |chrome| {
+                try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
+            } else {
+                _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+                if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
+                }
+            }
+
+            self.tree = tree;
+            self.arena_index = next_index;
+            // The fallback menu's target vanished from this build (the
+            // model dropped the row, or its menu emptied): the open state
+            // has nothing to present, so it closes.
+            if (self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0 and tree.context_menu_fallback == null) {
+                self.clearContextMenuFallback();
+            }
+            try self.scheduleAnimations(runtime, window_id);
+            try self.scheduleLayoutTweens(runtime, window_id);
+            self.applyWebPanes(runtime, window_id, layout);
+            self.applyStatusItem(runtime);
+            self.applyWindows(runtime);
+            self.applyChromeSelection();
+            self.applyChromeNavigation();
+        }
+
+        const BuiltLayout = struct {
+            tree: Ui.Tree,
+            layout: canvas.WidgetLayoutTree,
+        };
+
+        /// One view-build + flex-layout pass of `rebuild`, including the
+        /// windowed-virtual-list coverage retry: builds the tree into the
+        /// next arena and lays it out against `bounds` with `tokens`.
+        /// Extracted so rebuild can run it again with the window-control
+        /// reservation stamped when the first pass proved a collision.
+        fn buildLayoutPass(
+            self: *Self,
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            bounds: geometry.RectF,
+            tokens: canvas.DesignTokens,
+            next_index: usize,
+        ) anyerror!BuiltLayout {
             var window_source = VirtualWindowResolver{
                 .runtime = runtime,
                 .window_id = window_id,
@@ -1342,32 +1406,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (pass >= 2 or (!corrected and !self.virtualWindowsUndercovered(layout))) break;
                 window_source.fresh = layout;
             }
-            launch_timing.lapOnce("first_view_built");
+            return .{ .tree = tree, .layout = layout };
+        }
 
-            if (self.options.chrome) |chrome| {
-                try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
-            } else {
-                _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
-                if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
-                    _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
+        /// The window-control cluster's canvas-local frame — but only
+        /// when the just-built layout actually left drag-header content
+        /// under it, so rebuild knows a clearance retry will change
+        /// something. Cheap in the common case: a tree with no visible
+        /// drag region never even polls the platform's chrome report,
+        /// and standard-chrome windows report a zero cluster.
+        fn windowControlsReservation(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree) ?geometry.RectF {
+            var has_drag_region = false;
+            for (layout.nodes) |node| {
+                if (canvas.widgetIsWindowDragRegion(node.widget)) {
+                    has_drag_region = true;
+                    break;
                 }
             }
-
-            self.tree = tree;
-            self.arena_index = next_index;
-            // The fallback menu's target vanished from this build (the
-            // model dropped the row, or its menu emptied): the open state
-            // has nothing to present, so it closes.
-            if (self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0 and tree.context_menu_fallback == null) {
-                self.clearContextMenuFallback();
-            }
-            try self.scheduleAnimations(runtime, window_id);
-            try self.scheduleLayoutTweens(runtime, window_id);
-            self.applyWebPanes(runtime, window_id, layout);
-            self.applyStatusItem(runtime);
-            self.applyWindows(runtime);
-            self.applyChromeSelection();
-            self.applyChromeNavigation();
+            if (!has_drag_region) return null;
+            const controls = runtime.windowControlsForView(window_id, self.options.canvas_label);
+            if (controls.width <= 0 or controls.height <= 0) return null;
+            if (!canvas.windowDragContentUnderWindowControls(layout.nodes, controls)) return null;
+            return controls;
         }
 
         /// Re-derive the model's selected chrome tab after a rebuild

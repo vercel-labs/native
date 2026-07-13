@@ -1,4 +1,5 @@
 const std = @import("std");
+const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_metrics = @import("text_metrics.zig");
 const geist_theme = @import("themes/geist.zig");
@@ -1521,6 +1522,20 @@ pub const DesignTokens = struct {
     /// actually draws. Not themed and not part of overrides: the runtime
     /// stamps it after theme resolution.
     text_measure: ?*const text_metrics.TextMeasureProvider = null,
+    /// The OS window-control cluster's frame in the canvas's local
+    /// coordinates (Windows: the DWM min/max/close buttons on the
+    /// trailing edge; macOS: the traffic lights on the leading edge),
+    /// for hidden-titlebar windows whose content extends under the
+    /// band. Null (the default) lays out exactly as before. The runtime
+    /// stamps it — like `text_measure`, never themed and not part of
+    /// overrides — and only after a build proved the app's own drag
+    /// header left content UNDER the cluster (an app that already pads
+    /// via the chrome channel's insets keeps its byte-identical
+    /// layout). `window_drag` widgets then lay their content out clear
+    /// of the cluster (`widget_layout.windowControlsClearedContent`),
+    /// so a header that never consumed the chrome insets still keeps
+    /// its trailing status text out from under the caption buttons.
+    window_controls: ?geometry.RectF = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and

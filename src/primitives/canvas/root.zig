@@ -695,6 +695,11 @@ pub const disclosureSettledOpen = @import("widget_tree.zig").disclosureSettledOp
 pub const disclosureContentBottom = @import("widget_tree.zig").disclosureContentBottom;
 pub const isWidgetConcealedByDisclosure = @import("widget_tree.zig").isWidgetConcealedByDisclosure;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
+/// Window-control reservation trigger (widget_layout.zig): true when a
+/// laid-out tree left drag-header CONTENT under the OS window-control
+/// cluster, so runtimes know to stamp `DesignTokens.window_controls`
+/// and re-lay the view clear of it.
+pub const windowDragContentUnderWindowControls = @import("widget_layout.zig").windowDragContentUnderWindowControls;
 /// Split-pane geometry (widget_layout.zig): divider band width, the
 /// fraction clamp band from the panes' min widths, and the in-place
 /// subtree re-layout the runtime reconcile uses when it restores a

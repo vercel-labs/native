@@ -3292,6 +3292,84 @@ test "hug-sized centered text leaf never elides under geometry pixel snapping" {
     }
 }
 
+test "window-control clearance trims drag-header content on the cluster's side" {
+    // The engine half of the hidden-titlebar caption fix: when the
+    // runtime stamps the OS window-control cluster into the tokens, a
+    // `window_drag` row lays its content out clear of it — trailing
+    // cluster (Windows caption buttons) trims the content box's end,
+    // leading cluster (macOS traffic lights) its start. Non-drag rows
+    // never move.
+    const spacer = Widget{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 } };
+    const status = Widget{ .id = 3, .kind = .text, .text = "sampling" };
+    const children = [_]Widget{ spacer, status };
+    var row = Widget{ .id = 1, .kind = .row, .layout = .{ .cross_alignment = .center }, .children = &children };
+    row.window_drag = true;
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    // Trailing cluster: content ends at its leading edge.
+    const trailing_tokens = DesignTokens{ .window_controls = geometry.RectF.init(262, 0, 138, 32) };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(row, bounds, trailing_tokens, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.maxX() <= 262 + 0.01);
+
+    // Leading cluster (the macOS mirror): content starts past it.
+    const leading_tokens = DesignTokens{ .window_controls = geometry.RectF.init(0, 0, 78, 32) };
+    const lead_children = [_]Widget{ status, spacer };
+    var lead_row = row;
+    lead_row.children = &lead_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_row, bounds, leading_tokens, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.x >= 78 - 0.01);
+
+    // Unstamped tokens: byte-identical to a plain row.
+    layout = try canvas.layoutWidgetTreeWithTokens(row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expectEqual(@as(f32, 400), layout.findById(3).?.frame.maxX());
+
+    // A non-drag row ignores the stamp entirely.
+    var plain = row;
+    plain.window_drag = false;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain, bounds, trailing_tokens, &nodes);
+    try std.testing.expectEqual(@as(f32, 400), layout.findById(3).?.frame.maxX());
+}
+
+test "window-control collision scan flags readable content only" {
+    // The reservation trigger: text under the cluster inside a drag
+    // header counts; the row itself (its background paints under the
+    // buttons like it does under traffic lights), spacers, and
+    // full-bleed separators never do — and content outside any drag
+    // region is not the header's to fix.
+    const cluster = geometry.RectF.init(262, 0, 138, 32);
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    const spacer = Widget{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 } };
+    const status = Widget{ .id = 3, .kind = .text, .text = "sampling" };
+    const colliding_children = [_]Widget{ spacer, status };
+    var drag_row = Widget{ .id = 1, .kind = .row, .children = &colliding_children };
+    drag_row.window_drag = true;
+
+    var nodes: [6]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+
+    // The same content already clear of the cluster: no trigger.
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, geometry.RectF.init(262, 200, 138, 32)));
+
+    // Decoration under the cluster: a full-width separator never
+    // triggers (it is expected to run under the band).
+    const separator = Widget{ .id = 4, .kind = .separator };
+    const decor_children = [_]Widget{ spacer, separator };
+    var decor_row = drag_row;
+    decor_row.children = &decor_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(decor_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+
+    // Content under the cluster OUTSIDE any drag region: not the
+    // header's collision to fix, so no trigger.
+    var plain_row = drag_row;
+    plain_row.window_drag = false;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+}
+
 test "geometry pixel snapping off keeps label-exact intrinsic widths bit-identical" {
     // The ceil-to-grid rule is gated on `pixel_snap.geometry`: themes
     // without geometry snapping have no snap shave to defend against,

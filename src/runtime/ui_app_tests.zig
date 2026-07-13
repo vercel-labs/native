@@ -3185,6 +3185,165 @@ test "ui app delivers chrome overlay geometry before install and on change" {
     try std.testing.expect(try retainedTextExists(&harness.runtime, "leading 0"));
 }
 
+// ---------------------------------- window-control clearance fixtures
+
+const CaptionModel = struct {
+    /// The trailing chrome reservation the CONTRACT app consumes (the
+    /// soundboard pattern: a spacer sized to `insets.right`); the naive
+    /// app leaves it unwired at 0, exactly like an app that never
+    /// subscribed to the chrome channel.
+    trailing: f32 = 0,
+};
+
+const CaptionMsg = union(enum) {
+    chrome: zero_platform.WindowChrome,
+};
+
+const CaptionApp = ui_app_model.UiApp(CaptionModel, CaptionMsg);
+
+fn captionUpdate(model: *CaptionModel, msg: CaptionMsg) void {
+    switch (msg) {
+        .chrome => |chrome| model.trailing = chrome.insets.right,
+    }
+}
+
+/// A hidden-titlebar header that never consumed the chrome channel:
+/// title leading, status text trailing — the system-monitor shape whose
+/// status line rendered UNDER the Windows caption buttons.
+fn captionNaiveView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    _ = model;
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Monitor"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "sampling"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+/// The documented contract shape (the soundboard pattern): the header
+/// ends with a spacer sized to `insets.right`, so its own content
+/// already clears the caption cluster and the runtime reservation must
+/// stay out of the way.
+fn captionContractView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Monitor"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "sampling"),
+            ui.el(.stack, .{ .width = model.trailing }, .{}),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+fn captionChromeMap(chrome: zero_platform.WindowChrome) ?CaptionMsg {
+    return .{ .chrome = chrome };
+}
+
+fn captionTextFrame(runtime: *core.Runtime, text: []const u8) !geometry.RectF {
+    const layout = try runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .text and std.mem.eql(u8, node.widget.text, text)) return node.frame;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "drag header trailing content stays clear of the Windows caption cluster" {
+    // Windows-shaped hidden-titlebar chrome on a 400pt window: the DWM
+    // caption cluster overlays the trailing 138pt of the top band, and
+    // the platform reports it through the same chrome channel macOS
+    // reports the traffic lights on. The app never consumed the
+    // channel, so its right-aligned header status would lay out flush
+    // to the window edge — UNDER the min/max/close buttons. The runtime
+    // detects the collision after layout and re-lays the drag header
+    // with the cluster reserved, so the status text ends at the
+    // cluster's leading edge instead.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-naive",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionNaiveView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // The trailing status text ends at (or before) the cluster's
+    // leading edge; without the reservation it ended at the window's
+    // right edge, inside the cluster.
+    const status = try captionTextFrame(&harness.runtime, "sampling");
+    try std.testing.expect(status.maxX() <= 262 + 0.01);
+    // The leading title and the body below the band are untouched.
+    const title = try captionTextFrame(&harness.runtime, "Monitor");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+}
+
+test "drag header that already pads the caption cluster keeps its layout" {
+    // The contract app (the soundboard shape): its header ends with a
+    // spacer consuming `insets.right`, so nothing collides and the
+    // runtime reservation must NOT fire — a double reservation would
+    // shove the status text a full cluster-width further left.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-contract",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionContractView,
+        .on_chrome = captionChromeMap,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(f32, 138), app_state.model.trailing);
+
+    // The app's own spacer puts the status text at the cluster's edge;
+    // the runtime must not reserve on top of it (a double reservation
+    // would land it near 262 - 138 = 124).
+    const status = try captionTextFrame(&harness.runtime, "sampling");
+    try std.testing.expect(@abs(status.maxX() - 262) < 0.5);
+}
+
 // -------------------------------------- windowed virtual list fixture
 
 const VirtualFeedModel = struct {

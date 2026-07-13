@@ -645,6 +645,22 @@ pub const Runtime = struct {
         return self.surface.safe_area_insets;
     }
 
+    /// The OS window-control cluster's frame in a canvas view's LOCAL
+    /// coordinates (Windows: the DWM min/max/close buttons; macOS: the
+    /// traffic lights), from the platform's live chrome report. Zero-sized
+    /// when no controls overlay the content — standard-chrome windows,
+    /// fullscreen, platforms without the concept — and translated by the
+    /// view's window-content frame so a docked canvas judges the overlap
+    /// in its own space. This is the geometry `UiApp` consults to keep a
+    /// drag header's content out from under the cluster.
+    pub fn windowControlsForView(self: *const Runtime, window_id: platform.WindowId, label: []const u8) geometry.RectF {
+        const zero = geometry.RectF.init(0, 0, 0, 0);
+        const buttons = self.options.platform.services.windowChrome(window_id).buttons.normalized();
+        if (buttons.width <= 0 or buttons.height <= 0) return zero;
+        const view_frame = (self.absoluteViewFrame(window_id, label, 0) catch return buttons).normalized();
+        return geometry.RectF.init(buttons.x - view_frame.x, buttons.y - view_frame.y, buttons.width, buttons.height);
+    }
+
     pub fn listCommands(self: *const Runtime, output: []Command) []const Command {
         const count = @min(output.len, self.options.commands.len);
         for (self.options.commands[0..count], 0..) |command, index| {

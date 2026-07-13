@@ -70,7 +70,7 @@ pub fn layoutWidgetDepth(
     };
     len.* += 1;
 
-    const content = frame.inset(widget.layout.padding);
+    const content = windowControlsClearedContent(frame.inset(widget.layout.padding), widget, tokens);
     switch (widget.kind) {
         .row, .breadcrumb, .pagination, .radio_group, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         // Button groups flow like rows but at their register's effective
@@ -155,6 +155,104 @@ pub fn layoutWidgetDepth(
     try layoutAnchoredChildren(widget.children, frame, index, depth, output, len, tokens);
 
     return index;
+}
+
+/// Lay a drag header's content out clear of the OS window-control
+/// cluster. On hidden-titlebar windows the content extends under the
+/// system's control band, and the cluster sits ON the content at one
+/// end — macOS's traffic lights lead, Windows' min/max/close cluster
+/// trails. A `window_drag` widget declares "this row IS the titlebar",
+/// so when the runtime has stamped the cluster's frame into the tokens
+/// (`DesignTokens.window_controls` — only after a build proved content
+/// actually collided; see `windowDragContentUnderWindowControls`), the
+/// row's content box is trimmed on the cluster's side: trailing content
+/// (a right-aligned status line) stops at the cluster's leading edge
+/// instead of rendering under the buttons. Rows whose own padding (or
+/// an app-authored chrome spacer) already clears the cluster never
+/// reach the stamping step, so they lay out byte-identically.
+fn windowControlsClearedContent(content: geometry.RectF, widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (!widget.window_drag) return content;
+    const controls = (tokens.window_controls orelse return content).normalized();
+    if (controls.width <= 0 or controls.height <= 0) return content;
+    if (geometry.RectF.intersection(content, controls).isEmpty()) return content;
+    var cleared = content;
+    if (controls.x + controls.width / 2 >= content.x + content.width / 2) {
+        // Trailing cluster (Windows caption buttons): the content box
+        // ends where the cluster begins.
+        cleared.width = @max(0, @min(content.maxX(), controls.x) - content.x);
+    } else {
+        // Leading cluster (macOS traffic lights): the content box
+        // starts past the cluster.
+        const start = @min(content.maxX(), @max(content.x, controls.maxX()));
+        cleared.width = @max(0, content.maxX() - start);
+        cleared.x = start;
+    }
+    return cleared;
+}
+
+/// True when a laid-out tree left CONTENT of a drag header under the
+/// window-control cluster (`controls`, canvas-local): the trigger for
+/// the runtime's window-control reservation. Only nodes INSIDE a
+/// visible `window_drag` region count — the drag row is the declared
+/// titlebar, the one place the reservation can honestly re-flow — and
+/// only content-bearing leaves count: text you must read, controls you
+/// must see and press. Containers and full-bleed decoration (the row's
+/// own background, separators, skeletons, progress strips, cover
+/// images) are EXPECTED to run under the cluster, exactly like they do
+/// under macOS traffic lights, so they never trigger.
+pub fn windowDragContentUnderWindowControls(nodes: []const WidgetLayoutNode, controls: geometry.RectF) bool {
+    const cluster = controls.normalized();
+    if (cluster.width <= 0 or cluster.height <= 0) return false;
+    const layout = LayoutNodesView{ .nodes = nodes };
+    for (nodes, 0..) |node, index| {
+        if (!widget_access.isWindowDragRegion(node.widget)) continue;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
+        for (nodes, 0..) |candidate, candidate_index| {
+            if (candidate_index == index) continue;
+            if (!widgetIsWindowControlContent(candidate.widget)) continue;
+            if (geometry.RectF.intersection(candidate.frame.normalized(), cluster).isEmpty()) continue;
+            if (widget_tree.isWidgetHiddenInAncestors(layout, candidate_index)) continue;
+            if (!layoutNodeHasAncestor(nodes, candidate_index, index)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Adapter so the shared ancestor-hidden walk (which reads
+/// `layout.nodes`) runs over a bare node slice.
+const LayoutNodesView = struct {
+    nodes: []const WidgetLayoutNode,
+};
+
+fn layoutNodeHasAncestor(nodes: []const WidgetLayoutNode, node_index: usize, ancestor_index: usize) bool {
+    var current: ?usize = nodes[node_index].parent_index;
+    while (current) |index| {
+        if (index >= nodes.len) return false;
+        if (index == ancestor_index) return true;
+        current = nodes[index].parent_index;
+    }
+    return false;
+}
+
+/// Content the window-control cluster must never cover: readable leaves
+/// and interactive controls. Deliberately exhaustive so a new widget
+/// kind forces the honesty call here. Containers are transparent (their
+/// CHILDREN are judged, not their frames), and decorative full-bleed
+/// leaves — separators, skeletons, progress strips, images (header
+/// cover art composites under the OS controls on every platform) — are
+/// allowed under the cluster.
+fn widgetIsWindowControlContent(widget: Widget) bool {
+    return switch (widget.kind) {
+        // Layout and surface containers: judged through their children.
+        .stack, .row, .column, .grid, .data_grid, .table, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .dialog, .drawer, .sheet, .panel, .popover, .menu_surface, .dropdown_menu, .list_item, .data_row, .split, .tree, .input_group => false,
+        // Full-bleed decoration: expected under the cluster.
+        .separator, .skeleton, .progress, .image, .split_divider => false,
+        // A text leaf with no bytes and no spans is a hit/semantics
+        // overlay, not readable content.
+        .text => widget.text.len > 0 or widget.spans.len > 0,
+        .data_cell, .icon, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .spinner, .chart => true,
+    };
 }
 
 fn layoutAnchoredChildren(
