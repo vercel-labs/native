@@ -3238,6 +3238,20 @@ fn captionContractView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionAp
     });
 }
 
+/// The centered-title pattern: ONE grow text spanning the header row.
+/// Its FRAME runs under the caption cluster, but the centered glyphs
+/// sit well clear of it — nothing here needs (or may pay for) the
+/// clearance retry.
+fn captionCenteredView(ui: *CaptionApp.Ui, model: *const CaptionModel) CaptionApp.Ui.Node {
+    _ = model;
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{ .grow = 1, .text_alignment = .center }, "Monitor"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
 fn captionChromeMap(chrome: zero_platform.WindowChrome) ?CaptionMsg {
     return .{ .chrome = chrome };
 }
@@ -3342,6 +3356,54 @@ test "drag header that already pads the caption cluster keeps its layout" {
     // would land it near 262 - 138 = 124).
     const status = try captionTextFrame(&harness.runtime, "sampling");
     try std.testing.expect(@abs(status.maxX() - 262) < 0.5);
+}
+
+test "drag header centered title never pays the clearance retry" {
+    // The false positive the painted-bounds scan removes: a grow text
+    // spanning the header row with centered glyphs. Its FRAME runs
+    // under the caption cluster, but nothing inked does — a frame-based
+    // scan paid the one retry here, and the remedy's trimmed content
+    // box then visibly shifted the centered title left. The scan judges
+    // aligned painted bounds, so no retry fires and the layout is
+    // byte-identical to an unstamped build: the title's grow frame
+    // still spans the full row, cluster and all.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_chrome = .{
+        .insets = .{ .top = 32, .right = 138 },
+        .buttons = geometry.RectF.init(262, 0, 138, 32),
+    };
+
+    const app_state = try std.testing.allocator.create(CaptionApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptionApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-caption-centered",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = captionUpdate,
+        .view = captionCenteredView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // No reservation fired: the title's frame still spans the whole
+    // row. A paid retry would have trimmed the drag row's content box
+    // at the cluster's leading edge (262) and re-centered the glyphs
+    // inside the trimmed frame — the visible title shift.
+    const title = try captionTextFrame(&harness.runtime, "Monitor");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+    try std.testing.expectEqual(@as(f32, 400), title.maxX());
 }
 
 // -------------------------------------- windowed virtual list fixture

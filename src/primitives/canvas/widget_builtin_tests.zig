@@ -3348,10 +3348,10 @@ test "window-control collision scan flags readable content only" {
 
     var nodes: [6]WidgetLayoutNode = undefined;
     var layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
-    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
 
     // The same content already clear of the cluster: no trigger.
-    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, geometry.RectF.init(262, 200, 138, 32)));
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, geometry.RectF.init(262, 200, 138, 32), DesignTokens{}));
 
     // Decoration under the cluster: a full-width separator never
     // triggers (it is expected to run under the band).
@@ -3360,14 +3360,82 @@ test "window-control collision scan flags readable content only" {
     var decor_row = drag_row;
     decor_row.children = &decor_children;
     layout = try canvas.layoutWidgetTreeWithTokens(decor_row, bounds, DesignTokens{}, &nodes);
-    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
 
     // Content under the cluster OUTSIDE any drag region: not the
     // header's collision to fix, so no trigger.
     var plain_row = drag_row;
     plain_row.window_drag = false;
     layout = try canvas.layoutWidgetTreeWithTokens(plain_row, bounds, DesignTokens{}, &nodes);
-    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+}
+
+test "window-control collision scan judges text by its aligned painted bounds" {
+    // The centered-title pattern: a grow text spanning the header row
+    // has a FRAME under the trailing cluster while its inked glyphs sit
+    // well clear of it. Judging the frame would pay the clearance retry,
+    // and the trimmed content box would visibly shift the centered title
+    // — so the scan measures the aligned painted line instead. A
+    // trailing-aligned grow text whose painted END sits under the
+    // cluster still collides (the system-monitor case), the macOS
+    // leading mirror agrees, and multi-line text keeps the conservative
+    // frame test.
+    const cluster = geometry.RectF.init(262, 0, 138, 32);
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    var title = Widget{ .id = 2, .kind = .text, .text = "Monitor", .layout = .{ .grow = 1 } };
+    title.text_alignment = .center;
+    const centered_children = [_]Widget{title};
+    var drag_row = Widget{ .id = 1, .kind = .row, .children = &centered_children };
+    drag_row.window_drag = true;
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    // The grow frame really does span the cluster; the painted glyphs
+    // do not — no trigger, so the runtime never retries and the
+    // centered title never moves.
+    try std.testing.expect(layout.findById(2).?.frame.maxX() > cluster.x);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+
+    // Trailing-aligned grow text: same frame, painted end under the
+    // cluster — still a collision, and the remedy still converges (the
+    // re-laid text ends at the cluster's leading edge, so the re-scan
+    // of the remedied layout stays quiet).
+    var status = title;
+    status.text_alignment = .end;
+    const trailing_children = [_]Widget{status};
+    var trailing_row = drag_row;
+    trailing_row.children = &trailing_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(trailing_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+    const trailing_tokens = DesignTokens{ .window_controls = cluster };
+    layout = try canvas.layoutWidgetTreeWithTokens(trailing_row, bounds, trailing_tokens, &nodes);
+    try std.testing.expect(layout.findById(2).?.frame.maxX() <= cluster.x + 0.01);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, trailing_tokens));
+
+    // The macOS mirror: a leading cluster collides with leading-aligned
+    // glyphs but not with the same centered title.
+    const leading_cluster = geometry.RectF.init(0, 0, 78, 32);
+    var lead = title;
+    lead.text_alignment = .start;
+    const lead_children = [_]Widget{lead};
+    var lead_row = drag_row;
+    lead_row.children = &lead_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
+    layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
+
+    // Multi-line text (an explicit newline) stacks lines with per-line
+    // extents, so the scan keeps the conservative frame test: the same
+    // centered grow leaf triggers once it can break.
+    var wrapped = title;
+    wrapped.text = "Mon\nitor";
+    const wrapped_children = [_]Widget{wrapped};
+    var wrapped_row = drag_row;
+    wrapped_row.children = &wrapped_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(wrapped_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
 }
 
 test "window-control clearance moves a drag header's anchored children too" {
@@ -3400,14 +3468,14 @@ test "window-control clearance moves a drag header's anchored children too" {
     const naive = layout.findById(3).?.frame;
     try std.testing.expect(naive.maxX() > cluster.x);
     try std.testing.expect(!geometry.RectF.intersection(naive.normalized(), cluster).isEmpty());
-    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
 
     // Stamped: the anchor base is trimmed, the floater lands clear of
     // the cluster, and re-scanning the remedied layout stays quiet —
     // scan and remedy agree, so the runtime's single retry converges.
     layout = try canvas.layoutWidgetTreeWithTokens(root, bounds, trailing_tokens, &nodes);
     try std.testing.expect(layout.findById(3).?.frame.maxX() <= cluster.x + 0.01);
-    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster));
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, trailing_tokens));
 
     // The macOS mirror: a leading cluster pushes a start-aligned floater
     // past its trailing edge.
@@ -3420,10 +3488,10 @@ test "window-control clearance moves a drag header's anchored children too" {
     var lead_root = root;
     lead_root.children = &lead_root_children;
     layout = try canvas.layoutWidgetTreeWithTokens(lead_root, bounds, DesignTokens{}, &nodes);
-    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster));
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
     layout = try canvas.layoutWidgetTreeWithTokens(lead_root, bounds, DesignTokens{ .window_controls = leading_cluster }, &nodes);
     try std.testing.expect(layout.findById(3).?.frame.x >= leading_cluster.maxX() - 0.01);
-    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster));
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{ .window_controls = leading_cluster }));
 
     // A non-drag row's anchored child is byte-identical with the stamp:
     // anchoring semantics outside declared titlebars never change.

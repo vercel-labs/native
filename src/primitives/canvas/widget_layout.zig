@@ -204,8 +204,12 @@ fn windowControlsClearedContent(content: geometry.RectF, widget: Widget, tokens:
 /// must see and press. Containers and full-bleed decoration (the row's
 /// own background, separators, skeletons, progress strips, cover
 /// images) are EXPECTED to run under the cluster, exactly like they do
-/// under macOS traffic lights, so they never trigger.
-pub fn windowDragContentUnderWindowControls(nodes: []const WidgetLayoutNode, controls: geometry.RectF) bool {
+/// under macOS traffic lights, so they never trigger. Text leaves are
+/// judged by their PAINTED bounds, not their frame (`tokens` carries
+/// the measurement seam the layout ran with), so a grow/stretch title
+/// whose glyphs sit clear never pays a retry that would visibly shift
+/// it — see `windowControlContentBounds`.
+pub fn windowDragContentUnderWindowControls(nodes: []const WidgetLayoutNode, controls: geometry.RectF, tokens: DesignTokens) bool {
     const cluster = controls.normalized();
     if (cluster.width <= 0 or cluster.height <= 0) return false;
     const layout = LayoutNodesView{ .nodes = nodes };
@@ -215,13 +219,42 @@ pub fn windowDragContentUnderWindowControls(nodes: []const WidgetLayoutNode, con
         for (nodes, 0..) |candidate, candidate_index| {
             if (candidate_index == index) continue;
             if (!widgetIsWindowControlContent(candidate.widget)) continue;
-            if (geometry.RectF.intersection(candidate.frame.normalized(), cluster).isEmpty()) continue;
+            const painted = windowControlContentBounds(candidate.widget, candidate.frame.normalized(), tokens);
+            if (geometry.RectF.intersection(painted, cluster).isEmpty()) continue;
             if (widget_tree.isWidgetHiddenInAncestors(layout, candidate_index)) continue;
             if (!layoutNodeHasAncestor(nodes, candidate_index, index)) continue;
             return true;
         }
     }
     return false;
+}
+
+/// The rect the cluster test judges for one content candidate. Controls
+/// (buttons, inputs, ...) are judged by their full frame — the hit
+/// surface is the control, glyphs or not. Single-line text leaves are
+/// judged by their ALIGNED PAINTED BOUNDS instead: the measured line
+/// width (capped at the frame — elision and clipping both keep painted
+/// glyphs inside it), placed per the widget's text alignment, at the
+/// frame's full height. A grow/stretch title spanning the header row
+/// (the centered-title pattern) has a FRAME under the cluster while its
+/// inked glyphs sit well clear; judging the frame would trigger the
+/// clearance retry, and the remedy's trimmed content box would then
+/// visibly shift the very title it exists to protect. Span paragraphs
+/// wrap and explicit newlines stack lines with per-line extents; drag
+/// headers are practically single-line, so anything that can break
+/// keeps the conservative frame test.
+fn windowControlContentBounds(widget: Widget, frame: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (widget.kind != .text) return frame;
+    if (widget.spans.len > 0) return frame;
+    if (std.mem.indexOfScalar(u8, widget.text, '\n') != null) return frame;
+    const measured = measuredTextWidth(tokens, widget.text, widgetBodyTextSize(widget, tokens));
+    const width = @min(measured, frame.width);
+    const dx: f32 = switch (widget.text_alignment) {
+        .start => 0,
+        .center => (frame.width - width) * 0.5,
+        .end => frame.width - width,
+    };
+    return geometry.RectF.init(frame.x + dx, frame.y, width, frame.height);
 }
 
 /// Adapter so the shared ancestor-hidden walk (which reads

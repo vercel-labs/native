@@ -1293,7 +1293,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // Apps whose headers already pad through the chrome
             // channel's insets never collide, never retry, and keep a
             // byte-identical layout.
-            if (windowControlsReservation(runtime, window_id, self.options.canvas_label, built.layout)) |controls| {
+            if (windowControlsReservation(runtime, window_id, self.options.canvas_label, built.layout, tokens)) |controls| {
                 tokens.window_controls = controls;
                 built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             }
@@ -1416,8 +1416,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// retry will change something. Cheap in the common case: a tree
         /// with no visible drag region never even polls the platform's
         /// chrome report, and standard-chrome windows report a zero
-        /// cluster.
-        fn windowControlsReservation(runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, layout: canvas.WidgetLayoutTree) ?geometry.RectF {
+        /// cluster. `tokens` must be the tokens the layout was built
+        /// with: the scan re-measures text through the same seam to
+        /// judge painted bounds, not frames.
+        fn windowControlsReservation(runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) ?geometry.RectF {
             var has_drag_region = false;
             for (layout.nodes) |node| {
                 if (canvas.widgetIsWindowDragRegion(node.widget)) {
@@ -1428,7 +1430,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!has_drag_region) return null;
             const controls = runtime.windowControlsForView(window_id, canvas_label);
             if (controls.width <= 0 or controls.height <= 0) return null;
-            if (!canvas.windowDragContentUnderWindowControls(layout.nodes, controls)) return null;
+            if (!canvas.windowDragContentUnderWindowControls(layout.nodes, controls, tokens)) return null;
             return controls;
         }
 
@@ -1953,7 +1955,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // exactly like the main window's, so a proven collision
             // stamps the cluster into THIS slot's tokens (a local copy —
             // other windows keep their own layout) for one more pass.
-            if (windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout)) |controls| {
+            if (windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout, tokens)) |controls| {
                 tokens.window_controls = controls;
                 built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
             }
