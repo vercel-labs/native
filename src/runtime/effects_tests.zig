@@ -5,6 +5,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const clock_mod = @import("clock.zig");
 const platform_mod = @import("../platform/root.zig");
 
 const canvas_label = "stream-canvas";
@@ -862,6 +863,68 @@ test "real executor cancels a long-running stream cleanly" {
     try std.testing.expectEqual(lines_after_cancel, h.app_state.model.line_count);
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+}
+
+test "teardown mid-stream kills the real child and joins its worker before returning" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // A child that would outlive the whole suite: only the teardown's
+    // kill can end it. Waiting for the first line proves the worker is
+    // mid-stream (child spawned, stdout pipe open) when deinit runs —
+    // the exact posture of the e2e battery's timed-out cancel test.
+    test_argv = &.{ "/bin/sh", "-c", "echo streaming; sleep 30" };
+    test_stdin = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForRealCompletion(&h, sawLine);
+
+    const fx = &h.app_state.effects;
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+
+    // The kill ended the child — nothing waited out its 30s sleep
+    // (generous bound: a loaded runner still reaps a SIGKILLed child
+    // orders of magnitude faster than the sleep)...
+    try std.testing.expect(elapsed_ms < 10_000);
+    // ...and every worker was JOINED, not abandoned: no slot keeps a
+    // thread handle and none is still running, so the owner may free
+    // the channel's memory immediately. This pins the ownership hole
+    // behind the e2e cascade: a timed-out harness used to free the
+    // channel while a detached worker still held its slot pointer,
+    // and the worker segfaulted the NEXT test inside
+    // `slot.child_mutex.lock()`. The abandonment itself was a
+    // thread-timing window; the joined-and-idle invariant asserted
+    // here is its deterministic contract.
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+}
+
+test "a spawn teardown storm never leaks a worker into the next harness" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // The e2e cascade's shape, run deterministically and repeatedly: a
+    // harness dies while its real child still streams (or while a
+    // cancel is racing the spawn), then the next round builds a fresh
+    // executor over recycled heap. Before the join fix an abandoned
+    // worker could resume inside freed memory and crash a later round;
+    // with it, destroy cannot return while any worker lives. Bounded
+    // iterations keep the storm CI-cheap.
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        var h = try Harness.create();
+        // Runs at each iteration's end — the storm's teardown — and on
+        // an error return alike.
+        defer h.destroy();
+        test_argv = &.{ "/bin/sh", "-c", "echo tick; sleep 30" };
+        test_stdin = null;
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        // Odd rounds race a wire cancel against the spawn before the
+        // teardown; even rounds tear down against the bare stream.
+        if (round % 2 == 1) try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
+    }
 }
 
 test "real executor children inherit the parent environment" {

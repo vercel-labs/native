@@ -767,6 +767,10 @@ fn fallbackEnviron() std.process.Environ {
 /// host, so nothing is lost.
 const io_threaded_supported = builtin.target.os.tag != .freestanding;
 const IoThreaded = if (io_threaded_supported) std.Io.Threaded else void;
+/// Worker-thread handles exist only where the threaded executor does
+/// (the same seam as `IoThreaded`): on freestanding targets no worker
+/// ever spawns, so the slot field compiles away to a `?void`.
+const WorkerThread = if (io_threaded_supported) std.Thread else void;
 
 /// Map a fetch-side error onto the delivered failure taxonomy. The
 /// worker refines `.cancelled` into `.timed_out` when the deadline (not
@@ -1405,6 +1409,16 @@ pub fn Effects(comptime Msg: type) type {
             child_mutex: SpinMutex = .{},
             child_id: ?std.process.Child.Id = null,
             reaping: bool = false,
+            /// The worker thread driving this occupancy (real spawn,
+            /// fetch, and file effects; null for fake slots, host
+            /// requests, and idle slots). Loop-thread bookkeeping:
+            /// stored where the thread spawns, cleared by `joinWorker`.
+            /// A worker holds pointers into the whole channel (its
+            /// slot, the completion queue, the executor io) for its
+            /// entire thread lifetime, so the channel's memory must
+            /// never be freed while a handle here is outstanding —
+            /// `deinit` joins every one before it returns.
+            worker_thread: ?WorkerThread = null,
             /// Producer-side drop accounting (worker in real mode, loop
             /// thread in fake mode; never both).
             dropped_pending: u32 = 0,
@@ -1616,8 +1630,10 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Kill every running effect, wait for the workers to finish
-        /// (draining their final queue posts), and release the executor
-        /// io. Bounded: gives up waiting after ~5s.
+        /// (draining their final queue posts), JOIN every worker
+        /// thread, and release the executor io. The joins are
+        /// unconditional: no worker thread survives this call, so the
+        /// owner may free the channel's memory the moment it returns.
         ///
         /// Idempotent, and only the FIRST call may touch platform
         /// services — it ends by severing the services binding, so a
@@ -1665,18 +1681,38 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (io_threaded_supported) {
                 if (self.io_threaded) |threaded| {
+                    // Wait for every worker's terminal post, then JOIN
+                    // every worker thread. The joins are unconditional
+                    // and the wait is unbounded on purpose: a worker
+                    // holds pointers into this struct (its slot, the
+                    // completion queue, this io) for its whole thread
+                    // lifetime, and the owner frees this memory right
+                    // after deinit returns — the old bounded give-up
+                    // here left an abandoned worker writing into freed
+                    // memory, which is exactly how a torn-down app
+                    // crashed inside a stale slot's `child_mutex`.
+                    // Convergence is the kills' and the shutdown flag's
+                    // doing, not the queue's: every published child was
+                    // signaled above (a blocked stdout read ends at the
+                    // kill-forced EOF, `child.wait` reaps a dead
+                    // process, a raced pre-publish cancel is re-checked
+                    // by the worker itself), fetch supervisors poll
+                    // `shutdown` and cancel their exchange, and the
+                    // terminal-post retry loops give up on `shutdown`
+                    // within a millisecond. The queue is still drained
+                    // while waiting so posts that landed before the
+                    // flag retire promptly.
                     const io = threaded.io();
-                    var waited_ms: usize = 0;
-                    while (waited_ms < 5000) : (waited_ms += 1) {
+                    while (true) {
                         var running = false;
                         for (&self.slots) |*slot| {
                             if (slot.state.load(.acquire) == .running and !slot.fake) running = true;
                         }
                         if (!running) break;
-                        // Keep the queue drained so exit-post retries finish.
                         self.clearQueue();
                         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
                     }
+                    for (&self.slots) |*slot| self.joinWorker(slot);
                 }
                 if (self.io_threaded) |threaded| {
                     threaded.deinit();
@@ -1992,7 +2028,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.releaseSpawnSlot(slot);
                 return self.reject(options);
             };
-            thread.detach();
+            slot.worker_thread = thread;
         }
 
         /// Run an HTTP(S) request on a worker thread and deliver its
@@ -2101,7 +2137,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.releaseFetchSlot(slot);
                 return self.rejectFetch(options);
             };
-            thread.detach();
+            slot.worker_thread = thread;
         }
 
         /// Write a whole file on a worker thread — TEA-friendly
@@ -2191,7 +2227,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.releaseFetchSlot(slot);
                 return self.rejectFile(key, op, on_result);
             };
-            thread.detach();
+            slot.worker_thread = thread;
         }
 
         /// Put text on the system clipboard through the platform
@@ -4056,14 +4092,38 @@ pub fn Effects(comptime Msg: type) type {
             return index;
         }
 
+        /// Join a finished worker's thread and clear its handle.
+        /// Loop-thread only. The reclaim path reaches this only after
+        /// the worker published a non-running slot state — its last
+        /// slot access — so the join blocks for the thread's epilogue
+        /// (a wake nudge and the OS exit), never on child I/O. The
+        /// teardown path (`deinit`) may join a still-running worker;
+        /// convergence there is the kill's and the shutdown flag's
+        /// doing, as documented at that call site.
+        fn joinWorker(self: *Self, slot: *Slot) void {
+            _ = self;
+            if (io_threaded_supported) {
+                const thread = slot.worker_thread orelse return;
+                slot.worker_thread = null;
+                thread.join();
+            }
+        }
+
         fn reclaimSlots(self: *Self) void {
             for (&self.slots) |*slot| {
                 switch (slot.state.load(.acquire)) {
-                    .done => slot.state.store(.idle, .release),
+                    .done => {
+                        self.joinWorker(slot);
+                        slot.state.store(.idle, .release);
+                    },
                     // A draining slot is reusable once the drain took its
                     // heap buffer (fetch body or collected stdout — the
-                    // terminal Msg was delivered).
-                    .draining => if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release),
+                    // terminal Msg was delivered). Its worker is already
+                    // finished either way: retire the thread now.
+                    .draining => {
+                        self.joinWorker(slot);
+                        if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
+                    },
                     else => {},
                 }
             }
@@ -4183,7 +4243,15 @@ pub fn Effects(comptime Msg: type) type {
             if (builtin.os.tag == .windows) {
                 _ = std.os.windows.ntdll.NtTerminateProcess(id, @enumFromInt(1));
             } else {
-                std.posix.kill(id, .KILL) catch {};
+                // The child owns its process group (see the spawn in
+                // `runChild`), so the negative-pid form signals every
+                // descendant still in it — the grandchildren of a
+                // shell-wrapped command included, which is what lets
+                // the worker's stdout read reach EOF promptly. The
+                // direct-pid fallback covers a group already gone.
+                std.posix.kill(-id, .KILL) catch {
+                    std.posix.kill(id, .KILL) catch {};
+                };
             }
         }
 
@@ -4211,6 +4279,18 @@ pub fn Effects(comptime Msg: type) type {
                 .stdin = if (slot.stdin_len > 0) .pipe else .ignore,
                 .stdout = .pipe,
                 .stderr = if (slot.output_mode == .collect) .pipe else .ignore,
+                // POSIX: land the child in its OWN process group (id ==
+                // its pid, set before exec) so `killPublishedChild` can
+                // signal the whole descendant tree. Killing only the
+                // direct child leaves a shell-wrapped command's
+                // grandchildren (`sh -c "a; b"` forks `b`) holding the
+                // stdout pipe open — the worker would then block at
+                // read until the orphan exits on its own, stalling
+                // cancel's `.cancelled` terminal and any teardown
+                // joining the worker. Windows has no process groups in
+                // this sense; the direct-handle terminate stands alone
+                // there, as before.
+                .pgid = if (builtin.os.tag == .windows) null else 0,
             }) catch return;
 
             slot.child_mutex.lock();
