@@ -98,13 +98,15 @@ pub const PackageStats = struct {
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
-    /// True when a Windows package wrapped a CONSOLE-subsystem exe: the
-    /// app will flash a terminal window behind itself on every launch.
-    /// Release-shaped `native build` exes are GUI-subsystem, so this
-    /// only fires for stale or hand-supplied binaries — the packager
-    /// warns and the report carries the truth (pinned by tests over a
-    /// synthetic PE header).
-    windows_console_subsystem: bool = false,
+    /// The Windows subsystem verdict: true when the package wrapped a
+    /// CONSOLE-subsystem exe (the app will flash a terminal window
+    /// behind itself on every launch), false for a GUI-subsystem exe,
+    /// and null when the check never ran (non-Windows target, or no
+    /// binary to probe). Release-shaped `native build` exes are
+    /// GUI-subsystem, so true only fires for stale or hand-supplied
+    /// binaries — the packager warns and the report carries the truth
+    /// (pinned by tests over a synthetic PE header).
+    windows_console_subsystem: ?bool = null,
 };
 
 /// The web-layer verdict for a package, from the same declare-to-use
@@ -189,6 +191,13 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.signing_verified) {
         std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
     }
+    if (stats.windows_console_subsystem) |console| {
+        if (console) {
+            std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{});
+        } else {
+            std.debug.print("  subsystem: gui\n", .{});
+        }
+    }
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
@@ -235,7 +244,7 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try copyMacosIcon(allocator, io, package_dir, options);
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
-    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count);
+    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count, null);
     if (options.web_engine == .chromium) {
         try cef.ensureLayout(io, options.cef_dir);
         try copyMacosCefRuntime(allocator, io, package_dir, options.cef_dir);
@@ -307,10 +316,13 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     // zig-out binary or a hand-supplied --binary — packaged as-is it
     // flashes a terminal window behind the app on every launch. Warn and
     // carry the truth in the stats/report; the package still builds
-    // (the app works, it just looks unfinished).
-    const windows_console_subsystem = options.target == .windows and
-        if (options.binary_path) |binary_path| try peIsConsoleSubsystem(allocator, io, binary_path) else false;
-    if (windows_console_subsystem) {
+    // (the app works, it just looks unfinished). Null means the check
+    // never ran: a non-Windows target, or no binary to probe.
+    const windows_console_subsystem: ?bool = if (options.target == .windows)
+        if (options.binary_path) |binary_path| try peIsConsoleSubsystem(allocator, io, binary_path) else null
+    else
+        null;
+    if (windows_console_subsystem orelse false) {
         std.debug.print("warning[package.console-subsystem]: {s} is a console-subsystem exe, so a terminal window will open behind the app on every launch\n" ++
             "  rebuild with `native build` (release exes are GUI-subsystem) or pass a GUI-subsystem --binary\n", .{options.binary_path.?});
     }
@@ -362,7 +374,7 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try cef.ensureLayoutFor(io, cef_platform, options.cef_dir);
         try copyDesktopCefRuntime(allocator, io, dir, options.target, options.cef_dir);
     }
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count);
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count, windows_console_subsystem);
     return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_console_subsystem = windows_console_subsystem };
 }
 
@@ -434,7 +446,7 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     const readme = try iosProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
     return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
 }
 
@@ -496,7 +508,7 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     const readme = try androidProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
 
     var artifact_name: []const u8 = std.fs.path.basename(options.output_path);
     if (try assembleAndroidApk(allocator, io, options)) |apk_name| {
@@ -1275,11 +1287,13 @@ fn readPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return reader.interface.allocRemaining(allocator, .limited(128 * 1024 * 1024));
 }
 
-fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize) !void {
+fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize, windows_console_subsystem: ?bool) !void {
     const capabilities = try capabilityLines(allocator, options.metadata.capabilities);
     defer allocator.free(capabilities);
     const frontend = try frontendLines(allocator, options.frontend);
     defer allocator.free(frontend);
+    const subsystem = try subsystemLine(allocator, windows_console_subsystem);
+    defer allocator.free(subsystem);
     const artifact = try zonStringAlloc(allocator, std.fs.path.basename(options.output_path));
     defer allocator.free(artifact);
     const target = try zonStringAlloc(allocator, @tagName(options.target));
@@ -1316,7 +1330,7 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         \\  .web_engine = {s},
         \\  .web_layer = {s},
         \\  .signing = {s},
-        \\  .asset_count = {d},
+        \\{s}  .asset_count = {d},
         \\{s}
         \\  .capabilities = .{{
         \\{s}
@@ -1333,6 +1347,7 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         web_engine,
         web_layer,
         signing,
+        subsystem,
         asset_count,
         frontend,
         capabilities,
@@ -1352,6 +1367,18 @@ fn capabilityLines(allocator: std.mem.Allocator, capabilities: []const []const u
         try out.appendSlice(allocator, ",\n");
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// The report's subsystem-verdict line, present only when the posture
+/// check actually ran (a Windows package with a binary to probe): the
+/// durable twin of the transient warning[package.console-subsystem],
+/// in the same string style the report's other verdicts use.
+fn subsystemLine(allocator: std.mem.Allocator, windows_console_subsystem: ?bool) ![]const u8 {
+    const console = windows_console_subsystem orelse return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator,
+        \\  .subsystem = "{s}",
+        \\
+    , .{if (console) "console" else "gui"});
 }
 
 fn frontendLines(allocator: std.mem.Allocator, frontend: ?manifest_tool.FrontendMetadata) ![]const u8 {
@@ -2458,13 +2485,15 @@ test "package report records target signing and assets" {
         .target = .linux,
         .output_path = ".zig-cache/test-package-report",
         .signing = .{ .mode = .none },
-    }, "demo", 2);
+    }, "demo", 2, null);
     var buffer: [512]u8 = undefined;
     var file = try dir.openFile(std.testing.io, "package-manifest.zon", .{});
     defer file.close(std.testing.io);
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+    // No subsystem check ran, so the report makes no subsystem claim.
+    try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".subsystem") == null);
 }
 
 test "adhoc packaging into a spaced output path signs and verifies" {
@@ -2603,10 +2632,13 @@ test "webview-declaring package reports the web layer as declared" {
     });
     try std.testing.expect(stats.web_layer.?.enabled);
     try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
+    // No binary means the subsystem check never ran: no verdict to carry.
+    try std.testing.expectEqual(@as(?bool, null), stats.windows_console_subsystem);
 
     const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"webview2 (declared: capabilities)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem") == null);
 }
 
 test "package refuses a manifest that excludes the web layer while declaring web content" {
@@ -2783,7 +2815,10 @@ test "windows package pins the exe's subsystem: GUI is quiet, console warns in t
         .binary_path = root ++ "/gui.exe",
         .assets_dir = root ++ "/assets",
     });
-    try std.testing.expect(!gui_stats.windows_console_subsystem);
+    try std.testing.expectEqual(@as(?bool, false), gui_stats.windows_console_subsystem);
+    const gui_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/gui-package/package-manifest.zon");
+    defer std.testing.allocator.free(gui_report);
+    try std.testing.expect(std.mem.indexOf(u8, gui_report, ".subsystem = \"gui\"") != null);
 
     // A stale or hand-built console-subsystem exe: packaged (the app
     // still works), but the stats carry the finding the warning teaches.
@@ -2796,7 +2831,10 @@ test "windows package pins the exe's subsystem: GUI is quiet, console warns in t
         .binary_path = root ++ "/console.exe",
         .assets_dir = root ++ "/assets",
     });
-    try std.testing.expect(console_stats.windows_console_subsystem);
+    try std.testing.expectEqual(@as(?bool, true), console_stats.windows_console_subsystem);
+    const console_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/console-package/package-manifest.zon");
+    defer std.testing.allocator.free(console_report);
+    try std.testing.expect(std.mem.indexOf(u8, console_report, ".subsystem = \"console\"") != null);
 }
 
 test "package --web-layer include on a canvas manifest stages the loader and names the flag" {
