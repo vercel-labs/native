@@ -22,6 +22,7 @@ pub const Error = error{
     MissingTsCore,
     MissingNode,
     MissingTranspiler,
+    BrokenToolchainInstall,
     CoreCheckFailed,
     DevHostFailed,
 };
@@ -99,18 +100,174 @@ fn tsRunnerPath(allocator: std.mem.Allocator, io: std.Io, framework_root: []cons
     return path;
 }
 
-fn requireInstalledTranspiler(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8) !void {
-    const marker = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", "node_modules", "@typescript", "typescript6" });
-    defer allocator.free(marker);
-    const stat = std.Io.Dir.cwd().statFile(io, marker, .{}) catch {
-        std.debug.print(
-            \\the SDK's @native-sdk/core transpiler is missing its installed dependency.
-            \\Fix with: cd {s}/packages/core && npm ci
-            \\
-        , .{framework_root});
-        return error.MissingTranspiler;
-    };
-    _ = stat;
+/// The install command the repo-checkout teaching names. `--include=dev`
+/// is correctness, not style: @typescript/typescript6 is packages/core's
+/// devDependency, and a plain `npm ci` under ambient production npm config
+/// (NODE_ENV=production, `omit=dev` in an npmrc) skips devDependencies
+/// while exiting 0 — the named command would "succeed" and install
+/// nothing.
+pub const npm_ci_teaching_command = "npm ci --include=dev";
+
+/// Whether the transpiler's TypeScript toolchain (@typescript/typescript6)
+/// RESOLVES from the transpiler's own home, by node's ancestor walk: from
+/// `<framework_root>/packages/core` upward, the first
+/// `<ancestor>/node_modules/@typescript/typescript6` wins. This mirrors
+/// exactly how node resolves the import at run time, so every layout that
+/// works for node passes here and none that fails does:
+///   - repo checkout: packages/core/node_modules (nearest, after `npm ci`)
+///   - npm-installed CLI: the dependency npm installed alongside the
+///     package (nested under the CLI on global prefixes, hoisted to the
+///     project root on local ones, pnpm's sibling node_modules)
+/// Resolvable means the package's MANIFEST and its ENTRYPOINT are both
+/// present, not just its directory: node reads `<candidate>/package.json`
+/// for the entrypoint (the toolchain ships `"main": "./lib/typescript.js"`,
+/// no `"exports"`) and then loads that file. A bare directory — an
+/// interrupted `npm ci`, a pruned or half-cleaned node_modules — is
+/// MODULE_NOT_FOUND at run time, and a manifest WITHOUT its entrypoint is
+/// a real npm failure shape too: extraction is not atomic and package.json
+/// rides first in the tarball, so a mid-extraction crash lands exactly the
+/// manifest-without-entrypoint sliver, which node then fails on opaquely.
+/// Both must fail HERE, where the teaching can act. Hardcoding
+/// lib/typescript.js is safe: the dependency version is exactly pinned
+/// (packages/core/package-lock.json) and drift-checked by
+/// check-version-sync, so the entrypoint cannot move under us. The walk
+/// mirrors node's error shape too: a candidate WITHOUT package.json lets
+/// node keep walking upward, but a manifest whose "main" fails to load
+/// THROWS — no deeper ancestor is consulted — so a manifest-without-
+/// entrypoint candidate concludes unresolved here instead of trusting an
+/// ancestor node would never reach.
+///
+/// The wrapper alone is not the compiler: @typescript/typescript6's
+/// lib/typescript.js is a one-line re-export of "@typescript/old" (an npm
+/// alias of the real `typescript` package), so a tree where only the
+/// wrapper landed still dies at run time on the wrapper's own require. A
+/// resolvable toolchain therefore also needs that aliased compiler to
+/// resolve FROM THE WRAPPER — see `aliasedCompilerResolves`. Kept in
+/// lockstep with its deliberate twin for direct `zig build` runs,
+/// build/app.zig's tsToolchainResolves.
+fn transpilerResolves(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8) bool {
+    const core_dir = std.fs.path.join(allocator, &.{ framework_root, "packages", "core" }) catch return false;
+    defer allocator.free(core_dir);
+    var dir: []const u8 = core_dir;
+    while (true) {
+        const manifest = std.fs.path.join(allocator, &.{ dir, "node_modules", "@typescript", "typescript6", "package.json" }) catch return false;
+        defer allocator.free(manifest);
+        if (std.Io.Dir.cwd().statFile(io, manifest, .{})) |_| {
+            const entrypoint = std.fs.path.join(allocator, &.{ dir, "node_modules", "@typescript", "typescript6", "lib", "typescript.js" }) catch return false;
+            defer allocator.free(entrypoint);
+            _ = std.Io.Dir.cwd().statFile(io, entrypoint, .{}) catch return false;
+            const wrapper_dir = std.fs.path.join(allocator, &.{ dir, "node_modules", "@typescript", "typescript6" }) catch return false;
+            defer allocator.free(wrapper_dir);
+            return aliasedCompilerResolves(allocator, io, wrapper_dir);
+        } else |_| {}
+        dir = std.fs.path.dirname(dir) orelse return false;
+    }
+}
+
+/// Whether the wrapper's own `require("@typescript/old")` — the one line
+/// @typescript/typescript6's lib/typescript.js IS — resolves, by node's
+/// walk FROM THE WRAPPER's location upward: the nearest ancestor
+/// `node_modules/@typescript/old` wins (skipping ancestors that are
+/// themselves a node_modules directory, as node does). The walk must start
+/// at the wrapper, not probe a fixed sibling: npm hoists the alias to the
+/// install root on flat layouts (project-local installs) and nests it
+/// under the wrapper only on version conflicts, and both are ancestor hits
+/// of the wrapper, not of packages/core. Resolvable means the alias's
+/// manifest AND its entrypoint — the alias is the real `typescript`
+/// package, whose `"main"` is ./lib/typescript.js (no `"exports"`);
+/// hardcoding it is safe for the same reason as the wrapper's: the alias
+/// is exactly pinned (`npm:typescript@X.Y.Z` in both manifests plus the
+/// lockfile) and drift-checked by check-version-sync. A manifest without
+/// its entrypoint THROWS in node rather than consulting a deeper ancestor,
+/// so it concludes unresolvable here too.
+fn aliasedCompilerResolves(allocator: std.mem.Allocator, io: std.Io, wrapper_dir: []const u8) bool {
+    var dir: []const u8 = wrapper_dir;
+    while (true) {
+        if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
+            const manifest = std.fs.path.join(allocator, &.{ dir, "node_modules", "@typescript", "old", "package.json" }) catch return false;
+            defer allocator.free(manifest);
+            if (std.Io.Dir.cwd().statFile(io, manifest, .{})) |_| {
+                const entrypoint = std.fs.path.join(allocator, &.{ dir, "node_modules", "@typescript", "old", "lib", "typescript.js" }) catch return false;
+                defer allocator.free(entrypoint);
+                _ = std.Io.Dir.cwd().statFile(io, entrypoint, .{}) catch return false;
+                return true;
+            } else |_| {}
+        }
+        dir = std.fs.path.dirname(dir) orelse return false;
+    }
+}
+
+/// The teaching for a REPO CHECKOUT whose toolchain resolves nowhere (a
+/// clone whose `npm ci` hasn't happened yet, or whose node_modules was
+/// deleted): name the one command, fail the verb cleanly. The gate never
+/// runs npm itself — the tree stays exactly as the user left it.
+/// Non-checkout layouts route to `toolchainInstallBroken` instead: naming
+/// `npm ci` there would teach mutating an npm-owned tree.
+fn transpilerDepsMissing(framework_root: []const u8) Error {
+    std.debug.print(
+        \\the @native-sdk/core transpiler's dependencies are not installed
+        \\(@typescript/typescript6 resolves nowhere). Fix with:
+        \\  cd {s}/packages/core && {s}
+        \\
+    , .{ framework_root, npm_ci_teaching_command });
+    return error.MissingTranspiler;
+}
+
+/// The teaching for an npm-installed CLI whose toolchain resolves nowhere:
+/// @typescript/typescript6 is a regular dependency of @native-sdk/cli, so
+/// npm installs it in the same transaction as the package — its absence
+/// means the install itself is broken (interrupted install, a pruned
+/// node_modules, an overzealous cleaner). The fix is reinstalling the CLI,
+/// never `npm ci` inside the installed package: that would silently mutate
+/// npm-owned files and mask the breakage instead of curing it.
+fn toolchainInstallBroken(framework_root: []const u8) Error {
+    std.debug.print(
+        \\the @native-sdk/cli install at
+        \\  {s}
+        \\is missing its TypeScript toolchain (@typescript/typescript6). npm installs
+        \\that dependency in the same transaction as the CLI, so this install is
+        \\broken - reinstall @native-sdk/cli (e.g. re-run `npm install`, or
+        \\`npm install -g @native-sdk/cli` for a global install).
+        \\
+    , .{framework_root});
+    return error.BrokenToolchainInstall;
+}
+
+fn dirExists(io: std.Io, path: []const u8) bool {
+    var cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(io, path, .{}) catch return false;
+    dir.close(io);
+    return true;
+}
+
+/// The one gate every verb that reaches the transpiler runs (`native
+/// check`, `native dev --core`, and the build-graph verbs before they
+/// spawn `zig build`): the toolchain must RESOLVE from packages/core. The
+/// npm-installed CLI always resolves — @typescript/typescript6 is a
+/// regular dependency installed in the same transaction — and a repo
+/// checkout resolves after its one `npm ci --include=dev`. The gate NEVER
+/// runs npm itself, on any layout: it only splits the teaching when
+/// resolution fails. Which teaching is decided by `packages/core/test/`:
+/// the published payload deliberately omits it (copy-framework.js stages
+/// packages/core entry-by-entry without test/, and check-framework-sync.js
+/// pins that exclusion; @native-sdk/core's own tarball is pinned to
+/// `files: ["sdk"]` by test/package_manifest.test.ts) while every repo
+/// checkout carries it. Checkouts are taught the install command;
+/// non-checkout layouts are taught the reinstall — running `npm ci` there
+/// would mutate an npm-owned tree.
+pub fn ensureResolvedTranspiler(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8) !void {
+    if (transpilerResolves(allocator, io, framework_root)) return;
+    const test_dir = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", "test" });
+    defer allocator.free(test_dir);
+    if (!dirExists(io, test_dir)) return toolchainInstallBroken(framework_root);
+    // Teach the command against the RESOLVED absolute path: the checkout
+    // root may have been reached through a relative NATIVE_SDK_PATH or a
+    // symlinked binary, and the one command must paste-and-run from any
+    // cwd.
+    const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, framework_root, allocator) catch
+        return transpilerDepsMissing(framework_root);
+    defer allocator.free(resolved);
+    return transpilerDepsMissing(resolved);
 }
 
 /// `native check` over a TypeScript core: run the transpiler (checker +
@@ -125,7 +282,7 @@ pub fn checkCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.proces
     defer allocator.free(cli_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
-    try requireInstalledTranspiler(allocator, io, framework_root);
+    try ensureResolvedTranspiler(allocator, io, framework_root);
     try std.Io.Dir.cwd().createDirPath(io, ".native/check");
 
     var child = std.process.spawn(io, .{
@@ -167,6 +324,9 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer allocator.free(devhost_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
+    // The harness runs the transpiler tier under node, so it needs the
+    // TypeScript toolchain to resolve exactly like check/build do.
+    try ensureResolvedTranspiler(allocator, io, framework_root);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -459,6 +619,215 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try cwd.deleteFile(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts");
     try std.testing.expectEqual(EnsureOutcome.materialized, try ensureEditorPackage(allocator, io, sdk, app));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
+}
+
+// --------------------------------------------- toolchain resolution
+//
+// The resolution gate never spawns anything — it is stats plus teachings —
+// so the tests exercise it directly against fixture trees: the walk across
+// every layout npm produces, each partial-extraction sliver the predicate
+// must refuse, and the two teachings the layouts split into. "Nothing ran
+// npm" is asserted structurally: the gate has no runner to inject, and the
+// checkout fixtures prove their node_modules stayed exactly as staged.
+
+test "the checkout teaching's npm command survives production npm config" {
+    // `--include=dev` must ride the named command: without it, ambient
+    // NODE_ENV=production (or omit=dev) makes `npm ci` skip the
+    // devDependency the install exists for — exit 0, nothing on disk.
+    try std.testing.expect(std.mem.indexOf(u8, npm_ci_teaching_command, "--include=dev") != null);
+}
+
+/// The minimal manifest a fake COMPLETED install writes.
+const fake_toolchain_manifest = "{ \"name\": \"@typescript/typescript6\", \"main\": \"./lib/typescript.js\" }";
+
+/// The entrypoint the manifest's "main" names: the resolvability predicate
+/// (like node) requires BOTH files, so a fake toolchain is only resolvable
+/// once manifest and entrypoint land. Half-written trees — bare
+/// directories, manifests without their entrypoint — are staged in the
+/// tests themselves.
+const fake_toolchain_entrypoint = "// fake typescript.js";
+
+/// The minimal manifest of the aliased REAL compiler (@typescript/old is
+/// `npm:typescript@X.Y.Z`, so the installed manifest names `typescript`):
+/// a completed install carries it next to the wrapper — the wrapper's
+/// lib/typescript.js is only a re-export of it.
+const fake_compiler_manifest = "{ \"name\": \"typescript\", \"main\": \"./lib/typescript.js\" }";
+
+/// The aliased compiler's entrypoint bytes.
+const fake_compiler_entrypoint = "// fake real typescript.js";
+
+/// Land one fake-but-complete package (lib/ directory, manifest,
+/// lib/typescript.js entrypoint) at `dir`'s
+/// node_modules/@typescript/<package_name>.
+fn landFakePackage(io: std.Io, dir: []const u8, comptime package_name: []const u8, manifest_data: []const u8, entrypoint_data: []const u8) bool {
+    var buffer: [512]u8 = undefined;
+    const package = std.fmt.bufPrint(&buffer, "{s}/node_modules/@typescript/" ++ package_name, .{dir}) catch return false;
+    var cwd = std.Io.Dir.cwd();
+    var lib_buffer: [512]u8 = undefined;
+    const lib = std.fmt.bufPrint(&lib_buffer, "{s}/lib", .{package}) catch return false;
+    cwd.createDirPath(io, lib) catch return false;
+    var manifest_buffer: [512]u8 = undefined;
+    const manifest = std.fmt.bufPrint(&manifest_buffer, "{s}/package.json", .{package}) catch return false;
+    cwd.writeFile(io, .{ .sub_path = manifest, .data = manifest_data }) catch return false;
+    var entry_buffer: [512]u8 = undefined;
+    const entrypoint = std.fmt.bufPrint(&entry_buffer, "{s}/typescript.js", .{lib}) catch return false;
+    cwd.writeFile(io, .{ .sub_path = entrypoint, .data = entrypoint_data }) catch return false;
+    return true;
+}
+
+/// Land a fake-but-RESOLVABLE toolchain under `dir`'s node_modules: the
+/// wrapper (manifest + entrypoint) AND the aliased real compiler it
+/// re-exports, as npm's dedupe lands them — siblings under one
+/// node_modules. A completed install always carries both; the
+/// wrapper-without-compiler slivers are staged in the tests themselves.
+fn landFakeToolchain(io: std.Io, dir: []const u8) bool {
+    if (!landFakePackage(io, dir, "typescript6", fake_toolchain_manifest, fake_toolchain_entrypoint)) return false;
+    return landFakePackage(io, dir, "old", fake_compiler_manifest, fake_compiler_entrypoint);
+}
+
+test "toolchain resolution: the nested install (repo checkout) resolves, partial extractions do not" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-toolchain-nested";
+    const sdk = root ++ "/sdk-checkout";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    try cwd.createDirPath(io, sdk ++ "/packages/core");
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // A bare toolchain DIRECTORY (an interrupted extraction, a pruned
+    // install) is not resolvable: node needs the package's manifest.
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/typescript6");
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // A manifest WITHOUT its entrypoint is the mid-extraction crash shape
+    // (package.json rides first in the tarball): still not resolvable —
+    // node would read "main" and fail loading it.
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/typescript6/package.json", .data = fake_toolchain_manifest });
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/typescript6/lib");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/typescript6/lib/typescript.js", .data = fake_toolchain_entrypoint });
+    // The COMPLETE wrapper is still not the compiler: its entrypoint only
+    // re-exports @typescript/old, so a tree without the aliased real
+    // compiler dies at run time on that require. Not resolvable.
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // The alias's manifest without ITS entrypoint is the same
+    // mid-extraction sliver one package deeper: still not resolvable.
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/old");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/old/package.json", .data = fake_compiler_manifest });
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    try cwd.createDirPath(io, sdk ++ "/packages/core/node_modules/@typescript/old/lib");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/node_modules/@typescript/old/lib/typescript.js", .data = fake_compiler_entrypoint });
+    try std.testing.expect(transpilerResolves(allocator, io, sdk));
+}
+
+test "toolchain resolution: the hoisted install (npm project layout) resolves by ancestor walk" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-toolchain-hoisted";
+    // The npm local-install shape: the CLI package and the toolchain are
+    // SIBLINGS under the project's node_modules — nothing sits inside the
+    // CLI package itself.
+    const sdk = root ++ "/proj/node_modules/@native-sdk/cli";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    try cwd.createDirPath(io, sdk ++ "/packages/core");
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // A bare directory on the hoisted layout is a broken install, not a
+    // resolvable toolchain — the manifest is the bar here too.
+    try cwd.createDirPath(io, root ++ "/proj/node_modules/@typescript/typescript6");
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // And a manifest without its entrypoint (the mid-extraction crash
+    // shape) is still broken, not resolvable.
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/proj/node_modules/@typescript/typescript6/package.json", .data = fake_toolchain_manifest });
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    try cwd.createDirPath(io, root ++ "/proj/node_modules/@typescript/typescript6/lib");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/proj/node_modules/@typescript/typescript6/lib/typescript.js", .data = fake_toolchain_entrypoint });
+    // The complete wrapper without the aliased real compiler it re-exports
+    // is still a broken install (its entrypoint's require would throw).
+    try std.testing.expect(!transpilerResolves(allocator, io, sdk));
+    // npm hoists @typescript/old to the install root, as a SIBLING of the
+    // wrapper — the wrapper's own require-walk finds it there.
+    try cwd.createDirPath(io, root ++ "/proj/node_modules/@typescript/old/lib");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/proj/node_modules/@typescript/old/package.json", .data = fake_compiler_manifest });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/proj/node_modules/@typescript/old/lib/typescript.js", .data = fake_compiler_entrypoint });
+    try std.testing.expect(transpilerResolves(allocator, io, sdk));
+
+    // And the global-prefix shape: the dependency nested inside the CLI
+    // package's own node_modules (npm -g) resolves as the nearer ancestor.
+    // The aliased compiler stays where the flat install hoisted it — the
+    // alias walk starts at the NESTED wrapper and must still reach that
+    // install-root sibling (a fixed-sibling probe would miss it).
+    try cwd.createDirPath(io, sdk ++ "/node_modules/@typescript/typescript6/lib");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/node_modules/@typescript/typescript6/package.json", .data = fake_toolchain_manifest });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/node_modules/@typescript/typescript6/lib/typescript.js", .data = fake_toolchain_entrypoint });
+    try std.testing.expect(transpilerResolves(allocator, io, sdk));
+}
+
+test "toolchain gate: a resolvable tree passes silently, a checkout teaches the one npm ci and runs nothing" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-toolchain-gate";
+    const sdk = root ++ "/sdk-checkout";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    // test/ marks the layout a repo checkout (the published payload
+    // deliberately omits it): the teaching names `npm ci --include=dev`.
+    try cwd.createDirPath(io, sdk ++ "/packages/core/test");
+
+    // An uninstalled checkout: the teaching error — and NOTHING was
+    // spawned, structurally: the gate has no installer to call, and the
+    // tree it inspected stayed exactly as staged (no node_modules
+    // appeared).
+    try std.testing.expectError(error.MissingTranspiler, ensureResolvedTranspiler(allocator, io, sdk));
+    try std.testing.expect(!dirExists(io, sdk ++ "/packages/core/node_modules"));
+
+    // A partial extraction (the wrapper alone, no aliased compiler) is
+    // taught the same way — and left byte-for-byte in place, never
+    // "repaired".
+    try std.testing.expect(landFakePackage(io, sdk ++ "/packages/core", "typescript6", fake_toolchain_manifest, fake_toolchain_entrypoint));
+    try std.testing.expectError(error.MissingTranspiler, ensureResolvedTranspiler(allocator, io, sdk));
+    try std.testing.expect(!dirExists(io, sdk ++ "/packages/core/node_modules/@typescript/old"));
+
+    // A complete install passes silently.
+    try std.testing.expect(landFakePackage(io, sdk ++ "/packages/core", "old", fake_compiler_manifest, fake_compiler_entrypoint));
+    try ensureResolvedTranspiler(allocator, io, sdk);
+}
+
+test "toolchain gate: an npm-payload layout teaches the reinstall, never npm ci" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-ts-toolchain-npm-payload";
+    // The npm-installed CLI's shape: packages/core carries the lockfile
+    // (the payload deliberately ships it) but NO test/ directory — the
+    // staging excludes it, and that absence is the layout signal.
+    const sdk = root ++ "/proj/node_modules/@native-sdk/cli";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, sdk ++ "/packages/core");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/package-lock.json", .data = "{ \"lockfileVersion\": 3 }" });
+
+    // A missing toolchain here is a broken install: the reinstall
+    // teaching, and the npm-owned tree untouched (no node_modules
+    // appeared anywhere the gate looked).
+    try std.testing.expectError(error.BrokenToolchainInstall, ensureResolvedTranspiler(allocator, io, sdk));
+    try std.testing.expect(!dirExists(io, sdk ++ "/packages/core/node_modules"));
+
+    // The same verdict for each partial-extraction sliver: a hoisted bare
+    // directory, then its manifest-without-entrypoint completion — both
+    // broken installs to teach, never trees to repair.
+    try cwd.createDirPath(io, root ++ "/proj/node_modules/@typescript/typescript6");
+    try std.testing.expectError(error.BrokenToolchainInstall, ensureResolvedTranspiler(allocator, io, sdk));
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/proj/node_modules/@typescript/typescript6/package.json", .data = fake_toolchain_manifest });
+    try std.testing.expectError(error.BrokenToolchainInstall, ensureResolvedTranspiler(allocator, io, sdk));
+
+    // A complete hoisted install passes silently.
+    try std.testing.expect(landFakeToolchain(io, root ++ "/proj"));
+    try ensureResolvedTranspiler(allocator, io, sdk);
 }
 
 // The copy the CLI materializes IS the future published artifact: the

@@ -19,9 +19,11 @@
 // SDK library modules cores import (sdk/, also the editor package the CLI
 // materializes into apps), the rt kernel the emitted core pairs with
 // (rt/rt.zig), package.json (the bundled version every scaffold pin
-// follows), and package-lock.json — so `npm ci` inside the installed
-// package's packages/core works exactly as the build's teaching message
-// says (npm only strips the tarball ROOT lockfile; nested ones ship).
+// follows), and package-lock.json (npm only strips the tarball ROOT
+// lockfile; nested ones ship). The transpiler's TypeScript toolchain
+// itself does NOT ride in the payload: @typescript/typescript6 is a
+// regular dependency of @native-sdk/cli, installed by npm in the same
+// transaction and resolved from packages/core by node's ancestor walk.
 // test/ and scripts/ stay out: repo-dev surface, never build inputs.
 
 import { cpSync, copyFileSync, rmSync } from 'fs';

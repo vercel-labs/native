@@ -462,6 +462,28 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "\"gpuSurfaces\"" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "gpuFirstFrameLatencyNs: number" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-ts-toolchain-twins", "Verify the CLI's toolchain-resolution gate and its direct-`zig build` twin stay in lockstep (both walk to the aliased real compiler behind the @typescript/typescript6 wrapper, and both teach instead of panicking)", &.{
+        // The resolution twins require the aliased REAL compiler behind
+        // the @typescript/typescript6 wrapper (its lib/typescript.js is a
+        // one-line re-export of "@typescript/old") — both predicates must
+        // probe the alias's manifest AND entrypoint, in lockstep.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"package.json\"" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"lib\", \"typescript.js\"" },
+        .{ .path = "build/app.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"package.json\"" },
+        .{ .path = "build/app.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"lib\", \"typescript.js\"" },
+        // The reciprocal cross-references that keep the twins findable
+        // from each other.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "build/app.zig's tsToolchainResolves" },
+        .{ .path = "build/app.zig", .pattern = "transpilerResolves, this predicate's deliberate twin" },
+        // The teachings: the checkout's one production-config-safe npm ci
+        // command in both surfaces, the reinstall for npm layouts, and the
+        // build graph's clean configure-time failure (never a panic).
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "pub const npm_ci_teaching_command = \"npm ci --include=dev\";" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "reinstall @native-sdk/cli" },
+        .{ .path = "build/app.zig", .pattern = "npm ci --include=dev" },
+        .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
+        .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },

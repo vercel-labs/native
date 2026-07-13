@@ -11,8 +11,10 @@
 // stripping by design (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). This
 // runner closes that gap without forking the layouts: it registers a load
 // hook that strips ONLY node_modules-resident .ts modules, using the
-// transpiler's own installed TypeScript (the `npm ci` dependency inside
-// packages/core, resolved from the target module's location), and leaves
+// transpiler's own TypeScript toolchain (shipped as a dependency of
+// @native-sdk/cli, or a repo checkout's `npm ci` install inside
+// packages/core — either way resolved from the target module's location
+// by node's ancestor node_modules walk), and leaves
 // every other module to node's native handling. Then it imports the
 // requested module with argv respliced so the target sees its usual shape
 // (its own path at argv[1], its arguments from argv[2]).

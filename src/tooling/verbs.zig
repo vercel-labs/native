@@ -64,6 +64,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         if (buildgraph.resolveFrameworkRoot(allocator, io, options.base_env) catch null) |framework_root| {
             defer allocator.free(framework_root);
             ts_core.selfHealEditorPackage(allocator, io, framework_root);
+            // The build graph runs the transpiler inside `zig build`; gate
+            // its toolchain resolution HERE, before any zig spawns, so an
+            // unresolvable toolchain fails with the CLI's teaching message
+            // (the checkout's one `npm ci --include=dev`, or the
+            // reinstall on an npm layout) instead of a configure-time
+            // error inside the graph. npm-installed CLIs always resolve —
+            // the toolchain ships as a CLI dependency.
+            try ts_core.ensureResolvedTranspiler(allocator, io, framework_root);
         }
     }
 
