@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.4.4";
+const version = "0.5.0";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();

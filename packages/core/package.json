@@ -1,7 +1,6 @@
 {
   "name": "@native-sdk/core",
-  "private": true,
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "The TypeScript authoring tier: the app-core subset, its dev-time transpiler to arena-backed Zig, and the SDK module cores import",
   "type": "module",
   "types": "./sdk/core.ts",
