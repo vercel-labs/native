@@ -402,6 +402,188 @@ test "each window's tokens carry its own surface density, not the main canvas's"
     try std.testing.expectEqual(@as(f32, 1), main_after.pixel_snap.scale);
 }
 
+// ------------------- window-control clearance in secondary windows
+
+const CaptionWinModel = struct {
+    settings_open: bool = true,
+    /// The padded variant appends the contract spacer (the soundboard
+    /// pattern) so its header already clears the caption cluster.
+    padded: bool = false,
+};
+
+const CaptionWinMsg = union(enum) {
+    settings_closed,
+};
+
+const CaptionWinApp = ui_app_model.UiApp(CaptionWinModel, CaptionWinMsg);
+
+fn captionWinUpdate(model: *CaptionWinModel, msg: CaptionWinMsg) void {
+    switch (msg) {
+        .settings_closed => model.settings_open = false,
+    }
+}
+
+fn captionWinView(ui: *CaptionWinApp.Ui, model: *const CaptionWinModel) CaptionWinApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, "main body"),
+    });
+}
+
+fn captionWinWindows(model: *const CaptionWinModel, scratch: *CaptionWinApp.WindowsScratch) []const CaptionWinApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .title = "Tools",
+            .width = 320,
+            .height = 240,
+            .on_close = .settings_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+/// A hidden-inset SECONDARY window's titlebar: a drag row with a
+/// leading title and a right-aligned status text — the same
+/// system-monitor shape the main-canvas caption tests use, but built
+/// through `window_view` and `rebuildWindowSlot`.
+fn captionWinWindowView(ui: *CaptionWinApp.Ui, model: *const CaptionWinModel, window_label: []const u8) CaptionWinApp.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    if (model.padded) {
+        return ui.column(.{}, .{
+            ui.row(.{ .window_drag = true, .height = 40 }, .{
+                ui.text(.{}, "Tools"),
+                ui.el(.stack, .{ .grow = 1 }, .{}),
+                ui.text(.{}, "recording"),
+                ui.el(.stack, .{ .width = 138 }, .{}),
+            }),
+            ui.text(.{}, "body"),
+        });
+    }
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Tools"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "recording"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+const CaptionWinFixture = struct {
+    harness: *core.TestHarness(),
+    app_state: *CaptionWinApp,
+    app: core.App,
+    settings_id: support.platform.WindowId,
+
+    /// Start the app with Windows-shaped hidden-titlebar chrome (the
+    /// DWM caption cluster overlays the trailing 138pt of the 320pt
+    /// secondary window's top band) and install both canvases.
+    fn create(padded: bool) !CaptionWinFixture {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.window_chrome = .{
+            .insets = .{ .top = 32, .right = 138 },
+            .buttons = geometry.RectF.init(182, 0, 138, 32),
+        };
+        const app_state = try CaptionWinApp.create(std.heap.page_allocator, .{
+            .name = "ui-app-caption-window",
+            .scene = panel_scene,
+            .canvas_label = canvas_label,
+            .update = captionWinUpdate,
+            .view = captionWinView,
+            .windows_fn = captionWinWindows,
+            .window_view = captionWinWindowView,
+        });
+        errdefer app_state.destroy();
+        app_state.model.padded = padded;
+        const app = app_state.app();
+        try harness.start(app);
+        // The model declares the settings window from the start, so the
+        // main canvas's installing rebuild creates it.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        var settings_id: support.platform.WindowId = 0;
+        for (harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+        }
+        if (settings_id == 0) return error.TestUnexpectedResult;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = settings_id,
+            .label = settings_canvas_label,
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 2_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app, .settings_id = settings_id };
+    }
+
+    fn destroy(self: CaptionWinFixture) void {
+        self.app_state.destroy();
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    fn textFrame(self: CaptionWinFixture, window_id: support.platform.WindowId, label: []const u8, text: []const u8) !geometry.RectF {
+        const layout = try self.harness.runtime.canvasWidgetLayout(window_id, label);
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .text and std.mem.eql(u8, node.widget.text, text)) return node.frame;
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "a secondary window's drag header content stays clear of the Windows caption cluster" {
+    // The naive shape: the window view never consumed the chrome
+    // channel, so its right-aligned status would lay out flush to the
+    // window edge — UNDER the min/max/close buttons. `rebuildWindowSlot`
+    // must run the same collision scan + one-retry clearance the main
+    // rebuild runs, with the cluster stamped into the SLOT's tokens.
+    const fixture = try CaptionWinFixture.create(false);
+    defer fixture.destroy();
+
+    // The trailing status text ends at (or before) the cluster's
+    // leading edge (182 = 320 - 138); without the reservation it ended
+    // at the window's right edge, inside the cluster.
+    const status = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "recording");
+    try std.testing.expect(status.maxX() <= 182 + 0.01);
+    // The leading title and the body below the band are untouched.
+    const title = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "Tools");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+
+    // The stamp lived in a LOCAL copy of the slot's tokens: the main
+    // canvas (no drag header, no collision) keeps an unstamped stored
+    // set and its own layout.
+    const main_stored = try fixture.harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expect(main_stored.window_controls == null);
+    const main_body = try fixture.textFrame(1, canvas_label, "main body");
+    try std.testing.expectEqual(@as(f32, 12), main_body.x);
+}
+
+test "a padded secondary drag header keeps its layout (no double reservation)" {
+    // The contract shape: the header's own trailing spacer already
+    // clears the cluster, so nothing collides and the slot retry must
+    // NOT fire — a double reservation would shove the status text a
+    // full cluster-width further left (near 182 - 138 = 44).
+    const fixture = try CaptionWinFixture.create(true);
+    defer fixture.destroy();
+
+    const status = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "recording");
+    try std.testing.expect(@abs(status.maxX() - 182) < 0.5);
+}
+
 // ------------------------------------------------- window-action effects
 
 const VerbModel = struct {

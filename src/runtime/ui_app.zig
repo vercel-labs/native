@@ -1293,7 +1293,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // Apps whose headers already pad through the chrome
             // channel's insets never collide, never retry, and keep a
             // byte-identical layout.
-            if (self.windowControlsReservation(runtime, window_id, built.layout)) |controls| {
+            if (windowControlsReservation(runtime, window_id, self.options.canvas_label, built.layout)) |controls| {
                 tokens.window_controls = controls;
                 built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             }
@@ -1411,11 +1411,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// The window-control cluster's canvas-local frame — but only
         /// when the just-built layout actually left drag-header content
-        /// under it, so rebuild knows a clearance retry will change
-        /// something. Cheap in the common case: a tree with no visible
-        /// drag region never even polls the platform's chrome report,
-        /// and standard-chrome windows report a zero cluster.
-        fn windowControlsReservation(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree) ?geometry.RectF {
+        /// under it, so a rebuild (the main canvas's `rebuild` or a
+        /// secondary window's `rebuildWindowSlot`) knows a clearance
+        /// retry will change something. Cheap in the common case: a tree
+        /// with no visible drag region never even polls the platform's
+        /// chrome report, and standard-chrome windows report a zero
+        /// cluster.
+        fn windowControlsReservation(runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, layout: canvas.WidgetLayoutTree) ?geometry.RectF {
             var has_drag_region = false;
             for (layout.nodes) |node| {
                 if (canvas.widgetIsWindowDragRegion(node.widget)) {
@@ -1424,7 +1426,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             if (!has_drag_region) return null;
-            const controls = runtime.windowControlsForView(window_id, self.options.canvas_label);
+            const controls = runtime.windowControlsForView(window_id, canvas_label);
             if (controls.width <= 0 or controls.height <= 0) return null;
             if (!canvas.windowDragContentUnderWindowControls(layout.nodes, controls)) return null;
             return controls;
@@ -1940,25 +1942,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
-            const window_view = self.options.window_view orelse return;
-            const tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
+            if (self.options.window_view == null) return;
+            var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = slot.arena_index ^ 1;
-            _ = slot.arenas[next_index].reset(.retain_capacity);
-            var ui = Ui.init(slot.arenas[next_index].allocator());
-            ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
-            self.armUiFragmentHost(&ui);
-            const node = window_view(&ui, &self.model, slot.label());
-            const tree = try ui.finalizeWithTokens(node, tokens);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
-            const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
-                if (err == error.WidgetLayoutListFull) {
-                    ui_app_log.warn(
-                        "widget layout capacity exceeded for window '{s}' view '{s}': the per-view budget is {d} nodes (canvas_limits.max_canvas_widget_nodes_per_view) - reduce always-mounted widgets or virtualize lists",
-                        .{ slot.label(), slot.canvasLabel(), canvas_limits.max_canvas_widget_nodes_per_view },
-                    );
-                }
-                return err;
-            };
+            var built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
+            // The same one-retry window-control clearance the main
+            // rebuild runs (see `rebuild`): a secondary hidden-inset
+            // window's drag header collides with the OS caption cluster
+            // exactly like the main window's, so a proven collision
+            // stamps the cluster into THIS slot's tokens (a local copy —
+            // other windows keep their own layout) for one more pass.
+            if (windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout)) |controls| {
+                tokens.window_controls = controls;
+                built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
+            }
+            const tree = built.tree;
+            const layout = built.layout;
             _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
@@ -1969,6 +1969,37 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
             }
+        }
+
+        /// One view-build + flex-layout pass of `rebuildWindowSlot`,
+        /// the slot-path sibling of `buildLayoutPass`: resets the slot's
+        /// next arena (retaining capacity, so the clearance retry reuses
+        /// the same pass's memory) and builds the window view against
+        /// `bounds` with `tokens`.
+        fn buildWindowSlotPass(
+            self: *Self,
+            slot: *WindowSlot,
+            bounds: geometry.RectF,
+            tokens: canvas.DesignTokens,
+            next_index: usize,
+        ) anyerror!BuiltLayout {
+            const window_view = self.options.window_view.?;
+            _ = slot.arenas[next_index].reset(.retain_capacity);
+            var ui = Ui.init(slot.arenas[next_index].allocator());
+            ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
+            self.armUiFragmentHost(&ui);
+            const node = window_view(&ui, &self.model, slot.label());
+            const tree = try ui.finalizeWithTokens(node, tokens);
+            const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
+                if (err == error.WidgetLayoutListFull) {
+                    ui_app_log.warn(
+                        "widget layout capacity exceeded for window '{s}' view '{s}': the per-view budget is {d} nodes (canvas_limits.max_canvas_widget_nodes_per_view) - reduce always-mounted widgets or virtualize lists",
+                        .{ slot.label(), slot.canvasLabel(), canvas_limits.max_canvas_widget_nodes_per_view },
+                    );
+                }
+                return err;
+            };
+            return .{ .tree = tree, .layout = layout };
         }
 
         /// Re-apply the model-derived webview panes against the freshly
