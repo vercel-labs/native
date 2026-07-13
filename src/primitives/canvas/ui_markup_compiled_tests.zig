@@ -479,6 +479,60 @@ test "compiled split tween pair lowers into the layout-tween declaration identic
     try testing.expectEqual(interpreted_split.value, compiled_split.value);
 }
 
+// ---------------------------------------- anchored-tooltip intent parity
+
+const tooltip_intent_markup =
+    \\<column gap="12">
+    \\  <stack>
+    \\    <text>Bold</text>
+    \\    <tooltip anchor="above" tooltip-delay="250">Bold the selection</tooltip>
+    \\  </stack>
+    \\  <stack>
+    \\    <text>Link</text>
+    \\    <tooltip anchor="below" anchor-offset="8">Insert a link</tooltip>
+    \\  </stack>
+    \\  <tooltip>Copied!</tooltip>
+    \\</column>
+;
+
+const TooltipIntentCompiled = canvas.CompiledMarkupView(EntriesModel, EntriesMsg, tooltip_intent_markup);
+
+test "compiled anchored tooltips stamp the hover-intent declaration identically to the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const entries = [_]Entry{.{ .id = 11, .label = "first" }};
+    const model = EntriesModel{ .entries = &entries };
+
+    var view = try markup_view.MarkupView(EntriesModel, EntriesMsg).init(arena, tooltip_intent_markup);
+    var interpreter_ui = EntriesUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = EntriesUi.init(arena);
+    const compiled = try compiled_ui.finalize(TooltipIntentCompiled.build(&compiled_ui, &model));
+    try expectSameTree(EntriesMsg, interpreted, compiled);
+
+    // Both engines stamp the declaration the runtime's hover-intent
+    // machine reads: the anchor floats the leaf against its parent, and
+    // tooltip-delay overrides the token default (-1 keeps it). The bare
+    // static tooltip keeps null anchor and the -1 default, so existing
+    // documents lower byte-identically.
+    inline for (.{ interpreted.root, compiled.root }) |root| {
+        const declared = fixture.findByText(root, .tooltip, "Bold the selection").?;
+        try testing.expectEqual(@as(i32, 250), declared.tooltip_delay_ms);
+        try testing.expectEqual(canvas.WidgetAnchorPlacement.above, declared.layout.anchor.?.placement);
+
+        const defaulted = fixture.findByText(root, .tooltip, "Insert a link").?;
+        try testing.expectEqual(@as(i32, -1), defaulted.tooltip_delay_ms);
+        try testing.expectEqual(canvas.WidgetAnchorPlacement.below, defaulted.layout.anchor.?.placement);
+        try testing.expectEqual(@as(f32, 8), defaulted.layout.anchor.?.offset);
+
+        const static = fixture.findByText(root, .tooltip, "Copied!").?;
+        try testing.expectEqual(@as(i32, -1), static.tooltip_delay_ms);
+        try testing.expectEqual(@as(?canvas.WidgetAnchor, null), static.layout.anchor);
+    }
+}
+
 // --------------------- multi-child for bodies and the for-empty else
 
 const multi_entries_markup =

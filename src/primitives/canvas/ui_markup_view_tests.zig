@@ -716,6 +716,33 @@ test "resize-duration and resize-easing on split stamp the layout-tween declarat
     try testing.expectEqual(canvas.Easing.standard, plain.resize_easing);
 }
 
+test "anchor and tooltip-delay on tooltip stamp the hover-intent declaration" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    // An anchored tooltip declaring its own delay, an anchored tooltip
+    // on the token default, and a bare static tooltip that keeps the
+    // classic paints-when-rendered leaf — so existing documents lower
+    // byte-identically.
+    var view = try InboxMarkup.init(arena, "<column>\n  <stack>\n    <text>Bold</text>\n    <tooltip anchor=\"above\" tooltip-delay=\"250\">Bold the selection</tooltip>\n  </stack>\n  <stack>\n    <text>Link</text>\n    <tooltip anchor=\"below\">Insert a link</tooltip>\n  </stack>\n  <tooltip>Copied!</tooltip>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const declared = findByText(tree.root, .tooltip, "Bold the selection").?;
+    try testing.expectEqual(@as(i32, 250), declared.tooltip_delay_ms);
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.above, declared.layout.anchor.?.placement);
+
+    const defaulted = findByText(tree.root, .tooltip, "Insert a link").?;
+    try testing.expectEqual(@as(i32, -1), defaulted.tooltip_delay_ms);
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.below, defaulted.layout.anchor.?.placement);
+
+    const static = findByText(tree.root, .tooltip, "Copied!").?;
+    try testing.expectEqual(@as(i32, -1), static.tooltip_delay_ms);
+    try testing.expectEqual(@as(?canvas.WidgetAnchor, null), static.layout.anchor);
+}
+
 test "resize-easing value vocabulary mirrors the live Easing enum" {
     // The validator's std-only mirror of the enum's member names; a new
     // member cannot ship without its markup spelling.
