@@ -84,6 +84,15 @@ pub const PackageOptions = struct {
     env_map: ?*std.process.Environ.Map = null,
 };
 
+/// The Windows subsystem verdict the packaging posture check reaches:
+/// `gui` and `console` only when the PE optional header actually said
+/// so, `unknown` when the probe proved nothing — non-PE or truncated
+/// bytes, a headerless image, an `e_lfanew` past the header ceiling, a
+/// benign read error, or some other declared subsystem entirely
+/// (native, EFI, ...). No surface may claim a subsystem the parse
+/// never established.
+pub const WindowsSubsystem = enum { gui, console, unknown };
+
 pub const PackageStats = struct {
     path: []const u8,
     artifact_name: []const u8 = "",
@@ -98,15 +107,16 @@ pub const PackageStats = struct {
     web_engine: WebEngine = .system,
     web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
-    /// The Windows subsystem verdict: true when the package wrapped a
-    /// CONSOLE-subsystem exe (the app will flash a terminal window
-    /// behind itself on every launch), false for a GUI-subsystem exe,
-    /// and null when the check never ran (non-Windows target, or no
-    /// binary to probe). Release-shaped `native build` exes are
-    /// GUI-subsystem, so true only fires for stale or hand-supplied
-    /// binaries — the packager warns and the report carries the truth
-    /// (pinned by tests over a synthetic PE header).
-    windows_console_subsystem: ?bool = null,
+    /// The Windows subsystem verdict: `console` when the package
+    /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
+    /// window behind itself on every launch), `gui` for a GUI-subsystem
+    /// exe, `unknown` when the probe could not establish either, and
+    /// null when the check never ran (non-Windows target, or no binary
+    /// to probe). Release-shaped `native build` exes are GUI-subsystem,
+    /// so console only fires for stale or hand-supplied binaries — the
+    /// packager warns and the report carries the truth (pinned by tests
+    /// over a synthetic PE header).
+    windows_subsystem: ?WindowsSubsystem = null,
 };
 
 /// The web-layer verdict for a package, from the same declare-to-use
@@ -191,11 +201,11 @@ pub fn printDiagnostic(stats: PackageStats) void {
     if (stats.signing_verified) {
         std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
     }
-    if (stats.windows_console_subsystem) |console| {
-        if (console) {
-            std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{});
-        } else {
-            std.debug.print("  subsystem: gui\n", .{});
+    if (stats.windows_subsystem) |subsystem| {
+        switch (subsystem) {
+            .console => std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{}),
+            .gui => std.debug.print("  subsystem: gui\n", .{}),
+            .unknown => std.debug.print("  subsystem: unknown (unrecognized executable format)\n", .{}),
         }
     }
     if (stats.archive_path) |archive| {
@@ -318,11 +328,11 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     // carry the truth in the stats/report; the package still builds
     // (the app works, it just looks unfinished). Null means the check
     // never ran: a non-Windows target, or no binary to probe.
-    const windows_console_subsystem: ?bool = if (options.target == .windows)
-        if (options.binary_path) |binary_path| try peIsConsoleSubsystem(allocator, io, binary_path) else null
+    const windows_subsystem: ?WindowsSubsystem = if (options.target == .windows)
+        if (options.binary_path) |binary_path| try peSubsystemVerdictAtPath(allocator, io, binary_path) else null
     else
         null;
-    if (windows_console_subsystem orelse false) {
+    if (windows_subsystem == .console) {
         std.debug.print("warning[package.console-subsystem]: {s} is a console-subsystem exe, so a terminal window will open behind the app on every launch\n" ++
             "  rebuild with `native build` (release exes are GUI-subsystem) or pass a GUI-subsystem --binary\n", .{options.binary_path.?});
     }
@@ -374,8 +384,8 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try cef.ensureLayoutFor(io, cef_platform, options.cef_dir);
         try copyDesktopCefRuntime(allocator, io, dir, options.target, options.cef_dir);
     }
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count, windows_console_subsystem);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_console_subsystem = windows_console_subsystem };
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count, windows_subsystem);
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_subsystem = windows_subsystem };
 }
 
 /// The iOS host tier: a COMPLETE Xcode project the user never edits —
@@ -1162,14 +1172,22 @@ fn peSubsystemAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8)
     return peSubsystem(bytes[0 .. dos_header.len + rest]);
 }
 
-fn peIsConsoleSubsystem(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
-    // Only a genuinely-unreadable file degrades to "no claim"; a real
-    // read that proves non-PE (or headerless) already answers null.
+/// The posture check's verdict over a file: only a parsed Subsystem of
+/// GUI (2) or console (3) earns a named claim; everything else — a file
+/// the parse proves non-PE or headerless, an unreadable file, or a
+/// declared subsystem this check does not model (native, EFI, ...) —
+/// is honestly `unknown`. OutOfMemory still propagates: an allocation
+/// failure says nothing about the exe.
+fn peSubsystemVerdictAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !WindowsSubsystem {
     const subsystem = peSubsystemAtPath(allocator, io, path) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return false,
+        else => return .unknown,
     };
-    return (subsystem orelse return false) == pe_subsystem_console;
+    return switch (subsystem orelse return .unknown) {
+        pe_subsystem_gui => .gui,
+        pe_subsystem_console => .console,
+        else => .unknown,
+    };
 }
 
 /// Whether a Linux executable carries the embedded web layer: the GTK
@@ -1287,12 +1305,12 @@ fn readPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return reader.interface.allocRemaining(allocator, .limited(128 * 1024 * 1024));
 }
 
-fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize, windows_console_subsystem: ?bool) !void {
+fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize, windows_subsystem: ?WindowsSubsystem) !void {
     const capabilities = try capabilityLines(allocator, options.metadata.capabilities);
     defer allocator.free(capabilities);
     const frontend = try frontendLines(allocator, options.frontend);
     defer allocator.free(frontend);
-    const subsystem = try subsystemLine(allocator, windows_console_subsystem);
+    const subsystem = try subsystemLine(allocator, windows_subsystem);
     defer allocator.free(subsystem);
     const artifact = try zonStringAlloc(allocator, std.fs.path.basename(options.output_path));
     defer allocator.free(artifact);
@@ -1373,12 +1391,12 @@ fn capabilityLines(allocator: std.mem.Allocator, capabilities: []const []const u
 /// check actually ran (a Windows package with a binary to probe): the
 /// durable twin of the transient warning[package.console-subsystem],
 /// in the same string style the report's other verdicts use.
-fn subsystemLine(allocator: std.mem.Allocator, windows_console_subsystem: ?bool) ![]const u8 {
-    const console = windows_console_subsystem orelse return allocator.dupe(u8, "");
+fn subsystemLine(allocator: std.mem.Allocator, windows_subsystem: ?WindowsSubsystem) ![]const u8 {
+    const subsystem = windows_subsystem orelse return allocator.dupe(u8, "");
     return std.fmt.allocPrint(allocator,
         \\  .subsystem = "{s}",
         \\
-    , .{if (console) "console" else "gui"});
+    , .{@tagName(subsystem)});
 }
 
 fn frontendLines(allocator: std.mem.Allocator, frontend: ?manifest_tool.FrontendMetadata) ![]const u8 {
@@ -2633,7 +2651,7 @@ test "webview-declaring package reports the web layer as declared" {
     try std.testing.expect(stats.web_layer.?.enabled);
     try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
     // No binary means the subsystem check never ran: no verdict to carry.
-    try std.testing.expectEqual(@as(?bool, null), stats.windows_console_subsystem);
+    try std.testing.expectEqual(@as(?WindowsSubsystem, null), stats.windows_subsystem);
 
     const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
     defer std.testing.allocator.free(report);
@@ -2768,7 +2786,7 @@ test "the subsystem probe reads only the headers, so an exe past the old slurp c
         defer file.close(std.testing.io);
         try file.setLength(std.testing.io, 128 * 1024 * 1024 + 4096);
     }
-    try std.testing.expect(try peIsConsoleSubsystem(std.testing.allocator, std.testing.io, path));
+    try std.testing.expectEqual(WindowsSubsystem.console, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, path));
 }
 
 test "a PE offset past the header ceiling proves nothing and allocates nothing" {
@@ -2776,8 +2794,8 @@ test "a PE offset past the header ceiling proves nothing and allocates nothing" 
     // not a real Windows exe (linkers put it right after the DOS stub):
     // the probe answers null before sizing any buffer to the claimed
     // offset — the failing allocator turns any allocation into a test
-    // failure — and packaging treats it like non-PE bytes: no claim,
-    // no warning.
+    // failure — and packaging treats it like non-PE bytes: an unknown
+    // verdict, no warning, and never a gui claim.
     var cwd = std.Io.Dir.cwd();
     const root = ".zig-cache/test-package-subsystem-offset";
     try cwd.deleteTree(std.testing.io, root);
@@ -2789,7 +2807,7 @@ test "a PE offset past the header ceiling proves nothing and allocates nothing" 
     std.mem.writeInt(u32, bytes[0x3c..0x40], 8 * 1024 * 1024, .little);
     const path = root ++ "/bogus-offset.exe";
     try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &bytes });
-    try std.testing.expect(!try peIsConsoleSubsystem(std.testing.failing_allocator, std.testing.io, path));
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.failing_allocator, std.testing.io, path));
 }
 
 test "windows package pins the exe's subsystem: GUI is quiet, console warns in the stats" {
@@ -2815,7 +2833,7 @@ test "windows package pins the exe's subsystem: GUI is quiet, console warns in t
         .binary_path = root ++ "/gui.exe",
         .assets_dir = root ++ "/assets",
     });
-    try std.testing.expectEqual(@as(?bool, false), gui_stats.windows_console_subsystem);
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .gui), gui_stats.windows_subsystem);
     const gui_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/gui-package/package-manifest.zon");
     defer std.testing.allocator.free(gui_report);
     try std.testing.expect(std.mem.indexOf(u8, gui_report, ".subsystem = \"gui\"") != null);
@@ -2831,10 +2849,57 @@ test "windows package pins the exe's subsystem: GUI is quiet, console warns in t
         .binary_path = root ++ "/console.exe",
         .assets_dir = root ++ "/assets",
     });
-    try std.testing.expectEqual(@as(?bool, true), console_stats.windows_console_subsystem);
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .console), console_stats.windows_subsystem);
     const console_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/console-package/package-manifest.zon");
     defer std.testing.allocator.free(console_report);
     try std.testing.expect(std.mem.indexOf(u8, console_report, ".subsystem = \"console\"") != null);
+}
+
+test "a binary the probe proves nothing about reports subsystem unknown, never gui" {
+    // The parse failing is not evidence of a GUI exe: non-PE bytes and a
+    // PE truncated before its optional header both earn an honest
+    // "unknown" in the stats and report — the old bool verdict folded
+    // these into false and the report affirmatively claimed "gui".
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-unknown";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem-unknown",
+        .name = "subsystem-unknown-demo",
+        .version = "1.0.0",
+    };
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/not-a-pe.exe", .data = "not a pe at all" });
+    const full_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/truncated.exe", .data = full_bytes[0..0x50] });
+    const fixtures = [_]struct { binary: []const u8, output: []const u8 }{
+        .{ .binary = root ++ "/not-a-pe.exe", .output = root ++ "/not-a-pe-package" },
+        .{ .binary = root ++ "/truncated.exe", .output = root ++ "/truncated-package" },
+    };
+    for (fixtures) |fixture| {
+        const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+            .metadata = metadata,
+            .target = .windows,
+            .output_path = fixture.output,
+            .binary_path = fixture.binary,
+            .assets_dir = root ++ "/assets",
+        });
+        try std.testing.expectEqual(@as(?WindowsSubsystem, .unknown), stats.windows_subsystem);
+        const report_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/package-manifest.zon", .{fixture.output});
+        defer std.testing.allocator.free(report_path);
+        const report = try readPath(std.testing.allocator, std.testing.io, report_path);
+        defer std.testing.allocator.free(report);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"gui\"") == null);
+    }
+
+    // A subsystem the check does not model (1 = native) parses fine but
+    // still proves nothing about console-vs-GUI posture.
+    const native_bytes = testSubsystemPeBytes(1);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/native.exe", .data = &native_bytes });
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, root ++ "/native.exe"));
 }
 
 test "package --web-layer include on a canvas manifest stages the loader and names the flag" {
