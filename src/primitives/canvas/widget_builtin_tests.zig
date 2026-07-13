@@ -1,4 +1,5 @@
 const support = @import("test_support.zig");
+const widget_metrics = @import("widget_metrics.zig");
 const std = support.std;
 const geometry = support.geometry;
 const canvas = support.canvas;
@@ -3116,10 +3117,11 @@ test "themed design tokens flow into widget display lists" {
 }
 
 test "widget text at intrinsic width does not wrap under geometry pixel snapping" {
-    // Geometry snapping can shave up to half a device pixel off the frame
-    // that intrinsic sizing measured; the text emitter hands the shaved
-    // quantum back to the wrap budget so an exact-fit label ("Sort")
-    // never breaks into "Sor"/"t". Regression for the snapped-frame wrap
+    // Geometry snapping can shave up to a full device pixel off the frame
+    // that intrinsic sizing measured (each edge rounds independently by
+    // up to half); the text emitter hands the snap quantum back to the
+    // wrap budget so an exact-fit label ("Sort") never breaks into
+    // "Sor"/"t". Regression for the snapped-frame wrap
     // seam surfaced when the estimator became the bundled face's real
     // advance table.
     const scales = [_]f32{ 1, 2 };
@@ -3153,7 +3155,7 @@ test "widget text at intrinsic width does not wrap under geometry pixel snapping
 test "label-exact controls at intrinsic width never elide under geometry pixel snapping" {
     // The elision twin of the wrap seam above: a control sized exactly
     // to its measured label sits at a fractional width, and render-time
-    // geometry snapping can shave up to half a device pixel off that
+    // geometry snapping can shave up to a full device pixel off that
     // frame — past the elision slack, so real glyphs swap for an
     // ellipsis (system monitor's "PID" sort chip painting "PI…").
     // Intrinsic measured-label widths now ceil to the snap grid
@@ -3199,6 +3201,94 @@ test "label-exact controls at intrinsic width never elide under geometry pixel s
             };
             try std.testing.expect(seen);
         };
+    }
+}
+
+test "a string never elides inside its own measured width under edge snapping" {
+    // The measurement/ellipsize epsilon policy (see `textWrapMaxWidth`):
+    // geometry snapping rounds each frame edge independently, so a frame
+    // sized exactly to its measured text and sitting at a fractional
+    // position can come back up to a FULL device pixel narrower — the
+    // budget hands that whole quantum back, and the elision slack covers
+    // the residual float dust. Sweep fractional origins across the snap
+    // cell for every digit (the TS scaffold's counter, which painted "…"
+    // instead of "2" on Windows at scale 1) plus longer labels, at every
+    // real scale factor.
+    const scales = [_]f32{ 1, 1.25, 1.5, 2 };
+    const labels = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "ticks 7", "Sampling 60 s cadence" };
+    const size: f32 = 14;
+    for (scales) |scale| {
+        const tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
+        for (labels) |label| {
+            const measured = canvas.estimateTextWidthForFont(default_sans_font_id, label, size);
+            var step: usize = 0;
+            while (step < 32) : (step += 1) {
+                const origin = 235 + @as(f32, @floatFromInt(step)) / 32.0;
+                // Snap both edges exactly like the renderer's
+                // `pixelSnapGeometryRect` does.
+                const left = @round(origin * scale) / scale;
+                const right = @round((origin + measured) * scale) / scale;
+                const snapped_width = @max(0, right - left);
+                var lines: [2]TextLine = undefined;
+                const layout = try canvas.layoutTextRun(.{
+                    .id = 1,
+                    .font_id = default_sans_font_id,
+                    .size = size,
+                    .origin = geometry.PointF.init(left, 20),
+                    .color = Color.rgb8(0, 0, 0),
+                    .text = label,
+                }, .{
+                    .max_width = widget_metrics.textWrapMaxWidth(tokens, snapped_width),
+                    .wrap = .none,
+                    .overflow = .ellipsis,
+                }, &lines);
+                try std.testing.expectEqual(@as(usize, 1), layout.lineCount());
+                for (layout.lines) |line| try std.testing.expect(!line.isElided());
+            }
+        }
+    }
+}
+
+test "hug-sized centered text leaf never elides under geometry pixel snapping" {
+    // The widget-level twin of the sweep above, in the exact scaffold
+    // shape that surfaced it: `<row main="center">` centers a hug-sized
+    // digit between two buttons, landing BOTH its frame edges on
+    // fractional thirds — the left edge snaps up, the right edge snaps
+    // down, and the frame loses more than the old half-pixel hand-back.
+    const digits = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+    const scales = [_]f32{ 1, 1.25, 1.5, 2 };
+    for (scales) |scale| {
+        const tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
+        for (digits) |digit| {
+            const minus = Widget{ .id = 2, .kind = .button, .text = "-" };
+            const count = Widget{ .id = 3, .kind = .text, .text = digit };
+            const plus = Widget{ .id = 4, .kind = .button, .text = "+" };
+            const children = [_]Widget{ minus, count, plus };
+            const row = Widget{ .id = 1, .kind = .row, .layout = .{
+                .gap = 8,
+                .main_alignment = .center,
+                .cross_alignment = .center,
+            }, .children = &children };
+
+            var nodes: [4]WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTreeWithTokens(row, geometry.RectF.init(16, 56, 448, 164), tokens, &nodes);
+
+            var commands: [16]CanvasCommand = undefined;
+            var builder = Builder.init(&commands);
+            try canvas.emitWidgetLayout(&builder, layout, tokens);
+            var seen = false;
+            for (builder.displayList().commands) |command| switch (command) {
+                .draw_text => |text| {
+                    if (!std.mem.eql(u8, text.text, digit)) continue;
+                    seen = true;
+                    var lines: [2]TextLine = undefined;
+                    const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
+                    for (text_layout.lines) |line| try std.testing.expect(!line.isElided());
+                },
+                else => {},
+            };
+            try std.testing.expect(seen);
+        }
     }
 }
 

@@ -69,11 +69,11 @@ pub const layout_audit_epsilon: f32 = 0.5;
 /// call while the line breakers accumulate per-word measures, so an
 /// exact-fit line can land one f32 ulp past its own frame (~1e-3 px) —
 /// runtimes hide that under the pixel-snap wrap budget (`textWrapMaxWidth`
-/// hands back up to 0.5/scale). The audit widens its simulated wrap by an
-/// eighth of a point: far above accumulated float noise, below the
-/// smallest real overflow (a glyph) and below the smallest runtime snap
-/// budget (0.5/scale at any real scale factor), so exact-fit text stays
-/// clean and genuine wraps still report.
+/// hands back the full snap quantum, 1/scale). The audit widens its
+/// simulated wrap by an eighth of a point: far above accumulated float
+/// noise, below the smallest real overflow (a glyph) and below the
+/// smallest runtime snap budget (1/scale at any real scale factor), so
+/// exact-fit text stays clean and genuine wraps still report.
 pub const layout_audit_wrap_slack: f32 = 0.125;
 
 /// Findings reported per audit pass. A view with more than this many

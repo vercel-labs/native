@@ -70,18 +70,26 @@ pub fn widgetLineHeight(text_size: f32) f32 {
 }
 
 /// Wrap budget for text painted inside a pixel-snapped frame. Geometry
-/// snapping can shave up to half a device pixel off the layout frame
-/// that intrinsic sizing measured with the exact same metrics — enough
-/// to word-wrap an exact-fit line mid-word ("Sort" painting as
-/// "Sor"/"t"). Hand the shaved quantum back to the wrap so snapping
-/// never changes line breaks; glyph origins still snap independently.
-/// (Elision has its own exact-fit slack — `text_elision_slack` — so
-/// label budgets stay byte-identical for alignment.)
+/// snapping rounds each frame EDGE to the device grid independently
+/// (`pixelSnapGeometryRect`), so a frame at a fractional position can
+/// lose up to a FULL device pixel of width — the left edge rounds up by
+/// as much as half a pixel while the right edge rounds down by as much
+/// as half — off the layout frame that intrinsic sizing measured with
+/// the exact same metrics. That shave is enough to word-wrap an
+/// exact-fit line mid-word ("Sort" painting as "Sor"/"t") or to elide a
+/// hug-sized digit into "…" (the TS scaffold's centered counter on
+/// Windows at scale 1, where the shave is coarsest). Hand the whole
+/// snap quantum back to the budget so snapping never changes line
+/// breaks or elision; glyph origins still snap independently. Epsilon
+/// policy: a run's painted width may exceed its snapped frame by less
+/// than `1/scale + text_elision_slack` before eliding — always below
+/// the smallest real overflow (a glyph), so genuinely overflowing text
+/// still elides and any admitted overhang stays sub-pixel-scale.
 pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
     if (!tokens.pixel_snap.geometry) return width;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return width;
-    return width + 0.5 / scale;
+    return width + 1.0 / scale;
 }
 
 /// The single source of truth for how a span paragraph (`.text` widget
