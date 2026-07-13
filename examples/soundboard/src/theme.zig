@@ -35,11 +35,11 @@ const pink_ink = Color.rgb8(255, 255, 255);
 ///   with the identity moved to pink, the ring follows so focus and
 ///   accent chrome read as one system (pink on the page clears the 3:1
 ///   non-text bar in both schemes). The ring is stated PER SCHEME: the
-///   accent itself in light, `canvas.accentFocusRing`'s desaturated
-///   step in dark — full-chroma pink glares neon against the dark
-///   palette, and the derivation is the same one the manifest
-///   `theme_accent` channel applies, so both authoring tiers land the
-///   identical ring.
+///   accent itself in light, `canvas.accentFocusRing`'s desaturated,
+///   contrast-floored step in dark — full-chroma pink glares neon
+///   against the dark palette, and the derivation is the same one the
+///   manifest `theme_accent` channel applies, so both authoring tiers
+///   land the identical ring.
 /// - `controls.slider.active_background`: the pack's slider table states
 ///   its own hue for the filled range rather than deriving from the
 ///   accent channel, so the seek scrubber needs the same move stated

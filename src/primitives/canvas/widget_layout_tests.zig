@@ -959,6 +959,25 @@ test "widget grid keeps declared column slots when children run short" {
     try expectLayoutFrame(layout, 3, geometry.RectF.init(108, 0, 100, 40));
 }
 
+test "widget grid row count survives a huge declared column count" {
+    const widget_tree = @import("widget_tree.zig");
+    // Declared columns are engine input (never validator-bounded): the
+    // additive ceil-div `(count + columns - 1) / columns` would overflow
+    // in safe builds for a huge but valid usize. A few children under
+    // maxInt columns is one row, not a panic.
+    const huge = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 1), widget_tree.gridRowCount(3, huge));
+    try std.testing.expectEqual(@as(usize, 1), widget_tree.gridRowCount(1, huge));
+    // Zero children (or zero columns) is zero rows in both paths.
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(0, huge));
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(0, 4));
+    try std.testing.expectEqual(@as(usize, 0), widget_tree.gridRowCount(5, 0));
+    // The ordinary shape still ceil-divides: 5 children over 2 columns
+    // is 3 rows.
+    try std.testing.expectEqual(@as(usize, 3), widget_tree.gridRowCount(5, 2));
+    try std.testing.expectEqual(@as(usize, 2), widget_tree.gridRowCount(4, 2));
+}
+
 test "widget virtualized grid lays out visible cells by row" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .text = "Zero" },

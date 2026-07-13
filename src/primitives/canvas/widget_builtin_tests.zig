@@ -1445,6 +1445,80 @@ test "the accent override desaturates its dark-scheme focus ring" {
     try std.testing.expectEqualDeep(gray, canvas.accentFocusRing(gray, .dark));
 }
 
+test "the dark accent focus ring holds the non-text contrast floor across hues" {
+    // The surface accentFocusRing floors against: the default pack's
+    // dark background — the lighter (more demanding) of the shipped
+    // packs' dark backgrounds.
+    const dark_background = Color.rgb8(10, 10, 10);
+    const cases = [_]Color{
+        // The green desaturation alone dropped to ~2.6:1 (the input
+        // clears 3:1; halving HSL saturation loses a third of its
+        // luminance) — the floor lifts it back over the bar.
+        Color.rgb8(0, 128, 0),
+        // Deep blue: below 3:1 on its own; the ring must not get worse.
+        Color.rgb8(0, 0, 204),
+        // Dark red: below 3:1 on its own AND desaturation costs more —
+        // the floor restores the accent's own contrast, no further.
+        Color.rgb8(139, 0, 0),
+        // The soundboard pink: clears the bar before and after halving.
+        Color.rgb8(223, 38, 112),
+        // Achromatic gray: nothing to desaturate, passes through.
+        Color.rgb8(115, 115, 115),
+    };
+    for (cases) |accent| {
+        // Light passes the accent through untouched, every hue.
+        try std.testing.expectEqualDeep(accent, canvas.accentFocusRing(accent, .light));
+
+        const ring = canvas.accentFocusRing(accent, .dark);
+        // Dark never raises saturation; chromatic accents lose half.
+        const accent_saturation = testHslSaturation(accent);
+        const ring_saturation = testHslSaturation(ring);
+        if (accent_saturation > 0) {
+            try std.testing.expect(ring_saturation < accent_saturation);
+        } else {
+            try std.testing.expectEqualDeep(accent, ring);
+        }
+        // The floor: >= 3:1 (WCAG non-text) whenever the accent itself
+        // cleared it, and never below the accent's own contrast when
+        // the accent did not.
+        const accent_contrast = testContrastRatio(accent, dark_background);
+        const ring_contrast = testContrastRatio(ring, dark_background);
+        if (accent_contrast >= 3.0) {
+            try std.testing.expect(ring_contrast >= 3.0);
+        } else {
+            try std.testing.expect(ring_contrast >= accent_contrast);
+        }
+    }
+}
+
+/// HSL saturation of a color, for the desaturation assertions.
+fn testHslSaturation(color: Color) f32 {
+    const max = @max(color.r, @max(color.g, color.b));
+    const min = @min(color.r, @min(color.g, color.b));
+    const delta = max - min;
+    if (delta <= 0.0001) return 0;
+    const lightness = (max + min) / 2;
+    return delta / (1 - @abs(2 * lightness - 1));
+}
+
+/// WCAG contrast ratio between two colors, for the floor assertions.
+fn testContrastRatio(a: Color, b: Color) f32 {
+    const la = testRelativeLuminance(a);
+    const lb = testRelativeLuminance(b);
+    return (@max(la, lb) + 0.05) / (@min(la, lb) + 0.05);
+}
+
+fn testRelativeLuminance(color: Color) f32 {
+    return 0.2126 * testSrgbToLinear(color.r) +
+        0.7152 * testSrgbToLinear(color.g) +
+        0.0722 * testSrgbToLinear(color.b);
+}
+
+fn testSrgbToLinear(channel: f32) f32 {
+    if (channel <= 0.04045) return channel / 12.92;
+    return std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+}
+
 test "built-in component catalog covers house component set" {
     const expected_names = [_][]const u8{
         "Accordion",

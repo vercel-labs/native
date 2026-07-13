@@ -1438,9 +1438,10 @@ pub const ControlTokenOverrides = struct {
 /// - `colors.focus_ring`: packs spend their identity hue on focus; with
 ///   the identity moved, the ring follows so focus and accent chrome
 ///   read as one system. The ring is stated PER SCHEME
-///   (`accentFocusRing`): the accent itself in light, a desaturated
-///   step of it in dark — a full-chroma brand hue glares neon against
-///   a dark palette, so the bundle takes the scheme it layers over.
+///   (`accentFocusRing`): the accent itself in light, a desaturated,
+///   contrast-floored step of it in dark — a full-chroma brand hue
+///   glares neon against a dark palette, so the bundle takes the scheme
+///   it layers over.
 /// - `controls.slider.active_background`: the slider table states its
 ///   own hue for the filled range rather than deriving from the accent
 ///   channel, so the same move is stated once more or a seek scrubber
@@ -1463,27 +1464,59 @@ pub fn accentOverrides(accent: Color, color_scheme: ColorScheme) DesignTokenOver
 }
 
 /// The focus ring an accent identity carries, per scheme: the accent
-/// itself in light, and the accent at HALF its HSL saturation in dark —
-/// dark surfaces amplify chroma, so the raw brand hue reads neon where
-/// the ring should stay a quiet outline. Halving keeps the hue
-/// recognizably the brand's while settling it into the dark palette
-/// (the built-in packs make the same per-scheme move with their own
-/// ring steps). Exported so hand-authored token sets can state the
-/// identical derivation and stay in step with the manifest channel.
+/// itself in light, and in dark a desaturated step of it that still
+/// CLEARS the ring's contrast bar. Dark surfaces amplify chroma, so the
+/// raw brand hue reads neon where the ring should stay a quiet outline;
+/// halving HSL saturation settles it — but desaturation does not
+/// preserve luminance (a deep green loses a third of its light to the
+/// halved chroma), so the settled ring is then contrast-floored: its
+/// HSL lightness rises until it holds 3:1 (WCAG 1.4.11 non-text)
+/// against the default pack's dark background whenever the accent
+/// itself cleared that bar, and never lands below the accent's OWN
+/// contrast when it did not — the floor restores what desaturation
+/// cost, it never invents contrast the brand hue never had. The default
+/// dark background is the measuring surface because it is the lighter
+/// (more demanding) of the shipped packs' dark backgrounds: a ring
+/// clearing 3:1 there clears it over Geist's pure black too. Exported
+/// so hand-authored token sets can state the identical derivation and
+/// stay in step with the manifest channel.
 pub fn accentFocusRing(accent: Color, color_scheme: ColorScheme) Color {
     return switch (color_scheme) {
         .light => accent,
-        .dark => scaleSaturation(accent, 0.5),
+        .dark => darkAccentFocusRing(accent),
     };
 }
 
-/// Scale a color's HSL saturation, keeping hue, lightness, and alpha.
-fn scaleSaturation(color: Color, factor: f32) Color {
+/// The default pack's dark background — the surface `accentFocusRing`'s
+/// dark contrast floor measures against.
+const default_dark_background: Color = ColorTokens.dark().background;
+
+fn darkAccentFocusRing(accent: Color) Color {
+    // Apps resolve palettes as container-level consts (the soundboard's
+    // `dark_colors`), so this runs at comptime too: the lightness
+    // search's srgb pow calls need more than the default branch quota.
+    if (@inComptime()) @setEvalBranchQuota(1_000_000);
+    const desaturated = scaleSaturation(accent, 0.5);
+    const surface_luminance = relativeLuminance(default_dark_background);
+    const accent_contrast = contrastRatio(relativeLuminance(accent), surface_luminance);
+    const floor = @min(3.0, accent_contrast);
+    if (contrastRatio(relativeLuminance(desaturated), surface_luminance) >= floor) return desaturated;
+    // Solve the floor for the luminance it demands — (L + 0.05) /
+    // (Ls + 0.05) ≥ floor — and lift the desaturated ring's lightness
+    // to reach it. The epsilon absorbs the HSL roundtrip's f32 error so
+    // the returned ring measures at the floor, never a hair under it.
+    const needed_luminance = floor * (surface_luminance + 0.05) - 0.05 + 0.0001;
+    return lightenToLuminance(desaturated, needed_luminance);
+}
+
+const Hsl = struct { hue: f32, saturation: f32, lightness: f32 };
+
+fn rgbToHsl(color: Color) Hsl {
     const max = @max(color.r, @max(color.g, color.b));
     const min = @min(color.r, @min(color.g, color.b));
     const lightness = (max + min) / 2;
     const delta = max - min;
-    if (delta <= 0.0001) return color;
+    if (delta <= 0.0001) return .{ .hue = 0, .saturation = 0, .lightness = lightness };
     const saturation = delta / (1 - @abs(2 * lightness - 1));
     const hue: f32 = if (max == color.r)
         60 * @mod((color.g - color.b) / delta, 6)
@@ -1491,11 +1524,14 @@ fn scaleSaturation(color: Color, factor: f32) Color {
         60 * ((color.b - color.r) / delta + 2)
     else
         60 * ((color.r - color.g) / delta + 4);
-    const scaled = std.math.clamp(saturation * factor, 0, 1);
-    const chroma = (1 - @abs(2 * lightness - 1)) * scaled;
-    const x = chroma * (1 - @abs(@mod(hue / 60, 2) - 1));
-    const base = lightness - chroma / 2;
-    const sector: u3 = @intFromFloat(@min(5, @floor(hue / 60)));
+    return .{ .hue = hue, .saturation = saturation, .lightness = lightness };
+}
+
+fn hslToRgb(hsl: Hsl, alpha: f32) Color {
+    const chroma = (1 - @abs(2 * hsl.lightness - 1)) * hsl.saturation;
+    const x = chroma * (1 - @abs(@mod(hsl.hue / 60, 2) - 1));
+    const base = hsl.lightness - chroma / 2;
+    const sector: u3 = @intFromFloat(@min(5, @floor(hsl.hue / 60)));
     const rgb: [3]f32 = switch (sector) {
         0 => .{ chroma, x, 0 },
         1 => .{ x, chroma, 0 },
@@ -1504,7 +1540,52 @@ fn scaleSaturation(color: Color, factor: f32) Color {
         4 => .{ x, 0, chroma },
         else => .{ chroma, 0, x },
     };
-    return .{ .r = rgb[0] + base, .g = rgb[1] + base, .b = rgb[2] + base, .a = color.a };
+    return .{ .r = rgb[0] + base, .g = rgb[1] + base, .b = rgb[2] + base, .a = alpha };
+}
+
+/// Scale a color's HSL saturation, keeping hue, lightness, and alpha.
+/// Achromatic colors pass through untouched (no hue to keep).
+fn scaleSaturation(color: Color, factor: f32) Color {
+    const hsl = rgbToHsl(color);
+    if (hsl.saturation == 0) return color;
+    return hslToRgb(.{
+        .hue = hsl.hue,
+        .saturation = std.math.clamp(hsl.saturation * factor, 0, 1),
+        .lightness = hsl.lightness,
+    }, color.a);
+}
+
+/// Raise a color's HSL lightness (hue and saturation held) until its
+/// relative luminance reaches `minimum_luminance`. Luminance rises
+/// monotonically with HSL lightness at fixed hue and saturation, so a
+/// binary search converges; white (lightness 1, luminance 1) bounds the
+/// search and clears any reachable floor.
+fn lightenToLuminance(color: Color, minimum_luminance: f32) Color {
+    if (relativeLuminance(color) >= minimum_luminance) return color;
+    var hsl = rgbToHsl(color);
+    var low = hsl.lightness;
+    var high: f32 = 1;
+    for (0..24) |_| {
+        const mid = (low + high) / 2;
+        hsl.lightness = mid;
+        if (relativeLuminance(hslToRgb(hsl, color.a)) < minimum_luminance) low = mid else high = mid;
+    }
+    hsl.lightness = high;
+    return hslToRgb(hsl, color.a);
+}
+
+/// WCAG relative luminance of a color's sRGB channels (alpha ignored).
+fn relativeLuminance(color: Color) f32 {
+    return 0.2126 * srgbToLinear(color.r) +
+        0.7152 * srgbToLinear(color.g) +
+        0.0722 * srgbToLinear(color.b);
+}
+
+/// WCAG contrast ratio between two relative luminances.
+fn contrastRatio(luminance_a: f32, luminance_b: f32) f32 {
+    const lighter = @max(luminance_a, luminance_b);
+    const darker = @min(luminance_a, luminance_b);
+    return (lighter + 0.05) / (darker + 0.05);
 }
 
 /// The readable knockout ink over one accent fill: WHITE whenever it
@@ -1513,11 +1594,8 @@ fn scaleSaturation(color: Color, factor: f32) Color {
 /// near-black text ink only when the accent is light enough that white
 /// honestly cannot (1.05 / (L + 0.05) < 4.5).
 fn accentKnockoutInk(accent: Color) Color {
-    const luminance = 0.2126 * srgbToLinear(accent.r) +
-        0.7152 * srgbToLinear(accent.g) +
-        0.0722 * srgbToLinear(accent.b);
     // White clears 4.5:1 up to L = 1.05/4.5 - 0.05 ≈ 0.18333.
-    if (luminance <= 0.18333) return Color.rgb8(255, 255, 255);
+    if (relativeLuminance(accent) <= 0.18333) return Color.rgb8(255, 255, 255);
     return Color.rgb8(10, 10, 10);
 }
 

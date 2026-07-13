@@ -227,9 +227,16 @@ pub fn gridColumnCount(child_count: usize, requested_columns: usize) usize {
     return if (requested_columns > 0) requested_columns else child_count;
 }
 
+/// The row count those columns yield: ceil-division stated as
+/// `1 + (count - 1) / columns` rather than the additive
+/// `(count + columns - 1) / columns` — a declared column count is
+/// engine input (never validator-bounded), so `columns` may be any
+/// usize, including values where the additive form's sum overflows in
+/// safe builds. Both the layout and intrinsic-size paths share this
+/// helper.
 pub fn gridRowCount(child_count: usize, columns: usize) usize {
     if (child_count == 0 or columns == 0) return 0;
-    return (child_count + columns - 1) / columns;
+    return 1 + (child_count - 1) / columns;
 }
 
 pub fn saturatingU32(value: usize) u32 {
