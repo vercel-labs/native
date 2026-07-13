@@ -11,6 +11,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const clock_mod = @import("clock.zig");
 
 const canvas_label = "file-canvas";
 
@@ -346,6 +347,16 @@ test "real executor writes a file (creating parent dirs) and reads it back" {
     try h.app_state.dispatch(&h.harness.runtime, 1, .load);
     try waitForRealResult(&h, 4);
     try std.testing.expectEqualStrings("{\"n\":2}", h.app_state.model.bytesPrefix());
+
+    // Happy-path teardown pin: quick local ops join promptly and the
+    // abandon safety net never fires (no leak, no detached thread).
+    const fx = &h.app_state.effects;
+    fx.deinit();
+    try std.testing.expectEqual(@as(u32, 0), fx.abandoned_file_workers);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
 }
 
 test "real executor reports missing files as not_found" {
@@ -384,6 +395,136 @@ test "real executor cuts over-bound reads with outcome truncated" {
         std.hash.Wyhash.hash(0, oversized[0..effects_mod.max_effect_file_bytes]),
         h.app_state.model.bytes_hash,
     );
+}
+
+// --------------------------------------------------- bounded teardown
+
+/// Create a FIFO at `path` (POSIX-only; callers gate on the platform).
+/// A file write against it blocks forever inside `open(O_WRONLY)`
+/// while no reader exists — the uninterruptible-blocking-I/O posture
+/// the teardown deadline exists for.
+fn makeFifo(path: []const u8) !void {
+    var command_buffer: [512]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buffer, "mkfifo '{s}'", .{path});
+    const result = try std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", command },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expect(result.term == .exited and result.term.exited == 0);
+}
+
+test "teardown abandons a file worker stuck on a reader-less FIFO and leaks its world loudly" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var fifo_path_buffer: [256]u8 = undefined;
+    const fifo_path = try std.fmt.bufPrint(&fifo_path_buffer, ".zig-cache/tmp/{s}/stuck.fifo", .{tmp.sub_path[0..]});
+    try makeFifo(fifo_path);
+
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Tiny injected budget, interruption disabled: this test pins the
+    // SAFETY NET (abandon-and-leak). The interruption path that
+    // normally converges first has its own test below.
+    fx.file_join_deadline_ms = 300;
+    fx.file_join_interrupt = false;
+
+    test_path = fifo_path;
+    test_bytes = "never delivered";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    // Let the worker reach the blocking open. Not required for the
+    // abandon to fire — with interruption off, any still-running
+    // posture past the deadline is abandoned — but it exercises the
+    // real blocked shape.
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
+
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+
+    // Teardown returned on the budget's order of magnitude (generous
+    // bound for congested runners) instead of hanging behind the FIFO
+    // forever...
+    try std.testing.expect(elapsed_ms < 10_000);
+    // ...and abandoned exactly the stuck worker, loudly through the
+    // counter seam, leaving no joinable thread and no running slot —
+    // the owner may free the channel's memory right now.
+    try std.testing.expectEqual(@as(u32, 1), fx.abandoned_file_workers);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
+
+    // The process is healthy after the leak: a fresh channel runs a
+    // real file round trip and its own safety net stays quiet.
+    var h2 = try Harness.create();
+    defer h2.destroy();
+    var path_buffer: [256]u8 = undefined;
+    test_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/healthy.json", .{tmp.sub_path[0..]});
+    test_bytes = "{\"alive\":true}";
+    try h2.app_state.dispatch(&h2.harness.runtime, 1, .save);
+    try waitForRealResult(&h2, 1);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h2.app_state.model.last_outcome.?);
+    try std.testing.expectEqual(@as(u32, 0), h2.app_state.effects.abandoned_file_workers);
+
+    // Wake the abandoned worker under the leak invariant: opening the
+    // FIFO's read end completes its blocked open; it performs its
+    // write against its (leaked, still-valid) context and buffer,
+    // closes the FIFO, finds itself abandoned, and exits without
+    // touching the torn-down channel — if the leak were not honored,
+    // this is where a use-after-free would crash the test. Draining to
+    // EOF keeps the read end open across the worker's write (a write
+    // into a reader-less pipe raises SIGPIPE, and the io's no-op
+    // handler is not installed between tests) and proves the worker
+    // really woke: EOF only arrives once it opened and closed the
+    // write end.
+    var reader = try std.Io.Dir.cwd().openFile(io, fifo_path, .{});
+    defer reader.close(io);
+    var drain_buffer: [128]u8 = undefined;
+    while (true) {
+        const read_slices: [1][]u8 = .{&drain_buffer};
+        const count = reader.readStreaming(io, &read_slices) catch break;
+        if (count == 0) break;
+    }
+}
+
+test "teardown interrupts a file worker stuck on a reader-less FIFO and joins it with no leak" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var fifo_path_buffer: [256]u8 = undefined;
+    const fifo_path = try std.fmt.bufPrint(&fifo_path_buffer, ".zig-cache/tmp/{s}/interrupted.fifo", .{tmp.sub_path[0..]});
+    try makeFifo(fifo_path);
+
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Interruption stays on (the default): the best-effort cancel at
+    // the halfway mark must interrupt the blocked open and JOIN the
+    // worker — the abandon safety net must never fire here.
+    fx.file_join_deadline_ms = 2_000;
+
+    test_path = fifo_path;
+    test_bytes = "never delivered";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .save);
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
+
+    fx.deinit();
+
+    // Joined, not leaked: the syscall interruption converged the
+    // worker inside the deadline (deinit is deadline-bounded either
+    // way, so reaching these asserts already proves it returned).
+    try std.testing.expectEqual(@as(u32, 0), fx.abandoned_file_workers);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
 }
 
 test "a cancel racing a finished file effect still reports one cancelled terminal" {
