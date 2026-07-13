@@ -357,8 +357,10 @@ pub const EffectFetchOutcome = enum {
     /// `body` is its (possibly truncated) body.
     ok,
     /// The fetch never started: all slots busy, a duplicate active key,
-    /// a malformed URL or non-http(s) scheme, or URL/headers/payload
-    /// over capacity.
+    /// a malformed URL or non-http(s) scheme, URL/headers/payload over
+    /// capacity, or the executor could not start the exchange as a
+    /// cancelable task (an uncancelable exchange would evade `cancel`,
+    /// the timeout, and teardown, so it is refused up front).
     rejected,
     /// DNS resolution or the TCP connect failed (unknown host,
     /// connection refused, network unreachable).
@@ -784,6 +786,24 @@ const IoThreaded = if (io_threaded_supported) std.Io.Threaded else void;
 /// ever spawns, so the slot field compiles away to a `?void`.
 const WorkerThread = if (io_threaded_supported) std.Thread else void;
 
+/// Process-lifetime allocator backing everything an ABANDONED file
+/// worker can still reach: its `FileWorkerContext`, that context's
+/// data buffer, and the shared executor io (`IoThreaded` and its
+/// internals). The channel's own `allocator` is the OWNER's — an
+/// arena or GPA typically deinitialized right after `Effects.deinit`
+/// returns — so "leaking" caller-allocator memory under a live thread
+/// would only reintroduce the use-after-free the abandon path exists
+/// to prevent; abandonable memory must come from storage nothing ever
+/// tears down. The page allocator is that storage: process-lived by
+/// construction (it has no deinit), thread-safe, and available on
+/// every target including the docs' wasm32-freestanding preview.
+/// Page granularity is irrelevant here — file effects allocate one
+/// small context and one bounded (~1 MiB) buffer per op, and the
+/// executor io is created once, none of it on a hot path. The happy
+/// path frees through this same allocator: `joinWorker` releases the
+/// context and its buffer, `deinit` releases the executor io.
+const process_allocator: std.mem.Allocator = std.heap.page_allocator;
+
 /// Everything a real file worker's BLOCKING phase may touch, held
 /// out-of-line from the channel on its own heap block. File I/O is the
 /// one effect teardown cannot always interrupt (a write to a FIFO with
@@ -792,13 +812,14 @@ const WorkerThread = if (io_threaded_supported) std.Thread else void;
 /// deliberately leaks this context together with the buffer it points
 /// at. The invariant that makes the leak safe: an abandoned worker may
 /// wake at ANY later time, so everything it can still reach — this
-/// context, `buffer`, and the executor io — stays allocated forever,
-/// while everything it must never touch again (the slot, the queue,
-/// the channel itself) is fenced off by the commit/abandon handshake
-/// under `mutex`. The leak is bounded (at most one context and buffer
-/// per file slot per torn-down channel, plus the shared executor io)
-/// and loud (`deinit` warns with the stuck op and path when it gives
-/// up).
+/// context, `buffer`, and the executor io — lives in process-lifetime
+/// storage (`process_allocator`, never the channel's caller-owned
+/// allocator) and stays allocated forever, while everything it must
+/// never touch again (the slot, the queue, the channel itself) is
+/// fenced off by the commit/abandon handshake under `mutex`. The leak
+/// is bounded (at most one context and buffer per file slot per
+/// torn-down channel, plus the shared executor io) and loud (`deinit`
+/// warns with the stuck op and path when it gives up).
 const FileWorkerContext = struct {
     /// Serializes the worker's commit-to-publish transition against
     /// teardown's abandon decision: whoever locks first decides
@@ -820,9 +841,12 @@ const FileWorkerContext = struct {
     /// Set by the task after `outcome`/`read_len` are recorded.
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     op: EffectFileOp,
-    /// The slot's heap data buffer (a write's payload copy, a read's
-    /// content space) — a separate allocation the blocking op reads
-    /// and writes, leaked alongside this context on abandon.
+    /// The worker's PRIVATE data buffer (a write's payload copy, a
+    /// read's content space) — its own `process_allocator` allocation,
+    /// distinct from the slot's caller-allocated delivery buffer,
+    /// leaked alongside this context on abandon and freed with it by
+    /// `joinWorker` otherwise. A committed read's bytes are copied
+    /// into the slot's delivery buffer by the worker epilogue.
     buffer: []u8,
     payload_len: usize,
     read_len: usize = 0,
@@ -1683,6 +1707,20 @@ pub fn Effects(comptime Msg: type) type {
         /// bounded, warned leak — see `FileWorkerContext`). The seam
         /// tests assert against: zero on every healthy teardown.
         abandoned_file_workers: u32 = 0,
+        /// Injectable concurrent-start switch for fetch supervisors,
+        /// following `file_join_interrupt`: always true in real use;
+        /// tests disable it to pin the no-capacity rejection path
+        /// deterministically (the real trigger — the executor refusing
+        /// `std.Io.concurrent` — needs resource exhaustion). See
+        /// `fetchWorkerMain`.
+        fetch_concurrent_start: bool = true,
+        /// How many fetches were REFUSED because the executor could
+        /// not start their exchange as a cancelable task (each one a
+        /// `.rejected` terminal and a one-time warning — never an
+        /// uncancelable inline exchange). Incremented by worker
+        /// threads; read it from the loop thread after the terminal
+        /// drained.
+        fetch_start_rejections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         next_generation: u32 = 1,
         slots: [max_effects]Slot = [_]Slot{.{}} ** max_effects,
         /// Fixed fx timer table (see `max_effect_timers`): timers live
@@ -1741,9 +1779,11 @@ pub fn Effects(comptime Msg: type) type {
         /// out-of-line context, data buffer, and the executor io
         /// deliberately leaked, one warning naming the stuck op and
         /// path (see `FileWorkerContext` for the invariant). Either
-        /// way the owner may free the channel's memory the moment this
-        /// returns: nothing an abandoned worker can still reach lives
-        /// in it.
+        /// way the owner may free the channel's memory — and tear down
+        /// the allocator behind it — the moment this returns: nothing
+        /// an abandoned worker can still reach lives in the channel or
+        /// in caller-allocator storage (the leakable set is allocated
+        /// from `process_allocator`).
         ///
         /// Idempotent, and only the FIRST call may touch platform
         /// services — it ends by severing the services binding, so a
@@ -1807,7 +1847,9 @@ pub fn Effects(comptime Msg: type) type {
                     // kill-forced EOF, `child.wait` reaps a dead
                     // process, a raced pre-publish cancel is re-checked
                     // by the worker itself), fetch supervisors poll
-                    // `shutdown` and cancel their exchange, and the
+                    // `shutdown` and cancel their exchange (one that
+                    // cannot start cancellably is rejected up front,
+                    // never run inline), and the
                     // terminal-post retry loops give up on `shutdown`
                     // within a millisecond. File workers are the one
                     // exception: their blocking read/write has no
@@ -1870,12 +1912,18 @@ pub fn Effects(comptime Msg: type) type {
                         // safe: the abandoned worker may wake at any
                         // later time, so everything it can still reach
                         // must stay allocated forever — its context
-                        // (`ctx`, dropped here without freeing), the
-                        // slot's data buffer (nulled so the sweep below
-                        // skips it), and the executor io (leaked after
-                        // the joins). The handshake above guarantees it
-                        // touches nothing else — not this slot, not the
-                        // queue, not the channel — so the owner may
+                        // (`ctx`, dropped here without freeing), that
+                        // context's data buffer, and the executor io
+                        // (leaked after the joins). All three live in
+                        // process-lifetime storage
+                        // (`process_allocator`), NOT the channel's
+                        // caller-owned allocator, so the leak survives
+                        // the owner deinitializing its arena or GPA
+                        // right after this returns. The handshake above
+                        // guarantees the worker touches nothing else —
+                        // not this slot (whose caller-owned delivery
+                        // buffer the sweep below frees normally), not
+                        // the queue, not the channel — so the owner may
                         // free the channel's memory the moment deinit
                         // returns. Bounded (one context and buffer per
                         // abandoned worker, one executor io per
@@ -1886,13 +1934,12 @@ pub fn Effects(comptime Msg: type) type {
                             thread.detach();
                         }
                         slot.file_ctx = null;
-                        slot.fetch_buffer = null;
                         slot.generation = 0;
                         slot.state.store(.idle, .release);
                         self.abandoned_file_workers += 1;
                         abandoned_any = true;
                     }
-                    for (&self.slots) |*slot| self.joinWorker(slot);
+                    for (&self.slots) |*slot| joinWorker(slot);
                     if (abandoned_any) {
                         // Leak the executor io too: the abandoned
                         // worker's blocked syscall runs inside it, and
@@ -1903,7 +1950,7 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 if (self.io_threaded) |threaded| {
                     threaded.deinit();
-                    self.allocator.destroy(threaded);
+                    process_allocator.destroy(threaded);
                     self.io_threaded = null;
                 }
             }
@@ -2365,7 +2412,11 @@ pub fn Effects(comptime Msg: type) type {
             const slot = &self.slots[slot_index];
             // A write's buffer holds its payload copy; a read's holds
             // the content space plus one spare byte that detects
-            // over-bound files without a stat round trip.
+            // over-bound files without a stat round trip. This is the
+            // slot's CHANNEL-owned buffer (fake-mode storage, real-mode
+            // delivery space the drain hands to `update`); a real
+            // worker's blocking phase gets its own process-lived copy
+            // in `FileWorkerContext.buffer` below.
             const buffer_len = if (op == .write) bytes.len else max_effect_file_bytes + 1;
             const buffer = self.allocator.alloc(u8, buffer_len) catch {
                 return self.rejectFile(key, op, on_result);
@@ -2411,24 +2462,36 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectFile(key, op, on_result);
             };
             // The worker's blocking phase touches only this out-of-line
-            // context (path copy, op, the heap buffer), never the
+            // context (path copy, op, its own data buffer), never the
             // channel — the seam that lets teardown abandon a stuck
             // worker and still free the channel (see
-            // `FileWorkerContext`).
-            const ctx = self.allocator.create(FileWorkerContext) catch {
+            // `FileWorkerContext`). Context and buffer both come from
+            // `process_allocator`, never `self.allocator`: teardown may
+            // leak them under a live thread, and the channel's
+            // caller-owned allocator dies with the owner. The happy
+            // path frees both in `joinWorker`, through the same
+            // process-lifetime seam.
+            const ctx = process_allocator.create(FileWorkerContext) catch {
+                self.releaseFetchSlot(slot);
+                return self.rejectFile(key, op, on_result);
+            };
+            const worker_buffer = process_allocator.alloc(u8, buffer_len) catch {
+                process_allocator.destroy(ctx);
                 self.releaseFetchSlot(slot);
                 return self.rejectFile(key, op, on_result);
             };
             ctx.* = .{
                 .op = op,
-                .buffer = buffer,
+                .buffer = worker_buffer,
                 .payload_len = slot.payload_len,
             };
+            if (op == .write) @memcpy(worker_buffer[0..bytes.len], bytes);
             @memcpy(ctx.path_storage[0..file_path.len], file_path);
             ctx.path_len = file_path.len;
             slot.file_ctx = ctx;
             const thread = std.Thread.spawn(.{}, fileWorkerMain, .{ self, slot_index, slot.generation, io, ctx }) catch {
-                self.allocator.destroy(ctx);
+                process_allocator.free(worker_buffer);
+                process_allocator.destroy(ctx);
                 slot.file_ctx = null;
                 self.releaseFetchSlot(slot);
                 return self.rejectFile(key, op, on_result);
@@ -4018,11 +4081,18 @@ pub fn Effects(comptime Msg: type) type {
         fn ensureIo(self: *Self) !std.Io {
             if (io_threaded_supported) {
                 if (self.io_threaded == null) {
-                    const threaded = try self.allocator.create(IoThreaded);
+                    // The executor and everything it allocates internally
+                    // come from `process_allocator`, never the channel's
+                    // caller-owned allocator: an abandoning teardown
+                    // leaks the executor under a live worker's blocked
+                    // syscall, so nothing the worker can reach through
+                    // it may die with the owner. The healthy teardown
+                    // frees it through the same seam (`deinit`).
+                    const threaded = try process_allocator.create(IoThreaded);
                     // `environ` defaults to `.empty` in `InitOptions`, which
                     // would hand every spawned child a blank environment (no
                     // HOME, no PATH) — always pass the host environment.
-                    threaded.* = IoThreaded.init(self.allocator, .{
+                    threaded.* = IoThreaded.init(process_allocator, .{
                         .environ = self.environ orelse fallbackEnviron(),
                     });
                     self.io_threaded = threaded;
@@ -4306,15 +4376,19 @@ pub fn Effects(comptime Msg: type) type {
         /// teardown path (`deinit`) may join a still-running worker;
         /// convergence there is the kill's and the shutdown flag's
         /// doing, as documented at that call site.
-        fn joinWorker(self: *Self, slot: *Slot) void {
+        fn joinWorker(slot: *Slot) void {
             if (io_threaded_supported) {
                 const thread = slot.worker_thread orelse return;
                 slot.worker_thread = null;
                 thread.join();
                 // The join proves the worker is gone: its out-of-line
                 // file context (file workers only) has no user left.
+                // Context and buffer are process-lifetime allocations
+                // (see `process_allocator`), so they free through that
+                // seam, not the channel's allocator.
                 if (slot.file_ctx) |ctx| {
-                    self.allocator.destroy(ctx);
+                    process_allocator.free(ctx.buffer);
+                    process_allocator.destroy(ctx);
                     slot.file_ctx = null;
                 }
             }
@@ -4324,7 +4398,7 @@ pub fn Effects(comptime Msg: type) type {
             for (&self.slots) |*slot| {
                 switch (slot.state.load(.acquire)) {
                     .done => {
-                        self.joinWorker(slot);
+                        joinWorker(slot);
                         slot.state.store(.idle, .release);
                     },
                     // A draining slot is reusable once the drain took its
@@ -4332,7 +4406,7 @@ pub fn Effects(comptime Msg: type) type {
                     // terminal Msg was delivered). Its worker is already
                     // finished either way: retire the thread now.
                     .draining => {
-                        self.joinWorker(slot);
+                        joinWorker(slot);
                         if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
                     },
                     else => {},
@@ -4633,18 +4707,36 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Supervises one fetch: runs the blocking HTTP exchange as a
         /// cancelable `Io` task and polls for completion, cancel, and
-        /// the timeout deadline. Ends by posting exactly one `.response`
-        /// entry and parking the slot in `.draining` (the drain retires
-        /// it after taking the body buffer).
+        /// the timeout deadline. An exchange that cannot start as a
+        /// cancelable task is REJECTED, never run inline (see
+        /// `startFetchExchange`). Ends by posting exactly one
+        /// `.response` entry and parking the slot in `.draining` (the
+        /// drain retires it after taking the body buffer).
         fn fetchWorkerMain(self: *Self, slot_index: usize, generation: u32, io: std.Io) void {
             const slot = &self.slots[slot_index];
             supervise: {
-                var future = std.Io.concurrent(io, fetchTask, .{ self, slot, @as(u16, @intCast(slot_index)), generation, io }) catch {
-                    // No concurrent capacity: run the exchange inline.
-                    // Cancels can no longer interrupt mid-transfer and
-                    // the timeout is not enforced, but the terminal Msg
-                    // still lands (a raced cancel is rewritten at drain).
-                    fetchTask(self, slot, @intCast(slot_index), generation, io);
+                var future = self.startFetchExchange(slot, slot_index, generation, io) catch {
+                    // The executor cannot start the exchange as a
+                    // cancelable task. Running it inline instead would
+                    // observe neither `cancel` nor the timeout — and
+                    // teardown joins fetch workers UNCONDITIONALLY on
+                    // the guarantee that they poll `shutdown` and
+                    // cancel their exchange, so an inline stall would
+                    // hang `deinit` forever. REFUSE the exchange: the
+                    // honest terminal is `.rejected` (the fetch never
+                    // started), journaled at drain like every transport
+                    // failure, so replay reproduces the rejection
+                    // byte-identically.
+                    slot.fetch_status = 0;
+                    slot.body_len = 0;
+                    slot.fetch_truncated = false;
+                    slot.fetch_outcome = .rejected;
+                    if (self.fetch_start_rejections.fetchAdd(1, .monotonic) == 0) {
+                        std.debug.print(
+                            "effects fetch: the executor could not start a cancelable exchange for '{s}'; rejecting the fetch (an inline exchange would evade cancel, the timeout, and teardown)\n",
+                            .{slot.fetchUrl()},
+                        );
+                    }
                     break :supervise;
                 };
                 const poll_ms: u64 = 5;
@@ -4689,6 +4781,19 @@ pub fn Effects(comptime Msg: type) type {
             self.postResponse(slot, @intCast(slot_index), generation, io);
             slot.state.store(.draining, .release);
             self.wakeHost();
+        }
+
+        /// Start the blocking exchange as a cancelable task on the
+        /// executor io — the ONLY way a real exchange may run: an
+        /// exchange the supervisor cannot cancel would break the fetch
+        /// contract (timeout, `cancel`, teardown's unconditional join),
+        /// so a start failure is surfaced to `fetchWorkerMain`, which
+        /// rejects the fetch instead of running it inline. Injectable
+        /// through `fetch_concurrent_start` so tests pin the rejection
+        /// path deterministically.
+        fn startFetchExchange(self: *Self, slot: *Slot, slot_index: usize, generation: u32, io: std.Io) std.Io.ConcurrentError!std.Io.Future(void) {
+            if (!self.fetch_concurrent_start) return error.ConcurrencyUnavailable;
+            return std.Io.concurrent(io, fetchTask, .{ self, slot, @as(u16, @intCast(slot_index)), generation, io });
         }
 
         /// The blocking exchange, run as a cancelable task. Always
@@ -4884,6 +4989,10 @@ pub fn Effects(comptime Msg: type) type {
                     // No concurrent capacity: run the op inline.
                     // Teardown cannot interrupt it, only outwait or
                     // abandon it — the deadline still bounds deinit.
+                    // (Deliberately unlike fetch, which REJECTS when
+                    // its exchange cannot start cancellably: fetch
+                    // joins are unconditional and unbounded, while a
+                    // stuck file worker has the abandon safety net.)
                     fileTask(ctx, io);
                     break :supervise;
                 };
@@ -4916,6 +5025,17 @@ pub fn Effects(comptime Msg: type) type {
             // up on shutdown).
             const slot = &self.slots[slot_index];
             const outcome: EffectFileOutcome = if (ctx.done.load(.acquire)) ctx.outcome else .cancelled;
+            // Publish a read's bytes into the slot's channel-owned
+            // delivery buffer (what the drain hands to `update`): the
+            // blocking phase filled only the context's process-lived
+            // private buffer. Committed means teardown JOINS this
+            // worker, so the slot buffer is safe to touch here.
+            if (ctx.op == .read) {
+                if (slot.fetch_buffer) |delivery| {
+                    const publish_len = @min(ctx.read_len, delivery.len);
+                    @memcpy(delivery[0..publish_len], ctx.buffer[0..publish_len]);
+                }
+            }
             slot.body_len = ctx.read_len;
             self.postFile(slot, @intCast(slot_index), generation, io, outcome, ctx.read_len);
             slot.state.store(.draining, .release);

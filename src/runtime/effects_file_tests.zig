@@ -492,6 +492,85 @@ test "teardown abandons a file worker stuck on a reader-less FIFO and leaks its 
     }
 }
 
+test "an abandoned file worker survives the owner's allocator dying: its leak is process-lived only" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var fifo_path_buffer: [256]u8 = undefined;
+    const fifo_path = try std.fmt.bufPrint(&fifo_path_buffer, ".zig-cache/tmp/{s}/arena.fifo", .{tmp.sub_path[0..]});
+    try makeFifo(fifo_path);
+
+    // The channel — and every caller-side allocation it makes — lives
+    // in an arena backed by the leak-checking testing allocator and is
+    // deinitialized right after teardown: the exact owner-lifetime
+    // posture the abandon leak must survive. The channel struct itself
+    // sits in the arena too, so even the worker's `self` pointer dies
+    // with the owner.
+    const Channel = effects_mod.Effects(FileMsg);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var arena_live = true;
+    defer if (arena_live) arena.deinit();
+    const fx = try arena.allocator().create(Channel);
+    fx.* = Channel.init(arena.allocator());
+    // Tiny injected budget, interruption disabled: pin the
+    // abandon-and-leak safety net, exactly like the loud-leak test.
+    fx.file_join_deadline_ms = 300;
+    fx.file_join_interrupt = false;
+
+    fx.writeFile(.{ .key = 1, .path = fifo_path, .bytes = "never delivered", .on_result = null });
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
+
+    fx.deinit();
+    try std.testing.expectEqual(@as(u32, 1), fx.abandoned_file_workers);
+
+    // Kill the owner's allocator: everything the channel ever got from
+    // it — including the channel struct — is gone. The abandoned
+    // worker must not notice: all it can still reach (its context,
+    // that context's buffer, the executor io) is `process_allocator`
+    // storage.
+    arena.deinit();
+    arena_live = false;
+
+    // Wake the abandoned worker under that invariant: opening the
+    // FIFO's read end completes its blocked open; it writes through
+    // its process-lived context and buffer, finds itself abandoned,
+    // and exits without touching the dead arena — if any of its
+    // reachable memory were caller-allocated, this walk is where the
+    // use-after-free would crash the test. Draining to EOF keeps the
+    // read end open across the worker's write and proves the worker
+    // really woke.
+    var reader = try std.Io.Dir.cwd().openFile(io, fifo_path, .{});
+    defer reader.close(io);
+    var drain_buffer: [128]u8 = undefined;
+    while (true) {
+        const read_slices: [1][]u8 = .{&drain_buffer};
+        const count = reader.readStreaming(io, &read_slices) catch break;
+        if (count == 0) break;
+    }
+
+    // And the happy path still frees everything through the same
+    // seams: a fresh channel backed DIRECTLY by the testing allocator
+    // runs a real write to completion and tears down joined — the
+    // leak check at test end guards the caller-side allocations, and
+    // `joinWorker`/`deinit` return the context, worker buffer, and
+    // executor io to `process_allocator`.
+    var healthy = Channel.init(std.testing.allocator);
+    defer healthy.deinit();
+    var path_buffer: [256]u8 = undefined;
+    const healthy_path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/healthy.json", .{tmp.sub_path[0..]});
+    healthy.writeFile(.{ .key = 2, .path = healthy_path, .bytes = "{\"alive\":true}", .on_result = null });
+    var waited_ms: usize = 0;
+    while (waited_ms < 20_000) : (waited_ms += 10) {
+        if (healthy.hasPending()) break;
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(healthy.hasPending());
+    healthy.deinit();
+    try std.testing.expectEqual(@as(u32, 0), healthy.abandoned_file_workers);
+}
+
 test "teardown interrupts a file worker stuck on a reader-less FIFO and joins it with no leak" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;

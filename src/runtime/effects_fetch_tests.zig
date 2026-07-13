@@ -9,6 +9,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const clock_mod = @import("clock.zig");
 
 const canvas_label = "fetch-canvas";
 
@@ -978,6 +979,47 @@ test "real fetch reports connection refused as connect_failed" {
     try std.testing.expectEqual(effects_mod.EffectFetchOutcome.connect_failed, h.app_state.model.outcome.?);
     try std.testing.expectEqual(@as(u16, 0), h.app_state.model.status);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.body_len);
+}
+
+test "a fetch whose exchange cannot start cancellably is rejected, never run inline" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    // Pin the no-capacity path through the injectable seam (the real
+    // trigger — the executor refusing `std.Io.concurrent` — needs
+    // resource exhaustion). If a regression ran the exchange inline
+    // instead, this loopback connect would fail fast as
+    // `.connect_failed` and the assert below would catch the lie.
+    fx.fetch_concurrent_start = false;
+
+    var url_buffer: [128]u8 = undefined;
+    test_url = std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:9/", .{}) catch unreachable;
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForResponse(&h);
+
+    // Exactly one honest `.rejected` terminal — the fetch never
+    // started — counted through the rejection seam.
+    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.rejected, h.app_state.model.outcome.?);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(@as(u16, 0), h.app_state.model.status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.body_len);
+    try std.testing.expectEqual(@as(u32, 1), fx.fetch_start_rejections.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+
+    // Teardown returns promptly: no uncancelable inline exchange is
+    // left for the unconditional fetch join to wait on.
+    const start_ns = clock_mod.monotonicNanoseconds();
+    fx.deinit();
+    const elapsed_ms = (clock_mod.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+    try std.testing.expect(elapsed_ms < 10_000);
+    for (&fx.slots) |*slot| {
+        try std.testing.expect(slot.worker_thread == null);
+        try std.testing.expect(slot.state.load(.acquire) != .running);
+    }
 }
 
 test "real fetch times out against a hanging route" {
