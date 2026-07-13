@@ -791,6 +791,7 @@ pub const Runtime = struct {
     const selectAutomationCanvasWidget = AutomationWidgetMethods.selectAutomationCanvasWidget;
     const setAutomationCanvasWidgetText = AutomationWidgetMethods.setAutomationCanvasWidgetText;
     const editAutomationCanvasWidgetText = AutomationWidgetMethods.editAutomationCanvasWidgetText;
+    const composeAutomationCanvasWidgetText = AutomationWidgetMethods.composeAutomationCanvasWidgetText;
     const dispatchAutomationCanvasWidgetDrag = AutomationWidgetMethods.dispatchAutomationCanvasWidgetDrag;
     const dispatchAutomationCanvasWidgetFileDrop = AutomationWidgetMethods.dispatchAutomationCanvasWidgetFileDrop;
 };
