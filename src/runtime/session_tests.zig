@@ -36,6 +36,7 @@ const SessionModel = struct {
     external_kinds: [2]u32 = [_]u32{0} ** 2,
     external_outcomes: [2]effects_mod.EffectExternalOutcome = [_]effects_mod.EffectExternalOutcome{.ok} ** 2,
     external_first_bytes: [2]u8 = [_]u8{0} ** 2,
+    cancel_second_external_after_first: bool = false,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -49,6 +50,7 @@ const SessionMsg = union(enum) {
     start_spawn,
     start_audio,
     start_external,
+    start_external_cancel_chain,
     cancel_external,
     fetched: effects_mod.EffectResponse,
     line: effects_mod.EffectLine,
@@ -101,6 +103,21 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
                 .on_result = SessionApp.Effects.externalMsg(.external_result),
             }) catch unreachable;
         },
+        .start_external_cancel_chain => {
+            model.cancel_second_external_after_first = true;
+            _ = fx.external(.{
+                .key = 11,
+                .kind = 101,
+                .payload = "request-a",
+                .on_result = SessionApp.Effects.externalMsg(.external_result),
+            }) catch unreachable;
+            _ = fx.external(.{
+                .key = 12,
+                .kind = 102,
+                .payload = "request-b",
+                .on_result = SessionApp.Effects.externalMsg(.external_result),
+            }) catch unreachable;
+        },
         .cancel_external => fx.cancel(11),
         .fetched => |response| {
             model.fetch_status = response.status;
@@ -115,6 +132,10 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
             model.band_checksum = checksum;
         },
         .external_result => |result| {
+            if (model.cancel_second_external_after_first and result.kind == 101) {
+                model.cancel_second_external_after_first = false;
+                fx.cancel(12);
+            }
             if (model.external_count < model.external_kinds.len) {
                 model.external_kinds[model.external_count] = result.kind;
                 model.external_outcomes[model.external_count] = result.outcome;
@@ -145,6 +166,7 @@ fn sessionCommand(name: []const u8) ?SessionMsg {
     if (std.mem.eql(u8, name, "session.spawn")) return .start_spawn;
     if (std.mem.eql(u8, name, "session.audio")) return .start_audio;
     if (std.mem.eql(u8, name, "session.external")) return .start_external;
+    if (std.mem.eql(u8, name, "session.external-cancel-chain")) return .start_external_cancel_chain;
     if (std.mem.eql(u8, name, "session.external-cancel")) return .cancel_external;
     return null;
 }
@@ -433,6 +455,59 @@ test "SDK cancellation records and replays before a later adapter success" {
     try std.testing.expectEqual(@as(u64, 2), replayed.report.effects_fed);
     try std.testing.expectEqualDeep(recorded.model, replayed.model);
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
+}
+
+test "external cancellation issued by a result waits for the next replay wake" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(SessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.external-cancel-chain", .window_id = 1 } });
+    const first = app_state.effects.pendingExternalAt(0).?;
+    try app_state.effects.feedExternalResult(first.request_id, .success, "first");
+    try std.testing.expect(harness.null_platform.takeWake() != null);
+    try std.testing.expect(harness.null_platform.takeWake() == null);
+
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.model.external_count);
+    try std.testing.expect(harness.null_platform.takeWake() != null);
+    try std.testing.expect(harness.null_platform.takeWake() == null);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.external_count);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.cancelled, app_state.model.external_outcomes[1]);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expectEqualDeep(app_state.model, replayed.model);
 }
 
 test "a native-only session records and replays like a web-layer one" {
