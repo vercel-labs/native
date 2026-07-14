@@ -1077,6 +1077,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    .external => try runtime_effects.feedExternalReplayRecord(MsgT, &self.effects, record),
                     .timer => {},
                 },
             }
