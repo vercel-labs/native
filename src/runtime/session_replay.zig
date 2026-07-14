@@ -169,7 +169,7 @@ pub fn replaySession(
                     },
                     error.ExternalEffectReplayMismatch => {
                         std.debug.print(
-                            "replay diverged after event {d}: journaled external result for key {d} does not match the pending request id, kind, payload fingerprint, or cancellation state\n",
+                            "replay diverged after event {d}: journaled external result for key {d} does not match the pending request id, adapter id, kind, payload schema version, payload fingerprint, or cancellation state\n",
                             .{ report.events_replayed, effect.key },
                         );
                         return error.ReplayEffectDivergence;

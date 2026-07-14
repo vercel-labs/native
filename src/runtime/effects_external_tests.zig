@@ -7,6 +7,8 @@ const effects_mod = @import("effects.zig");
 
 const canvas_label = "external-effects-canvas";
 const external_key: u64 = 10;
+const external_adapter_id: u32 = 7;
+const external_schema_version: u32 = 3;
 const stream_key: u64 = 500;
 const max_results = 64;
 const kept_result_bytes = 16;
@@ -27,7 +29,9 @@ const ExternalModel = struct {
     result_count: usize = 0,
     request_ids: [max_results]u64 = [_]u64{0} ** max_results,
     keys: [max_results]u64 = [_]u64{0} ** max_results,
+    adapter_ids: [max_results]u32 = [_]u32{0} ** max_results,
     kinds: [max_results]u32 = [_]u32{0} ** max_results,
+    schema_versions: [max_results]u32 = [_]u32{0} ** max_results,
     outcomes: [max_results]effects_mod.EffectExternalOutcome = [_]effects_mod.EffectExternalOutcome{.ok} ** max_results,
     byte_lens: [max_results]usize = [_]usize{0} ** max_results,
     bytes: [max_results][kept_result_bytes]u8 = undefined,
@@ -39,7 +43,9 @@ const ExternalModel = struct {
         const index = self.result_count;
         self.request_ids[index] = result.request_id;
         self.keys[index] = result.key;
+        self.adapter_ids[index] = result.adapter_id;
         self.kinds[index] = result.kind;
+        self.schema_versions[index] = result.schema_version;
         self.outcomes[index] = result.outcome;
         self.byte_lens[index] = result.bytes.len;
         const len = @min(result.bytes.len, kept_result_bytes);
@@ -71,7 +77,9 @@ const oversized_request = [_]u8{'x'} ** (effects_mod.max_effect_external_request
 fn issueExternal(fx: *ExternalEffects, key: u64, kind: u32, payload: []const u8) u64 {
     return fx.external(.{
         .key = key,
+        .adapter_id = external_adapter_id,
         .kind = kind,
+        .schema_version = external_schema_version,
         .payload = payload,
         .on_result = ExternalEffects.externalMsg(.result),
     }) catch unreachable;
@@ -217,6 +225,8 @@ const LiveAdapter = struct {
 const CapturingAdapter = struct {
     completion: ?effects_mod.ExternalEffectCompletion = null,
     request_id: u64 = 0,
+    adapter_id: u32 = 0,
+    schema_version: u32 = 0,
     fail_submit: bool = false,
     cancel_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     cancelled_request_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -235,6 +245,8 @@ const CapturingAdapter = struct {
         const self: *CapturingAdapter = @ptrCast(@alignCast(context));
         if (self.fail_submit) return error.AdapterRejected;
         self.request_id = request.request_id;
+        self.adapter_id = request.adapter_id;
+        self.schema_version = request.schema_version;
         self.completion = completion;
     }
 
@@ -261,23 +273,35 @@ fn waitForCompleted(adapter: *LiveAdapter, count: usize) !void {
 fn externalOptions(key: u64, kind: u32, payload: []const u8) ExternalEffects.ExternalOptions {
     return .{
         .key = key,
+        .adapter_id = external_adapter_id,
         .kind = kind,
+        .schema_version = external_schema_version,
         .payload = payload,
         .on_result = ExternalEffects.externalMsg(.result),
     };
 }
 
-test "external options require a result handler" {
+test "external options require adapter, schema, and result identity" {
     comptime {
-        var found = false;
+        var found_adapter = false;
+        var found_schema = false;
+        var found_result = false;
         for (@typeInfo(ExternalEffects.ExternalOptions).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, "adapter_id")) {
+                if (field.default_value_ptr != null or field.type != u32) @compileError("ExternalOptions.adapter_id must be a required u32");
+                found_adapter = true;
+            }
+            if (std.mem.eql(u8, field.name, "schema_version")) {
+                if (field.default_value_ptr != null or field.type != u32) @compileError("ExternalOptions.schema_version must be a required u32");
+                found_schema = true;
+            }
             if (std.mem.eql(u8, field.name, "on_result")) {
                 if (field.default_value_ptr != null) @compileError("ExternalOptions.on_result must not have a default");
                 if (field.type != ExternalEffects.ExternalMsgFn) @compileError("ExternalOptions.on_result must be a required ExternalMsgFn");
-                found = true;
+                found_result = true;
             }
         }
-        if (!found) @compileError("ExternalOptions.on_result is missing");
+        if (!found_adapter or !found_schema or !found_result) @compileError("ExternalOptions external identity is incomplete");
     }
 }
 
@@ -366,7 +390,9 @@ test "fake external effects preserve issue and completion order" {
     const first = h.app_state.effects.pendingExternalAt(0).?;
     const second = h.app_state.effects.pendingExternalAt(1).?;
     try std.testing.expectEqual(external_key, first.key);
+    try std.testing.expectEqual(external_adapter_id, first.adapter_id);
     try std.testing.expectEqual(@as(u32, 1), first.kind);
+    try std.testing.expectEqual(external_schema_version, first.schema_version);
     try std.testing.expectEqualStrings("alpha", first.payload);
     try std.testing.expectEqual(external_key + 10, second.key);
     try std.testing.expectEqualStrings("beta", second.payload);
@@ -378,6 +404,8 @@ test "fake external effects preserve issue and completion order" {
     try h.harness.runtime.dispatchPlatformEvent(h.app, .wake);
     try std.testing.expectEqual(@as(usize, 2), h.app_state.model.result_count);
     try std.testing.expectEqual(external_key + 10, h.app_state.model.keys[0]);
+    try std.testing.expectEqual(external_adapter_id, h.app_state.model.adapter_ids[0]);
+    try std.testing.expectEqual(external_schema_version, h.app_state.model.schema_versions[0]);
     try std.testing.expectEqualStrings("second", h.app_state.model.resultBytes(0));
     try std.testing.expectEqual(external_key, h.app_state.model.keys[1]);
     try std.testing.expectEqualStrings("first", h.app_state.model.resultBytes(1));
@@ -613,6 +641,8 @@ test "live cancellation forwards once and late completion is stale" {
     try h.app_state.dispatch(&h.harness.runtime, 1, .issue_one);
     const completion = capturing.completion.?;
     const request_id = capturing.request_id;
+    try std.testing.expectEqual(external_adapter_id, capturing.adapter_id);
+    try std.testing.expectEqual(external_schema_version, capturing.schema_version);
     try h.app_state.dispatch(&h.harness.runtime, 1, .cancel_one);
     try std.testing.expectEqual(@as(usize, 1), capturing.cancel_count.load(.acquire));
     try std.testing.expectEqual(request_id, capturing.cancelled_request_id.load(.acquire));
@@ -756,7 +786,7 @@ test "fake external work never submits or cancels through a bound live adapter" 
     try std.testing.expect(capturing.shutdown_called);
 }
 
-test "replay feed validates key, kind, and request payload fingerprint" {
+test "replay feed validates adapter, key, kind, schema, and request payload fingerprint" {
     var effects = ExternalEffects.init(std.heap.page_allocator);
     defer effects.deinit();
     effects.armReplay();
@@ -771,7 +801,9 @@ test "replay feed validates key, kind, and request payload fingerprint" {
         .key = 42,
         .payload = "result",
         .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id,
         .external_kind = 7,
+        .external_schema_version = external_schema_version,
         .external_request_hash = request_hash,
     }));
     try std.testing.expectError(error.ExternalEffectReplayMismatch, effects_mod.feedExternalReplayRecord(ExternalMsg, &effects, .{
@@ -779,7 +811,19 @@ test "replay feed validates key, kind, and request payload fingerprint" {
         .key = 41,
         .payload = "result",
         .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id + 1,
+        .external_kind = 7,
+        .external_schema_version = external_schema_version,
+        .external_request_hash = request_hash,
+    }));
+    try std.testing.expectError(error.ExternalEffectReplayMismatch, effects_mod.feedExternalReplayRecord(ExternalMsg, &effects, .{
+        .kind = .external,
+        .key = 41,
+        .payload = "result",
+        .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id,
         .external_kind = 8,
+        .external_schema_version = external_schema_version,
         .external_request_hash = request_hash,
     }));
     try std.testing.expectError(error.ExternalEffectReplayMismatch, effects_mod.feedExternalReplayRecord(ExternalMsg, &effects, .{
@@ -787,7 +831,19 @@ test "replay feed validates key, kind, and request payload fingerprint" {
         .key = 41,
         .payload = "result",
         .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id,
         .external_kind = 7,
+        .external_schema_version = external_schema_version + 1,
+        .external_request_hash = request_hash,
+    }));
+    try std.testing.expectError(error.ExternalEffectReplayMismatch, effects_mod.feedExternalReplayRecord(ExternalMsg, &effects, .{
+        .kind = .external,
+        .key = 41,
+        .payload = "result",
+        .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id,
+        .external_kind = 7,
+        .external_schema_version = external_schema_version,
         .external_request_hash = wrong_hash,
     }));
     try effects_mod.feedExternalReplayRecord(ExternalMsg, &effects, .{
@@ -795,7 +851,9 @@ test "replay feed validates key, kind, and request payload fingerprint" {
         .key = 41,
         .payload = "result",
         .external_request_id = request_id,
+        .external_adapter_id = external_adapter_id,
         .external_kind = 7,
+        .external_schema_version = external_schema_version,
         .external_request_hash = request_hash,
     });
     try std.testing.expect(effects.takeMsg() != null);

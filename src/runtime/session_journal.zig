@@ -73,9 +73,10 @@ pub const magic = "NSDKSJNL";
 /// flag to audio event and audio effect records; v3 added the spectrum
 /// band bytes to both (and the `.spectrum` audio kind). Preserved
 /// pre-#119 external-effects work used v4-v6 with effect tag 9, which
-/// now belongs to `.host`; v7 adds the complete external identity and
-/// outcome fields with the collision-free `.external` tag 11 and
-/// deliberately refuses those incompatible journals.
+/// now belongs to `.host`; v7 adds the complete external-only adapter,
+/// operation, schema, request, and outcome identity with the
+/// collision-free `.external` tag 11 and deliberately refuses those
+/// incompatible journals.
 pub const format_version: u32 = 7;
 
 // ------------------------------------------------------------- budgets
@@ -837,10 +838,14 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
     try cursor.writeBytes(&record.audio_bands);
-    try cursor.writeInt(u64, record.external_request_id);
-    try cursor.writeInt(u32, record.external_kind);
-    try cursor.writeBytes(&record.external_request_hash);
-    try cursor.writeEnum(record.external_outcome);
+    if (record.kind == .external) {
+        try cursor.writeInt(u64, record.external_request_id);
+        try cursor.writeInt(u32, record.external_adapter_id);
+        try cursor.writeInt(u32, record.external_kind);
+        try cursor.writeInt(u32, record.external_schema_version);
+        try cursor.writeBytes(&record.external_request_hash);
+        try cursor.writeEnum(record.external_outcome);
+    }
     return buffer[0..cursor.len];
 }
 
@@ -873,10 +878,14 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_buffering = try cursor.readBool(),
     };
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
-    record.external_request_id = try cursor.readInt(u64);
-    record.external_kind = try cursor.readInt(u32);
-    @memcpy(&record.external_request_hash, try cursor.readBytes(record.external_request_hash.len));
-    record.external_outcome = try cursor.readEnum(runtime_effects.EffectExternalOutcome);
+    if (record.kind == .external) {
+        record.external_request_id = try cursor.readInt(u64);
+        record.external_adapter_id = try cursor.readInt(u32);
+        record.external_kind = try cursor.readInt(u32);
+        record.external_schema_version = try cursor.readInt(u32);
+        @memcpy(&record.external_request_hash, try cursor.readBytes(record.external_request_hash.len));
+        record.external_outcome = try cursor.readEnum(runtime_effects.EffectExternalOutcome);
+    }
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1391,7 +1400,9 @@ test "effect codec round-trips payloads and outcomes" {
         .key = 88,
         .payload = "page-2",
         .external_request_id = 17,
+        .external_adapter_id = 9,
         .external_kind = 4001,
+        .external_schema_version = 3,
         .external_request_hash = [_]u8{0xa5} ** 32,
         .external_outcome = .ok,
     }, &buffer);
@@ -1400,7 +1411,9 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expectEqual(runtime_effects.EffectResultKind.external, external_decoded.kind);
     try testing.expectEqual(@as(u64, 88), external_decoded.key);
     try testing.expectEqual(@as(u64, 17), external_decoded.external_request_id);
+    try testing.expectEqual(@as(u32, 9), external_decoded.external_adapter_id);
     try testing.expectEqual(@as(u32, 4001), external_decoded.external_kind);
+    try testing.expectEqual(@as(u32, 3), external_decoded.external_schema_version);
     try testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 32), &external_decoded.external_request_hash);
     try testing.expectEqual(runtime_effects.EffectExternalOutcome.ok, external_decoded.external_outcome);
     try testing.expectEqualStrings("page-2", external_decoded.payload);
@@ -1426,12 +1439,15 @@ test "effect wire tags remain additive" {
     try testing.expectEqual(@as(u8, 4), @intFromEnum(runtime_effects.EffectExternalOutcome.submit_failed));
 }
 
-test "v7 external identity adds exactly 45 bytes to every effect record" {
+test "v7 external identity is encoded only for external effect records" {
     var buffer: [256]u8 = undefined;
-    const encoded = try encodeEffect(.{ .kind = .line, .key = 1 }, &buffer);
-    // The v3-v6 fixed record was 104 bytes with empty strings. V7 adds
-    // request id (8), kind (4), SHA-256 (32), and outcome (1).
-    try testing.expectEqual(@as(usize, 104 + 45), encoded.len);
+    const line_len = (try encodeEffect(.{ .kind = .line, .key = 1 }, &buffer)).len;
+    const external_len = (try encodeEffect(.{ .kind = .external, .key = 1 }, &buffer)).len;
+    // The non-external v3-v6 record stays 104 bytes. External identity is
+    // request id (8), adapter id (4), kind (4), schema version (4),
+    // SHA-256 (32), and outcome (1).
+    try testing.expectEqual(@as(usize, 104), line_len);
+    try testing.expectEqual(@as(usize, 53), external_len - line_len);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

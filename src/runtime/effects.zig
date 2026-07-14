@@ -535,22 +535,29 @@ pub const ExternalEffectIssueError = error{
 };
 
 /// One typed/byte request crossing the application-defined boundary.
-/// `kind` is a fixed-width application operation code suitable for a C
-/// ABI; `payload` is binary-safe. The live adapter borrows `payload` only
-/// for `submit_fn` and must copy it before returning.
+/// `adapter_id`, operation `kind`, and `schema_version` are independent
+/// fixed-width application identities suitable for a C ABI; `payload` is
+/// binary-safe. The live adapter borrows `payload` only for `submit_fn`
+/// and must copy it before returning.
 pub const EffectExternalRequest = struct {
     request_id: u64,
     key: u64,
+    adapter_id: u32,
     kind: u32,
+    schema_version: u32,
     payload: []const u8,
 };
 
 /// One external result delivered to `update` on the runtime/UI thread.
-/// `bytes` is valid only for that update call; copy what the model keeps.
+/// Adapter, operation, and payload-schema identity are copied from the
+/// accepted request. `bytes` is valid only for that update call; copy what
+/// the model keeps.
 pub const EffectExternalResult = struct {
     request_id: u64,
     key: u64,
+    adapter_id: u32,
     kind: u32,
+    schema_version: u32,
     outcome: EffectExternalOutcome,
     bytes: []const u8 = "",
 };
@@ -818,7 +825,7 @@ pub const EffectResultRecord = struct {
     kind: EffectResultKind,
     key: u64,
     /// Line bytes / collected stdout / response body / file bytes /
-    /// clipboard text.
+    /// clipboard text / external result bytes.
     payload: []const u8 = "",
     /// Collect-exit stderr tail.
     stderr_tail: []const u8 = "",
@@ -852,18 +859,21 @@ pub const EffectResultRecord = struct {
     /// `.external` records: the exact accepted request identity and
     /// terminal result delivered to update.
     external_request_id: u64 = 0,
+    external_adapter_id: u32 = 0,
     external_kind: u32 = 0,
+    external_schema_version: u32 = 0,
     external_request_hash: [32]u8 = @splat(0),
     external_outcome: EffectExternalOutcome = .ok,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
-/// session is being recorded (`bindJournal`). Called on the loop thread,
-/// immediately before the Msg constructed from the same payload runs
-/// through `update` — so the journal holds exactly what the app saw.
+/// session is being recorded (`bindJournal`). Both callbacks run on the
+/// loop thread: results immediately before the matching Msg enters
+/// `update`, and a failure when a worker attempted an unrecordable result.
 pub const EffectJournal = struct {
     context: *anyopaque,
     record_fn: *const fn (context: *anyopaque, record: EffectResultRecord) void,
+    fail_fn: ?*const fn (context: *anyopaque, reason: []const u8) void = null,
 };
 
 /// Tiny spin lock over `std.atomic.Mutex` (0.16 has no blocking
@@ -1057,6 +1067,7 @@ pub fn Effects(comptime Msg: type) type {
             pending_remaining: usize = 0,
             queue_remaining: usize = 0,
             external_control_remaining: usize = 0,
+            journal_failure_remaining: bool = false,
             wake_deferred: bool = false,
         };
 
@@ -1355,9 +1366,15 @@ pub fn Effects(comptime Msg: type) type {
             /// Caller-chosen model identity. External requests share the
             /// ordinary effect key space and pending slots.
             key: u64,
+            /// Stable application-defined adapter identity. This is not an
+            /// operation kind and is recorded independently for replay.
+            adapter_id: u32,
             /// Application operation code. Use `@intFromEnum` for a Zig
             /// enum; the fixed u32 is directly representable at a C ABI.
             kind: u32,
+            /// Version of the request/result payload contract for this
+            /// operation. This is independent of the SDK journal version.
+            schema_version: u32,
             /// Binary-safe request bytes, copied before `external`
             /// returns and bounded by `max_effect_external_request_bytes`.
             payload: []const u8 = "",
@@ -1569,7 +1586,9 @@ pub fn Effects(comptime Msg: type) type {
             /// `.external` entries: fixed request identity plus terminal
             /// outcome. Result bytes stay in the slot buffer until drain.
             external_request_id: u64 = 0,
+            external_adapter_id: u32 = 0,
             external_kind: u32 = 0,
+            external_schema_version: u32 = 0,
             external_request_hash: [32]u8 = @splat(0),
             external_outcome: EffectExternalOutcome = .ok,
             /// `.host` entries: which route the result takes (true = the
@@ -1888,7 +1907,9 @@ pub fn Effects(comptime Msg: type) type {
             /// and teardown. The adapter never owns slot memory.
             external_mutex: SpinMutex = .{},
             external_request_id: u64 = 0,
+            external_adapter_id: u32 = 0,
             external_kind: u32 = 0,
+            external_schema_version: u32 = 0,
             external_request_hash: [32]u8 = @splat(0),
             external_outcome: EffectExternalOutcome = .ok,
             external_terminal: ExternalTerminal = .none,
@@ -1931,6 +1952,8 @@ pub fn Effects(comptime Msg: type) type {
         /// here (loop thread, right before its Msg runs through
         /// `update`). Null outside recording.
         journal: ?EffectJournal = null,
+        journal_failure_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        external_result_over_budget: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         /// The clock behind `wallMs` — the swap seam tests use
         /// (`TestClock`), exactly like the fake executor. Session replay
         /// never consults it: journaled values win there.
@@ -2471,7 +2494,10 @@ pub fn Effects(comptime Msg: type) type {
         /// Point the drain's result reporting at a session recorder.
         /// Loop-thread only; the first bind sticks.
         pub fn bindJournal(self: *Self, binding: EffectJournal) void {
-            if (self.journal == null) self.journal = binding;
+            if (self.journal == null) {
+                self.journal = binding;
+                self.journal_failure_enabled.store(binding.fail_fn != null, .release);
+            }
         }
 
         /// Bind the application-owned live external adapter. The first
@@ -2511,6 +2537,12 @@ pub fn Effects(comptime Msg: type) type {
         fn journalNote(self: *Self, record: EffectResultRecord) void {
             const binding = self.journal orelse return;
             binding.record_fn(binding.context, record);
+        }
+
+        fn journalFail(self: *Self, reason: []const u8) void {
+            const binding = self.journal orelse return;
+            const fail_fn = binding.fail_fn orelse return;
+            fail_fn(binding.context, reason);
         }
 
         /// Wall-clock milliseconds since the Unix epoch, AS AN EFFECT:
@@ -3125,7 +3157,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.payload.len > max_effect_external_request_bytes) {
                 return error.ExternalEffectRequestTooLarge;
             }
-            if (self.findActiveSlot(options.key) != null or self.findPendingExternalKey(options.key) != null) {
+            if (self.findActiveSlot(options.key) != null) {
                 return error.ExternalEffectDuplicateKey;
             }
             const slot_index = self.findIdleSlot() orelse {
@@ -3164,7 +3196,9 @@ pub fn Effects(comptime Msg: type) type {
             // occupant may still have entries in the shared queue, and
             // its generation must remain filtered after this reuse.
             slot.external_request_id = request_id;
+            slot.external_adapter_id = options.adapter_id;
             slot.external_kind = options.kind;
+            slot.external_schema_version = options.schema_version;
             std.crypto.hash.sha2.Sha256.hash(options.payload, &slot.external_request_hash, .{});
             slot.external_outcome = .ok;
             slot.external_terminal = .none;
@@ -3200,7 +3234,9 @@ pub fn Effects(comptime Msg: type) type {
             adapter.?.submit_fn(adapter.?.context, .{
                 .request_id = request_id,
                 .key = options.key,
+                .adapter_id = options.adapter_id,
                 .kind = options.kind,
+                .schema_version = options.schema_version,
                 .payload = workspace[0..options.payload.len],
             }, completion) catch {
                 const wake = self.enqueueExternalControlLocked(slot, slot_index, .submit_failed);
@@ -3373,12 +3409,6 @@ pub fn Effects(comptime Msg: type) type {
         /// Host-request slots keep their own contract instead: a cancel
         /// aimed at one drops it silently (`cancelHostRequest`).
         pub fn cancel(self: *Self, key: u64) void {
-            // External slots serialize running/draining cancellation with
-            // completion and drain under their own mutex.
-            if (self.findPendingExternalKey(key)) |external_index| {
-                self.cancelExternal(external_index);
-                return;
-            }
             const slot_index = self.findActiveSlot(key) orelse {
                 // The worker may have finished with its exit still in
                 // the queue: mark the finished generation cancelled so
@@ -3390,6 +3420,9 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             const slot = &self.slots[slot_index];
+            // External slots serialize running/draining cancellation with
+            // completion and drain under their own mutex.
+            if (slot.kind == .external) return self.cancelExternal(slot_index);
             if (slot.kind == .host) return self.cancelHostRequest(key);
             slot.cancelled_generation = slot.generation;
             slot.cancel_requested.store(true, .release);
@@ -3875,9 +3908,11 @@ pub fn Effects(comptime Msg: type) type {
             return count;
         }
 
-        /// True when a drain would dispatch at least one Msg.
+        /// True when a drain has a Msg or recorder failure to consume.
         pub fn hasPending(self: *const Self) bool {
-            return self.pending_exit_len > 0 or self.queue_count.load(.acquire) > 0;
+            return self.pending_exit_len > 0 or
+                self.queue_count.load(.acquire) > 0 or
+                self.external_result_over_budget.load(.acquire);
         }
 
         /// Freeze the loop-thread-visible completion prefixes for one
@@ -3890,6 +3925,7 @@ pub fn Effects(comptime Msg: type) type {
                 .pending_remaining = self.pending_exit_len,
                 .queue_remaining = self.queue_len,
                 .external_control_remaining = self.external_control_len,
+                .journal_failure_remaining = self.external_result_over_budget.load(.acquire),
             };
             self.active_drain_window = window;
         }
@@ -3921,6 +3957,9 @@ pub fn Effects(comptime Msg: type) type {
 
         fn takeMsgInner(self: *Self, window: ?*DrainWindow) ?Msg {
             self.reclaimSlots();
+            if (self.takeJournalFailureInDrainWindow(window)) {
+                self.journalFail("an external effect result exceeded max_effect_external_result_bytes");
+            }
             while (true) {
                 if (self.takePendingMsgInDrainWindow(window)) |pending| {
                     switch (pending) {
@@ -4253,14 +4292,18 @@ pub fn Effects(comptime Msg: type) type {
                             .{
                                 .request_id = entry.external_request_id,
                                 .key = entry.key,
+                                .adapter_id = entry.external_adapter_id,
                                 .kind = entry.external_kind,
+                                .schema_version = entry.external_schema_version,
                                 .outcome = .cancelled,
                             }
                         else
                             .{
                                 .request_id = entry.external_request_id,
                                 .key = entry.key,
+                                .adapter_id = entry.external_adapter_id,
                                 .kind = entry.external_kind,
+                                .schema_version = entry.external_schema_version,
                                 .outcome = entry.external_outcome,
                                 .bytes = bytes,
                             };
@@ -4269,7 +4312,9 @@ pub fn Effects(comptime Msg: type) type {
                             .key = result.key,
                             .payload = result.bytes,
                             .external_request_id = result.request_id,
+                            .external_adapter_id = result.adapter_id,
                             .external_kind = result.kind,
+                            .external_schema_version = result.schema_version,
                             .external_request_hash = entry.external_request_hash,
                             .external_outcome = result.outcome,
                         });
@@ -4312,6 +4357,14 @@ pub fn Effects(comptime Msg: type) type {
                     },
                 }
             }
+        }
+
+        fn takeJournalFailureInDrainWindow(self: *Self, window: ?*DrainWindow) bool {
+            if (window) |bounded| {
+                if (!bounded.journal_failure_remaining) return false;
+                bounded.journal_failure_remaining = false;
+            }
+            return self.external_result_over_budget.swap(false, .acq_rel);
         }
 
         // --------------------------------------------------- fake executor
@@ -4787,7 +4840,9 @@ pub fn Effects(comptime Msg: type) type {
                     return .{
                         .request_id = slot.external_request_id,
                         .key = slot.key,
+                        .adapter_id = slot.external_adapter_id,
                         .kind = slot.external_kind,
+                        .schema_version = slot.external_schema_version,
                         .payload = if (slot.fetch_buffer) |buffer| buffer[0..slot.payload_len] else "",
                     };
                 }
@@ -4820,7 +4875,9 @@ pub fn Effects(comptime Msg: type) type {
             self: *Self,
             request_id: u64,
             key: u64,
+            adapter_id: u32,
             kind: u32,
+            schema_version: u32,
             request_hash: [32]u8,
             outcome: EffectExternalOutcome,
             bytes: []const u8,
@@ -4834,7 +4891,9 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 const generation = slot.generation;
                 const matches_identity = slot.key == key and
+                    slot.external_adapter_id == adapter_id and
                     slot.external_kind == kind and
+                    slot.external_schema_version == schema_version and
                     std.mem.eql(u8, &slot.external_request_hash, &request_hash);
                 const replay_cancelled = slot.cancelled_generation == slot.generation;
                 slot.external_mutex.unlock();
@@ -4968,7 +5027,9 @@ pub fn Effects(comptime Msg: type) type {
                 .generation = slot.generation,
                 .key = slot.key,
                 .external_request_id = slot.external_request_id,
+                .external_adapter_id = slot.external_adapter_id,
                 .external_kind = slot.external_kind,
+                .external_schema_version = slot.external_schema_version,
                 .external_request_hash = slot.external_request_hash,
                 .external_outcome = outcome,
                 .external_fn = slot.on_external,
@@ -5062,7 +5123,10 @@ pub fn Effects(comptime Msg: type) type {
                 .none => {},
             }
             if (slot.state.load(.acquire) != .running) return error.ExternalEffectStaleResult;
-            if (bytes.len > max_effect_external_result_bytes) return error.ExternalEffectResultTooLarge;
+            if (bytes.len > max_effect_external_result_bytes) {
+                self.noteExternalResultOverBudget();
+                return error.ExternalEffectResultTooLarge;
+            }
             if (outcome == .cancelled or outcome == .adapter_unavailable or outcome == .submit_failed) {
                 wake = self.enqueueExternalControlLocked(slot, token.slot_index, outcome);
                 return;
@@ -5094,7 +5158,9 @@ pub fn Effects(comptime Msg: type) type {
                 .key = slot.key,
                 .line_len = @intCast(bytes.len),
                 .external_request_id = token.request_id,
+                .external_adapter_id = slot.external_adapter_id,
                 .external_kind = slot.external_kind,
+                .external_schema_version = slot.external_schema_version,
                 .external_request_hash = slot.external_request_hash,
                 .external_outcome = outcome,
                 .external_fn = slot.on_external,
@@ -5360,17 +5426,6 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
-        fn findPendingExternalKey(self: *Self, key: u64) ?usize {
-            for (&self.slots, 0..) |*slot, index| {
-                if (slot.kind != .external or slot.key != key) continue;
-                switch (slot.state.load(.acquire)) {
-                    .running, .draining => return index,
-                    else => {},
-                }
-            }
-            return null;
-        }
-
         /// The most recent no-longer-running occupant with `key` (done
         /// or already reclaimed to idle) — the spawn a racing cancel is
         /// aimed at.
@@ -5473,6 +5528,20 @@ pub fn Effects(comptime Msg: type) type {
             self.queue_len += 1;
             self.queue_count.store(self.queue_len + self.external_control_len, .release);
             return true;
+        }
+
+        fn noteExternalResultOverBudget(self: *Self) void {
+            if (!self.journal_failure_enabled.load(.acquire)) return;
+            self.queue_mutex.lock();
+            if (self.external_result_over_budget.load(.acquire)) {
+                self.queue_mutex.unlock();
+                return;
+            }
+            self.external_result_over_budget.store(true, .release);
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
+            self.queue_mutex.unlock();
+            if (should_wake) self.wakePlatform();
         }
 
         fn takeQueueOrderLocked(self: *Self) u64 {
@@ -6369,7 +6438,9 @@ pub fn feedExternalReplayRecord(comptime Msg: type, effects: *Effects(Msg), reco
     return effects.feedExternalReplayResult(
         record.external_request_id,
         record.key,
+        record.external_adapter_id,
         record.external_kind,
+        record.external_schema_version,
         record.external_request_hash,
         record.external_outcome,
         record.payload,

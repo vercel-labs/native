@@ -143,12 +143,18 @@ pub const SessionRecorder = struct {
 
     /// The type-erased binding `Effects.bindJournal` takes.
     pub fn effectJournal(self: *SessionRecorder) runtime_effects.EffectJournal {
-        return .{ .context = self, .record_fn = recordEffectErased };
+        return .{ .context = self, .record_fn = recordEffectErased, .fail_fn = failErased };
     }
 
     fn recordEffectErased(context: *anyopaque, record: runtime_effects.EffectResultRecord) void {
         const self: *SessionRecorder = @ptrCast(@alignCast(context));
         self.recordEffect(record);
+    }
+
+    fn failErased(context: *anyopaque, reason: []const u8) void {
+        const self: *SessionRecorder = @ptrCast(@alignCast(context));
+        if (!self.began or self.failed or self.finished) return;
+        self.fail(reason);
     }
 
     /// Write the end record, sealing the journal. A failed recording
@@ -272,6 +278,44 @@ test "recorder orders effect results before their consuming event" {
     const end = (try reader.next()).?;
     try testing.expectEqual(@as(u64, 2), end.end.event_count);
     try testing.expectEqual(@as(u64, 1), end.end.effect_count);
+}
+
+test "oversized external result fails an active recording without an end record" {
+    const Msg = union(enum) { result: runtime_effects.EffectExternalResult };
+    const Effects = runtime_effects.Effects(Msg);
+
+    var buffer_sink = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "demo" });
+
+    var effects = Effects.init(testing.allocator);
+    defer effects.deinit();
+    effects.executor = .fake;
+    effects.bindJournal(recorder.effectJournal());
+    const request_id = try effects.external(.{
+        .key = 1,
+        .adapter_id = 7,
+        .kind = 11,
+        .schema_version = 3,
+        .on_result = Effects.externalMsg(.result),
+    });
+    const oversized = try testing.allocator.alloc(u8, runtime_effects.max_effect_external_result_bytes + 1);
+    defer testing.allocator.free(oversized);
+
+    try testing.expectError(error.ExternalEffectResultTooLarge, effects.feedExternalResult(request_id, .success, oversized));
+    try testing.expect(effects.hasPending());
+    try testing.expectEqual(@as(?Msg, null), effects.takeMsg());
+    try testing.expect(recorder.failed);
+    recorder.finish();
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    switch ((try reader.next()).?) {
+        .header => {},
+        else => return error.ExpectedHeader,
+    }
+    try testing.expectError(error.JournalTruncated, reader.next());
 }
 
 test "recorder commits nested events innermost-first" {

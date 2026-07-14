@@ -17,6 +17,8 @@ const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
 
 const canvas_label = "session-canvas";
+const core_adapter_id: u32 = 1;
+const core_payload_schema_version: u32 = 1;
 
 const SessionModel = struct {
     count: u32 = 0,
@@ -33,7 +35,9 @@ const SessionModel = struct {
     spectrum_count: u32 = 0,
     band_checksum: u64 = 0,
     external_count: usize = 0,
+    external_adapter_ids: [2]u32 = [_]u32{0} ** 2,
     external_kinds: [2]u32 = [_]u32{0} ** 2,
+    external_schema_versions: [2]u32 = [_]u32{0} ** 2,
     external_outcomes: [2]effects_mod.EffectExternalOutcome = [_]effects_mod.EffectExternalOutcome{.ok} ** 2,
     external_first_bytes: [2]u8 = [_]u8{0} ** 2,
     cancel_second_external_after_first: bool = false,
@@ -92,13 +96,17 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
         .start_external => {
             _ = fx.external(.{
                 .key = 11,
+                .adapter_id = core_adapter_id,
                 .kind = 101,
+                .schema_version = core_payload_schema_version,
                 .payload = "request-a",
                 .on_result = SessionApp.Effects.externalMsg(.external_result),
             }) catch unreachable;
             _ = fx.external(.{
                 .key = 12,
+                .adapter_id = core_adapter_id,
                 .kind = 102,
+                .schema_version = core_payload_schema_version,
                 .payload = "request-b",
                 .on_result = SessionApp.Effects.externalMsg(.external_result),
             }) catch unreachable;
@@ -107,13 +115,17 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
             model.cancel_second_external_after_first = true;
             _ = fx.external(.{
                 .key = 11,
+                .adapter_id = core_adapter_id,
                 .kind = 101,
+                .schema_version = core_payload_schema_version,
                 .payload = "request-a",
                 .on_result = SessionApp.Effects.externalMsg(.external_result),
             }) catch unreachable;
             _ = fx.external(.{
                 .key = 12,
+                .adapter_id = core_adapter_id,
                 .kind = 102,
+                .schema_version = core_payload_schema_version,
                 .payload = "request-b",
                 .on_result = SessionApp.Effects.externalMsg(.external_result),
             }) catch unreachable;
@@ -137,7 +149,9 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
                 fx.cancel(12);
             }
             if (model.external_count < model.external_kinds.len) {
+                model.external_adapter_ids[model.external_count] = result.adapter_id;
                 model.external_kinds[model.external_count] = result.kind;
+                model.external_schema_versions[model.external_count] = result.schema_version;
                 model.external_outcomes[model.external_count] = result.outcome;
                 model.external_first_bytes[model.external_count] = if (result.bytes.len > 0) result.bytes[0] else 0;
                 model.external_count += 1;
@@ -405,7 +419,9 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expectEqual(@as(u32, 1), recorded.model.spectrum_count);
     try std.testing.expect(recorded.model.band_checksum != 0);
     try std.testing.expectEqual(@as(usize, 2), recorded.model.external_count);
+    try std.testing.expectEqual(core_adapter_id, recorded.model.external_adapter_ids[0]);
     try std.testing.expectEqual(@as(u32, 102), recorded.model.external_kinds[0]);
+    try std.testing.expectEqual(core_payload_schema_version, recorded.model.external_schema_versions[0]);
     try std.testing.expectEqual(effects_mod.EffectExternalOutcome.failed, recorded.model.external_outcomes[0]);
     try std.testing.expectEqual(@as(u8, 'B'), recorded.model.external_first_bytes[0]);
     try std.testing.expectEqual(@as(u32, 101), recorded.model.external_kinds[1]);
