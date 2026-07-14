@@ -403,6 +403,152 @@ test "a native-only session records and replays like a web-layer one" {
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
 }
 
+test "accessibility actions journal once and replay without double-dispatch" {
+    // A journaled `widget_accessibility_action` re-runs its verb on
+    // replay, and the verb synthesizes REAL platform events (press its
+    // Enter key, set_text a select-all plus a text input). If those
+    // children also landed in the journal, replay would dispatch them
+    // twice — the stray child arrives first, against the focus the
+    // PREVIOUS action left behind, so a repeated press increments an
+    // extra time and a repeated set_text edits the field extra times.
+    // The recorder journals outer-wins: exactly one record per action,
+    // and live/replay model counters match exactly.
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(SessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var button_id: canvas.ObjectId = 0;
+    var field_id: canvas.ObjectId = 0;
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .button) button_id = node.widget.id;
+        if (node.widget.kind == .search_field) field_id = node.widget.id;
+    }
+    try std.testing.expect(button_id != 0);
+    try std.testing.expect(field_id != 0);
+
+    // Two AX presses: the second is the doubling witness — with the
+    // synthesized Enter also journaled, replay delivers it against the
+    // already-focused button and the count lands at 3, not 2.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .id = button_id,
+        .action = .press,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .id = button_id,
+        .action = .press,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.count);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Two AX set_texts: the second one's stray select-all + text input
+    // would hit the focused field on replay and inflate `query_edits`.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .id = field_id,
+        .action = .set_text,
+        .text = "glass",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .id = field_id,
+        .action = .set_text,
+        .text = "brass",
+    } });
+    try std.testing.expectEqualStrings("brass", app_state.model.queryText());
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    const edits_after_set_text = app_state.model.query_edits;
+
+    // An IME composition through the AX verb surface (the embed host's
+    // direct-call path — the platform AX event enum carries no
+    // composition kinds). The direct call is not itself journaled, so
+    // here the synthesized ime inputs ARE the journal representation
+    // and must keep recording — exactly once each.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = field_id,
+        .action = .set_composition,
+        .text = "ne",
+    });
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = field_id,
+        .action = .commit_composition,
+    });
+    try std.testing.expectEqualStrings("brassne", app_state.model.queryText());
+    // Both composition edits reached the model's `on_input` mirror.
+    try std.testing.expect(app_state.model.query_edits > edits_after_set_text);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    const recorded_model = app_state.model;
+    const recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+
+    // The journal carries one record per AX action and none of their
+    // synthesized key/text children; the direct composition calls left
+    // exactly their two ime inputs.
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var action_records: usize = 0;
+    var ime_records: usize = 0;
+    while (try reader.next()) |record| {
+        if (record != .event) continue;
+        switch (record.event) {
+            .widget_accessibility_action => action_records += 1,
+            .gpu_surface_input => |input| switch (input.kind) {
+                .ime_set_composition, .ime_commit_composition => ime_records += 1,
+                .key_down, .text_input => return error.SynthesizedChildJournaled,
+                else => {},
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), action_records);
+    try std.testing.expectEqual(@as(usize, 2), ime_records);
+
+    // Replay into a fresh app: every counter must match exactly — a
+    // double-dispatched child shows up as +1 on `count` or extra
+    // `query_edits`.
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expectEqual(@as(u32, 2), replayed.model.count);
+    try std.testing.expectEqual(recorded_model.query_edits, replayed.model.query_edits);
+    try std.testing.expectEqualDeep(recorded_model, replayed.model);
+    try std.testing.expectEqual(recorded_fingerprint, replayed.fingerprint);
+}
+
 test "a truncated journal is refused loudly" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

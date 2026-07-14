@@ -6,6 +6,9 @@
 //! BEFORE the event record — the ordering replay depends on (feed the
 //! stub executor, then dispatch). Nested dispatches (automation commands
 //! inside `frame_requested`) commit innermost-first for the same reason.
+//! One exception: events nested inside a dispatched accessibility
+//! action are suppressed — replaying the action re-derives them, so the
+//! outer record is the whole representation (see `stageEvent`).
 //!
 //! Recording must never take the app down: any failure — a sink write
 //! error, an over-budget event, a journal past its size budget — flips
@@ -46,7 +49,14 @@ pub const SessionRecorder = struct {
     /// checkpoint follows each published frame.
     last_checkpoint_frame: u64 = 0,
     depth: usize = 0,
+    /// Staging-stack depth of the `widget_accessibility_action` event
+    /// currently being dispatched, if any. While set, nested
+    /// stage/commit pairs are suppressed: the outer action record is the
+    /// journal's WHOLE representation of the interaction (see
+    /// `stageEvent`).
+    suppress_owner_depth: ?usize = null,
     staged_lens: [journal.max_session_event_depth]usize = [_]usize{0} ** journal.max_session_event_depth,
+    staged_suppressed: [journal.max_session_event_depth]bool = [_]bool{false} ** journal.max_session_event_depth,
     staged: [journal.max_session_event_depth][journal.max_session_event_bytes]u8 = undefined,
     /// Encode scratch for effect payloads (up to a whole file read).
     effect_buffer: [journal.max_session_record_bytes]u8 = undefined,
@@ -72,15 +82,48 @@ pub const SessionRecorder = struct {
     /// Serialize `event` into the staging stack. Effect results drained
     /// during its dispatch write directly to the stream; `commitEvent`
     /// then appends the event record after them.
+    ///
+    /// Accessibility actions journal OUTER-WINS: a dispatched
+    /// `widget_accessibility_action` synthesizes real platform events
+    /// (a press dispatches its Enter key, set_text a select-all plus a
+    /// text input, composition its ime inputs) through the same choke
+    /// point, so recording both the action and its children would make
+    /// replay dispatch the children twice — once from their own records,
+    /// then again when replaying the action re-runs the verb. The outer
+    /// record wins because the children are deterministic derivations of
+    /// the action against runtime state replay has already rebuilt, and
+    /// because it keeps the ASSISTIVE semantics visible in the journal
+    /// ("press on widget 12", not an anonymous key event). While the
+    /// action sits on the staging stack, nested stage/commit pairs are
+    /// therefore suppressed — staged as placeholders so commit pairing
+    /// stays balanced, never written, never counted (`event_count` must
+    /// keep matching the records a replay reader will actually see;
+    /// checkpoints fire only at depth 0, so no ordinal can land inside
+    /// the suppressed window). Effect results are NOT suppressed: they
+    /// write directly to the stream and still precede the action record,
+    /// exactly the feed-then-dispatch order replay depends on. Nested
+    /// dispatches that arrive WITHOUT a journaled accessibility action
+    /// on the stack (automation commands inside `frame_requested`, the
+    /// embed host's direct verb calls) keep journaling their real
+    /// events — there, the children are the only representation, because
+    /// replay never re-runs their outer trigger.
     pub fn stageEvent(self: *SessionRecorder, event: platform.Event) void {
         if (!self.began or self.failed or self.finished) return;
         if (self.depth >= journal.max_session_event_depth) {
             return self.fail("dispatch nesting exceeded max_session_event_depth - this is a runtime bug, not a session shape");
         }
+        if (self.suppress_owner_depth != null) {
+            self.staged_suppressed[self.depth] = true;
+            self.staged_lens[self.depth] = 0;
+            self.depth += 1;
+            return;
+        }
         const encoded = journal.encodeEvent(event, &self.staged[self.depth]) catch {
             return self.fail("a platform event exceeded max_session_event_bytes");
         };
         self.staged_lens[self.depth] = encoded.len;
+        self.staged_suppressed[self.depth] = false;
+        if (event == .widget_accessibility_action) self.suppress_owner_depth = self.depth;
         self.depth += 1;
     }
 
@@ -90,6 +133,10 @@ pub const SessionRecorder = struct {
         if (!self.began or self.failed or self.finished) return;
         if (self.depth == 0) return;
         self.depth -= 1;
+        if (self.staged_suppressed[self.depth]) return;
+        if (self.suppress_owner_depth) |owner_depth| {
+            if (owner_depth == self.depth) self.suppress_owner_depth = null;
+        }
         self.writeRecord(.event, self.staged[self.depth][0..self.staged_lens[self.depth]]);
         if (!self.failed) self.event_count += 1;
     }
@@ -292,6 +339,61 @@ test "recorder commits nested events innermost-first" {
     try testing.expectEqualStrings("app.about", inner.event.menu_command.name);
     const outer = (try reader.next()).?;
     try testing.expect(outer.event == .frame_requested);
+}
+
+test "accessibility actions suppress their synthesized children in the journal" {
+    var buffer_sink = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "demo" });
+
+    // An AX press dispatches its synthesized Enter key through the same
+    // choke point: the nested event must not land — replaying the action
+    // re-derives it — but an effect result drained during the dispatch
+    // still writes through, ahead of the action record.
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .press,
+    } });
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    recorder.recordEffect(.{ .kind = .line, .key = 3, .payload = "drained" });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    // Suppression ends with the action: a later top-level input records.
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    recorder.commitEvent();
+    recorder.recordCheckpoint(1, 0xbeef);
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?; // header
+    const effect = (try reader.next()).?;
+    try testing.expectEqualStrings("drained", effect.effect.payload);
+    const action = (try reader.next()).?;
+    try testing.expectEqual(platform.WidgetAccessibilityActionKind.press, action.event.widget_accessibility_action.action);
+    const key = (try reader.next()).?;
+    try testing.expectEqualStrings("tab", key.event.gpu_surface_input.key);
+    // The checkpoint ordinal and end counts see only the two surviving
+    // events — coherent with what a replay reader will process.
+    const checkpoint = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), checkpoint.checkpoint.event_ordinal);
+    const end = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), end.end.event_count);
+    try testing.expectEqual(@as(u64, 1), end.end.effect_count);
 }
 
 test "recorder fails loudly once and seals nothing after a sink error" {
