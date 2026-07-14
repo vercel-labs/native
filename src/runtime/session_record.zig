@@ -101,12 +101,19 @@ pub const SessionRecorder = struct {
     /// checkpoints fire only at depth 0, so no ordinal can land inside
     /// the suppressed window). Effect results are NOT suppressed: they
     /// write directly to the stream and still precede the action record,
-    /// exactly the feed-then-dispatch order replay depends on. Nested
-    /// dispatches that arrive WITHOUT a journaled accessibility action
-    /// on the stack (automation commands inside `frame_requested`, the
-    /// embed host's direct verb calls) keep journaling their real
-    /// events — there, the children are the only representation, because
-    /// replay never re-runs their outer trigger.
+    /// exactly the feed-then-dispatch order replay depends on. BOTH
+    /// entry surfaces stage the action record: the platform AX event
+    /// path stages it at the dispatch choke point, and the direct verb
+    /// surfaces (an embed host's `widgetAction`, automation
+    /// `widget_action` commands) stage a synthetic one inside
+    /// `dispatchCanvasWidgetAccessibilityAction` — without it, their
+    /// journaled children were untargeted inputs routed by focus while
+    /// the verb's focus write stayed unjournaled, so a fresh replay
+    /// delivered them against the wrong editor. A second accessibility
+    /// action staged while one is already on the stack (the direct
+    /// dispatch reached through a staged platform AX event) is just a
+    /// suppressed placeholder: the outermost action owns the window and
+    /// the journal keeps exactly one record.
     pub fn stageEvent(self: *SessionRecorder, event: platform.Event) void {
         if (!self.began or self.failed or self.finished) return;
         if (self.depth >= journal.max_session_event_depth) {
@@ -394,6 +401,63 @@ test "accessibility actions suppress their synthesized children in the journal" 
     const end = (try reader.next()).?;
     try testing.expectEqual(@as(u64, 2), end.end.event_count);
     try testing.expectEqual(@as(u64, 1), end.end.effect_count);
+}
+
+test "a nested accessibility action stays a suppressed placeholder" {
+    var buffer_sink = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "demo" });
+
+    // The platform AX event path stages tag 23 at the dispatch choke
+    // point, then `dispatchCanvasWidgetAccessibilityAction` stages its
+    // synthetic copy of the same action: the inner stage must ride the
+    // suppression window as a placeholder (one journal record, the
+    // outer one), and suppression must survive the inner commit so the
+    // verb's children staged AFTER it stay suppressed too.
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .set_text,
+        .text = "outer",
+    } });
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .set_text,
+        .text = "synthetic",
+    } });
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "outer",
+    } });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.commitEvent();
+    // The window closed with the outer action: a later input records.
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    recorder.commitEvent();
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?; // header
+    const action = (try reader.next()).?;
+    try testing.expectEqualStrings("outer", action.event.widget_accessibility_action.text);
+    const key = (try reader.next()).?;
+    try testing.expectEqualStrings("tab", key.event.gpu_surface_input.key);
+    const end = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), end.end.event_count);
 }
 
 test "recorder fails loudly once and seals nothing after a sink error" {

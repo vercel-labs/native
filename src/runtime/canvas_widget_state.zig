@@ -25,6 +25,7 @@ const CanvasWidgetTextReconcileEntry = canvas_widget_runtime.CanvasWidgetTextRec
 const canvasWidgetLayoutTreeWithRuntimeReconcileState = canvas_widget_runtime.canvasWidgetLayoutTreeWithRuntimeReconcileState;
 const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
 const canvasWidgetAccessibilityActionSupported = widget_bridge.canvasWidgetAccessibilityActionSupported;
+const platformWidgetAccessibilityActionKindFromCanvas = widget_bridge.platformWidgetAccessibilityActionKindFromCanvas;
 const canvasWidgetBooleanSelected = canvas_widget_runtime.canvasWidgetBooleanSelected;
 
 pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
@@ -186,6 +187,38 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const actions = AutomationWidgetMethods(Runtime).canvasWidgetActionsForId(self, index, action.id) orelse return error.InvalidCommand;
             if (!canvasWidgetAccessibilityActionSupported(actions, action.action)) return error.InvalidCommand;
+
+            // Session recording, outer-wins on BOTH entry surfaces: the
+            // platform AX path arrives with its journaled tag-23 event
+            // already on the recorder's staging stack (flow.zig staged
+            // it), but the DIRECT verb surfaces (an embed host's
+            // `widgetAction`, automation `widget_action` commands) reach
+            // here with no platform event at all. Their verbs journal
+            // only UNTARGETED children routed by focus, while the focus
+            // write itself (`focusAutomationCanvasWidget`) is a direct
+            // unjournaled state change — so a fresh replay delivered the
+            // children against whatever focus the session happened to
+            // hold and a first-in-session composition landed nowhere.
+            // Stage the same synthetic `widget_accessibility_action`
+            // record the platform path carries: its suppression window
+            // keeps the children out of the journal and replay re-runs
+            // this whole dispatch — focus included — through the tag-23
+            // arm in flow.zig. When the platform event IS already staged,
+            // this nested stage lands inside its suppression window as a
+            // never-written placeholder, so no double record; the commit
+            // below pops it symmetrically. Effect results drained during
+            // the verb still write through ahead of the record, and
+            // event_count/checkpoint ordinals only ever see the one
+            // surviving record (checkpoints fire at staging depth 0).
+            if (self.options.session_recorder) |recorder| recorder.stageEvent(.{ .widget_accessibility_action = .{
+                .window_id = window_id,
+                .label = label,
+                .id = action.id,
+                .action = platformWidgetAccessibilityActionKindFromCanvas(action.action),
+                .text = action.text,
+                .selection = if (action.selection) |selection| .{ .start = selection.anchor, .end = selection.focus } else null,
+            } });
+            defer if (self.options.session_recorder) |recorder| recorder.commitEvent();
 
             // Every assistive action rides the SAME machinery the
             // automation widget verbs use — the key-driven activation for

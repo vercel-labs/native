@@ -16,7 +16,6 @@ const AutomationProvenanceTarget = automation_commands.AutomationProvenanceTarge
 const AutomationWidgetWheel = automation_commands.AutomationWidgetWheel;
 const AutomationWidgetKey = automation_commands.AutomationWidgetKey;
 const AutomationWidgetPointerDrag = automation_commands.AutomationWidgetPointerDrag;
-const automationWidgetActionSupported = automation_commands.automationWidgetActionSupported;
 const parseAutomationTextSelection = automation_commands.parseAutomationTextSelection;
 const parseAutomationDragDelta = automation_commands.parseAutomationDragDelta;
 const parseAutomationDropPaths = automation_commands.parseAutomationDropPaths;
@@ -27,24 +26,40 @@ const validateViewLabel = validation.validateViewLabel;
 
 pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
     return struct {
+        /// The automation `widget_action` command surface delegates to
+        /// the accessibility dispatch rather than switching over the
+        /// verbs itself: one choke point performs the verb AND stages
+        /// the outer-wins `widget_accessibility_action` journal record,
+        /// so a recorded session replays the verb — focus included —
+        /// instead of replaying its untargeted synthesized children
+        /// against whatever focus the session happened to hold.
         pub fn dispatchAutomationWidgetAction(self: *Runtime, app: runtime_api.App(Runtime), action: AutomationWidgetAction) anyerror!void {
-            const view_index = try automationWidgetActionViewIndex(self, action);
-            switch (action.action) {
-                .focus => try focusAutomationCanvasWidget(self, view_index, action.id),
-                .press => try dispatchAutomationWidgetKey(self, app, view_index, action.id, "enter"),
-                .toggle => try dispatchAutomationWidgetKey(self, app, view_index, action.id, "space"),
-                .increment => try dispatchAutomationWidgetKey(self, app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .increment)),
-                .decrement => try dispatchAutomationWidgetKey(self, app, view_index, action.id, self.views[view_index].canvasWidgetStepKey(action.id, .decrement)),
-                .set_text => try setAutomationCanvasWidgetText(self, app, view_index, action.id, action.value),
-                .set_selection => try editAutomationCanvasWidgetText(self, app, view_index, action.id, .{ .set_selection = try parseAutomationTextSelection(action.value) }),
-                .set_composition => try composeAutomationCanvasWidgetText(self, app, view_index, action.id, .ime_set_composition, action.value),
-                .commit_composition => try composeAutomationCanvasWidgetText(self, app, view_index, action.id, .ime_commit_composition, ""),
-                .cancel_composition => try composeAutomationCanvasWidgetText(self, app, view_index, action.id, .ime_cancel_composition, ""),
-                .select => try selectAutomationCanvasWidget(self, view_index, action.id),
-                .drag => try dispatchAutomationCanvasWidgetDrag(self, app, view_index, action.id, action.value),
-                .drop_files => try dispatchAutomationCanvasWidgetFileDrop(self, app, view_index, action.id, action.value),
-                .dismiss => try dismissAutomationCanvasWidget(self, app, view_index, action.id),
-            }
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, action.view_label);
+            _ = try self.dispatchCanvasWidgetAccessibilityAction(app, self.views[view_index].window_id, self.views[view_index].label, .{
+                .id = action.id,
+                .action = canvasWidgetActionKindFromAutomation(action.action),
+                .text = action.value,
+                .selection = if (action.action == .set_selection) try parseAutomationTextSelection(action.value) else null,
+            });
+        }
+
+        fn canvasWidgetActionKindFromAutomation(kind: automation_commands.AutomationWidgetActionKind) runtime_api.CanvasWidgetAccessibilityActionKind {
+            return switch (kind) {
+                .focus => .focus,
+                .press => .press,
+                .toggle => .toggle,
+                .increment => .increment,
+                .decrement => .decrement,
+                .set_text => .set_text,
+                .set_selection => .set_selection,
+                .set_composition => .set_composition,
+                .commit_composition => .commit_composition,
+                .cancel_composition => .cancel_composition,
+                .select => .select,
+                .drag => .drag,
+                .drop_files => .drop_files,
+                .dismiss => .dismiss,
+            };
         }
 
         pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
@@ -482,9 +497,9 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// verb synthesizes the routed keyboard event the clipboard and
         /// context-menu edits use: the keyboard choke point applies the
         /// stamped edit to the retained editor and the app dispatch
-        /// keeps the model's selection mirror honest. (The journal does
-        /// not see this verb — the one automation text edit a replay
-        /// cannot reproduce yet.)
+        /// keeps the model's selection mirror honest. (The journal sees
+        /// this verb as the outer `widget_accessibility_action` record
+        /// its dispatch stages; replaying that record re-runs the verb.)
         pub fn editAutomationCanvasWidgetText(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
             try focusAutomationCanvasWidget(self, view_index, id);
             if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
@@ -560,13 +575,6 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .point = bounds.center(),
                 .paths = paths,
             } });
-        }
-
-        fn automationWidgetActionViewIndex(self: *Runtime, action: AutomationWidgetAction) anyerror!usize {
-            const view_index = try automationGpuSurfaceViewIndexByLabel(self, action.view_label);
-            const actions = canvasWidgetActionsForId(self, view_index, action.id) orelse return error.InvalidCommand;
-            if (!automationWidgetActionSupported(actions, action.action)) return error.InvalidCommand;
-            return view_index;
         }
 
         fn automationWidgetTargetViewIndex(self: *Runtime, target: AutomationWidgetTarget) anyerror!usize {

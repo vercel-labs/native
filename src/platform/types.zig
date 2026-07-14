@@ -1817,6 +1817,15 @@ pub const WidgetAccessibilityActionKind = enum(c_int) {
     drag = 8,
     drop_files = 9,
     dismiss = 10,
+    // The composition verbs never arrive from desktop assistive-tech
+    // bridges (AppKit has no AX composition action); they exist so the
+    // DIRECT verb surfaces (embed hosts, automation commands) and the
+    // session journal can carry every accessibility verb as one
+    // `widget_accessibility_action` — replay re-runs the verb, focus
+    // included, instead of replaying its untargeted ime children.
+    set_composition = 11,
+    commit_composition = 12,
+    cancel_composition = 13,
 };
 
 pub const WidgetAccessibilityActionEvent = struct {
