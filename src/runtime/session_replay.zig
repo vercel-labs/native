@@ -158,10 +158,19 @@ pub fn replaySession(
                     continue;
                 }
                 app.replayControl(.{ .feed = effect }) catch |err| switch (err) {
-                    error.EffectNotFound => {
+                    error.EffectNotFound,
+                    error.ExternalEffectStaleResult,
+                    => {
                         std.debug.print(
                             "replay diverged after event {d}: journaled {s} result for effect key {d} has no matching pending request - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
                             .{ report.events_replayed, @tagName(effect.kind), effect.key },
+                        );
+                        return error.ReplayEffectDivergence;
+                    },
+                    error.ExternalEffectReplayMismatch => {
+                        std.debug.print(
+                            "replay diverged after event {d}: journaled external result for key {d} does not match the pending request id, kind, payload fingerprint, or cancellation state\n",
+                            .{ report.events_replayed, effect.key },
                         );
                         return error.ReplayEffectDivergence;
                     },
@@ -232,7 +241,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.
-        .line, .clock, .env => false,
+        .line, .clock, .env, .external => false,
     };
 }
 
