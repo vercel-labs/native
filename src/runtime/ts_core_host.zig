@@ -505,7 +505,10 @@ pub fn TsCoreHost(comptime core: type) type {
         /// bridge-shaped mirror of `UiApp.drainEffects`' loop. Hosts
         /// that embed the core without a UiApp call this on wake/frame.
         pub fn drain(fx: *Fx) void {
-            while (fx.takeMsg()) |msg| dispatch(fx, msg);
+            var window: Fx.DrainWindow = undefined;
+            fx.beginDrainWindow(&window);
+            defer fx.finishDrainWindow(&window);
+            while (fx.takeMsgInDrainWindow(&window)) |msg| dispatch(fx, msg);
         }
 
         fn dispatchDepth(fx: *Fx, msg: Msg, depth: usize) void {
