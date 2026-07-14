@@ -32,6 +32,10 @@ const SessionModel = struct {
     /// pin, without 32 array fields in the equality check.
     spectrum_count: u32 = 0,
     band_checksum: u64 = 0,
+    external_count: usize = 0,
+    external_kinds: [2]u32 = [_]u32{0} ** 2,
+    external_outcomes: [2]effects_mod.EffectExternalOutcome = [_]effects_mod.EffectExternalOutcome{.ok} ** 2,
+    external_first_bytes: [2]u8 = [_]u8{0} ** 2,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -44,11 +48,14 @@ const SessionMsg = union(enum) {
     start_fetch,
     start_spawn,
     start_audio,
+    start_external,
+    cancel_external,
     fetched: effects_mod.EffectResponse,
     line: effects_mod.EffectLine,
     exited: effects_mod.EffectExit,
     tick: effects_mod.EffectTimer,
     audio_event: effects_mod.EffectAudio,
+    external_result: effects_mod.EffectExternalResult,
 };
 
 const SessionApp = ui_app_mod.UiApp(SessionModel, SessionMsg);
@@ -80,6 +87,21 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
             .path = "assets/session-track.mp3",
             .on_event = SessionApp.Effects.audioMsg(.audio_event),
         }),
+        .start_external => {
+            _ = fx.external(.{
+                .key = 11,
+                .kind = 101,
+                .payload = "request-a",
+                .on_result = SessionApp.Effects.externalMsg(.external_result),
+            }) catch unreachable;
+            _ = fx.external(.{
+                .key = 12,
+                .kind = 102,
+                .payload = "request-b",
+                .on_result = SessionApp.Effects.externalMsg(.external_result),
+            }) catch unreachable;
+        },
+        .cancel_external => fx.cancel(11),
         .fetched => |response| {
             model.fetch_status = response.status;
             const len = @min(response.body.len, model.body.len);
@@ -92,6 +114,14 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
             for (event.bands) |band| checksum = checksum *% 31 +% band;
             model.band_checksum = checksum;
         },
+        .external_result => |result| {
+            if (model.external_count < model.external_kinds.len) {
+                model.external_kinds[model.external_count] = result.kind;
+                model.external_outcomes[model.external_count] = result.outcome;
+                model.external_first_bytes[model.external_count] = if (result.bytes.len > 0) result.bytes[0] else 0;
+                model.external_count += 1;
+            }
+        },
         .line => model.line_count += 1,
         .exited => |exit| model.exit_code = exit.code,
         .tick => |timer| model.tick_timestamp_ns = timer.timestamp_ns,
@@ -103,6 +133,7 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
         ui.text(.{}, ui.fmt("Count {d}", .{model.count})),
         ui.text(.{}, ui.fmt("Body {s} ({d})", .{ model.bodyText(), model.fetch_status })),
         ui.text(.{}, ui.fmt("Lines {d} Exit {d} Tick {d} Stamp {d}", .{ model.line_count, model.exit_code, model.tick_timestamp_ns, model.stamp_ms })),
+        ui.text(.{}, ui.fmt("External {d} {d}:{d} {d}:{d}", .{ model.external_count, model.external_kinds[0], model.external_first_bytes[0], model.external_kinds[1], model.external_first_bytes[1] })),
         ui.button(.{ .on_press = .increment }, "Increment"),
     });
 }
@@ -113,6 +144,8 @@ fn sessionCommand(name: []const u8) ?SessionMsg {
     if (std.mem.eql(u8, name, "session.fetch")) return .start_fetch;
     if (std.mem.eql(u8, name, "session.spawn")) return .start_spawn;
     if (std.mem.eql(u8, name, "session.audio")) return .start_audio;
+    if (std.mem.eql(u8, name, "session.external")) return .start_external;
+    if (std.mem.eql(u8, name, "session.external-cancel")) return .cancel_external;
     return null;
 }
 
@@ -209,6 +242,12 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.fetch", .window_id = 1 } });
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.spawn", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.external", .window_id = 1 } });
+
+    const first_external = app_state.effects.pendingExternalAt(0).?;
+    const second_external = app_state.effects.pendingExternalAt(1).?;
+    try std.testing.expectEqual(@as(u32, 101), first_external.kind);
+    try std.testing.expectEqual(@as(u32, 102), second_external.kind);
 
     // The world answers: one stdout line, a clean exit, and the fetch
     // response. Draining happens on the wake dispatch, which journals
@@ -216,6 +255,10 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
     try app_state.effects.feedLine(2, "probe-line-1");
     try app_state.effects.feedExit(2, 0);
     try app_state.effects.feedResponse(1, 200, "hello-from-the-network");
+    // Complete in reverse request order. The journal must preserve both
+    // the issue identities and this result order without live work.
+    try app_state.effects.feedExternalResult(second_external.request_id, .failure, "B-result");
+    try app_state.effects.feedExternalResult(first_external.request_id, .success, "A-result");
     try harness.runtime.dispatchPlatformEvent(app, .wake);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
@@ -277,6 +320,51 @@ fn replayIntoFreshApp(gpa: std.mem.Allocator, journal_bytes: []const u8, web_lay
     };
 }
 
+fn recordExternalOnlySession(gpa: std.mem.Allocator, buffer: *JournalBuffer, executor: effects_mod.EffectExecutor, cancel_first: bool) !RecordedSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(SessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = executor;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.external", .window_id = 1 } });
+    if (cancel_first) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.external-cancel", .window_id = 1 } });
+        const remaining = app_state.effects.pendingExternalAt(0).?;
+        try std.testing.expectEqual(@as(u64, 12), remaining.key);
+        try app_state.effects.feedExternalResult(remaining.request_id, .success, "remaining");
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(usize, 0), app_state.effects.activeCount());
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
 test "a recorded session replays to identical model state and fingerprints" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
@@ -294,12 +382,55 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expect(recorded.model.stamp_ms != 0);
     try std.testing.expectEqual(@as(u32, 1), recorded.model.spectrum_count);
     try std.testing.expect(recorded.model.band_checksum != 0);
+    try std.testing.expectEqual(@as(usize, 2), recorded.model.external_count);
+    try std.testing.expectEqual(@as(u32, 102), recorded.model.external_kinds[0]);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.failed, recorded.model.external_outcomes[0]);
+    try std.testing.expectEqual(@as(u8, 'B'), recorded.model.external_first_bytes[0]);
+    try std.testing.expectEqual(@as(u32, 101), recorded.model.external_kinds[1]);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.ok, recorded.model.external_outcomes[1]);
+    try std.testing.expectEqual(@as(u8, 'A'), recorded.model.external_first_bytes[1]);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());
     try std.testing.expect(replayed.report.events_replayed > 0);
-    try std.testing.expectEqual(@as(u64, 5), replayed.report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 7), replayed.report.effects_fed);
     try std.testing.expect(replayed.report.checkpoints_verified > 0);
+    try std.testing.expectEqualDeep(recorded.model, replayed.model);
+    try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
+}
+
+test "adapter-unavailable accepted terminals retire and replay without a live adapter" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorded = try recordExternalOnlySession(gpa, buffer, .real, false);
+    try std.testing.expectEqual(@as(usize, 2), recorded.model.external_count);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.adapter_unavailable, recorded.model.external_outcomes[0]);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.adapter_unavailable, recorded.model.external_outcomes[1]);
+
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expectEqual(@as(u64, 2), replayed.report.effects_fed);
+    try std.testing.expectEqualDeep(recorded.model, replayed.model);
+    try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
+}
+
+test "SDK cancellation records and replays before a later adapter success" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorded = try recordExternalOnlySession(gpa, buffer, .fake, true);
+    try std.testing.expectEqual(@as(usize, 2), recorded.model.external_count);
+    try std.testing.expectEqual(@as(u32, 101), recorded.model.external_kinds[0]);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.cancelled, recorded.model.external_outcomes[0]);
+    try std.testing.expectEqual(@as(u32, 102), recorded.model.external_kinds[1]);
+    try std.testing.expectEqual(effects_mod.EffectExternalOutcome.ok, recorded.model.external_outcomes[1]);
+
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expectEqual(@as(u64, 2), replayed.report.effects_fed);
     try std.testing.expectEqualDeep(recorded.model, replayed.model);
     try std.testing.expectEqual(recorded.fingerprint, replayed.fingerprint);
 }
@@ -368,6 +499,34 @@ test "a tampered effect payload fails verification loudly" {
     try std.testing.expect(!replayed.report.ok());
     try std.testing.expect(replayed.report.mismatch_count >= 1);
     try std.testing.expectEqual(session_replay.ReplayMismatchKind.fingerprint, replayed.report.mismatches[0].kind);
+}
+
+test "tampered external request identity fails replay before model fingerprint verification" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    _ = try recordReferenceSession(gpa, buffer, true);
+
+    var request_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("request-a", &request_hash, .{});
+    const bytes = buffer.bytes[0..buffer.len];
+    const at = std.mem.indexOf(u8, bytes, &request_hash) orelse unreachable;
+    bytes[at] ^= 0x80;
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(SessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+    defer app_state.deinit();
+
+    const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+    });
+    try std.testing.expectError(error.ReplayEffectDivergence, result);
 }
 
 test "journaled effects that no replayed request matches name the divergence" {
