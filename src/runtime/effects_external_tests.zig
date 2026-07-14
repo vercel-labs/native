@@ -419,6 +419,96 @@ test "an undrained external terminal keeps its key reserved across effect kinds"
     try std.testing.expectEqual(@as(usize, 0), effects.pendingHostCount());
 }
 
+test "external slot reuse does not revive a cancelled spawn line" {
+    var effects = ExternalEffects.init(std.heap.page_allocator);
+    defer effects.deinit();
+    effects.executor = .fake;
+
+    effects.spawn(.{
+        .key = stream_key,
+        .argv = &.{"cancelled-stream"},
+        .on_line = ExternalEffects.lineMsg(.line),
+        .on_exit = ExternalEffects.exitMsg(.exited),
+    });
+    try effects.feedLine(stream_key, "must-not-deliver");
+    effects.cancel(stream_key);
+    _ = try effects.external(externalOptions(external_key, 1, "reuses-slot-zero"));
+
+    var line_count: usize = 0;
+    while (effects.takeMsg()) |msg| switch (msg) {
+        .line => line_count += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 0), line_count);
+}
+
+test "drain window counts a stale physical pop without taking newer work" {
+    var effects = ExternalEffects.init(std.heap.page_allocator);
+    defer effects.deinit();
+    effects.executor = .fake;
+
+    effects.spawn(.{
+        .key = stream_key,
+        .argv = &.{"cancelled-stream"},
+        .on_line = ExternalEffects.lineMsg(.line),
+        .on_exit = ExternalEffects.exitMsg(.exited),
+    });
+    try effects.feedLine(stream_key, "stale");
+    effects.cancel(stream_key);
+    const request_id = try effects.external(externalOptions(external_key, 1, "newer"));
+
+    {
+        var window: ExternalEffects.DrainWindow = undefined;
+        effects.beginDrainWindow(&window);
+        defer effects.finishDrainWindow(&window);
+        try effects.feedExternalResult(request_id, .success, "next-window");
+
+        var result_count: usize = 0;
+        while (effects.takeMsgInDrainWindow(&window)) |msg| switch (msg) {
+            .result => result_count += 1,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, 0), result_count);
+    }
+
+    switch (effects.takeMsg().?) {
+        .result => |result| try std.testing.expectEqualStrings("next-window", result.bytes),
+        else => return error.ExpectedDeferredExternalResult,
+    }
+}
+
+test "drain window pending prefix shrinks when overflow evicts an old entry" {
+    var effects = ExternalEffects.init(std.heap.page_allocator);
+    defer effects.deinit();
+    effects.executor = .fake;
+
+    for (0..effects_mod.max_effect_pending_exits) |index| {
+        effects.spawn(.{
+            .key = @intCast(index + 1),
+            .argv = &.{},
+            .on_exit = ExternalEffects.exitMsg(.exited),
+        });
+    }
+
+    var window_count: usize = 0;
+    {
+        var window: ExternalEffects.DrainWindow = undefined;
+        effects.beginDrainWindow(&window);
+        defer effects.finishDrainWindow(&window);
+
+        try std.testing.expect(effects.takeMsgInDrainWindow(&window) != null);
+        window_count += 1;
+        effects.spawn(.{ .key = 10_001, .argv = &.{}, .on_exit = ExternalEffects.exitMsg(.exited) });
+        effects.spawn(.{ .key = 10_002, .argv = &.{}, .on_exit = ExternalEffects.exitMsg(.exited) });
+        while (effects.takeMsgInDrainWindow(&window)) |_| window_count += 1;
+    }
+    try std.testing.expectEqual(effects_mod.max_effect_pending_exits - 1, window_count);
+
+    var deferred_count: usize = 0;
+    while (effects.takeMsg()) |_| deferred_count += 1;
+    try std.testing.expectEqual(@as(usize, 2), deferred_count);
+}
+
 test "external cancellation merges with worker results in global insertion order" {
     var h = try Harness.create(.fake, null);
     defer h.destroy();
@@ -530,6 +620,30 @@ test "live cancellation forwards once and late completion is stale" {
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.result_count);
     try std.testing.expectEqual(effects_mod.EffectExternalOutcome.cancelled, h.app_state.model.outcomes[0]);
+}
+
+test "worker completion is stale after another effect kind reuses its slot" {
+    var capturing = CapturingAdapter{};
+    var h = try Harness.create(.real, capturing.adapter());
+    defer h.destroy();
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .issue_one);
+    const completion = capturing.completion.?;
+    try completion.complete(.success, "first");
+    try h.drainWakes();
+
+    // The external request used the first slot. Reclaim it, then make a
+    // fake spawn claim that exact slot before the retained completion is
+    // called from a worker.
+    h.app_state.effects.executor = .fake;
+    h.app_state.effects.spawn(.{ .key = stream_key, .argv = &.{"reused-slot"} });
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingSpawnCount());
+
+    var gate = std.atomic.Value(bool).init(true);
+    var status: CompletionStatus = .pending;
+    const worker = try std.Thread.spawn(.{}, completeAfterGate, .{ completion, &gate, &status });
+    worker.join();
+    try std.testing.expectEqual(CompletionStatus.stale, status);
 }
 
 const CompletionStatus = enum(u8) { pending, accepted, duplicate, stale, other };
