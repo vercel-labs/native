@@ -6,11 +6,12 @@
 //! a session header, every dispatched platform event (payload + implicit
 //! ordinal), every effect RESULT the drain delivered to `update` (fetch
 //! response bytes, subprocess lines and exits, file reads, clipboard
-//! reads), and verification checkpoints (state fingerprints per published
+//! reads, application-defined external results), and verification
+//! checkpoints (state fingerprints per published
 //! frame, plus pixel hashes at screenshot marks). Replaying the journal
 //! through the same dispatch path — with effects stubbed from the
-//! journaled results, so no process, network, file, or clipboard is
-//! touched — reproduces the same model states.
+//! journaled results, so no process, network, file, clipboard, or live
+//! application adapter is touched — reproduces the same model states.
 //!
 //! THE INIT CONTRACT (v1, loud on purpose): the initial model is NOT
 //! serialized. Replay re-runs the app's own model init and `init_fx`,
@@ -70,8 +71,12 @@ pub const magic = "NSDKSJNL";
 /// enum orders bumps this; readers refuse other versions loudly rather
 /// than misreading yesterday's shape. v2 added the stream `buffering`
 /// flag to audio event and audio effect records; v3 added the spectrum
-/// band bytes to both (and the `.spectrum` audio kind).
-pub const format_version: u32 = 3;
+/// band bytes to both (and the `.spectrum` audio kind). Preserved
+/// pre-#119 external-effects work used v4-v6 with effect tag 9, which
+/// now belongs to `.host`; v7 adds the complete external identity and
+/// outcome fields with the collision-free `.external` tag 11 and
+/// deliberately refuses those incompatible journals.
+pub const format_version: u32 = 7;
 
 // ------------------------------------------------------------- budgets
 //
@@ -832,6 +837,10 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
     try cursor.writeBytes(&record.audio_bands);
+    try cursor.writeInt(u64, record.external_request_id);
+    try cursor.writeInt(u32, record.external_kind);
+    try cursor.writeBytes(&record.external_request_hash);
+    try cursor.writeEnum(record.external_outcome);
     return buffer[0..cursor.len];
 }
 
@@ -864,6 +873,10 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_buffering = try cursor.readBool(),
     };
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
+    record.external_request_id = try cursor.readInt(u64);
+    record.external_kind = try cursor.readInt(u32);
+    @memcpy(&record.external_request_hash, try cursor.readBytes(record.external_request_hash.len));
+    record.external_outcome = try cursor.readEnum(runtime_effects.EffectExternalOutcome);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1287,6 +1300,7 @@ test "effect codec round-trips payloads and outcomes" {
         .status = 200,
         .fetch_outcome = .ok,
     }, &buffer);
+    try testing.expectEqual(@as(u8, 3), encoded[0]);
     const decoded = try decodeEffect(encoded);
     try testing.expectEqual(runtime_effects.EffectResultKind.response, decoded.kind);
     try testing.expectEqual(@as(u64, 77), decoded.key);
@@ -1343,6 +1357,81 @@ test "effect codec round-trips payloads and outcomes" {
     const spectrum_decoded = try decodeEffect(spectrum_encoded);
     try testing.expectEqual(runtime_effects.EffectAudioEventKind.spectrum, spectrum_decoded.audio_kind);
     try testing.expectEqualSlices(u8, &spectrum_bands, &spectrum_decoded.audio_bands);
+
+    const host_encoded = try encodeEffect(.{
+        .kind = .host,
+        .key = 71,
+        .payload = "permission denied",
+        .code = 1,
+        .exit_reason = .cancelled,
+    }, &buffer);
+    try testing.expectEqual(@as(u8, 9), host_encoded[0]);
+    const host_decoded = try decodeEffect(host_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.host, host_decoded.kind);
+    try testing.expectEqual(@as(u64, 71), host_decoded.key);
+    try testing.expectEqualStrings("permission denied", host_decoded.payload);
+    try testing.expectEqual(@as(i32, 1), host_decoded.code);
+    try testing.expectEqual(runtime_effects.EffectExitReason.cancelled, host_decoded.exit_reason);
+
+    const env_encoded = try encodeEffect(.{
+        .kind = .env,
+        .key = 2,
+        .payload = "production",
+        .stderr_tail = "environmentLoaded",
+    }, &buffer);
+    try testing.expectEqual(@as(u8, 10), env_encoded[0]);
+    const env_decoded = try decodeEffect(env_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.env, env_decoded.kind);
+    try testing.expectEqual(@as(u64, 2), env_decoded.key);
+    try testing.expectEqualStrings("production", env_decoded.payload);
+    try testing.expectEqualStrings("environmentLoaded", env_decoded.stderr_tail);
+
+    const external_encoded = try encodeEffect(.{
+        .kind = .external,
+        .key = 88,
+        .payload = "page-2",
+        .external_request_id = 17,
+        .external_kind = 4001,
+        .external_request_hash = [_]u8{0xa5} ** 32,
+        .external_outcome = .ok,
+    }, &buffer);
+    try testing.expectEqual(@as(u8, 11), external_encoded[0]);
+    const external_decoded = try decodeEffect(external_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.external, external_decoded.kind);
+    try testing.expectEqual(@as(u64, 88), external_decoded.key);
+    try testing.expectEqual(@as(u64, 17), external_decoded.external_request_id);
+    try testing.expectEqual(@as(u32, 4001), external_decoded.external_kind);
+    try testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 32), &external_decoded.external_request_hash);
+    try testing.expectEqual(runtime_effects.EffectExternalOutcome.ok, external_decoded.external_outcome);
+    try testing.expectEqualStrings("page-2", external_decoded.payload);
+}
+
+test "effect wire tags remain additive" {
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(runtime_effects.EffectResultKind.line));
+    try testing.expectEqual(@as(u8, 2), @intFromEnum(runtime_effects.EffectResultKind.exit));
+    try testing.expectEqual(@as(u8, 3), @intFromEnum(runtime_effects.EffectResultKind.response));
+    try testing.expectEqual(@as(u8, 4), @intFromEnum(runtime_effects.EffectResultKind.file));
+    try testing.expectEqual(@as(u8, 5), @intFromEnum(runtime_effects.EffectResultKind.clipboard));
+    try testing.expectEqual(@as(u8, 6), @intFromEnum(runtime_effects.EffectResultKind.timer));
+    try testing.expectEqual(@as(u8, 7), @intFromEnum(runtime_effects.EffectResultKind.clock));
+    try testing.expectEqual(@as(u8, 8), @intFromEnum(runtime_effects.EffectResultKind.audio));
+    try testing.expectEqual(@as(u8, 9), @intFromEnum(runtime_effects.EffectResultKind.host));
+    try testing.expectEqual(@as(u8, 10), @intFromEnum(runtime_effects.EffectResultKind.env));
+    try testing.expectEqual(@as(u8, 11), @intFromEnum(runtime_effects.EffectResultKind.external));
+
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(runtime_effects.EffectExternalOutcome.ok));
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(runtime_effects.EffectExternalOutcome.failed));
+    try testing.expectEqual(@as(u8, 2), @intFromEnum(runtime_effects.EffectExternalOutcome.cancelled));
+    try testing.expectEqual(@as(u8, 3), @intFromEnum(runtime_effects.EffectExternalOutcome.adapter_unavailable));
+    try testing.expectEqual(@as(u8, 4), @intFromEnum(runtime_effects.EffectExternalOutcome.submit_failed));
+}
+
+test "v7 external identity adds exactly 45 bytes to every effect record" {
+    var buffer: [256]u8 = undefined;
+    const encoded = try encodeEffect(.{ .kind = .line, .key = 1 }, &buffer);
+    // The v3-v6 fixed record was 104 bytes with empty strings. V7 adds
+    // request id (8), kind (4), SHA-256 (32), and outcome (1).
+    try testing.expectEqual(@as(usize, 104 + 45), encoded.len);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {
@@ -1427,6 +1516,7 @@ test "reader walks a whole journal and stops at the end record" {
 }
 
 test "reader refuses bad magic and version skew" {
+    try testing.expectEqual(@as(u32, 7), format_version);
     var buffer: [16384]u8 = undefined;
     const len = try buildTestJournal(&buffer);
     try testing.expectError(error.JournalBadMagic, Reader.init("not a journal at all"));
@@ -1435,6 +1525,16 @@ test "reader refuses bad magic and version skew" {
     @memcpy(skewed[0..len], buffer[0..len]);
     std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version + 1, .little);
     try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
+
+    var version_three: [preamble_len]u8 = undefined;
+    @memcpy(version_three[0..magic.len], magic);
+    std.mem.writeInt(u32, version_three[magic.len..][0..4], 3, .little);
+    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&version_three));
+
+    var version_six: [preamble_len]u8 = undefined;
+    @memcpy(version_six[0..magic.len], magic);
+    std.mem.writeInt(u32, version_six[magic.len..][0..4], 6, .little);
+    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&version_six));
 }
 
 test "reader fails loudly on truncation at every boundary" {
