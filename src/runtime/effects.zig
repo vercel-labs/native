@@ -867,9 +867,10 @@ pub const EffectJournal = struct {
 };
 
 /// Tiny spin lock over `std.atomic.Mutex` (0.16 has no blocking
-/// thread mutex outside `Io`). Every guarded section here is a bounded
-/// copy of at most one bounded queue entry or external result workspace;
-/// it never blocks on I/O or calls an allocator.
+/// thread mutex outside `Io`). Hot-path guarded sections only copy
+/// bounded queue entries or result workspaces and never block on I/O or
+/// call an allocator. Shutdown-only queue clearing may free owned line
+/// buffers after every producer has stopped, when the lock is uncontended.
 const SpinMutex = struct {
     inner: std.atomic.Mutex = .unlocked,
 
@@ -1048,6 +1049,16 @@ pub fn Effects(comptime Msg: type) type {
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
+
+        /// One loop-thread drain snapshot. Results created by handling a
+        /// Msg stay outside this window and therefore land on the next
+        /// wake, preserving the same event/effect interleaving in replay.
+        pub const DrainWindow = struct {
+            pending_remaining: usize = 0,
+            queue_remaining: usize = 0,
+            external_control_remaining: usize = 0,
+            wake_deferred: bool = false,
+        };
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -2055,6 +2066,10 @@ pub fn Effects(comptime Msg: type) type {
         external_control_head: usize = 0,
         external_control_len: usize = 0,
         next_queue_order: u64 = 1,
+        /// Stack-owned loop-thread drain window. The pointer is published
+        /// under queue_mutex so producers defer exactly one wake until the
+        /// current snapshot finishes.
+        active_drain_window: ?*DrainWindow = null,
         /// Mirror of shared worker entries plus ordered external control
         /// terminals, readable without the lock so the frame path can
         /// skip idle drains cheaply.
@@ -3127,6 +3142,10 @@ pub fn Effects(comptime Msg: type) type {
             const request_id = self.takeExternalRequestId();
 
             const slot = &self.slots[slot_index];
+            if (slot.fetch_buffer) |old| {
+                self.allocator.free(old);
+                slot.fetch_buffer = null;
+            }
             slot.external_mutex.lock();
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
@@ -3141,13 +3160,14 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_external = options.on_result;
             slot.on_host = null;
             slot.cancel_requested.store(false, .release);
-            slot.cancelled_generation = 0;
+            // Keep cancelled_generation sticky: a cancelled previous
+            // occupant may still have entries in the shared queue, and
+            // its generation must remain filtered after this reuse.
             slot.external_request_id = request_id;
             slot.external_kind = options.kind;
             std.crypto.hash.sha2.Sha256.hash(options.payload, &slot.external_request_hash, .{});
             slot.external_outcome = .ok;
             slot.external_terminal = .none;
-            if (slot.fetch_buffer) |old| self.allocator.free(old);
             slot.fetch_buffer = workspace;
             slot.payload_len = options.payload.len;
             slot.body_len = 0;
@@ -3433,9 +3453,11 @@ pub fn Effects(comptime Msg: type) type {
             var forward_cancel = false;
             var request_id: u64 = 0;
             var should_wake = false;
+            var buffer_to_free: ?[]u8 = null;
             slot.external_mutex.lock();
             defer {
                 slot.external_mutex.unlock();
+                if (buffer_to_free) |buffer| self.allocator.free(buffer);
                 if (forward_cancel) {
                     if (self.external_adapter) |adapter| adapter.cancel_fn(adapter.context, request_id);
                 }
@@ -3459,7 +3481,10 @@ pub fn Effects(comptime Msg: type) type {
                 // has a global queue position. Rewrite it in place rather
                 // than enqueueing a second terminal.
                 self.rewriteExternalQueuedOutcomeLocked(slot, request_id, .cancelled);
-                self.freeExternalBuffer(slot);
+                buffer_to_free = slot.fetch_buffer;
+                slot.fetch_buffer = null;
+                slot.payload_len = 0;
+                slot.body_len = 0;
                 slot.external_outcome = .cancelled;
                 slot.external_terminal = .sdk_owned;
                 return;
@@ -3855,12 +3880,49 @@ pub fn Effects(comptime Msg: type) type {
             return self.pending_exit_len > 0 or self.queue_count.load(.acquire) > 0;
         }
 
+        /// Freeze the loop-thread-visible completion prefixes for one
+        /// update batch. `finishDrainWindow` must run through `defer`.
+        pub fn beginDrainWindow(self: *Self, window: *DrainWindow) void {
+            self.queue_mutex.lock();
+            defer self.queue_mutex.unlock();
+            std.debug.assert(self.active_drain_window == null);
+            window.* = .{
+                .pending_remaining = self.pending_exit_len,
+                .queue_remaining = self.queue_len,
+                .external_control_remaining = self.external_control_len,
+            };
+            self.active_drain_window = window;
+        }
+
+        /// Close a drain snapshot and release one deferred producer wake.
+        pub fn finishDrainWindow(self: *Self, window: *DrainWindow) void {
+            self.queue_mutex.lock();
+            std.debug.assert(self.active_drain_window == window);
+            self.active_drain_window = null;
+            const wake = window.wake_deferred;
+            self.queue_mutex.unlock();
+            if (wake) self.wakePlatform();
+        }
+
         /// Pop the next completion as a Msg. Loop-thread only. The
         /// returned Msg's line payload stays valid until the next call.
         pub fn takeMsg(self: *Self) ?Msg {
+            std.debug.assert(self.active_drain_window == null);
+            return self.takeMsgInner(null);
+        }
+
+        /// Pop only completions that existed when `window` began. Every
+        /// physical queue pop consumes its prefix budget, including a
+        /// stale entry that produces no Msg.
+        pub fn takeMsgInDrainWindow(self: *Self, window: *DrainWindow) ?Msg {
+            std.debug.assert(self.active_drain_window == window);
+            return self.takeMsgInner(window);
+        }
+
+        fn takeMsgInner(self: *Self, window: ?*DrainWindow) ?Msg {
             self.reclaimSlots();
             while (true) {
-                if (self.takePendingMsg()) |pending| {
+                if (self.takePendingMsgInDrainWindow(window)) |pending| {
                     switch (pending) {
                         .exit => |entry| {
                             const exit_fn = entry.exit_fn orelse continue;
@@ -3966,7 +4028,7 @@ pub fn Effects(comptime Msg: type) type {
                         },
                     }
                 }
-                if (!self.dequeueInto(&self.drain_scratch)) return null;
+                if (!self.dequeueInto(&self.drain_scratch, window)) return null;
                 const entry = &self.drain_scratch;
                 const slot = &self.slots[entry.slot_index];
                 const cancelled = slot.cancelled_generation == entry.generation and entry.generation != 0;
@@ -4166,6 +4228,8 @@ pub fn Effects(comptime Msg: type) type {
                         return clipboard_fn(result);
                     },
                     .external => {
+                        if (self.drain_fetch_body) |old| self.allocator.free(old);
+                        self.drain_fetch_body = null;
                         slot.external_mutex.lock();
                         if (entry.generation != slot.generation or
                             entry.external_request_id != slot.external_request_id)
@@ -4175,7 +4239,6 @@ pub fn Effects(comptime Msg: type) type {
                         }
                         const external_cancelled = entry.external_outcome == .cancelled or
                             (slot.cancelled_generation == entry.generation and entry.generation != 0);
-                        if (self.drain_fetch_body) |old| self.allocator.free(old);
                         self.drain_fetch_body = slot.fetch_buffer;
                         slot.fetch_buffer = null;
                         const external_fn = entry.external_fn;
@@ -4861,8 +4924,30 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn wakeHost(self: *Self) void {
+            self.queue_mutex.lock();
+            if (self.active_drain_window) |window| {
+                window.wake_deferred = true;
+                self.queue_mutex.unlock();
+                return;
+            }
+            self.queue_mutex.unlock();
+            self.wakePlatform();
+        }
+
+        fn wakePlatform(self: *Self) void {
             const services = self.services orelse return;
             services.wake() catch {};
+        }
+
+        /// Decide an enqueue wake while queue_mutex is held. A producer
+        /// inside a drain window hands its wake to the window closer;
+        /// otherwise the ordinary empty-to-nonempty edge owns it.
+        fn queueWakeDecisionLocked(self: *Self, was_empty: bool) bool {
+            if (self.active_drain_window) |window| {
+                window.wake_deferred = true;
+                return false;
+            }
+            return was_empty;
         }
 
         fn takeExternalRequestId(self: *Self) u64 {
@@ -4890,12 +4975,13 @@ pub fn Effects(comptime Msg: type) type {
             };
             self.queue_mutex.lock();
             std.debug.assert(self.external_control_len < self.external_control_queue.len);
-            const should_wake = self.queue_len == 0 and self.external_control_len == 0;
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
             entry.order = self.takeQueueOrderLocked();
             const tail = (self.external_control_head + self.external_control_len) % self.external_control_queue.len;
             self.external_control_queue[tail] = entry;
             self.external_control_len += 1;
             self.queue_count.store(self.queue_len + self.external_control_len, .release);
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
             self.queue_mutex.unlock();
             slot.external_outcome = outcome;
             slot.external_terminal = .sdk_owned;
@@ -4959,8 +5045,12 @@ pub fn Effects(comptime Msg: type) type {
                 slot.external_mutex.unlock();
                 if (wake) self.wakeHost();
             }
-            if (slot.kind != .external or
-                slot.generation != token.generation or
+            // Zero is the disarmed external token. Reclaim clears it
+            // under this mutex before publishing `.idle`, so a stale
+            // completion never reads generation/kind while another
+            // effect kind rewrites the reused slot on the UI thread.
+            if (slot.external_request_id == 0) return error.ExternalEffectStaleResult;
+            if (slot.generation != token.generation or
                 slot.external_request_id != token.request_id or
                 self.shutdown.load(.acquire))
             {
@@ -4983,7 +5073,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.queue_mutex.unlock();
                 return error.ExternalEffectQueueFull;
             }
-            const should_wake = self.queue_len == 0 and self.external_control_len == 0;
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
             const workspace = slot.fetch_buffer orelse {
                 self.queue_mutex.unlock();
                 return error.ExternalEffectStaleResult;
@@ -5014,6 +5104,7 @@ pub fn Effects(comptime Msg: type) type {
             self.queue[tail] = entry;
             self.queue_len += 1;
             self.queue_count.store(self.queue_len + self.external_control_len, .release);
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
             self.queue_mutex.unlock();
             wake = should_wake;
         }
@@ -5192,15 +5283,6 @@ pub fn Effects(comptime Msg: type) type {
             slot.state.store(.idle, .release);
         }
 
-        fn freeExternalBuffer(self: *Self, slot: *Slot) void {
-            if (slot.fetch_buffer) |buffer| {
-                self.allocator.free(buffer);
-                slot.fetch_buffer = null;
-            }
-            slot.payload_len = 0;
-            slot.body_len = 0;
-        }
-
         /// Queue an exit produced on the loop thread (rejections, fake
         /// cancel/exit fallbacks) for the next drain.
         fn deliverLoopExit(self: *Self, exit: EffectExit, exit_fn: ?ExitMsgFn) void {
@@ -5230,6 +5312,12 @@ pub fn Effects(comptime Msg: type) type {
         fn deliverPending(self: *Self, pending: PendingMsg) void {
             if (self.pending_exit_len == max_effect_pending_exits) {
                 const oldest = &self.pending_exits[self.pending_exit_head];
+                // The ring replaced an entry that belonged to the active
+                // snapshot. Shrink that prefix so the replacement waits
+                // for the next window instead of spending the old budget.
+                if (self.active_drain_window) |window| {
+                    if (window.pending_remaining > 0) window.pending_remaining -= 1;
+                }
                 self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
                 self.pending_exit_len -= 1;
                 var replacement = pending;
@@ -5245,11 +5333,15 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
-        fn takePendingMsg(self: *Self) ?PendingMsg {
+        fn takePendingMsgInDrainWindow(self: *Self, window: ?*DrainWindow) ?PendingMsg {
+            if (window) |bounded| {
+                if (bounded.pending_remaining == 0) return null;
+            }
             if (self.pending_exit_len == 0) return null;
             const pending = self.pending_exits[self.pending_exit_head];
             self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
             self.pending_exit_len -= 1;
+            if (window) |bounded| bounded.pending_remaining -= 1;
             return pending;
         }
 
@@ -5344,7 +5436,12 @@ pub fn Effects(comptime Msg: type) type {
                     .done => {
                         if (slot.kind == .external) {
                             slot.external_mutex.lock();
-                            if (slot.state.load(.acquire) == .done) slot.state.store(.idle, .release);
+                            if (slot.state.load(.acquire) == .done) {
+                                // Disarm stale adapter completions before
+                                // another effect kind may claim this slot.
+                                slot.external_request_id = 0;
+                                slot.state.store(.idle, .release);
+                            }
                             slot.external_mutex.unlock();
                         } else {
                             joinWorker(slot);
@@ -5385,20 +5482,26 @@ pub fn Effects(comptime Msg: type) type {
             return order;
         }
 
-        fn dequeueInto(self: *Self, out: *Entry) bool {
+        fn dequeueInto(self: *Self, out: *Entry, window: ?*DrainWindow) bool {
             self.queue_mutex.lock();
             defer self.queue_mutex.unlock();
-            if (self.queue_len == 0 and self.external_control_len == 0) return false;
-            const take_control = self.external_control_len > 0 and
-                (self.queue_len == 0 or self.external_control_queue[self.external_control_head].order < self.queue[self.queue_head].order);
+            const queue_available = self.queue_len > 0 and
+                (window == null or window.?.queue_remaining > 0);
+            const control_available = self.external_control_len > 0 and
+                (window == null or window.?.external_control_remaining > 0);
+            if (!queue_available and !control_available) return false;
+            const take_control = control_available and
+                (!queue_available or self.external_control_queue[self.external_control_head].order < self.queue[self.queue_head].order);
             if (take_control) {
                 out.* = self.external_control_queue[self.external_control_head];
                 self.external_control_head = (self.external_control_head + 1) % self.external_control_queue.len;
                 self.external_control_len -= 1;
+                if (window) |bounded| bounded.external_control_remaining -= 1;
             } else {
                 out.* = self.queue[self.queue_head];
                 self.queue_head = (self.queue_head + 1) % max_effect_queue_entries;
                 self.queue_len -= 1;
+                if (window) |bounded| bounded.queue_remaining -= 1;
             }
             self.queue_count.store(self.queue_len + self.external_control_len, .release);
             return true;
