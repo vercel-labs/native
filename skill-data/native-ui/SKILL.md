@@ -687,6 +687,32 @@ Clipboard rules:
 - Writes are text/plain and replace the clipboard whole; rich-data clipboard stays on the runtime API (`runtime.writeClipboardData`).
 - In the fake executor: `pendingClipboardAt(0)` records `key`/`op`/`text` for assertions; `feedClipboardResult(key, .ok, "pasted")` answers a read, `feedClipboardResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed. Under the real executor the test harness's null platform records the write — assert `harness.null_platform.lastClipboardData()`.
 
+`fx.external` is the bounded seam for app-defined native/core work that should still obey TEA, deterministic tests, and session replay. A fixed `u32` kind plus binary payload crosses to an application-owned `ExternalEffectAdapter`; accepted results return through `Effects.externalMsg` on the UI thread:
+
+```zig
+const CoreOperation = enum(u32) { list_items = 1 };
+
+.load => {
+    const request_id = fx.external(.{
+        .key = model.next_request_key,
+        .kind = @intFromEnum(CoreOperation.list_items),
+        .payload = model.pageRequestBytes(),
+        .on_result = Effects.externalMsg(.core_result),
+    }) catch |err| return model.noteCoreIssueError(err);
+    model.active_request_id = request_id;
+},
+.cancel_load => fx.cancel(model.next_request_key),
+.core_result => |result| model.applyCoreResult(result), // COPY result.bytes
+```
+
+`on_result` is required: every accepted request has one terminal lifecycle Msg and therefore retires and replays exactly. Bind `app_state.effects.bindExternalAdapter(adapter)` after app initialization and before the first request. `submit_fn` and `cancel_fn` run on the UI thread and must only copy/enqueue control data; `submit_fn` must never invoke completion inline. Workers call `completion.complete(.success | .failure, bytes)`. Adapters cannot submit SDK-owned cancellation, transport, or capacity outcomes. `shutdown_fn` must wait until all workers that hold a completion have stopped.
+
+Local issuing is synchronous and loud: `external` returns `ExternalEffectRequestTooLarge`, `ExternalEffectDuplicateKey`, `ExternalEffectPendingFull`, or `ExternalEffectAllocationFailed`; no request or Msg follows. Once the shared slot and 256 KiB workspace are accepted, it returns the SDK request id. A missing adapter or synchronous `submit_fn` refusal is then the request's guaranteed async `.adapter_unavailable` or `.submit_failed` result, so recording and replay do not depend on a live adapter. Requests are at most 64 KiB, results 256 KiB, and external requests share the 16 ordinary effect slots. Workspace allocation happens through the app allocator on the UI thread; completion only copies into it, so no worker calls an unrestricted app allocator.
+
+Completion returns `ExternalEffectResultTooLarge` or `ExternalEffectQueueFull` without consuming the request, so the adapter may retry after correcting the payload or after the UI drains capacity. One accepted completion wins; another is `ExternalEffectDuplicateResult`. App cancellation forwards the request id once and makes later completion `ExternalEffectStaleResult`. Cancellation, adapter absence, and submit refusal share a bounded 16-entry SDK control-terminal queue, one per external slot, merged with worker completions by global insertion order. Producer wakes are edge-triggered. The UI drain consumes one queue snapshot; work created by that batch waits for the next batch, with one re-armed wake, so recording and replay keep the same event boundary. Only the UI drain constructs Msgs.
+
+Fake tests set `effects.executor = .fake`, inspect accepted requests in issue order with `pendingExternalCount` / `pendingExternalAt`, and answer with `feedExternalResult(request_id, .success | .failure, bytes)`. Session journals include request id, key, kind, request-payload SHA-256, result, and delivery order. Replay validates that identity before feeding the parked fake request, so changed key/kind/payload fails before model fingerprint verification and no live adapter runs.
+
 `fx.startTimer` / `fx.cancelTimer` are key-based timers on the same channel — an auto-refresh, a poll, a debounce — one-shot or repeating, each fire delivered as one `on_fire` Msg. Timers are their own fixed table (16, `max_effect_timers`) and their own key namespace: they consume none of the 16 effect slots and never collide with spawn/fetch/file keys:
 
 ```zig
