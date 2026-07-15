@@ -44,10 +44,8 @@ const render_fingerprints = @import("render_fingerprints.zig");
 const vector = @import("vector.zig");
 const font_ttf = @import("font_ttf.zig");
 
-/// Element budget for one glyph outline: the bundled face's densest
-/// glyphs stay well under this, and the registered Japanese boundary
-/// fixture emits 243 elements.
-const reference_glyph_path_capacity: usize = 256;
+/// Element budget for every simple glyph accepted by the bounded parser.
+const reference_glyph_path_capacity: usize = font_ttf.max_simple_glyph_path_elements;
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
@@ -1074,7 +1072,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);

@@ -207,13 +207,17 @@ test "mono outlines rasterize within the vector budgets" {
 test "registered Japanese outlines render at the parser boundary" {
     const face = try font_ttf.Face.parse(japanese_boundary_bytes);
     const expected = [_]u21{ 'ば', 'ぱ', 'ぼ', 'ぽ', 'ゑ', '鬱' };
+    var max_emitted: usize = 0;
     for (expected) |codepoint| {
         const glyph = face.glyphIndex(codepoint);
         try std.testing.expect(glyph != 0);
-        var builder = vector.PathBuilder(256){};
+        var builder = vector.PathBuilder(font_ttf.max_simple_glyph_path_elements){};
         try face.glyphOutline(glyph, Affine.identity(), &builder);
         try std.testing.expect(builder.slice().len > 0);
+        max_emitted = @max(max_emitted, builder.slice().len);
     }
+    try std.testing.expectEqual(@as(usize, 243), max_emitted);
+    try std.testing.expectEqual(@as(usize, 289), font_ttf.max_simple_glyph_path_elements);
 
     var mapped: usize = 0;
     var codepoint: u21 = 0;

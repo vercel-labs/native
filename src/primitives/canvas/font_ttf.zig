@@ -34,6 +34,9 @@ pub const Error = error{
 
 pub const max_glyph_points: usize = 237;
 pub const max_glyph_contours: usize = 26;
+/// A simple glyph emits at most one segment per point plus one move and
+/// one close for each contour.
+pub const max_simple_glyph_path_elements: usize = max_glyph_points + 2 * max_glyph_contours;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
 
