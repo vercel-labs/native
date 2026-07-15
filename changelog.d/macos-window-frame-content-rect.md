@@ -1,0 +1,2 @@
+fix: **macOS shell-view geometry**: `WINDOW_FRAME` events now emit the window's content rect instead of the outer frame, ending the per-frame relayout fight with `RESIZE` events that clipped the bottom titlebar-height of the canvas and grew `restore_state` windows by one titlebar per launch.
+- **Cross-display moves**: the window delegate now re-emits the resize chain on `windowDidChangeScreen:` and `windowDidChangeBackingProperties:`, so dragging to another display refreshes layout immediately instead of waiting for the next key-window change.
