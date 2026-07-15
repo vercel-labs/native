@@ -10,7 +10,7 @@
 //! derives its advance table from this face's `cmap`/`hmtx`, so layout
 //! measures with exactly the advances these outlines are inked at.
 //! All parsing is bounds-checked against fixed budgets sized from the
-//! bundled and registered-face fixtures (138 points / 24 contours per
+//! bundled and registered-face fixtures (237 points / 26 contours per
 //! simple glyph), and any glyph beyond the budget fails with a recoverable
 //! error so callers can fall back to block glyphs.
 //!
@@ -32,8 +32,8 @@ pub const Error = error{
     FontGlyphTooComplex,
 } || @import("vector.zig").Error;
 
-pub const max_glyph_points: usize = 138;
-pub const max_glyph_contours: usize = 24;
+pub const max_glyph_points: usize = 237;
+pub const max_glyph_contours: usize = 26;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
 

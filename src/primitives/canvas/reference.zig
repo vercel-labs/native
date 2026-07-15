@@ -45,7 +45,8 @@ const vector = @import("vector.zig");
 const font_ttf = @import("font_ttf.zig");
 
 /// Element budget for one glyph outline: the bundled face's densest
-/// glyphs stay well under this (maxp: 96 points per simple glyph).
+/// glyphs stay well under this, and the registered Japanese boundary
+/// fixture emits 243 elements.
 const reference_glyph_path_capacity: usize = 256;
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
