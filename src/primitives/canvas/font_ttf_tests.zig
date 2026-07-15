@@ -11,6 +11,7 @@ const drawing = @import("drawing.zig");
 
 const PointF = geometry.PointF;
 const Affine = drawing.Affine;
+const kana_boundary_bytes = @embedFile("testdata/noto-kana-boundary/NotoSansJP-kana-boundary.ttf");
 
 const grid_size: usize = 24;
 
@@ -201,6 +202,21 @@ test "mono outlines rasterize within the vector budgets" {
         try face.glyphOutline(glyph, Affine.identity(), &builder);
         try std.testing.expect(builder.slice().len > 0);
     }
+}
+
+test "registered kana outlines render at the parser boundary" {
+    const face = try font_ttf.Face.parse(kana_boundary_bytes);
+    var mapped: usize = 0;
+    var codepoint: u21 = 0;
+    while (codepoint <= 0xFFFF) : (codepoint += 1) {
+        const glyph = face.glyphIndex(codepoint);
+        if (glyph == 0) continue;
+        var builder = vector.PathBuilder(256){};
+        try face.glyphOutline(glyph, Affine.identity(), &builder);
+        try std.testing.expect(builder.slice().len > 0);
+        mapped += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), mapped);
 }
 
 test "corrupt font bytes fail to parse without crashing" {

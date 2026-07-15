@@ -9,10 +9,10 @@
 //! shaping, no CFF. The deterministic estimator (`text_metrics.zig`)
 //! derives its advance table from this face's `cmap`/`hmtx`, so layout
 //! measures with exactly the advances these outlines are inked at.
-//! All parsing is bounds-checked against fixed budgets sized from
-//! the bundled face's `maxp` (96 points / 16 contours per simple glyph,
-//! composites well under both), and any glyph beyond the budget fails
-//! with a recoverable error so callers can fall back to block glyphs.
+//! All parsing is bounds-checked against fixed budgets sized from the
+//! bundled and registered-face fixtures (138 points / 24 contours per
+//! simple glyph), and any glyph beyond the budget fails with a recoverable
+//! error so callers can fall back to block glyphs.
 //!
 //! The bundled face is embedded at comptime and its table directory is
 //! validated at comptime: a corrupt bundle is a compile error, and the
@@ -32,7 +32,7 @@ pub const Error = error{
     FontGlyphTooComplex,
 } || @import("vector.zig").Error;
 
-pub const max_glyph_points: usize = 128;
+pub const max_glyph_points: usize = 138;
 pub const max_glyph_contours: usize = 24;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
