@@ -17,8 +17,11 @@
 //! the same shape over the platform pasteboard — the seam the
 //! runtime's cmd+C copy uses — executed synchronously on the loop
 //! thread (pasteboards are main-thread services), so apps stop
-//! spawning `pbcopy`. The model is
-//! never touched off-thread: workers post
+//! spawning `pbcopy`. Application-defined external effects reuse those
+//! same slots and queues: a fixed-width operation kind plus bounded bytes
+//! goes to a live adapter (or deterministic fake), and its thread-safe
+//! completion becomes an ordinary Msg at drain. The model is never
+//! touched off-thread: workers post
 //! fixed-size completion records into a bounded MPSC queue, nudge the
 //! platform loop through `PlatformServices.wake_fn`, and the loop thread
 //! drains the queue and dispatches Msgs through the app's `update`.
@@ -58,7 +61,8 @@
 //!   and nothing for that fetch after it.
 //!
 //! Payload lifetime: `EffectLine.line`, `EffectResponse.body`,
-//! `EffectExit.output`, and `EffectExit.stderr_tail` point into drain
+//! `EffectExit.output`, `EffectExit.stderr_tail`, and
+//! `EffectExternalResult.bytes` point into drain
 //! scratch that is recycled on the next drained Msg — `update` must copy
 //! what it keeps, exactly like `canvas.TextInputEvent` payloads.
 
@@ -67,7 +71,8 @@ const builtin = @import("builtin");
 const platform = @import("../platform/root.zig");
 const runtime_clock = @import("clock.zig");
 
-/// Maximum in-flight effects (spawn slots / worker threads).
+/// Maximum in-flight slot-backed effects (spawn, fetch, file, clipboard,
+/// and application-defined external requests).
 pub const max_effects: usize = 16;
 /// Maximum argv entries per spawn.
 pub const max_effect_argv: usize = 16;
@@ -116,6 +121,12 @@ comptime {
 }
 /// Completion queue depth (lines + exits from all workers combined).
 pub const max_effect_queue_entries: usize = 64;
+/// Maximum bytes copied into one application-defined external request.
+/// This is a command/control seam for a native core, not a bulk-media
+/// transport; video pixels and other large streams stay out of it.
+pub const max_effect_external_request_bytes: usize = 64 * 1024;
+/// Maximum bytes copied from one application-defined external result.
+pub const max_effect_external_result_bytes: usize = 256 * 1024;
 /// Main-thread pending-exit ring (spawn rejections, fake-executor exits
 /// that found the queue full). Sized above the slot count so a burst of
 /// rejected spawns in one update still surfaces individually.
@@ -489,6 +500,120 @@ pub const EffectClipboardResult = struct {
     dropped_before: u32 = 0,
 };
 
+/// Terminal outcome of an accepted application-defined external request.
+/// Issue/capacity failures are synchronous `ExternalEffectIssueError`s;
+/// only accepted requests enter this asynchronous result channel.
+pub const EffectExternalOutcome = enum(u8) {
+    /// The adapter completed the operation; `bytes` is its result.
+    ok = 0,
+    /// The adapter completed the operation with an application failure.
+    failed = 1,
+    /// `cancel(key)` retired the request. A later adapter completion is
+    /// rejected as stale and never reaches the model.
+    cancelled = 2,
+    /// The request was accepted, but no live adapter was bound. SDK-owned
+    /// and journaled so replay observes the same terminal without a live
+    /// adapter.
+    adapter_unavailable = 3,
+    /// The request was accepted, but `submit_fn` refused it
+    /// synchronously. SDK-owned and journaled like cancellation.
+    submit_failed = 4,
+};
+
+/// Outcomes a live adapter may submit. SDK-owned terminal states such as
+/// cancellation are deliberately absent, so an adapter cannot forge them.
+pub const ExternalEffectAdapterOutcome = enum(u8) { success, failure };
+
+/// Loud synchronous refusal from `Effects.external`. No request was
+/// accepted and no asynchronous result follows when one of these is
+/// returned.
+pub const ExternalEffectIssueError = error{
+    ExternalEffectRequestTooLarge,
+    ExternalEffectDuplicateKey,
+    ExternalEffectPendingFull,
+    ExternalEffectAllocationFailed,
+};
+
+/// One typed/byte request crossing the application-defined boundary.
+/// `adapter_id`, operation `kind`, and `schema_version` are independent
+/// fixed-width application identities suitable for a C ABI; `payload` is
+/// binary-safe. The live adapter borrows `payload` only for `submit_fn`
+/// and must copy it before returning.
+pub const EffectExternalRequest = struct {
+    request_id: u64,
+    key: u64,
+    adapter_id: u32,
+    kind: u32,
+    schema_version: u32,
+    payload: []const u8,
+};
+
+/// One external result delivered to `update` on the runtime/UI thread.
+/// Adapter, operation, and payload-schema identity are copied from the
+/// accepted request. `bytes` is valid only for that update call; copy what
+/// the model keeps.
+pub const EffectExternalResult = struct {
+    request_id: u64,
+    key: u64,
+    adapter_id: u32,
+    kind: u32,
+    schema_version: u32,
+    outcome: EffectExternalOutcome,
+    bytes: []const u8 = "",
+};
+
+pub const ExternalEffectCompletionError = error{
+    /// The request was cancelled or its slot has since been reused.
+    ExternalEffectStaleResult,
+    /// This request already accepted a terminal result.
+    ExternalEffectDuplicateResult,
+    /// The result exceeded `max_effect_external_result_bytes`. The
+    /// request remains pending, so the adapter may retry with bounded
+    /// bytes or the app may cancel it.
+    ExternalEffectResultTooLarge,
+    /// The shared completion queue was full. Nothing was consumed; the
+    /// same completion remains valid for a later retry or app cancel.
+    ExternalEffectQueueFull,
+};
+
+const ExternalEffectToken = struct {
+    slot_index: u16,
+    generation: u32,
+    request_id: u64,
+};
+
+/// Thread-safe one-shot completion passed to a live adapter. `complete`
+/// copies `bytes` before returning, so the adapter keeps no result buffer
+/// alive for the SDK. Calling it twice returns
+/// `error.ExternalEffectDuplicateResult`; calling it after cancellation
+/// or slot reuse returns `error.ExternalEffectStaleResult`.
+pub const ExternalEffectCompletion = struct {
+    context: *anyopaque,
+    token: ExternalEffectToken,
+    complete_fn: *const fn (context: *anyopaque, token: ExternalEffectToken, outcome: ExternalEffectAdapterOutcome, bytes: []const u8) ExternalEffectCompletionError!void,
+
+    pub fn complete(self: ExternalEffectCompletion, outcome: ExternalEffectAdapterOutcome, bytes: []const u8) ExternalEffectCompletionError!void {
+        return self.complete_fn(self.context, self.token, outcome, bytes);
+    }
+};
+
+/// Application-owned live adapter for external work. `submit_fn` runs on
+/// the UI thread and MUST only copy/enqueue the request and return; the
+/// work and `completion.complete` call run off-thread. It must never call
+/// completion inline from `submit_fn`. Completion copies into a result
+/// workspace allocated by `external` on the UI thread, so it never calls
+/// the application's allocator from a worker. `cancel_fn` is the same
+/// nonblocking control operation. `shutdown_fn` is called once by
+/// `Effects.deinit` and must not return until every worker that could call
+/// a supplied completion has stopped. The SDK borrows `context` until
+/// that shutdown returns; it never destroys application-owned state.
+pub const ExternalEffectAdapter = struct {
+    context: *anyopaque,
+    submit_fn: *const fn (context: *anyopaque, request: EffectExternalRequest, completion: ExternalEffectCompletion) anyerror!void,
+    cancel_fn: *const fn (context: *anyopaque, request_id: u64) void,
+    shutdown_fn: *const fn (context: *anyopaque) void,
+};
+
 /// Payload for `on_result` Msg constructors of host requests
 /// (`hostRequest` — the generic named host call behind transpiled
 /// cores' `request` wire records). Exactly one terminal per request,
@@ -668,6 +793,10 @@ pub const EffectResultKind = enum(u8) {
     /// launches with no variables set) re-derive from the launch
     /// configuration exactly as before.
     env = 10,
+    /// One application-defined external terminal. Unlike the additive
+    /// host/env records, this channel adds identity fields to the effect
+    /// record layout and therefore ships with journal format v7.
+    external = 11,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -696,7 +825,7 @@ pub const EffectResultRecord = struct {
     kind: EffectResultKind,
     key: u64,
     /// Line bytes / collected stdout / response body / file bytes /
-    /// clipboard text.
+    /// clipboard text / external result bytes.
     payload: []const u8 = "",
     /// Collect-exit stderr tail.
     stderr_tail: []const u8 = "",
@@ -727,21 +856,31 @@ pub const EffectResultRecord = struct {
     /// the honest non-determinism (a real FFT of real audio) recorded at
     /// the boundary so replay repaints identical bars.
     audio_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+    /// `.external` records: the exact accepted request identity and
+    /// terminal result delivered to update.
+    external_request_id: u64 = 0,
+    external_adapter_id: u32 = 0,
+    external_kind: u32 = 0,
+    external_schema_version: u32 = 0,
+    external_request_hash: [32]u8 = @splat(0),
+    external_outcome: EffectExternalOutcome = .ok,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
-/// session is being recorded (`bindJournal`). Called on the loop thread,
-/// immediately before the Msg constructed from the same payload runs
-/// through `update` — so the journal holds exactly what the app saw.
+/// session is being recorded (`bindJournal`). Both callbacks run on the
+/// loop thread: results immediately before the matching Msg enters
+/// `update`, and a failure when a worker attempted an unrecordable result.
 pub const EffectJournal = struct {
     context: *anyopaque,
     record_fn: *const fn (context: *anyopaque, record: EffectResultRecord) void,
+    fail_fn: ?*const fn (context: *anyopaque, reason: []const u8) void = null,
 };
 
 /// Tiny spin lock over `std.atomic.Mutex` (0.16 has no blocking
-/// thread mutex outside `Io`). Every guarded section here is a bounded
-/// copy of at most one queue entry, so spinning is microseconds worst
-/// case and never blocks on I/O.
+/// thread mutex outside `Io`). Hot-path guarded sections only copy
+/// bounded queue entries or result workspaces and never block on I/O or
+/// call an allocator. Shutdown-only queue clearing may free owned line
+/// buffers after every producer has stopped, when the lock is uncontended.
 const SpinMutex = struct {
     inner: std.atomic.Mutex = .unlocked,
 
@@ -916,9 +1055,21 @@ pub fn Effects(comptime Msg: type) type {
         pub const ResponseMsgFn = *const fn (response: EffectResponse) Msg;
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
+        pub const ExternalMsgFn = *const fn (result: EffectExternalResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
+
+        /// One loop-thread drain snapshot. Results created by handling a
+        /// Msg stay outside this window and therefore land on the next
+        /// wake, preserving the same event/effect interleaving in replay.
+        pub const DrainWindow = struct {
+            pending_remaining: usize = 0,
+            queue_remaining: usize = 0,
+            external_control_remaining: usize = 0,
+            journal_failure_remaining: bool = false,
+            wake_deferred: bool = false,
+        };
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -974,6 +1125,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn clipboardMsg(comptime tag: std.meta.Tag(Msg)) ClipboardMsgFn {
             return struct {
                 fn make(result: EffectClipboardResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for application-defined external
+        /// results: `externalMsg(.core_result)` builds
+        /// `Msg{ .core_result = result }` — the variant's payload type
+        /// must be `native_sdk.EffectExternalResult`.
+        pub fn externalMsg(comptime tag: std.meta.Tag(Msg)) ExternalMsgFn {
+            return struct {
+                fn make(result: EffectExternalResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -1199,6 +1362,27 @@ pub fn Effects(comptime Msg: type) type {
             payload: []const u8 = "",
         };
 
+        pub const ExternalOptions = struct {
+            /// Caller-chosen model identity. External requests share the
+            /// ordinary effect key space and pending slots.
+            key: u64,
+            /// Stable application-defined adapter identity. This is not an
+            /// operation kind and is recorded independently for replay.
+            adapter_id: u32,
+            /// Application operation code. Use `@intFromEnum` for a Zig
+            /// enum; the fixed u32 is directly representable at a C ABI.
+            kind: u32,
+            /// Version of the request/result payload contract for this
+            /// operation. This is independent of the SDK journal version.
+            schema_version: u32,
+            /// Binary-safe request bytes, copied before `external`
+            /// returns and bounded by `max_effect_external_request_bytes`.
+            payload: []const u8 = "",
+            /// Required terminal constructor. Every accepted external
+            /// request has exactly one useful async lifecycle result.
+            on_result: ExternalMsgFn,
+        };
+
         pub const StartTimerOptions = struct {
             /// Caller-chosen identity, stored in the model. Timer keys
             /// are their own namespace: they never collide with (and are
@@ -1364,12 +1548,15 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, external, host };
 
-        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard, external, host };
 
         const Entry = struct {
             kind: EntryKind = .line,
+            /// Global insertion order across the shared worker queue and
+            /// the dedicated bounded external-control queue.
+            order: u64 = 0,
             slot_index: u16 = 0,
             generation: u32 = 0,
             key: u64 = 0,
@@ -1396,6 +1583,14 @@ pub fn Effects(comptime Msg: type) type {
             /// `line_len`.
             clipboard_op: EffectClipboardOp = .write,
             clipboard_outcome: EffectClipboardOutcome = .ok,
+            /// `.external` entries: fixed request identity plus terminal
+            /// outcome. Result bytes stay in the slot buffer until drain.
+            external_request_id: u64 = 0,
+            external_adapter_id: u32 = 0,
+            external_kind: u32 = 0,
+            external_schema_version: u32 = 0,
+            external_request_hash: [32]u8 = @splat(0),
+            external_outcome: EffectExternalOutcome = .ok,
             /// `.host` entries: which route the result takes (true = the
             /// ok arm). The bytes stay in the slot's heap buffer (taken
             /// at drain, like a fetch body) with their length in
@@ -1414,6 +1609,7 @@ pub fn Effects(comptime Msg: type) type {
             response_fn: ?ResponseMsgFn = null,
             file_fn: ?FileMsgFn = null,
             clipboard_fn: ?ClipboardMsgFn = null,
+            external_fn: ExternalMsgFn = undefined,
             host_fn: ?HostMsgFn = null,
             /// `.line` entries whose payload exceeds the inline buffer
             /// (a raised `max_line_bytes` bound): the bytes ride in this
@@ -1585,6 +1781,8 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const ExternalTerminal = enum(u8) { none, adapter_completed, sdk_owned };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -1596,6 +1794,7 @@ pub fn Effects(comptime Msg: type) type {
             on_response: ?ResponseMsgFn = null,
             on_file: ?FileMsgFn = null,
             on_clipboard: ?ClipboardMsgFn = null,
+            on_external: ExternalMsgFn = undefined,
             on_host: ?HostMsgFn = null,
             /// Set by `cancel` before any kill attempt; read by the
             /// worker so a cancel that lands before the process spawns
@@ -1703,6 +1902,17 @@ pub fn Effects(comptime Msg: type) type {
             /// supervising worker distinguishes "completed" from
             /// "interrupted by cancel/timeout" through it.
             fetch_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            // ---- application-defined external-effect fields ----
+            /// Serializes live completion against UI-thread cancellation
+            /// and teardown. The adapter never owns slot memory.
+            external_mutex: SpinMutex = .{},
+            external_request_id: u64 = 0,
+            external_adapter_id: u32 = 0,
+            external_kind: u32 = 0,
+            external_schema_version: u32 = 0,
+            external_request_hash: [32]u8 = @splat(0),
+            external_outcome: EffectExternalOutcome = .ok,
+            external_terminal: ExternalTerminal = .none,
 
             fn argv(slot: *const Slot) []const []const u8 {
                 return slot.argv_slices[0..slot.argv_count];
@@ -1742,6 +1952,8 @@ pub fn Effects(comptime Msg: type) type {
         /// here (loop thread, right before its Msg runs through
         /// `update`). Null outside recording.
         journal: ?EffectJournal = null,
+        journal_failure_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        external_result_over_budget: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         /// The clock behind `wallMs` — the swap seam tests use
         /// (`TestClock`), exactly like the fake executor. Session replay
         /// never consults it: journaled values win there.
@@ -1792,6 +2004,9 @@ pub fn Effects(comptime Msg: type) type {
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
+        /// Application-owned asynchronous adapter. Bound before the
+        /// first real external request; shutdown is called from deinit.
+        external_adapter: ?ExternalEffectAdapter = null,
         /// The environment spawned children inherit and fetch honors
         /// (PATH for `spawnPath`-style lookups, proxy variables).
         /// Bound once from the loop thread before the first real
@@ -1854,6 +2069,7 @@ pub fn Effects(comptime Msg: type) type {
         /// drained.
         fetch_start_rejections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         next_generation: u32 = 1,
+        next_external_request_id: u64 = 1,
         slots: [max_effects]Slot = [_]Slot{.{}} ** max_effects,
         /// Fixed fx timer table (see `max_effect_timers`): timers live
         /// beside the effect slots, never in them. Loop-thread only.
@@ -1865,8 +2081,21 @@ pub fn Effects(comptime Msg: type) type {
         queue: [max_effect_queue_entries]Entry = undefined,
         queue_head: usize = 0,
         queue_len: usize = 0,
-        /// Mirror of `queue_len` readable without the lock, so the frame
-        /// path can skip idle drains cheaply.
+        /// SDK-owned external terminals cannot fail because the worker
+        /// queue is full. One entry per external slot covers cancellation,
+        /// unavailable adapters, and synchronous submit refusal; global
+        /// `Entry.order` merges this queue with `queue` without overtaking.
+        external_control_queue: [max_effects]Entry = undefined,
+        external_control_head: usize = 0,
+        external_control_len: usize = 0,
+        next_queue_order: u64 = 1,
+        /// Stack-owned loop-thread drain window. The pointer is published
+        /// under queue_mutex so producers defer exactly one wake until the
+        /// current snapshot finishes.
+        active_drain_window: ?*DrainWindow = null,
+        /// Mirror of shared worker entries plus ordered external control
+        /// terminals, readable without the lock so the frame path can
+        /// skip idle drains cheaply.
         queue_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
         /// Loop-thread-only ring: spawn/fetch rejections and fake-executor
         /// terminals that found the queue full. Drained before the queue.
@@ -1950,6 +2179,31 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            // Retire live external requests before asking the adapter to
+            // quiesce. `shutdown_fn` is the lifetime barrier: after it
+            // returns no completion may retain this Effects pointer.
+            if (self.external_adapter) |adapter| {
+                var cancel_ids: [max_effects]u64 = undefined;
+                var cancel_count: usize = 0;
+                for (&self.slots) |*slot| {
+                    if (slot.kind != .external) continue;
+                    slot.external_mutex.lock();
+                    if (slot.state.load(.acquire) == .running and slot.external_terminal == .none) {
+                        slot.cancelled_generation = slot.generation;
+                        slot.external_outcome = .cancelled;
+                        slot.external_terminal = .sdk_owned;
+                        slot.state.store(.done, .release);
+                        if (!slot.fake) {
+                            cancel_ids[cancel_count] = slot.external_request_id;
+                            cancel_count += 1;
+                        }
+                    }
+                    slot.external_mutex.unlock();
+                }
+                for (cancel_ids[0..cancel_count]) |request_id| adapter.cancel_fn(adapter.context, request_id);
+                adapter.shutdown_fn(adapter.context);
+                self.external_adapter = null;
+            }
             // Host requests park on the loop thread with no worker to
             // wait for: retire them here so the worker wait below never
             // stalls on one, and any late host answer reports
@@ -1961,7 +2215,7 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             for (&self.slots) |*slot| {
-                if (slot.state.load(.acquire) == .running and !slot.fake) {
+                if (slot.kind != .external and slot.state.load(.acquire) == .running and !slot.fake) {
                     slot.cancel_requested.store(true, .release);
                     // Fetch workers poll `cancel_requested`/`shutdown`
                     // and cancel their blocking task themselves.
@@ -2208,6 +2462,8 @@ pub fn Effects(comptime Msg: type) type {
                 self.queue_len -= 1;
             }
             self.queue_head = 0;
+            self.external_control_head = 0;
+            self.external_control_len = 0;
             self.queue_count.store(0, .release);
         }
 
@@ -2238,7 +2494,19 @@ pub fn Effects(comptime Msg: type) type {
         /// Point the drain's result reporting at a session recorder.
         /// Loop-thread only; the first bind sticks.
         pub fn bindJournal(self: *Self, binding: EffectJournal) void {
-            if (self.journal == null) self.journal = binding;
+            if (self.journal == null) {
+                self.journal = binding;
+                self.journal_failure_enabled.store(binding.fail_fn != null, .release);
+            }
+        }
+
+        /// Bind the application-owned live external adapter. The first
+        /// bind sticks, matching the runtime service bindings. Call this
+        /// after `UiApp.init` and before the first frame/update that can
+        /// issue an external request. Fake/replay execution records
+        /// requests without consulting the adapter.
+        pub fn bindExternalAdapter(self: *Self, adapter: ExternalEffectAdapter) void {
+            if (self.external_adapter == null) self.external_adapter = adapter;
         }
 
         /// Point window actions at the runtime's window verbs (bound by
@@ -2269,6 +2537,12 @@ pub fn Effects(comptime Msg: type) type {
         fn journalNote(self: *Self, record: EffectResultRecord) void {
             const binding = self.journal orelse return;
             binding.record_fn(binding.context, record);
+        }
+
+        fn journalFail(self: *Self, reason: []const u8) void {
+            const binding = self.journal orelse return;
+            const fail_fn = binding.fail_fn orelse return;
+            fail_fn(binding.context, reason);
         }
 
         /// Wall-clock milliseconds since the Unix epoch, AS AN EFFECT:
@@ -2873,6 +3147,107 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Issue one application-defined typed/byte request. Local
+        /// bounds/capacity/allocation refusal is synchronous and creates
+        /// no request. Once a slot and workspace are accepted, this
+        /// returns the SDK request id and guarantees one later async
+        /// result, including adapter absence or submit refusal.
+        pub fn external(self: *Self, options: ExternalOptions) ExternalEffectIssueError!u64 {
+            self.reclaimSlots();
+            if (options.payload.len > max_effect_external_request_bytes) {
+                return error.ExternalEffectRequestTooLarge;
+            }
+            if (self.findActiveSlot(options.key) != null) {
+                return error.ExternalEffectDuplicateKey;
+            }
+            const slot_index = self.findIdleSlot() orelse {
+                return error.ExternalEffectPendingFull;
+            };
+            const fake = self.executor == .fake;
+            const adapter = if (fake) null else self.external_adapter;
+            // Allocate the maximum result workspace now, on the UI
+            // thread. Worker completion only copies into this memory and
+            // therefore never touches an unrestricted app allocator.
+            const workspace = self.allocator.alloc(u8, max_effect_external_result_bytes) catch
+                return error.ExternalEffectAllocationFailed;
+            @memcpy(workspace[0..options.payload.len], options.payload);
+            const request_id = self.takeExternalRequestId();
+
+            const slot = &self.slots[slot_index];
+            if (slot.fetch_buffer) |old| {
+                self.allocator.free(old);
+                slot.fetch_buffer = null;
+            }
+            slot.external_mutex.lock();
+            slot.generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.key = options.key;
+            slot.kind = .external;
+            slot.on_line = null;
+            slot.on_exit = null;
+            slot.on_response = null;
+            slot.on_file = null;
+            slot.on_clipboard = null;
+            slot.on_external = options.on_result;
+            slot.on_host = null;
+            slot.cancel_requested.store(false, .release);
+            // Keep cancelled_generation sticky: a cancelled previous
+            // occupant may still have entries in the shared queue, and
+            // its generation must remain filtered after this reuse.
+            slot.external_request_id = request_id;
+            slot.external_adapter_id = options.adapter_id;
+            slot.external_kind = options.kind;
+            slot.external_schema_version = options.schema_version;
+            std.crypto.hash.sha2.Sha256.hash(options.payload, &slot.external_request_hash, .{});
+            slot.external_outcome = .ok;
+            slot.external_terminal = .none;
+            slot.fetch_buffer = workspace;
+            slot.payload_len = options.payload.len;
+            slot.body_len = 0;
+            slot.fake = fake;
+            slot.state.store(.running, .release);
+
+            if (fake) {
+                slot.external_mutex.unlock();
+                return request_id;
+            }
+            if (adapter == null) {
+                const wake = self.enqueueExternalControlLocked(slot, slot_index, .adapter_unavailable);
+                slot.external_mutex.unlock();
+                if (wake) self.wakeHost();
+                return request_id;
+            }
+            const completion: ExternalEffectCompletion = .{
+                .context = self,
+                .token = .{
+                    .slot_index = @intCast(slot_index),
+                    .generation = slot.generation,
+                    .request_id = request_id,
+                },
+                .complete_fn = completeExternalErased,
+            };
+            // Holding the slot lock across the nonblocking submit call is
+            // the publication barrier: a newly spawned worker may call
+            // completion immediately, but cannot observe a half-submitted
+            // slot or race submit failure cleanup.
+            adapter.?.submit_fn(adapter.?.context, .{
+                .request_id = request_id,
+                .key = options.key,
+                .adapter_id = options.adapter_id,
+                .kind = options.kind,
+                .schema_version = options.schema_version,
+                .payload = workspace[0..options.payload.len],
+            }, completion) catch {
+                const wake = self.enqueueExternalControlLocked(slot, slot_index, .submit_failed);
+                slot.external_mutex.unlock();
+                if (wake) self.wakeHost();
+                return request_id;
+            };
+            slot.external_mutex.unlock();
+            return request_id;
+        }
+
         /// Fire-and-forget named host command: hand `name` + `payload`
         /// to the bound host services and move on — no key, no result,
         /// no Msg. This is the delivery path of a transpiled core's
@@ -2920,14 +3295,16 @@ pub fn Effects(comptime Msg: type) type {
                 // the old result silently (its queued entry dies by
                 // generation mismatch at drain). A running occupancy of
                 // another kind is a key collision and rejects; a
-                // draining one is already terminal — its key is free.
+                // draining one is already terminal — its key is free,
+                // except for an external terminal, which remains
+                // cancellable by key until the drain delivers it.
                 var replaced: ?usize = null;
                 for (&self.slots, 0..) |*slot, index| {
                     const state = slot.state.load(.acquire);
                     if (state != .running and state != .draining) continue;
                     if (slot.key != options.key) continue;
                     if (slot.kind != .host) {
-                        if (state == .running) return self.rejectHost(options.key, options.on_result);
+                        if (state == .running or slot.kind == .external) return self.rejectHost(options.key, options.on_result);
                         continue;
                     }
                     // Tell the host first: a late answer for the old
@@ -3043,6 +3420,9 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             const slot = &self.slots[slot_index];
+            // External slots serialize running/draining cancellation with
+            // completion and drain under their own mutex.
+            if (slot.kind == .external) return self.cancelExternal(slot_index);
             if (slot.kind == .host) return self.cancelHostRequest(key);
             slot.cancelled_generation = slot.generation;
             slot.cancel_requested.store(true, .release);
@@ -3099,6 +3479,55 @@ pub fn Effects(comptime Msg: type) type {
             // and simply finishes (the drain rewrites its terminal to
             // `.cancelled`). Neither has a child to kill.
             if (slot.kind == .spawn) self.killPublishedChild(slot);
+        }
+
+        fn cancelExternal(self: *Self, slot_index: usize) void {
+            const slot = &self.slots[slot_index];
+            var forward_cancel = false;
+            var request_id: u64 = 0;
+            var should_wake = false;
+            var buffer_to_free: ?[]u8 = null;
+            slot.external_mutex.lock();
+            defer {
+                slot.external_mutex.unlock();
+                if (buffer_to_free) |buffer| self.allocator.free(buffer);
+                if (forward_cancel) {
+                    if (self.external_adapter) |adapter| adapter.cancel_fn(adapter.context, request_id);
+                }
+                if (should_wake) self.wakeHost();
+            }
+
+            if (slot.kind != .external) return;
+            const state = slot.state.load(.acquire);
+            if (state != .running and state != .draining) return;
+            request_id = slot.external_request_id;
+            slot.cancelled_generation = slot.generation;
+            if (self.replay) {
+                // The journal owns terminal order. Keep the claim and
+                // fake request parked until its recorded result is fed.
+                return;
+            }
+
+            if (slot.external_terminal != .none) {
+                if (slot.external_outcome == .cancelled) return;
+                // An adapter result or SDK-owned issue terminal already
+                // has a global queue position. Rewrite it in place rather
+                // than enqueueing a second terminal.
+                self.rewriteExternalQueuedOutcomeLocked(slot, request_id, .cancelled);
+                buffer_to_free = slot.fetch_buffer;
+                slot.fetch_buffer = null;
+                slot.payload_len = 0;
+                slot.body_len = 0;
+                slot.external_outcome = .cancelled;
+                slot.external_terminal = .sdk_owned;
+                return;
+            }
+
+            // A running request has no shared-queue entry yet. Cancellation
+            // uses the max_effects-sized SDK control queue, so a full
+            // worker queue cannot lose or overtake this terminal.
+            should_wake = self.enqueueExternalControlLocked(slot, slot_index, .cancelled);
+            forward_cancel = !slot.fake;
         }
 
         /// Start (or replace) a key-based timer on the effects channel:
@@ -3479,17 +3908,60 @@ pub fn Effects(comptime Msg: type) type {
             return count;
         }
 
-        /// True when a drain would dispatch at least one Msg.
+        /// True when a drain has a Msg or recorder failure to consume.
         pub fn hasPending(self: *const Self) bool {
-            return self.pending_exit_len > 0 or self.queue_count.load(.acquire) > 0;
+            return self.pending_exit_len > 0 or
+                self.queue_count.load(.acquire) > 0 or
+                self.external_result_over_budget.load(.acquire);
+        }
+
+        /// Freeze the loop-thread-visible completion prefixes for one
+        /// update batch. `finishDrainWindow` must run through `defer`.
+        pub fn beginDrainWindow(self: *Self, window: *DrainWindow) void {
+            self.queue_mutex.lock();
+            defer self.queue_mutex.unlock();
+            std.debug.assert(self.active_drain_window == null);
+            window.* = .{
+                .pending_remaining = self.pending_exit_len,
+                .queue_remaining = self.queue_len,
+                .external_control_remaining = self.external_control_len,
+                .journal_failure_remaining = self.external_result_over_budget.load(.acquire),
+            };
+            self.active_drain_window = window;
+        }
+
+        /// Close a drain snapshot and release one deferred producer wake.
+        pub fn finishDrainWindow(self: *Self, window: *DrainWindow) void {
+            self.queue_mutex.lock();
+            std.debug.assert(self.active_drain_window == window);
+            self.active_drain_window = null;
+            const wake = window.wake_deferred;
+            self.queue_mutex.unlock();
+            if (wake) self.wakePlatform();
         }
 
         /// Pop the next completion as a Msg. Loop-thread only. The
         /// returned Msg's line payload stays valid until the next call.
         pub fn takeMsg(self: *Self) ?Msg {
+            std.debug.assert(self.active_drain_window == null);
+            return self.takeMsgInner(null);
+        }
+
+        /// Pop only completions that existed when `window` began. Every
+        /// physical queue pop consumes its prefix budget, including a
+        /// stale entry that produces no Msg.
+        pub fn takeMsgInDrainWindow(self: *Self, window: *DrainWindow) ?Msg {
+            std.debug.assert(self.active_drain_window == window);
+            return self.takeMsgInner(window);
+        }
+
+        fn takeMsgInner(self: *Self, window: ?*DrainWindow) ?Msg {
             self.reclaimSlots();
+            if (self.takeJournalFailureInDrainWindow(window)) {
+                self.journalFail("an external effect result exceeded max_effect_external_result_bytes");
+            }
             while (true) {
-                if (self.takePendingMsg()) |pending| {
+                if (self.takePendingMsgInDrainWindow(window)) |pending| {
                     switch (pending) {
                         .exit => |entry| {
                             const exit_fn = entry.exit_fn orelse continue;
@@ -3595,7 +4067,7 @@ pub fn Effects(comptime Msg: type) type {
                         },
                     }
                 }
-                if (!self.dequeueInto(&self.drain_scratch)) return null;
+                if (!self.dequeueInto(&self.drain_scratch, window)) return null;
                 const entry = &self.drain_scratch;
                 const slot = &self.slots[entry.slot_index];
                 const cancelled = slot.cancelled_generation == entry.generation and entry.generation != 0;
@@ -3794,6 +4266,60 @@ pub fn Effects(comptime Msg: type) type {
                         });
                         return clipboard_fn(result);
                     },
+                    .external => {
+                        if (self.drain_fetch_body) |old| self.allocator.free(old);
+                        self.drain_fetch_body = null;
+                        slot.external_mutex.lock();
+                        if (entry.generation != slot.generation or
+                            entry.external_request_id != slot.external_request_id)
+                        {
+                            slot.external_mutex.unlock();
+                            continue;
+                        }
+                        const external_cancelled = entry.external_outcome == .cancelled or
+                            (slot.cancelled_generation == entry.generation and entry.generation != 0);
+                        self.drain_fetch_body = slot.fetch_buffer;
+                        slot.fetch_buffer = null;
+                        const external_fn = entry.external_fn;
+                        slot.state.store(.done, .release);
+                        slot.external_mutex.unlock();
+
+                        const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
+                            if (external_cancelled) "" else buffer[0..entry.line_len]
+                        else
+                            "";
+                        const result: EffectExternalResult = if (external_cancelled)
+                            .{
+                                .request_id = entry.external_request_id,
+                                .key = entry.key,
+                                .adapter_id = entry.external_adapter_id,
+                                .kind = entry.external_kind,
+                                .schema_version = entry.external_schema_version,
+                                .outcome = .cancelled,
+                            }
+                        else
+                            .{
+                                .request_id = entry.external_request_id,
+                                .key = entry.key,
+                                .adapter_id = entry.external_adapter_id,
+                                .kind = entry.external_kind,
+                                .schema_version = entry.external_schema_version,
+                                .outcome = entry.external_outcome,
+                                .bytes = bytes,
+                            };
+                        self.journalNote(.{
+                            .kind = .external,
+                            .key = result.key,
+                            .payload = result.bytes,
+                            .external_request_id = result.request_id,
+                            .external_adapter_id = result.adapter_id,
+                            .external_kind = result.kind,
+                            .external_schema_version = result.schema_version,
+                            .external_request_hash = entry.external_request_hash,
+                            .external_outcome = result.outcome,
+                        });
+                        return external_fn(result);
+                    },
                     .host => {
                         // One terminal per host occupancy, mirroring
                         // `.response`: a mismatched generation means the
@@ -3831,6 +4357,14 @@ pub fn Effects(comptime Msg: type) type {
                     },
                 }
             }
+        }
+
+        fn takeJournalFailureInDrainWindow(self: *Self, window: ?*DrainWindow) bool {
+            if (window) |bounded| {
+                if (!bounded.journal_failure_remaining) return false;
+                bounded.journal_failure_remaining = false;
+            }
+            return self.external_result_over_budget.swap(false, .acq_rel);
         }
 
         // --------------------------------------------------- fake executor
@@ -4277,6 +4811,108 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Number of still-pending external requests in live, fake, or
+        /// replay mode. Completed results leave this set before the UI
+        /// drain consumes them.
+        pub fn pendingExternalCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (slot.kind == .external and slot.state.load(.acquire) == .running) count += 1;
+            }
+            return count;
+        }
+
+        /// The `index`-th fake external request in ISSUE order, not slot
+        /// order. Request ids are monotonic, so slot reuse cannot reorder
+        /// deterministic headless assertions.
+        pub fn pendingExternalAt(self: *Self, index: usize) ?EffectExternalRequest {
+            var previous_id: u64 = 0;
+            var ordinal: usize = 0;
+            while (ordinal <= index) : (ordinal += 1) {
+                var selected: ?*Slot = null;
+                for (&self.slots) |*slot| {
+                    if (!(slot.fake and slot.kind == .external and slot.state.load(.acquire) == .running)) continue;
+                    if (slot.external_request_id <= previous_id) continue;
+                    if (selected == null or slot.external_request_id < selected.?.external_request_id) selected = slot;
+                }
+                const slot = selected orelse return null;
+                if (ordinal == index) {
+                    return .{
+                        .request_id = slot.external_request_id,
+                        .key = slot.key,
+                        .adapter_id = slot.external_adapter_id,
+                        .kind = slot.external_kind,
+                        .schema_version = slot.external_schema_version,
+                        .payload = if (slot.fetch_buffer) |buffer| buffer[0..slot.payload_len] else "",
+                    };
+                }
+                previous_id = slot.external_request_id;
+            }
+            return null;
+        }
+
+        /// Feed one fake external terminal by its SDK request id. Fake
+        /// adapters have the same outcome authority as live adapters:
+        /// success/failure only. A second feed is an explicit duplicate;
+        /// a cancelled or reused id is stale.
+        pub fn feedExternalResult(self: *Self, request_id: u64, outcome: ExternalEffectAdapterOutcome, bytes: []const u8) ExternalEffectCompletionError!void {
+            for (&self.slots, 0..) |*slot, slot_index| {
+                if (slot.kind != .external or slot.external_request_id != request_id) continue;
+                return self.completeExternal(.{
+                    .slot_index = @intCast(slot_index),
+                    .generation = slot.generation,
+                    .request_id = request_id,
+                }, outcome, bytes);
+            }
+            return error.ExternalEffectStaleResult;
+        }
+
+        /// Replay-only feed. Unlike the fake adapter helper, this accepts
+        /// the final SDK outcome because a recorded cancellation is owned
+        /// by the SDK. The full recorded request identity must match the
+        /// currently parked request before any terminal is consumed.
+        fn feedExternalReplayResult(
+            self: *Self,
+            request_id: u64,
+            key: u64,
+            adapter_id: u32,
+            kind: u32,
+            schema_version: u32,
+            request_hash: [32]u8,
+            outcome: EffectExternalOutcome,
+            bytes: []const u8,
+        ) (ExternalEffectCompletionError || error{ExternalEffectReplayMismatch})!void {
+            for (&self.slots, 0..) |*slot, slot_index| {
+                slot.external_mutex.lock();
+                const matches_id = slot.kind == .external and slot.external_request_id == request_id;
+                if (!matches_id) {
+                    slot.external_mutex.unlock();
+                    continue;
+                }
+                const generation = slot.generation;
+                const matches_identity = slot.key == key and
+                    slot.external_adapter_id == adapter_id and
+                    slot.external_kind == kind and
+                    slot.external_schema_version == schema_version and
+                    std.mem.eql(u8, &slot.external_request_hash, &request_hash);
+                const replay_cancelled = slot.cancelled_generation == slot.generation;
+                slot.external_mutex.unlock();
+                const sdk_owned = outcome == .cancelled or outcome == .adapter_unavailable or outcome == .submit_failed;
+                if (!matches_identity or
+                    (outcome == .cancelled) != replay_cancelled or
+                    (sdk_owned and bytes.len != 0))
+                {
+                    return error.ExternalEffectReplayMismatch;
+                }
+                return self.completeExternalOutcome(.{
+                    .slot_index = @intCast(slot_index),
+                    .generation = generation,
+                    .request_id = request_id,
+                }, outcome, bytes);
+            }
+            return error.ExternalEffectStaleResult;
+        }
+
         /// Number of recorded (still-armed) fake fx timers.
         pub fn pendingTimerCount(self: *Self) usize {
             var count: usize = 0;
@@ -4347,8 +4983,196 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn wakeHost(self: *Self) void {
+            self.queue_mutex.lock();
+            if (self.active_drain_window) |window| {
+                window.wake_deferred = true;
+                self.queue_mutex.unlock();
+                return;
+            }
+            self.queue_mutex.unlock();
+            self.wakePlatform();
+        }
+
+        fn wakePlatform(self: *Self) void {
             const services = self.services orelse return;
             services.wake() catch {};
+        }
+
+        /// Decide an enqueue wake while queue_mutex is held. A producer
+        /// inside a drain window hands its wake to the window closer;
+        /// otherwise the ordinary empty-to-nonempty edge owns it.
+        fn queueWakeDecisionLocked(self: *Self, was_empty: bool) bool {
+            if (self.active_drain_window) |window| {
+                window.wake_deferred = true;
+                return false;
+            }
+            return was_empty;
+        }
+
+        fn takeExternalRequestId(self: *Self) u64 {
+            const request_id = self.next_external_request_id;
+            self.next_external_request_id +%= 1;
+            if (self.next_external_request_id == 0) self.next_external_request_id = 1;
+            return request_id;
+        }
+
+        /// Publish one SDK-owned external terminal while the caller holds
+        /// `slot.external_mutex`. The per-slot queue has exact capacity
+        /// for one terminal per accepted request and shares global order
+        /// numbers with worker completions.
+        fn enqueueExternalControlLocked(self: *Self, slot: *Slot, slot_index: usize, outcome: EffectExternalOutcome) bool {
+            var entry: Entry = .{
+                .kind = .external,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .external_request_id = slot.external_request_id,
+                .external_adapter_id = slot.external_adapter_id,
+                .external_kind = slot.external_kind,
+                .external_schema_version = slot.external_schema_version,
+                .external_request_hash = slot.external_request_hash,
+                .external_outcome = outcome,
+                .external_fn = slot.on_external,
+            };
+            self.queue_mutex.lock();
+            std.debug.assert(self.external_control_len < self.external_control_queue.len);
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
+            entry.order = self.takeQueueOrderLocked();
+            const tail = (self.external_control_head + self.external_control_len) % self.external_control_queue.len;
+            self.external_control_queue[tail] = entry;
+            self.external_control_len += 1;
+            self.queue_count.store(self.queue_len + self.external_control_len, .release);
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
+            self.queue_mutex.unlock();
+            slot.external_outcome = outcome;
+            slot.external_terminal = .sdk_owned;
+            slot.state.store(.draining, .release);
+            return should_wake;
+        }
+
+        /// Keep an already-published adapter or SDK terminal at its exact
+        /// queue position while cancellation replaces its payload/outcome.
+        /// The entry may already be in drain scratch; cancelled_generation
+        /// handles that serialized race after the slot lock is released.
+        fn rewriteExternalQueuedOutcomeLocked(self: *Self, slot: *Slot, request_id: u64, outcome: EffectExternalOutcome) void {
+            self.queue_mutex.lock();
+            defer self.queue_mutex.unlock();
+            for (0..self.queue_len) |offset| {
+                const index = (self.queue_head + offset) % max_effect_queue_entries;
+                const entry = &self.queue[index];
+                if (entry.kind == .external and
+                    entry.generation == slot.generation and
+                    entry.external_request_id == request_id)
+                {
+                    entry.line_len = 0;
+                    entry.external_outcome = outcome;
+                    return;
+                }
+            }
+            for (0..self.external_control_len) |offset| {
+                const index = (self.external_control_head + offset) % self.external_control_queue.len;
+                const entry = &self.external_control_queue[index];
+                if (entry.generation == slot.generation and entry.external_request_id == request_id) {
+                    entry.line_len = 0;
+                    entry.external_outcome = outcome;
+                    return;
+                }
+            }
+        }
+
+        fn completeExternalErased(context: *anyopaque, token: ExternalEffectToken, outcome: ExternalEffectAdapterOutcome, bytes: []const u8) ExternalEffectCompletionError!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return self.completeExternal(token, outcome, bytes);
+        }
+
+        fn completeExternal(self: *Self, token: ExternalEffectToken, outcome: ExternalEffectAdapterOutcome, bytes: []const u8) ExternalEffectCompletionError!void {
+            return self.completeExternalOutcome(token, switch (outcome) {
+                .success => .ok,
+                .failure => .failed,
+            }, bytes);
+        }
+
+        /// Thread-safe acceptance point for live/fake/replay external
+        /// results. Slot identity, terminal state, payload copy, and queue
+        /// publication are serialized by the slot and queue mutexes. A
+        /// full queue consumes nothing, leaving the completion retryable.
+        fn completeExternalOutcome(self: *Self, token: ExternalEffectToken, outcome: EffectExternalOutcome, bytes: []const u8) ExternalEffectCompletionError!void {
+            if (token.slot_index >= max_effects) return error.ExternalEffectStaleResult;
+
+            const slot = &self.slots[token.slot_index];
+            slot.external_mutex.lock();
+            var wake = false;
+            defer {
+                slot.external_mutex.unlock();
+                if (wake) self.wakeHost();
+            }
+            // Zero is the disarmed external token. Reclaim clears it
+            // under this mutex before publishing `.idle`, so a stale
+            // completion never reads generation/kind while another
+            // effect kind rewrites the reused slot on the UI thread.
+            if (slot.external_request_id == 0) return error.ExternalEffectStaleResult;
+            if (slot.generation != token.generation or
+                slot.external_request_id != token.request_id or
+                self.shutdown.load(.acquire))
+            {
+                return error.ExternalEffectStaleResult;
+            }
+            switch (slot.external_terminal) {
+                .adapter_completed => return error.ExternalEffectDuplicateResult,
+                .sdk_owned => return error.ExternalEffectStaleResult,
+                .none => {},
+            }
+            if (slot.state.load(.acquire) != .running) return error.ExternalEffectStaleResult;
+            if (bytes.len > max_effect_external_result_bytes) {
+                self.noteExternalResultOverBudget();
+                return error.ExternalEffectResultTooLarge;
+            }
+            if (outcome == .cancelled or outcome == .adapter_unavailable or outcome == .submit_failed) {
+                wake = self.enqueueExternalControlLocked(slot, token.slot_index, outcome);
+                return;
+            }
+
+            self.queue_mutex.lock();
+            if (self.queue_len == max_effect_queue_entries) {
+                self.queue_mutex.unlock();
+                return error.ExternalEffectQueueFull;
+            }
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
+            const workspace = slot.fetch_buffer orelse {
+                self.queue_mutex.unlock();
+                return error.ExternalEffectStaleResult;
+            };
+            @memcpy(workspace[0..bytes.len], bytes);
+            slot.payload_len = 0;
+            slot.body_len = bytes.len;
+            slot.external_outcome = outcome;
+            slot.external_terminal = switch (outcome) {
+                .ok, .failed => .adapter_completed,
+                .cancelled, .adapter_unavailable, .submit_failed => .sdk_owned,
+            };
+            slot.state.store(.draining, .release);
+            var entry: Entry = .{
+                .kind = .external,
+                .slot_index = token.slot_index,
+                .generation = token.generation,
+                .key = slot.key,
+                .line_len = @intCast(bytes.len),
+                .external_request_id = token.request_id,
+                .external_adapter_id = slot.external_adapter_id,
+                .external_kind = slot.external_kind,
+                .external_schema_version = slot.external_schema_version,
+                .external_request_hash = slot.external_request_hash,
+                .external_outcome = outcome,
+                .external_fn = slot.on_external,
+            };
+            entry.order = self.takeQueueOrderLocked();
+            const tail = (self.queue_head + self.queue_len) % max_effect_queue_entries;
+            self.queue[tail] = entry;
+            self.queue_len += 1;
+            self.queue_count.store(self.queue_len + self.external_control_len, .release);
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
+            self.queue_mutex.unlock();
+            wake = should_wake;
         }
 
         fn reject(self: *Self, options: SpawnOptions) void {
@@ -4554,6 +5378,12 @@ pub fn Effects(comptime Msg: type) type {
         fn deliverPending(self: *Self, pending: PendingMsg) void {
             if (self.pending_exit_len == max_effect_pending_exits) {
                 const oldest = &self.pending_exits[self.pending_exit_head];
+                // The ring replaced an entry that belonged to the active
+                // snapshot. Shrink that prefix so the replacement waits
+                // for the next window instead of spending the old budget.
+                if (self.active_drain_window) |window| {
+                    if (window.pending_remaining > 0) window.pending_remaining -= 1;
+                }
                 self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
                 self.pending_exit_len -= 1;
                 var replacement = pending;
@@ -4569,11 +5399,15 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
-        fn takePendingMsg(self: *Self) ?PendingMsg {
+        fn takePendingMsgInDrainWindow(self: *Self, window: ?*DrainWindow) ?PendingMsg {
+            if (window) |bounded| {
+                if (bounded.pending_remaining == 0) return null;
+            }
             if (self.pending_exit_len == 0) return null;
             const pending = self.pending_exits[self.pending_exit_head];
             self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
             self.pending_exit_len -= 1;
+            if (window) |bounded| bounded.pending_remaining -= 1;
             return pending;
         }
 
@@ -4586,7 +5420,8 @@ pub fn Effects(comptime Msg: type) type {
 
         fn findActiveSlot(self: *Self, key: u64) ?usize {
             for (&self.slots, 0..) |*slot, index| {
-                if (slot.state.load(.acquire) == .running and slot.key == key) return index;
+                const state = slot.state.load(.acquire);
+                if ((state == .running or (state == .draining and slot.kind == .external)) and slot.key == key) return index;
             }
             return null;
         }
@@ -4654,16 +5489,29 @@ pub fn Effects(comptime Msg: type) type {
             for (&self.slots) |*slot| {
                 switch (slot.state.load(.acquire)) {
                     .done => {
-                        joinWorker(slot);
-                        slot.state.store(.idle, .release);
+                        if (slot.kind == .external) {
+                            slot.external_mutex.lock();
+                            if (slot.state.load(.acquire) == .done) {
+                                // Disarm stale adapter completions before
+                                // another effect kind may claim this slot.
+                                slot.external_request_id = 0;
+                                slot.state.store(.idle, .release);
+                            }
+                            slot.external_mutex.unlock();
+                        } else {
+                            joinWorker(slot);
+                            slot.state.store(.idle, .release);
+                        }
                     },
                     // A draining slot is reusable once the drain took its
                     // heap buffer (fetch body or collected stdout — the
                     // terminal Msg was delivered). Its worker is already
                     // finished either way: retire the thread now.
                     .draining => {
-                        joinWorker(slot);
-                        if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
+                        if (slot.kind != .external) {
+                            joinWorker(slot);
+                            if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
+                        }
                     },
                     else => {},
                 }
@@ -4676,19 +5524,55 @@ pub fn Effects(comptime Msg: type) type {
             if (self.queue_len == max_effect_queue_entries) return false;
             const tail = (self.queue_head + self.queue_len) % max_effect_queue_entries;
             self.queue[tail] = entry.*;
+            self.queue[tail].order = self.takeQueueOrderLocked();
             self.queue_len += 1;
-            self.queue_count.store(self.queue_len, .release);
+            self.queue_count.store(self.queue_len + self.external_control_len, .release);
             return true;
         }
 
-        fn dequeueInto(self: *Self, out: *Entry) bool {
+        fn noteExternalResultOverBudget(self: *Self) void {
+            if (!self.journal_failure_enabled.load(.acquire)) return;
+            self.queue_mutex.lock();
+            if (self.external_result_over_budget.load(.acquire)) {
+                self.queue_mutex.unlock();
+                return;
+            }
+            self.external_result_over_budget.store(true, .release);
+            const was_empty = self.queue_len == 0 and self.external_control_len == 0;
+            const should_wake = self.queueWakeDecisionLocked(was_empty);
+            self.queue_mutex.unlock();
+            if (should_wake) self.wakePlatform();
+        }
+
+        fn takeQueueOrderLocked(self: *Self) u64 {
+            const order = self.next_queue_order;
+            self.next_queue_order +%= 1;
+            if (self.next_queue_order == 0) self.next_queue_order = 1;
+            return order;
+        }
+
+        fn dequeueInto(self: *Self, out: *Entry, window: ?*DrainWindow) bool {
             self.queue_mutex.lock();
             defer self.queue_mutex.unlock();
-            if (self.queue_len == 0) return false;
-            out.* = self.queue[self.queue_head];
-            self.queue_head = (self.queue_head + 1) % max_effect_queue_entries;
-            self.queue_len -= 1;
-            self.queue_count.store(self.queue_len, .release);
+            const queue_available = self.queue_len > 0 and
+                (window == null or window.?.queue_remaining > 0);
+            const control_available = self.external_control_len > 0 and
+                (window == null or window.?.external_control_remaining > 0);
+            if (!queue_available and !control_available) return false;
+            const take_control = control_available and
+                (!queue_available or self.external_control_queue[self.external_control_head].order < self.queue[self.queue_head].order);
+            if (take_control) {
+                out.* = self.external_control_queue[self.external_control_head];
+                self.external_control_head = (self.external_control_head + 1) % self.external_control_queue.len;
+                self.external_control_len -= 1;
+                if (window) |bounded| bounded.external_control_remaining -= 1;
+            } else {
+                out.* = self.queue[self.queue_head];
+                self.queue_head = (self.queue_head + 1) % max_effect_queue_entries;
+                self.queue_len -= 1;
+                if (window) |bounded| bounded.queue_remaining -= 1;
+            }
+            self.queue_count.store(self.queue_len + self.external_control_len, .release);
             return true;
         }
 
@@ -5545,6 +6429,22 @@ pub fn Effects(comptime Msg: type) type {
             }
         }
     };
+}
+
+/// Runtime integration seam for UiApp session replay. Kept off the
+/// public `UiApp.Effects` surface so applications cannot forge SDK-owned
+/// terminal outcomes through the replay path.
+pub fn feedExternalReplayRecord(comptime Msg: type, effects: *Effects(Msg), record: EffectResultRecord) anyerror!void {
+    return effects.feedExternalReplayResult(
+        record.external_request_id,
+        record.key,
+        record.external_adapter_id,
+        record.external_kind,
+        record.external_schema_version,
+        record.external_request_hash,
+        record.external_outcome,
+        record.payload,
+    );
 }
 
 test "effect payload types have documented defaults" {

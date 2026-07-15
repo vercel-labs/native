@@ -1,0 +1,2 @@
+feature: **Application-defined external effects**: Model/Msg/update apps can issue bounded byte requests through live or fake adapters, cancel them exactly, and record/replay results without rerunning native work.
+- **Session journal v7**: External adapter, operation, payload-schema, and request identity are recorded for deterministic replay without enlarging unrelated effect records; older journals must be re-recorded.

@@ -16,6 +16,7 @@ test {
     _ = @import("canvas_image_tests.zig");
     _ = @import("canvas_font_tests.zig");
     _ = @import("effects_tests.zig");
+    _ = @import("effects_external_tests.zig");
     _ = @import("effects_fetch_tests.zig");
     _ = @import("effects_file_tests.zig");
     _ = @import("effects_clipboard_tests.zig");

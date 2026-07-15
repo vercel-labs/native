@@ -1077,6 +1077,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    .external => try runtime_effects.feedExternalReplayRecord(MsgT, &self.effects, record),
                     .timer => {},
                 },
             }
@@ -1128,8 +1129,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.effects.hasPending()) return;
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
+            var window: Effects.DrainWindow = undefined;
+            self.effects.beginDrainWindow(&window);
+            defer self.effects.finishDrainWindow(&window);
             var dispatched = false;
-            while (self.effects.takeMsg()) |msg| {
+            while (self.effects.takeMsgInDrainWindow(&window)) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
             }
