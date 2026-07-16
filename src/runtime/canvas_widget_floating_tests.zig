@@ -1356,6 +1356,63 @@ test "keyboard activation dismisses the focus-shown tooltip like a press" {
     try std.testing.expectEqual(toolbar.tooltip_ids[1], harness.runtime.views[0].canvas_tooltip_shown_id);
 }
 
+test "view blur resets tooltip state and re-stamps hidden, keyboard- and pointer-shown alike" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-view-blur", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const toolbar = try installTooltipToolbar(harness, app, arena.allocator());
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "other",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 200, 420, 80),
+    });
+
+    // Tab reveals the focus-shown tooltip on the canvas view.
+    try tooltipKey(harness, app, "tab", tooltip_t0);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try std.testing.expect(!try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+
+    // Focus moving to a SIBLING VIEW blurs the canvas: the keyboard
+    // left the whole surface, so the focus-shown tooltip hides, the
+    // machine resets, and the semantics tree carries no stale
+    // visible-tooltip node.
+    try harness.runtime.focusView(1, "other");
+    try std.testing.expect(!harness.runtime.views[0].focused);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+    for (runtimeViewWidgetSemantics(&harness.runtime.views[0])) |node| {
+        try std.testing.expect(node.id != toolbar.tooltip_ids[0]);
+    }
+
+    // The pointer-owned register resets too: earn Link's instant
+    // tooltip plus an armed dwell on Bold's, then blur — shown hides,
+    // armed disarms, and the warm window closes (a later hover in the
+    // returned-to view re-earns the full delay).
+    try harness.runtime.focusView(1, "canvas");
+    try tooltipHover(harness, app, toolbar.button_centers[2], tooltip_t0 + 100 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[2], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try tooltipHover(harness, app, toolbar.button_centers[0], tooltip_t0 + 150 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
+    try harness.runtime.focusView(1, "other");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_warm_until_ns);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[2]));
+}
+
 test "a secondary-button down dismisses the shown tooltip and the context menu still presents" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);

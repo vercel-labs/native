@@ -722,6 +722,36 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// moving focus off the trigger, so the broad reset never fights
         /// the narrower paths, and it keeps window-drag and capture
         /// corners honest.
+        /// A view that stops being FOCUSED drops its whole tooltip
+        /// conversation — armed delay, shown tooltip (focus-owned AND
+        /// pointer-owned), warm window, transit grace — and re-stamps
+        /// the tooltip hidden. The focus-shown tooltip's blur-hides
+        /// contract (shadcn's Base UI-backed default) extends to the
+        /// VIEW: the widget focus bookkeeping survives a view switch so
+        /// focus can return where it was, but a tooltip is transient
+        /// explanation for the interaction the user just left — keeping
+        /// one painted (or letting a warm window smolder) in a view
+        /// that no longer hears the keyboard is a stale affordance, and
+        /// its semantics node would keep claiming visible in the a11y
+        /// tree. Both focus seams call this: per-view focus moves
+        /// (setFocusedView, from input and from the focus commands) and
+        /// window-level focus loss (clearFocusedView).
+        pub fn resetCanvasTooltipIntentForViewBlur(self: *Runtime, view_index: usize) anyerror!void {
+            if (view_index >= self.view_count) return;
+            if (self.views[view_index].kind != .gpu_surface) return;
+            const view = &self.views[view_index];
+            const had_shown = view.canvas_tooltip_shown_id != 0;
+            view.canvas_tooltip_armed_id = 0;
+            view.canvas_tooltip_armed_owner_id = 0;
+            view.canvas_tooltip_deadline_ns = 0;
+            view.canvas_tooltip_warm_until_ns = 0;
+            view.canvas_tooltip_transit_deadline_ns = 0;
+            view.canvas_tooltip_shown_id = 0;
+            view.canvas_tooltip_shown_owner_id = 0;
+            view.canvas_tooltip_shown_from_focus = false;
+            if (had_shown) try commitCanvasTooltipVisibility(self, view_index);
+        }
+
         /// The press reset, keyed by the raw input's view identity: the
         /// entry point for pointer-downs that never reach the widget
         /// press pipeline — secondary-button downs consumed by the

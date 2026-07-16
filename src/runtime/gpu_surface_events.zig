@@ -633,10 +633,17 @@ fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8
     for (self.views[0..self.view_count], 0..) |*view, view_index| {
         if (view.window_id != window_id) continue;
         const previous_state = view.canvasWidgetRenderState();
+        const was_focused = view.focused;
         view.focused = std.mem.eql(u8, view.label, label);
         const next_state = view.canvasWidgetRenderState();
         if (!runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).canvasWidgetRenderStatesEqual(previous_state, next_state)) {
             try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+        }
+        // A view losing focus drops its tooltip state and re-stamps
+        // hidden — input landing in a sibling view must not leave the
+        // blurred view's tooltip floating.
+        if (was_focused and !view.focused) {
+            try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).resetCanvasTooltipIntentForViewBlur(self, view_index);
         }
     }
     for (self.webviews[0..self.webview_count]) |*webview| {

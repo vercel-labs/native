@@ -534,10 +534,17 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = std.mem.eql(u8, view.label, label);
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // A view losing focus drops its tooltip state and
+                // re-stamps hidden — no stale tooltip may keep floating
+                // in a view the keyboard just left.
+                if (was_focused and !view.focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
@@ -552,10 +559,16 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = false;
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // Window-level focus loss blurs every view: same tooltip
+                // reset as a per-view focus move.
+                if (was_focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
