@@ -1681,7 +1681,10 @@ fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize)
         cell_height = @max(cell_height, size.height);
     }
     const columns = gridColumnCount(widget.children.len, widget.layout.columns);
-    const rows = (widget.children.len + columns - 1) / columns;
+    // `gridRowCount`, not the additive ceil-div: declared columns are
+    // engine input, and `children.len + columns` overflows in safe
+    // builds when a parent intrinsically measures a maxInt-columns grid.
+    const rows = gridRowCount(widget.children.len, columns);
     const gap = nonNegative(widget.layout.gap);
     return paddedIntrinsicSize(widget, geometry.SizeF.init(
         cell_width * @as(f32, @floatFromInt(columns)) + gap * @as(f32, @floatFromInt(columns - 1)),

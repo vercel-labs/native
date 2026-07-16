@@ -1446,14 +1446,30 @@ test "the accent override desaturates its dark-scheme focus ring" {
 }
 
 test "the dark accent focus ring holds the non-text contrast floor across hues" {
-    // The surface accentFocusRing floors against: the default pack's
-    // dark background — the lighter (more demanding) of the shipped
-    // packs' dark backgrounds.
-    const dark_background = Color.rgb8(10, 10, 10);
+    // Rings draw OUTSIDE controls, so the tones that matter are the
+    // dark containers controls commonly sit on, across BOTH shipped
+    // packs: page background, card/popover surface, and the muted
+    // surface (the tabs-list pill container focusable triggers sit
+    // inside). accentFocusRing floors against the LIGHTEST of these
+    // (house surface_subtle #262626) — a ring clearing 3:1 there
+    // clears every darker tone in the set too; each is asserted below.
+    const house_dark = DesignTokens.theme(.{ .color_scheme = .dark }).colors;
+    const geist_dark = DesignTokens.theme(.{ .pack = .geist, .color_scheme = .dark }).colors;
+    const adjacent_tones = [_]Color{
+        house_dark.background, // #0a0a0a
+        house_dark.surface, // #171717
+        house_dark.surface_subtle, // #262626 — the floor's reference
+        geist_dark.background, // #000000 (Geist surface is the same black)
+        geist_dark.surface_subtle, // #1a1a1a
+    };
+    const reference_tone = house_dark.surface_subtle;
     const cases = [_]Color{
-        // The green desaturation alone dropped to ~2.6:1 (the input
-        // clears 3:1; halving HSL saturation loses a third of its
-        // luminance) — the floor lifts it back over the bar.
+        // Green: the input clears 3:1 on the background AND the card
+        // surface; desaturation alone dropped to ~2.6:1 on the
+        // background (worse still on the surface) — the floor lifts it
+        // back over the bar on both. Against the muted reference the
+        // input itself sits just under 3:1 (~2.94), so the ring holds
+        // exactly that there — restored, never invented.
         Color.rgb8(0, 128, 0),
         // Deep blue: below 3:1 on its own; the ring must not get worse.
         Color.rgb8(0, 0, 204),
@@ -1478,11 +1494,21 @@ test "the dark accent focus ring holds the non-text contrast floor across hues" 
         } else {
             try std.testing.expectEqualDeep(accent, ring);
         }
-        // The floor: >= 3:1 (WCAG non-text) whenever the accent itself
-        // cleared it, and never below the accent's own contrast when
-        // the accent did not.
-        const accent_contrast = testContrastRatio(accent, dark_background);
-        const ring_contrast = testContrastRatio(ring, dark_background);
+        // The floor, tone by tone: >= 3:1 (WCAG non-text) against EVERY
+        // adjacent tone the accent itself cleared it on. Flooring
+        // against the lightest tone guarantees the rest: where the
+        // accent cleared 3:1 anywhere, the ring's luminance lands at or
+        // above the accent's, so no darker tone can regress.
+        for (adjacent_tones) |tone| {
+            if (testContrastRatio(accent, tone) >= 3.0) {
+                try std.testing.expect(testContrastRatio(ring, tone) >= 3.0);
+            }
+        }
+        // The escape hatch, stated against the SAME reference the floor
+        // measures on: when the accent never cleared 3:1 there, the
+        // ring still never lands below the accent's own contrast.
+        const accent_contrast = testContrastRatio(accent, reference_tone);
+        const ring_contrast = testContrastRatio(ring, reference_tone);
         if (accent_contrast >= 3.0) {
             try std.testing.expect(ring_contrast >= 3.0);
         } else {

@@ -1471,15 +1471,16 @@ pub fn accentOverrides(accent: Color, color_scheme: ColorScheme) DesignTokenOver
 /// preserve luminance (a deep green loses a third of its light to the
 /// halved chroma), so the settled ring is then contrast-floored: its
 /// HSL lightness rises until it holds 3:1 (WCAG 1.4.11 non-text)
-/// against the default pack's dark background whenever the accent
-/// itself cleared that bar, and never lands below the accent's OWN
-/// contrast when it did not — the floor restores what desaturation
-/// cost, it never invents contrast the brand hue never had. The default
-/// dark background is the measuring surface because it is the lighter
-/// (more demanding) of the shipped packs' dark backgrounds: a ring
-/// clearing 3:1 there clears it over Geist's pure black too. Exported
-/// so hand-authored token sets can state the identical derivation and
-/// stay in step with the manifest channel.
+/// against the LIGHTEST dark tone controls commonly sit on
+/// (`lightest_dark_adjacent_tone`) whenever the accent itself cleared
+/// that bar there, and never lands below the accent's OWN contrast
+/// (against that same tone) when it did not — the floor restores what
+/// desaturation cost, it never invents contrast the brand hue never
+/// had. Contrast against a DARKER tone is always higher for a light
+/// ring, so clearing the lightest adjacent tone clears every darker
+/// one — background and card surface included — in both shipped packs.
+/// Exported so hand-authored token sets can state the identical
+/// derivation and stay in step with the manifest channel.
 pub fn accentFocusRing(accent: Color, color_scheme: ColorScheme) Color {
     return switch (color_scheme) {
         .light => accent,
@@ -1487,9 +1488,23 @@ pub fn accentFocusRing(accent: Color, color_scheme: ColorScheme) Color {
     };
 }
 
-/// The default pack's dark background — the surface `accentFocusRing`'s
-/// dark contrast floor measures against.
-const default_dark_background: Color = ColorTokens.dark().background;
+/// The tone `accentFocusRing`'s dark contrast floor measures against:
+/// the LIGHTEST of the dark tones controls commonly sit on across the
+/// shipped packs — rings draw OUTSIDE controls, so the tone that
+/// matters is the container behind the control, and lighter dark tones
+/// are the more demanding reference. The set, per pack:
+///
+/// - house dark: `background` #0a0a0a (the page), `surface` #171717
+///   (cards, popovers, menus), `surface_subtle` #262626 (muted chrome —
+///   the tabs-list pill container focusable triggers sit inside);
+/// - Geist dark: `background`/`surface` #000000, `surface_subtle`
+///   #1a1a1a.
+///
+/// The house `surface_subtle` is the lightest of the set, so a ring
+/// clearing 3:1 there clears it on every other tone controls sit on in
+/// both packs (contrast against a darker tone is strictly higher for a
+/// ring lighter than all of them).
+const lightest_dark_adjacent_tone: Color = ColorTokens.dark().surface_subtle;
 
 fn darkAccentFocusRing(accent: Color) Color {
     // Apps resolve palettes as container-level consts (the soundboard's
@@ -1497,7 +1512,7 @@ fn darkAccentFocusRing(accent: Color) Color {
     // search's srgb pow calls need more than the default branch quota.
     if (@inComptime()) @setEvalBranchQuota(1_000_000);
     const desaturated = scaleSaturation(accent, 0.5);
-    const surface_luminance = relativeLuminance(default_dark_background);
+    const surface_luminance = relativeLuminance(lightest_dark_adjacent_tone);
     const accent_contrast = contrastRatio(relativeLuminance(accent), surface_luminance);
     const floor = @min(3.0, accent_contrast);
     if (contrastRatio(relativeLuminance(desaturated), surface_luminance) >= floor) return desaturated;
