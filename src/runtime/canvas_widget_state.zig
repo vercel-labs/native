@@ -168,6 +168,16 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // the user was looking at, and the tween walks it to the
             // declared pose one presented frame at a time.
             try applyCanvasWidgetDisclosureTweenPlan(self, index, disclosure_plan);
+            // Re-hit-test the stationary pointer against the ADOPTED
+            // tree, after every pose restore above settles the frames
+            // the user actually sees and BEFORE the display refresh
+            // publishes them: the prune at the top validates only
+            // tooltip/owner identity and hover survives by ID, so a
+            // rebuild that MOVES a same-ID trigger away from (or
+            // under) the stationary pointer must step hover ownership
+            // and the tooltip intent machine exactly like the
+            // point-blind scroll paths do.
+            try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetInteractionAfterLayoutAdoption(self, index);
             const requested_frame = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
             if ((layout_dirty or widget_revision_changed) and !requested_frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
             return self.views[index].info();

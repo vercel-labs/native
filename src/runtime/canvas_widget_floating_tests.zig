@@ -1981,9 +1981,32 @@ test "a rebuild that rekeys the tooltip's trigger resets the shown tooltip" {
     try installTooltipRebuildFixture(harness, app);
 
     // Same structure, new trigger id: a new id is a new widget, so the
-    // intent earned against the old one does not transfer.
-    const replacement = tooltipRebuildChildren(9, false);
-    try expectTooltipRebuildReset(harness, app, &replacement);
+    // intent earned against the old one does not transfer — the shown
+    // slot resets and the warm window closes with it. The replacement
+    // declares the DEFAULT delay so the distinction stays observable:
+    // the new widget sits under the stationary pointer, and the
+    // adoption re-hit-test treats it exactly like a trigger scrolled
+    // under the pointer — it earns a FRESH dwell (owner re-recorded
+    // against the new id), never an instant carry-over of the old
+    // widget's show.
+    var replacement = tooltipRebuildChildren(9, false);
+    replacement[1].tooltip_delay_ms = -1;
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &replacement }, geometry.RectF.init(0, 0, 220, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_warm_until_ns);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 9), harness.runtime.views[0].canvas_tooltip_armed_owner_id);
+
+    // The fresh dwell completes on the frame clock like any other —
+    // earned by the new widget's own declaration, not inherited.
+    try tooltipFrame(harness, app, tooltip_t0 + 2000 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 9), harness.runtime.views[0].canvas_tooltip_shown_owner_id);
+    try std.testing.expect(!try tooltipHidden(harness, 3));
 }
 
 test "a rebuild that disables the tooltip's trigger resets the shown tooltip" {
@@ -2003,6 +2026,201 @@ test "a rebuild that disables the tooltip's trigger resets the shown tooltip" {
     // not wait for one.
     const replacement = tooltipRebuildChildren(2, true);
     try expectTooltipRebuildReset(harness, app, &replacement);
+}
+
+/// The rebuild-relocation fixture: a wrapper stack at an
+/// author-controlled x carrying the trigger (id 2) and its anchored
+/// tooltip (id 3) — same ids at every position, so a rebuild that
+/// moves the stack relocates the SAME binding instead of breaking it
+/// (the prune keeps it; only geometry changed).
+fn setTooltipRelocationLayout(harness: anytype, trigger_x: f32, delay_ms: i32) !void {
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 96, 32), .text = "Run" },
+        .{ .id = 3, .kind = .tooltip, .text = "Runs the job", .tooltip_delay_ms = delay_ms, .layout = .{ .anchor = .{ .placement = .above } } },
+    };
+    const stacks = [_]canvas.Widget{
+        .{ .id = 4, .kind = .stack, .frame = geometry.RectF.init(trigger_x, 60, 96, 32), .children = &children },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .stack, .children = &stacks },
+        geometry.RectF.init(0, 0, 320, 160),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+fn installTooltipRelocationView(harness: anytype, app: App) !void {
+    harness.null_platform.gpu_surfaces = true;
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 160),
+    });
+}
+
+test "a rebuild that relocates the same-ID trigger away from the stationary pointer disarms and hides" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-relocate-away", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipRelocationView(harness, app);
+    try setTooltipRelocationLayout(harness, 10, -1);
+
+    // Arm the default dwell on the trigger, then rebuild with the SAME
+    // ids relocated away from the stationary pointer: identity survives
+    // the prune, but the re-hit-test sees the pointer over nothing —
+    // the armed intent disarms on the rebuild itself, and frames past
+    // the would-be deadline reveal nothing.
+    try tooltipHover(harness, app, .{ .x = 58, .y = 76 }, tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try setTooltipRelocationLayout(harness, 180, -1);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_deadline_ns);
+    try tooltipFrame(harness, app, tooltip_t0 + 800 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+
+    // Earn the SHOWN tooltip back in place, then relocate again: the
+    // shown tooltip hides on the rebuild itself — no pointer event, no
+    // frame needed — with the usual pointer-hide warmth (the content
+    // moved, not the pointer: no transit corridor applies).
+    try setTooltipRelocationLayout(harness, 10, -1);
+    try tooltipHover(harness, app, .{ .x = 58, .y = 76 }, tooltip_t0 + 900 * tooltip_ms);
+    try tooltipFrame(harness, app, tooltip_t0 + 1500 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try setTooltipRelocationLayout(harness, 180, -1);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
+    try tooltipFrame(harness, app, tooltip_t0 + 2500 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+}
+
+test "a rebuild that moves a trigger under the stored pointer arms the normal dwell" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-relocate-under", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipRelocationView(harness, app);
+    try setTooltipRelocationLayout(harness, 180, -1);
+
+    // Park the pointer over empty space (seeding the stored position,
+    // earning no warmth), then rebuild with the trigger relocated
+    // UNDER it: the re-hit-test arms the normal dwell — owner recorded,
+    // corridor apex seeded from the stored truth — and the dwell
+    // completes on the frame clock like any other.
+    try tooltipHover(harness, app, .{ .x = 58, .y = 76 }, tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try setTooltipRelocationLayout(harness, 10, -1);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_tooltip_armed_owner_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_deadline_ns != 0);
+    try std.testing.expectEqual(@as(f32, 58), harness.runtime.views[0].canvas_tooltip_pointer_from.x);
+    try std.testing.expectEqual(@as(f32, 76), harness.runtime.views[0].canvas_tooltip_pointer_from.y);
+    try tooltipFrame(harness, app, tooltip_t0 + 700 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHidden(harness, 3));
+}
+
+test "a rebuild re-checks the content hold against the tooltip's new frame" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-relocate-held", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipRelocationView(harness, app);
+    try setTooltipRelocationLayout(harness, 10, 0);
+
+    // Show instantly (delay 0) and park the pointer INSIDE the
+    // tooltip's frame: the content hold, with hovered_id == 0 (the
+    // tooltip is not a hit target) — the exact state no hover
+    // transition can see.
+    try tooltipHover(harness, app, .{ .x = 58, .y = 76 }, tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    const held_point = (try tooltipNodeFrame(harness, 3)).center();
+    try tooltipHover(harness, app, held_point, tooltip_t0 + 100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // An unchanged rebuild keeps the hold: the containment re-check
+    // against the (same) adopted frame still passes and re-seeds the
+    // corridor apex from the stored position.
+    try setTooltipRelocationLayout(harness, 10, 0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHidden(harness, 3));
+    try std.testing.expectEqual(held_point.x, harness.runtime.views[0].canvas_tooltip_pointer_from.x);
+    try std.testing.expectEqual(held_point.y, harness.runtime.views[0].canvas_tooltip_pointer_from.y);
+
+    // A rebuild that MOVES the tooltip's frame out from under the
+    // stationary pointer breaks the hold honestly: hidden on the
+    // rebuild itself, usual warmth, and no frame resurrects it.
+    try setTooltipRelocationLayout(harness, 180, 0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
+    try tooltipFrame(harness, app, tooltip_t0 + 1000 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+}
+
+test "a rebuild without a trustworthy pointer position closes pointer intent, focus-shown survives" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-relocate-blind", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipRelocationView(harness, app);
+    try setTooltipRelocationLayout(harness, 10, -1);
+
+    // A keyboard-only session: tab earns the focus-shown tooltip, and
+    // a rebuild (no stored pointer position anywhere) leaves it alone —
+    // the keyboard holds it; the blind close is pointer-owned only.
+    try tooltipKey(harness, app, "tab", tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try setTooltipRelocationLayout(harness, 180, -1);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try std.testing.expect(!try tooltipHidden(harness, 3));
+
+    // Pointer-owned intent with no position to re-hit-test closes on
+    // the rebuild — the blind-scroll policy. Seed an armed dwell and a
+    // warm window directly (no pointer event may seed the store).
+    harness.runtime.views[0].canvas_tooltip_armed_id = 3;
+    harness.runtime.views[0].canvas_tooltip_armed_owner_id = 2;
+    harness.runtime.views[0].canvas_tooltip_deadline_ns = tooltip_t0 + 1000 * tooltip_ms;
+    harness.runtime.views[0].canvas_tooltip_warm_until_ns = tooltip_t0 + 5000 * tooltip_ms;
+    try setTooltipRelocationLayout(harness, 10, -1);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_owner_id);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_deadline_ns);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_warm_until_ns);
+    // And the focus-shown tooltip still stands after the pointer-owned
+    // close.
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHidden(harness, 3));
 }
 
 test "an unchanged rebuild with a hidden anchored tooltip diffs clean" {

@@ -1207,6 +1207,85 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             try commitCanvasTooltipVisibility(self, view_index);
         }
 
+        /// A rebuild adopted a new tree under a (possibly stationary)
+        /// pointer — the layout sibling of the point-blind scroll
+        /// reconcile above, called by `setCanvasWidgetLayout` after
+        /// adoption (copy, tween pose restores) settles the frames the
+        /// user actually sees. The adoption prune validates only
+        /// tooltip/owner IDENTITY and hover survives by ID, so without
+        /// this step a rebuild that MOVED the same-ID trigger away from
+        /// the stationary pointer left armed intent able to fire — and
+        /// a shown tooltip visible — until the next real pointer event.
+        ///
+        /// With a trustworthy stored position, re-hit-test it against
+        /// the adopted tree exactly like the blind-scroll path: hover
+        /// ownership follows the content honestly (wash and cursor
+        /// included), and the hover transition steps the intent machine
+        /// per normal rules — armed disarms, shown hides with the usual
+        /// warmth, a trigger arriving under the pointer arms (or
+        /// warm-shows) with the corridor apex seeded from the stored
+        /// truth. On top of that, the content HOLD is re-checked
+        /// against the tooltip's NEW frame, which the transition gate
+        /// cannot see (a content-held tooltip reads hovered_id == 0 on
+        /// both sides of the rebuild): still inside the adopted frame —
+        /// or still on the owner — keeps the hold and re-seeds the
+        /// apex; moved out from under the pointer hides on the rebuild
+        /// itself. Deliberately NO transit corridor for that hide: the
+        /// content moved, not the pointer (the blind-scroll doctrine),
+        /// and a corridor hold here would let continuous rebuilds
+        /// re-arm the bounded grace forever under a stationary pointer.
+        ///
+        /// With no trustworthy position (a keyboard-only session, or
+        /// the pointer left the view), the pointer's whole tooltip
+        /// conversation closes — the blind-scroll close policy.
+        /// Focus-shown tooltips survive every arm of this: the
+        /// keyboard holds them, and the adoption prune already handles
+        /// a binding the rebuild actually broke.
+        pub fn reconcileCanvasWidgetInteractionAfterLayoutAdoption(self: *Runtime, view_index: usize) anyerror!void {
+            const view = &self.views[view_index];
+            const previous_state = view.canvasWidgetRenderState();
+            const previous_cursor = view.canvas_widget_cursor;
+            const point = view.canvas_last_pointer_position orelse {
+                view.reconcileCanvasWidgetRenderStateAfterScroll(null);
+                try closeCanvasTooltipPointerIntent(self, view_index);
+                try invalidateForCanvasWidgetAdoptionReconcile(self, view_index, previous_state, previous_cursor);
+                return;
+            };
+            const previous_hovered_id = view.canvas_widget_hovered_id;
+            view.reconcileCanvasWidgetRenderStateAfterScroll(point);
+            const next_hovered_id = view.canvas_widget_hovered_id;
+            // The content-hold re-check, BEFORE the transition step so
+            // a hover arriving on a new trigger arms against the
+            // settled shown slot (the transition step's own
+            // held-by-content test then agrees with this resolution).
+            if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus) {
+                const on_owner = next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id;
+                if (on_owner or canvasTooltipShownContentContains(view, point)) {
+                    view.canvas_tooltip_pointer_from = point;
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                } else {
+                    hideShownCanvasTooltipWithWarmth(view, canvasRenderAnimationStartNsForView(view));
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+            }
+            if (next_hovered_id != previous_hovered_id) {
+                try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, point);
+            }
+            try invalidateForCanvasWidgetAdoptionReconcile(self, view_index, previous_state, previous_cursor);
+        }
+
+        /// The adoption reconcile's repaint echo: a wash or cursor the
+        /// re-hit-test moved must publish even when the rebuild's own
+        /// diff never touched those frames. No-ops entirely on the
+        /// unchanged-rebuild path, so a clean rebuild stays clean.
+        fn invalidateForCanvasWidgetAdoptionReconcile(self: *Runtime, view_index: usize, previous_state: canvas.WidgetRenderState, previous_cursor: platform.Cursor) anyerror!void {
+            const view = &self.views[view_index];
+            if (previous_cursor != view.canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, view_index);
+            if (!canvasWidgetRenderStatesEqual(previous_state, view.canvasWidgetRenderState())) {
+                try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, view.canvasWidgetRenderState());
+            }
+        }
+
         pub fn updateCanvasWidgetScrollFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
             if (pointer_event.pointer.phase != .wheel) return;
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
