@@ -1134,10 +1134,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
-                // An armed tooltip show delay only fires on a presented
-                // frame's timestamp, so frames must keep coming while
-                // one is armed — the render-animation pump's policy.
-                // Shown tooltips and the warm window need no pump: both
+                // An armed tooltip show delay — and a running anchor-gap
+                // transit grace — only fire on a presented frame's
+                // timestamp, so frames must keep coming while either is
+                // pending: the render-animation pump's policy. Settled
+                // shown tooltips and the warm window need no pump: both
                 // step on journaled input timestamps.
                 if (self.views[index].canvasTooltipIntentArmed()) {
                     self.invalidateFor(.state, self.views[index].frame);

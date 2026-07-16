@@ -967,6 +967,113 @@ test "tooltip-delay zero restores the instant hover show" {
     try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[2]));
 }
 
+fn tooltipNodeFrame(harness: anytype, widget_id: canvas.ObjectId) !geometry.RectF {
+    const view = &harness.runtime.views[0];
+    const node_index = view.canvasWidgetNodeIndexById(widget_id) orelse return error.TestUnexpectedResult;
+    return view.widget_layout_nodes[node_index].frame;
+}
+
+test "pointer travels into hoverable tooltip content and it stays open until leaving both" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-hoverable", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const toolbar = try installTooltipToolbar(harness, app, arena.allocator());
+
+    // Earn Bold's tooltip with a full dwell.
+    try tooltipHover(harness, app, toolbar.button_centers[0], tooltip_t0);
+    try tooltipFrame(harness, app, tooltip_t0 + 600 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // The anchored tooltip floats ABOVE the trigger with a gap between
+    // them; crossing that gap (a point between the tooltip's bottom
+    // edge and the trigger's top edge, inside the transit corridor)
+    // must not hide it — WCAG 1.4.13 wants hover-revealed content
+    // reachable by pointer, and Base UI tooltips default `hoverable`.
+    const tooltip_frame = try tooltipNodeFrame(harness, toolbar.tooltip_ids[0]);
+    const trigger_frame = try tooltipNodeFrame(harness, toolbar.button_ids[0]);
+    try std.testing.expect(tooltip_frame.maxY() < trigger_frame.y);
+    const gap_point = geometry.PointF{
+        .x = toolbar.button_centers[0].x,
+        .y = (tooltip_frame.maxY() + trigger_frame.y) / 2,
+    };
+    try tooltipHover(harness, app, gap_point, tooltip_t0 + 700 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+
+    // Frames inside the transit bound change nothing.
+    try tooltipFrame(harness, app, tooltip_t0 + 800 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // Arriving inside the tooltip's own frame holds it open outright
+    // (the tooltip stays out of hit-testing; the hold is the intent
+    // machine's geometric test), and gliding within it stays free.
+    try tooltipHover(harness, app, tooltip_frame.center(), tooltip_t0 + 850 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_transit_deadline_ns);
+    try tooltipHover(harness, app, .{ .x = tooltip_frame.center().x + 4, .y = tooltip_frame.center().y }, tooltip_t0 + 2000 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+
+    // Leaving BOTH regions (away from the corridor) hides on the move
+    // itself, with the usual pointer-hide warm window: the neighboring
+    // trigger explains itself instantly.
+    try tooltipHover(harness, app, .{ .x = 5, .y = 150 }, tooltip_t0 + 2100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+    try tooltipHover(harness, app, toolbar.button_centers[1], tooltip_t0 + 2200 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[1], harness.runtime.views[0].canvas_tooltip_shown_id);
+}
+
+test "a pointer parked in the anchor gap resolves the transit on the frame clock" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-transit", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const toolbar = try installTooltipToolbar(harness, app, arena.allocator());
+
+    try tooltipHover(harness, app, toolbar.button_centers[0], tooltip_t0);
+    try tooltipFrame(harness, app, tooltip_t0 + 600 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    const tooltip_frame = try tooltipNodeFrame(harness, toolbar.tooltip_ids[0]);
+    const trigger_frame = try tooltipNodeFrame(harness, toolbar.button_ids[0]);
+    const gap_point = geometry.PointF{
+        .x = toolbar.button_centers[0].x,
+        .y = (tooltip_frame.maxY() + trigger_frame.y) / 2,
+    };
+    try tooltipHover(harness, app, gap_point, tooltip_t0 + 700 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // The transit is BOUNDED: it holds while frames stay inside the
+    // grace, keeps the frame channel pumping so the deadline can fire
+    // without further input, and a pointer that parks in the gap
+    // resolves on the recorded frame clock — hidden, with the usual
+    // pointer-hide warm window (replay hits the same frame).
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_transit_deadline_ns != 0);
+    try std.testing.expect(harness.runtime.invalidated);
+    try tooltipFrame(harness, app, tooltip_t0 + 1000 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try tooltipFrame(harness, app, tooltip_t0 + 1101 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
+}
+
 fn tooltipKey(harness: anytype, app: App, key: []const u8, timestamp_ns: u64) !void {
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,

@@ -482,6 +482,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 if (self.canvas_tooltip_shown_id == surface.id) {
                     self.canvas_tooltip_shown_id = 0;
                     self.canvas_tooltip_shown_owner_id = 0;
+                    self.canvas_tooltip_transit_deadline_ns = 0;
                     // Covers the focus-shown path too: Escape on the
                     // focused trigger clears the reason flag with the
                     // slot, and focus (still on the trigger) does not
@@ -633,6 +634,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 self.canvas_tooltip_shown_owner_id = 0;
                 self.canvas_tooltip_shown_from_focus = false;
                 self.canvas_tooltip_warm_until_ns = 0;
+                self.canvas_tooltip_transit_deadline_ns = 0;
             }
         }
 
@@ -658,11 +660,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         /// True while the intent machine needs presented frames to keep
-        /// coming: an armed show delay only fires on a frame timestamp,
-        /// so the frame pump re-invalidates until it fires or disarms
-        /// (the render-animation pump's policy exactly).
+        /// coming: an armed show delay and a running transit grace both
+        /// fire only on a frame timestamp, so the frame pump
+        /// re-invalidates until they resolve (the render-animation
+        /// pump's policy exactly).
         pub fn canvasTooltipIntentArmed(self: *const RuntimeView) bool {
-            return self.canvas_tooltip_armed_id != 0;
+            return self.canvas_tooltip_armed_id != 0 or self.canvas_tooltip_transit_deadline_ns != 0;
         }
 
         /// Keyboard entry point into an anchored menu surface: the marked

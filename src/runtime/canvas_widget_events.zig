@@ -405,11 +405,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             );
 
             // Anchored-tooltip hover intent steps on hover-target
-            // transitions only (a pointer gliding within one trigger is
+            // transitions (a pointer gliding within one trigger is
             // free); the armed delay itself fires on presented-frame
-            // timestamps in advanceCanvasTooltipIntentForFrame.
+            // timestamps in advanceCanvasTooltipIntentForFrame. A
+            // .cancel carries no trustworthy position, so it steps the
+            // machine point-blind (immediate hide semantics).
+            const tooltip_intent_point: ?geometry.PointF = if (pointer_event.pointer.phase == .cancel) null else pointer_event.pointer.point;
             if (self.views[index].canvas_widget_hovered_id != next_hovered_id) {
-                try updateCanvasTooltipIntentForHoverChange(self, index, next_hovered_id);
+                try updateCanvasTooltipIntentForHoverChange(self, index, next_hovered_id, tooltip_intent_point);
+            }
+            // While a pointer-shown tooltip is up, EVERY move also steps
+            // the travel check: crossing the anchor gap or gliding over
+            // the tooltip's own frame usually changes no hover target
+            // (the tooltip is deliberately not hit-tested), so the
+            // transition gate above cannot see it.
+            if (pointer_event.pointer.phase == .hover or pointer_event.pointer.phase == .move) {
+                try updateCanvasTooltipIntentForPointerTravel(self, index, next_hovered_id, pointer_event.pointer.point);
             }
             // A press ends the tooltip conversation outright — pending
             // reveal, shown tooltip, and warm window alike (after the
@@ -466,7 +477,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// `now` is `canvasRenderAnimationStartNsForView` — the freshest
         /// journaled input/frame timestamp, never a wall clock — so a
         /// recorded sweep replays every show/hide frame byte-identically.
-        fn updateCanvasTooltipIntentForHoverChange(self: *Runtime, view_index: usize, next_hovered_id: canvas.ObjectId) anyerror!void {
+        ///
+        /// `point` is the pointer position that produced this
+        /// transition, when one exists: it lets a SHOWN tooltip hold
+        /// through a move into its own frame or across the anchor gap
+        /// (see `updateCanvasTooltipIntentForPointerTravel`). Pass null
+        /// for point-blind steps — pointer cancel, and scroll paths
+        /// without a live pointer position — which keep the classic
+        /// immediate-hide semantics.
+        fn updateCanvasTooltipIntentForHoverChange(self: *Runtime, view_index: usize, next_hovered_id: canvas.ObjectId, point: ?geometry.PointF) anyerror!void {
             const view = &self.views[view_index];
             const now_ns = canvasRenderAnimationStartNsForView(view);
             const tooltip_index: ?usize = blk: {
@@ -477,6 +496,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
 
             var shown_changed = false;
+            // The pointer sitting inside the shown tooltip's own frame
+            // holds it open (WCAG 1.4.13: hover-revealed content must be
+            // hoverable; Base UI tooltips default `hoverable`). The
+            // tooltip stays OUT of hit-testing — it is presentation
+            // chrome, and claiming hover or presses would put a
+            // non-interactive surface into interaction routing and the
+            // a11y tree's hover story — so the hold is a geometric test
+            // against the shown frame here in the intent machine.
+            const held_by_content = canvasTooltipShownContentContains(view, point);
             // A FOCUS-shown tooltip is held by the keyboard, not the
             // pointer: hover leaving some other widget must not tear it
             // down (the shadcn/Base UI focus-open holds through pointer
@@ -484,10 +512,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // intent below, which takes over the single shown slot —
             // moves it.
             if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_id != tooltip_id and !view.canvas_tooltip_shown_from_focus) {
-                view.canvas_tooltip_shown_id = 0;
-                view.canvas_tooltip_shown_owner_id = 0;
-                view.canvas_tooltip_warm_until_ns = now_ns + canvasTooltipWarmWindowNs(view.widget_tokens);
-                shown_changed = true;
+                // Crossing the anchor gap: a leave whose pointer is still
+                // inside the transit corridor keeps the tooltip up (the
+                // travel step opens the bounded grace); one that owns a
+                // DIFFERENT tooltip transfers immediately (the warm-window
+                // sweep), and everything else hides on the spot.
+                const held_in_transit = tooltip_id == 0 and canvasTooltipTravelRegionContains(view, point);
+                if (!held_by_content and !held_in_transit) {
+                    hideShownCanvasTooltipWithWarmth(view, now_ns);
+                    shown_changed = true;
+                }
             }
             if (view.canvas_tooltip_armed_id != 0 and view.canvas_tooltip_armed_id != tooltip_id) {
                 view.canvas_tooltip_armed_id = 0;
@@ -495,7 +529,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 view.canvas_tooltip_deadline_ns = 0;
             }
             if (tooltip_index) |node_index| {
-                if (view.canvas_tooltip_shown_id != tooltip_id and tooltip_id != 0) {
+                // Hover reached through the shown tooltip's frame belongs
+                // to the tooltip, not to whatever sits beneath it: never
+                // arm (or warm-show) a trigger the pointer is not
+                // actually on.
+                if (view.canvas_tooltip_shown_id != tooltip_id and tooltip_id != 0 and !held_by_content) {
                     const delay_ns = canvasTooltipShowDelayNs(view.widget_layout_nodes[node_index].widget, view.widget_tokens);
                     if (delay_ns == 0 or now_ns < view.canvas_tooltip_warm_until_ns) {
                         view.canvas_tooltip_shown_id = tooltip_id;
@@ -504,15 +542,141 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         view.canvas_tooltip_armed_id = 0;
                         view.canvas_tooltip_armed_owner_id = 0;
                         view.canvas_tooltip_deadline_ns = 0;
+                        view.canvas_tooltip_transit_deadline_ns = 0;
+                        if (point) |value| view.canvas_tooltip_pointer_from = value;
                         shown_changed = true;
                     } else if (view.canvas_tooltip_armed_id != tooltip_id) {
                         view.canvas_tooltip_armed_id = tooltip_id;
                         view.canvas_tooltip_armed_owner_id = next_hovered_id;
                         view.canvas_tooltip_deadline_ns = now_ns + delay_ns;
+                        // Seed the transit apex at arm time: a dwell that
+                        // completes on the frame clock has no pointer
+                        // position of its own, and the corridor for the
+                        // eventual leave must fan out from a point that
+                        // was really on the trigger.
+                        if (point) |value| view.canvas_tooltip_pointer_from = value;
                     }
                 }
             }
             if (shown_changed) try commitCanvasTooltipVisibility(self, view_index);
+        }
+
+        /// The travel half of hoverable tooltip content, stepped on
+        /// EVERY pointer move while a pointer-shown tooltip is up (the
+        /// hover-change step alone cannot see moves that stay on one
+        /// hover target while crossing the anchor gap or the tooltip's
+        /// frame, because the tooltip is deliberately not hit-tested):
+        ///   - on the owning trigger or inside the shown tooltip's
+        ///     frame: held — remember the position as the corridor apex
+        ///     and close any running transit;
+        ///   - outside both but inside the transit corridor (the convex
+        ///     fan from the apex to the trigger and tooltip frames —
+        ///     Base UI's safe-polygon shape): keep the tooltip up and
+        ///     re-arm the bounded deadline, so a slow deliberate
+        ///     crossing never races a timer (WCAG 1.4.13) while a
+        ///     pointer that parks in the gap still resolves on the
+        ///     frame clock, replay-deterministically;
+        ///   - outside the corridor: hide with the usual pointer-hide
+        ///     warm window.
+        /// The safe-polygon corridor was chosen over a pure transit
+        /// time window because it keeps every motion AWAY from the
+        /// tooltip hiding on the move itself — the pre-hoverable
+        /// semantics tests and recorded sessions pin — and holds only
+        /// motion that is honestly en route to the content; the
+        /// deadline bounds it so replay and long-idle behavior stay
+        /// deterministic (Base UI's safe polygon is unbounded).
+        fn updateCanvasTooltipIntentForPointerTravel(self: *Runtime, view_index: usize, next_hovered_id: canvas.ObjectId, point: geometry.PointF) anyerror!void {
+            const view = &self.views[view_index];
+            if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) {
+                view.canvas_tooltip_transit_deadline_ns = 0;
+                return;
+            }
+            const now_ns = canvasRenderAnimationStartNsForView(view);
+            const on_owner = next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id;
+            if (on_owner or canvasTooltipShownContentContains(view, point)) {
+                view.canvas_tooltip_pointer_from = point;
+                view.canvas_tooltip_transit_deadline_ns = 0;
+                return;
+            }
+            if (canvasTooltipTravelRegionContains(view, point)) {
+                view.canvas_tooltip_transit_deadline_ns = now_ns + tooltip_transit_grace_ms * std.time.ns_per_ms;
+                return;
+            }
+            hideShownCanvasTooltipWithWarmth(view, now_ns);
+            try commitCanvasTooltipVisibility(self, view_index);
+        }
+
+        /// Hide the pointer-shown tooltip and open the shared warm
+        /// window — the one pointer-hide shape every path shares. Any
+        /// in-flight transit grace dies with the tooltip it was holding.
+        fn hideShownCanvasTooltipWithWarmth(view: anytype, now_ns: u64) void {
+            view.canvas_tooltip_shown_id = 0;
+            view.canvas_tooltip_shown_owner_id = 0;
+            view.canvas_tooltip_shown_from_focus = false;
+            view.canvas_tooltip_warm_until_ns = now_ns + canvasTooltipWarmWindowNs(view.widget_tokens);
+            view.canvas_tooltip_transit_deadline_ns = 0;
+        }
+
+        /// Whether `point` sits inside the SHOWN tooltip's own frame —
+        /// the hoverable-content test. Null points (cancel, point-blind
+        /// scroll steps) never hold.
+        fn canvasTooltipShownContentContains(view: anytype, point: ?geometry.PointF) bool {
+            const value = point orelse return false;
+            if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) return false;
+            const node_index = view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_id) orelse return false;
+            return view.widget_layout_nodes[node_index].frame.containsPoint(value);
+        }
+
+        /// Whether `point` sits inside the transit corridor between the
+        /// pointer's last held position and the shown tooltip: the
+        /// convex fan from the apex to the tooltip's frame plus the fan
+        /// back to the owning trigger's frame (so content-to-trigger
+        /// returns cross the same gap). This is Base UI's safe-polygon
+        /// shape, evaluated against journaled pointer positions only.
+        fn canvasTooltipTravelRegionContains(view: anytype, point: ?geometry.PointF) bool {
+            const value = point orelse return false;
+            if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) return false;
+            const apex = view.canvas_tooltip_pointer_from;
+            if (view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_id)) |node_index| {
+                if (canvasTooltipTravelFanContains(apex, view.widget_layout_nodes[node_index].frame, value)) return true;
+            }
+            if (view.canvasWidgetNodeIndexById(view.canvas_tooltip_shown_owner_id)) |node_index| {
+                if (canvasTooltipTravelFanContains(apex, view.widget_layout_nodes[node_index].frame, value)) return true;
+            }
+            return false;
+        }
+
+        /// Point-in-convex-hull for the fan from `apex` over `rect`:
+        /// the rect itself plus the four apex-to-adjacent-corner
+        /// triangles cover exactly the hull of {apex} ∪ rect.
+        fn canvasTooltipTravelFanContains(apex: geometry.PointF, rect: geometry.RectF, point: geometry.PointF) bool {
+            if (rect.containsPoint(point)) return true;
+            const corners = [4]geometry.PointF{
+                .{ .x = rect.x, .y = rect.y },
+                .{ .x = rect.maxX(), .y = rect.y },
+                .{ .x = rect.maxX(), .y = rect.maxY() },
+                .{ .x = rect.x, .y = rect.maxY() },
+            };
+            inline for (0..4) |index| {
+                if (canvasTooltipPointInTriangle(point, apex, corners[index], corners[(index + 1) % 4])) return true;
+            }
+            return false;
+        }
+
+        /// Sign-consistency point-in-triangle (boundary counts as
+        /// inside; degenerate triangles — an apex on the rect edge —
+        /// collapse to their boundary and stay honest).
+        fn canvasTooltipPointInTriangle(p: geometry.PointF, a: geometry.PointF, b: geometry.PointF, c: geometry.PointF) bool {
+            const d1 = canvasTooltipCross(p, a, b);
+            const d2 = canvasTooltipCross(p, b, c);
+            const d3 = canvasTooltipCross(p, c, a);
+            const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
+            const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
+            return !(has_neg and has_pos);
+        }
+
+        fn canvasTooltipCross(p: geometry.PointF, a: geometry.PointF, b: geometry.PointF) f32 {
+            return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
         }
 
         /// The armed show delay fires on the presented frame's RECORDED
@@ -522,6 +686,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// frames coming while a delay is armed.
         pub fn advanceCanvasTooltipIntentForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
             const view = &self.views[view_index];
+            // A transit grace that ran out resolves here, on the same
+            // recorded frame clock the show delay fires on: the pointer
+            // parked in the corridor without arriving, so the tooltip
+            // hides with the usual pointer-hide warmth — a
+            // deterministic frame in replay, exactly like the show.
+            if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus and
+                view.canvas_tooltip_transit_deadline_ns != 0 and timestamp_ns >= view.canvas_tooltip_transit_deadline_ns)
+            {
+                hideShownCanvasTooltipWithWarmth(view, timestamp_ns);
+                try commitCanvasTooltipVisibility(self, view_index);
+            }
             if (view.canvas_tooltip_armed_id == 0) return;
             if (timestamp_ns < view.canvas_tooltip_deadline_ns) return;
             view.canvas_tooltip_shown_id = view.canvas_tooltip_armed_id;
@@ -530,6 +705,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             view.canvas_tooltip_armed_id = 0;
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;
+            view.canvas_tooltip_transit_deadline_ns = 0;
             try commitCanvasTooltipVisibility(self, view_index);
         }
 
@@ -552,6 +728,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;
             view.canvas_tooltip_warm_until_ns = 0;
+            view.canvas_tooltip_transit_deadline_ns = 0;
             if (view.canvas_tooltip_shown_id == 0) return;
             view.canvas_tooltip_shown_id = 0;
             view.canvas_tooltip_shown_owner_id = 0;
@@ -597,8 +774,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 // Focus re-affirms an already pointer-shown tooltip too:
                 // the keyboard now holds it, so pointer leave (which
                 // opens the warm window) no longer hides it — blur will.
+                // Any pointer transit grace dies with the handover.
                 view.canvas_tooltip_shown_owner_id = focus_visible_id;
                 view.canvas_tooltip_shown_from_focus = true;
+                view.canvas_tooltip_transit_deadline_ns = 0;
                 // A pending pointer dwell for the SAME tooltip is
                 // redundant now; a dwell on another trigger keeps
                 // running (the pointer's own intent may still complete
@@ -646,6 +825,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 view.canvas_tooltip_shown_id = 0;
                 view.canvas_tooltip_shown_owner_id = 0;
                 view.canvas_tooltip_shown_from_focus = false;
+                view.canvas_tooltip_transit_deadline_ns = 0;
                 matched = true;
             }
             if (matched) view.canvas_tooltip_warm_until_ns = 0;
@@ -671,6 +851,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             view.widget_revision += 1;
             try invalidateForCanvasWidgetDirty(self, view_index, dirty orelse view.frame);
         }
+
+        /// Bound on the anchor-gap transit grace, in milliseconds. Each
+        /// in-corridor pointer move re-arms it, so it only ever fires
+        /// for a pointer PARKED between trigger and tooltip — 400ms of
+        /// stillness in a gap a few points wide is abandonment, not
+        /// transit. Deliberately a constant, not a theme token: the
+        /// corridor's timing is interaction mechanics (like
+        /// double-click windows), and Base UI exposes no knob for its
+        /// safe polygon either.
+        const tooltip_transit_grace_ms: u64 = 400;
 
         fn canvasTooltipShowDelayNs(widget: canvas.Widget, tokens: canvas.DesignTokens) u64 {
             const delay_ms: u64 = if (widget.tooltip_delay_ms >= 0)

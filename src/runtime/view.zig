@@ -452,6 +452,23 @@ pub const RuntimeView = struct {
     /// exists.
     canvas_tooltip_armed_owner_id: canvas.ObjectId = 0,
     canvas_tooltip_shown_owner_id: canvas.ObjectId = 0,
+    /// The pointer's last position while it held the shown tooltip —
+    /// on the owning trigger (seeded at arm/show) or inside the shown
+    /// tooltip's own frame. It is the apex of the transit corridor
+    /// (`canvasTooltipTravelRegionContains`) a leave-move is judged
+    /// against, so the corridor always fans out from where the pointer
+    /// actually left. Meaningful only while a pointer-shown tooltip is
+    /// up; every value it is compared against comes from journaled
+    /// pointer events, so replay sees identical corridors.
+    canvas_tooltip_pointer_from: geometry.PointF = geometry.PointF.zero(),
+    /// Nonzero while the pointer has left both the trigger and the
+    /// shown tooltip's frame but is still inside the transit corridor
+    /// between them: the deadline (recorded clock) by which it must
+    /// arrive. Each in-corridor move re-arms it, so slow deliberate
+    /// transits stay open (WCAG 1.4.13 hoverable content) while a
+    /// pointer that parks in the gap resolves deterministically on the
+    /// frame clock. 0 means no transit is in flight.
+    canvas_tooltip_transit_deadline_ns: u64 = 0,
     /// True when the shown tooltip was revealed by keyboard
     /// focus-visible rather than pointer hover. Focus-shown tooltips
     /// follow shadcn's Base UI-backed defaults: they open instantly on
