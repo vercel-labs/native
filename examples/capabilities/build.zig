@@ -87,6 +87,11 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
+        // Force the LLVM backend + LLD on x86_64 (LLD only on Linux) to avoid the
+        // .sframe linker crash the self-hosted backend hits; mirrors the generated
+        // app graph so hand-wired examples get the same workaround. See fix/37.
+        .use_llvm = if (target.result.cpu.arch == .x86_64) true else null,
+        .use_lld = if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) true else null,
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
