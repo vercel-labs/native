@@ -1074,6 +1074,64 @@ test "a pointer parked in the anchor gap resolves the transit on the frame clock
     try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
 }
 
+test "a collinear apex holds only the corridor's segment, never the infinite line" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-degenerate", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const toolbar = try installTooltipToolbar(harness, app, arena.allocator());
+
+    // Earn Bold's tooltip with a full dwell, then park the pointer ON
+    // the trigger's top edge: still the owner (top edge is inclusive),
+    // so the corridor apex re-seeds EXACTLY collinear with that edge —
+    // the degenerate-fan setup, since the apex-to-adjacent-corner
+    // triangle over the trigger's top edge now has zero area.
+    try tooltipHover(harness, app, toolbar.button_centers[0], tooltip_t0);
+    try tooltipFrame(harness, app, tooltip_t0 + 600 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    const trigger_frame = try tooltipNodeFrame(harness, toolbar.button_ids[0]);
+    const tooltip_frame = try tooltipNodeFrame(harness, toolbar.tooltip_ids[0]);
+    const edge_apex = geometry.PointF{ .x = toolbar.button_centers[0].x, .y = trigger_frame.y };
+    try tooltipHover(harness, app, edge_apex, tooltip_t0 + 700 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(edge_apex.x, harness.runtime.views[0].canvas_tooltip_pointer_from.x);
+    try std.testing.expectEqual(edge_apex.y, harness.runtime.views[0].canvas_tooltip_pointer_from.y);
+
+    // The NORMAL corridor still works from this apex: stepping into the
+    // anchor gap keeps the tooltip up on the bounded grace, and a frame
+    // inside the grace changes nothing.
+    const gap_point = geometry.PointF{
+        .x = toolbar.button_centers[0].x,
+        .y = (tooltip_frame.maxY() + trigger_frame.y) / 2,
+    };
+    try tooltipHover(harness, app, gap_point, tooltip_t0 + 750 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_transit_deadline_ns != 0);
+    try tooltipFrame(harness, app, tooltip_t0 + 800 * tooltip_ms);
+    try std.testing.expectEqual(toolbar.tooltip_ids[0], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // Motion ALONG the apex's collinear line, beyond the trigger's
+    // actual corners (into the row padding left of Bold): the collapsed
+    // triangle contains only its boundary segment, so this is OUTSIDE
+    // the corridor — the tooltip hides on the move itself with the
+    // usual pointer-hide warmth instead of re-arming the grace forever
+    // along the infinite line.
+    try std.testing.expect(trigger_frame.x > 4);
+    const along_line = geometry.PointF{ .x = 2, .y = trigger_frame.y };
+    try tooltipHover(harness, app, along_line, tooltip_t0 + 850 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[0]));
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_warm_until_ns != 0);
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_transit_deadline_ns);
+}
+
 /// A scrollable toolbar column: a scroll_view whose two stacks each
 /// wrap a trigger button and its anchored tooltip, viewport 40 points
 /// tall so a 40-point scroll swaps which trigger sits under a

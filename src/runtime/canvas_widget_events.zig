@@ -675,16 +675,78 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             return false;
         }
 
+        /// Degeneracy threshold for the corridor fan's triangles, in
+        /// CANVAS POINTS — the same logical-point scale every corridor
+        /// coordinate (pointer positions, widget frames) is measured
+        /// in, so the tolerance means the same thing at every display
+        /// scale factor. A triangle whose apex sits within half a
+        /// point of the line through its other two vertices is a
+        /// sliver no pointer path could meaningfully travel through:
+        /// treating it as degenerate loses no honest corridor area,
+        /// while the exact-collinear case (the apex parked precisely
+        /// on a tooltip edge's line) stops reading as "contains the
+        /// whole infinite line".
+        const tooltip_corridor_epsilon: f32 = 0.5;
+
         /// Sign-consistency point-in-triangle (boundary counts as
-        /// inside; degenerate triangles — an apex on the rect edge —
-        /// collapse to their boundary and stay honest).
+        /// inside). Degenerate triangles get an explicit guard: when
+        /// the apex lands on (or within the epsilon of) the line
+        /// through the rect edge, ALL THREE cross products are ~0 for
+        /// every point collinear with the collapsed triangle, so the
+        /// bare sign test held the corridor open along the entire
+        /// infinite line — motion arbitrarily far along it kept
+        /// re-arming the transit grace and the tooltip never closed. A
+        /// collapsed triangle contains only its boundary SEGMENTS
+        /// (between its actual vertices), never the line beyond them.
         fn canvasTooltipPointInTriangle(p: geometry.PointF, a: geometry.PointF, b: geometry.PointF, c: geometry.PointF) bool {
+            // |cross(c, a, b)| is twice the triangle's area — base
+            // edge times the apex's height over it. Comparing its
+            // square against epsilon² · longest-edge² asks "is the
+            // triangle thinner than the epsilon over its LONGEST
+            // base?", which is scale-honest for slivers of any length
+            // (a flat epsilon on the area would misclassify long thin
+            // fans whose area grows with the base).
+            const area_x2 = canvasTooltipCross(c, a, b);
+            const longest_sq = @max(
+                canvasTooltipDistanceSq(a, b),
+                @max(canvasTooltipDistanceSq(b, c), canvasTooltipDistanceSq(c, a)),
+            );
+            if (area_x2 * area_x2 <= tooltip_corridor_epsilon * tooltip_corridor_epsilon * longest_sq) {
+                return canvasTooltipPointOnSegment(p, a, b) or
+                    canvasTooltipPointOnSegment(p, b, c) or
+                    canvasTooltipPointOnSegment(p, c, a);
+            }
             const d1 = canvasTooltipCross(p, a, b);
             const d2 = canvasTooltipCross(p, b, c);
             const d3 = canvasTooltipCross(p, c, a);
             const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
             const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
             return !(has_neg and has_pos);
+        }
+
+        /// Whether `p` lies on the segment [a, b] — between the actual
+        /// endpoints, within the corridor epsilon perpendicular to it —
+        /// the only containment a collapsed fan triangle keeps.
+        fn canvasTooltipPointOnSegment(p: geometry.PointF, a: geometry.PointF, b: geometry.PointF) bool {
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const len_sq = dx * dx + dy * dy;
+            if (len_sq == 0) {
+                // The segment itself collapsed to a point.
+                return canvasTooltipDistanceSq(p, a) <= tooltip_corridor_epsilon * tooltip_corridor_epsilon;
+            }
+            // Perpendicular distance: |cross| = distance · |b - a|.
+            const cross = canvasTooltipCross(p, a, b);
+            if (cross * cross > tooltip_corridor_epsilon * tooltip_corridor_epsilon * len_sq) return false;
+            // Projection onto the segment stays within its endpoints.
+            const dot = (p.x - a.x) * dx + (p.y - a.y) * dy;
+            return dot >= 0 and dot <= len_sq;
+        }
+
+        fn canvasTooltipDistanceSq(a: geometry.PointF, b: geometry.PointF) f32 {
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            return dx * dx + dy * dy;
         }
 
         fn canvasTooltipCross(p: geometry.PointF, a: geometry.PointF, b: geometry.PointF) f32 {
