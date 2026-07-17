@@ -1003,6 +1003,120 @@ test "media buffer ownership freezes at init: a mutated options.allocator sees z
     // either allocator.
 }
 
+// ------------------------------------------------ dropped-frame retries
+
+test "an adoption-OOM drop retries with byte-identical pixels on the next push" {
+    // The static-frame shape: a paused video (or album art) producer
+    // re-pushes the SAME bytes after its frame was dropped. The drop
+    // must forget the push-boundary fingerprint, or the identical
+    // retry dies in the dedup gate — no stage, no wake, the surface
+    // stays blank until the pixels happen to change.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const harness = try startedGpuHarnessWithRuntimeAllocator(std.testing.allocator, counting.allocator());
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    defer producer.release();
+
+    // The lazy texture-buffer allocation fails at first adoption: this
+    // frame drops loudly, nothing is adopted.
+    const still = solidFrame(.{ 21, 22, 23, 255 });
+    try producer.pushFrame(2, 2, &still);
+    counting.fail_index = 0;
+    try dispatchFrame(harness, app, 1);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
+
+    // Memory recovers and the producer re-pushes the SAME bytes: the
+    // push must stage AND wake again (the drop reopened both gates),
+    // and the next adoption lands the frame.
+    counting.fail_index = std.math.maxInt(usize);
+    const requests_before = harness.null_platform.pendingFrameRequestCount();
+    try producer.pushFrame(2, 2, &still);
+    try std.testing.expectEqual(requests_before + 1, harness.null_platform.pendingFrameRequestCount());
+    try dispatchFrame(harness, app, 2);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
+    const resources = harness.runtime.registeredCanvasImages();
+    try std.testing.expectEqual(@as(usize, 1), resources.len);
+    try std.testing.expectEqualSlices(u8, &still, resources[0].pixels);
+}
+
+test "a registry-full drop retries with byte-identical pixels on the next push" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    // Fill the runtime's texture registry from claims that stay LIVE,
+    // so no entry is reclaimable.
+    var live: [canvas_limits.max_media_surface_channels]media_surface.MediaSurfaceProducer = undefined;
+    for (&live, 0..) |*extra, index| {
+        extra.* = try harness.runtime.acquireMediaSurfaceProducer(501 + index);
+        const shade: u8 = @intCast(index + 1);
+        const frame = solidFrame(.{ shade, 0, shade, 255 });
+        try extra.pushFrame(2, 2, &frame);
+    }
+    defer for (live[1..]) |extra| extra.release();
+    try dispatchFrame(harness, app, 1);
+    try std.testing.expectEqual(canvas_limits.max_media_surface_channels, harness.runtime.media_surface_count);
+
+    // Free ONE slot for the new producer, then rename the released
+    // surface's entry to a still-live surface id. That manufactures
+    // the registry-full drop's shape, which no single-threaded API
+    // sequence can reach (the entry budget equals the process-wide
+    // slot budget, so a full table of actively claimed entries plus a
+    // fifth staged surface requires a release racing the lock-free
+    // ownership snapshot): every entry reads as actively claimed
+    // while a staged frame has nowhere to land.
+    live[0].release();
+    var renamed_index: usize = 0;
+    for (harness.runtime.media_surface_entries[0..harness.runtime.media_surface_count], 0..) |entry, index| {
+        if (entry.surface_id == 501) renamed_index = index;
+    }
+    harness.runtime.media_surface_entries[renamed_index].surface_id = 502;
+
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(999);
+    defer producer.release();
+    const still = solidFrame(.{ 77, 78, 79, 255 });
+    try producer.pushFrame(2, 2, &still);
+    try dispatchFrame(harness, app, 2);
+    // Registry full of live surfaces: this frame dropped loudly.
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(999) == null);
+
+    // The release becomes visible (the entry is reclaimable again) and
+    // the producer re-pushes the SAME bytes: the drop must have
+    // reopened the push-boundary gate, so the retry stages, wakes, and
+    // the next adoption reclaims the entry and lands the frame.
+    harness.runtime.media_surface_entries[renamed_index].surface_id = 501;
+    const requests_before = harness.null_platform.pendingFrameRequestCount();
+    try producer.pushFrame(2, 2, &still);
+    try std.testing.expectEqual(requests_before + 1, harness.null_platform.pendingFrameRequestCount());
+    try dispatchFrame(harness, app, 3);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(999) != null);
+    const texture_id = canvas.mediaSurfaceTextureImageId(999);
+    var landed = false;
+    for (harness.runtime.registeredCanvasImages()) |resource| {
+        if (resource.id != texture_id) continue;
+        landed = true;
+        try std.testing.expectEqualSlices(u8, &still, resource.pixels);
+    }
+    try std.testing.expect(landed);
+}
+
 // ------------------------------------------------------- producer wakes
 
 test "a push wakes an idle compositor: one coalesced frame request that adopts on dispatch" {

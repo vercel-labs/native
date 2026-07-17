@@ -479,8 +479,16 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                 var reclaimed_texture_id: u64 = 0;
                 const entry_index = mediaSurfaceEntryIndex(self, slot.surface_id, &reclaimed_texture_id) orelse {
                     // Registry saturated by retained textures of
-                    // released channels; loud, never silent.
+                    // released channels; loud, never silent. Dropping
+                    // the stage must also forget the push-boundary
+                    // fingerprint (0 = no previous push, unreachable
+                    // by frameFingerprint): a producer re-pushing the
+                    // SAME bytes — a paused video's frame, album art —
+                    // must stage and wake again so the retry can adopt
+                    // once the registry heals, not die in the
+                    // push-boundary dedup gate.
                     slot.staged = false;
+                    slot.last_push_fingerprint = 0;
                     slot.mutex.unlock();
                     // No stderr on freestanding targets (the docs' wasm
                     // preview host): analyzing the print would drag
@@ -516,12 +524,18 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                     self.media_surface_pixels[entry_index] = self.owned_allocator.alloc(u8, max_media_surface_pixel_bytes) catch {
                         // OOM degrades like the saturated registry:
                         // this frame drops loudly, the channel stays
-                        // healthy, the next adoption retries. An entry
-                        // reclaim that already happened still removes
-                        // the reclaimed host texture (below, outside
-                        // the lock) — the entry now names the new
-                        // surface either way.
+                        // healthy, and the producer's NEXT PUSH stages
+                        // and wakes a retry — even a byte-identical
+                        // one, because the fingerprint reset below
+                        // (0 = no previous push, unreachable by
+                        // frameFingerprint) reopens the push-boundary
+                        // dedup gate a static frame would otherwise
+                        // die in. An entry reclaim that already
+                        // happened still removes the reclaimed host
+                        // texture (below, outside the lock) — the
+                        // entry now names the new surface either way.
                         slot.staged = false;
+                        slot.last_push_fingerprint = 0;
                         slot.mutex.unlock();
                         if (comptime builtin.os.tag != .freestanding) {
                             std.debug.print(
