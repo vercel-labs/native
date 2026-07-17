@@ -4042,3 +4042,155 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     try std.testing.expectEqual(@as(usize, 600), first_index + mounted);
     try std.testing.expect(mounted >= 25);
 }
+
+// ------------------------------------------------------- pinch channel
+
+const ZoomModel = struct {
+    /// Cumulative gesture scale: the running product of `1 + delta`
+    /// across change events — the semantics the channel documents.
+    scale: f32 = 1,
+    begins: u32 = 0,
+    ends: u32 = 0,
+    centroid_x: f32 = 0,
+    centroid_y: f32 = 0,
+};
+
+const ZoomMsg = union(enum) {
+    pinch: zero_platform.PinchEvent,
+};
+
+const ZoomApp = ui_app_model.UiApp(ZoomModel, ZoomMsg);
+
+fn zoomUpdate(model: *ZoomModel, msg: ZoomMsg) void {
+    switch (msg) {
+        .pinch => |pinch| switch (pinch.phase) {
+            .begin => {
+                model.begins += 1;
+                model.centroid_x = pinch.x;
+                model.centroid_y = pinch.y;
+            },
+            .change => model.scale *= (1 + pinch.scale),
+            .end => model.ends += 1,
+        },
+    }
+}
+
+fn zoomView(ui: *ZoomApp.Ui, model: *const ZoomModel) ZoomApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, ui.fmt("Zoom {d:.2}", .{model.scale})),
+    });
+}
+
+fn zoomPinch(pinch: zero_platform.PinchEvent) ?ZoomMsg {
+    return .{ .pinch = pinch };
+}
+
+test "trackpad pinch reaches the app through on_pinch with product-of-deltas scale" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ZoomApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ZoomApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-zoom",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = zoomUpdate,
+        .view = zoomView,
+        .on_pinch = zoomPinch,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // begin -> change -> change -> end, the host's phase stream: the
+    // model hears every phase, the centroid rides x/y, and the
+    // cumulative scale is the PRODUCT of (1 + delta) — two +25% steps
+    // land on 1.5625, never the 1.45 a sum-of-deltas would produce.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_begin,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.begins);
+    try std.testing.expectEqual(@as(f32, 120), app_state.model.centroid_x);
+    try std.testing.expectEqual(@as(f32, 80), app_state.model.centroid_y);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try std.testing.expectEqual(@as(f32, 1.5625), app_state.model.scale);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.ends);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_end,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.ends);
+    // The dispatched Msgs rebuilt the view from the model.
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Zoom 1.56"));
+
+    // Non-pinch raw input never leaks into the channel: a scroll leaves
+    // the model untouched.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .delta_y = 24,
+    } });
+    try std.testing.expectEqual(@as(f32, 1.5625), app_state.model.scale);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.begins);
+
+    // The automation verb drives the same real events: one full gesture
+    // whose change carries scale - 1, centroid defaulting to the view
+    // center, so tests and users can pinch without a trackpad.
+    app_state.model = .{};
+    var command_buffer: [96]u8 = undefined;
+    const pinch_default = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 1.5", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_default);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.begins);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.ends);
+    try std.testing.expectEqual(@as(f32, 1.5), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 200), app_state.model.centroid_x);
+    try std.testing.expectEqual(@as(f32, 150), app_state.model.centroid_y);
+
+    // An explicit centroid rides through; the cumulative scale keeps
+    // compounding across gestures exactly as deltas compound within one.
+    const pinch_at = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 0.5 40 60", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_at);
+    try std.testing.expectEqual(@as(f32, 0.75), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 40), app_state.model.centroid_x);
+    try std.testing.expectEqual(@as(f32, 60), app_state.model.centroid_y);
+
+    // A malformed scale is loud driver misuse, not a dispatched gesture
+    // (the product of 1 + delta can never reach a non-positive scale).
+    const pinch_bad = try std.fmt.bufPrint(&command_buffer, "widget-pinch {s} 0", .{canvas_label});
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, pinch_bad));
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
+}

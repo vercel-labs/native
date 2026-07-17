@@ -302,6 +302,7 @@ test "the runtime markup interpreter builds the emitted model exactly like the c
         .stampMs = -1,
         .draft = "",
         .canvasWidth = 0,
+        .zoom = 1,
         .dark = false,
         .chromeTop = 0,
     };
@@ -478,6 +479,51 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
     } });
     try std.testing.expect(Bridge.model().filter == .open);
     try std.testing.expect(h.hasText("filter open"));
+
+    // pinchMsg: the trackpad pinch channel — the phase alias matches by
+    // member name, begin/end gate to null in the core, and each change
+    // compounds the zoom by (1 + delta): two +25% deltas land on the
+    // PRODUCT 1.5625, never a sum's 1.45.
+    try std.testing.expectEqual(@as(f64, 1), Bridge.model().zoom);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_begin,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(f64, 1), Bridge.model().zoom);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 120,
+        .y = 80,
+        .scale = 0.25,
+    } });
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_end,
+        .x = 120,
+        .y = 80,
+    } });
+    try std.testing.expectEqual(@as(f64, 1.5625), Bridge.model().zoom);
+
+    // The automation pinch verb dispatches the same real events into the
+    // transpiled core: one gesture whose change carries scale - 1.
+    var pinch_buffer: [96]u8 = undefined;
+    const pinch = try std.fmt.bufPrint(&pinch_buffer, "widget-pinch {s} 2", .{canvas_label});
+    try h.harness.runtime.dispatchAutomationCommand(h.app, pinch);
+    try std.testing.expectEqual(@as(f64, 3.125), Bridge.model().zoom);
 }
 
 test "boot images register and launch env overrides dispatch at install" {

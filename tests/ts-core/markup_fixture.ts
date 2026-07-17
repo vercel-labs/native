@@ -18,6 +18,7 @@ import {
   type TextInputEvent,
   type FrameEvent,
   type KeyEvent,
+  type PinchEvent,
   type ColorScheme,
   type ChromeInsets,
   type ChromeButtons,
@@ -42,6 +43,9 @@ export interface Model {
   readonly draft: Uint8Array;
   /// The frame channel's width mirror (the album-grid derivation shape).
   readonly canvasWidth: number;
+  /// The pinch channel's cumulative zoom: the product of (1 + delta)
+  /// across change events — the timeline-zoom derivation shape.
+  readonly zoom: number;
   /// The appearance channel's scheme mirror.
   readonly dark: boolean;
   /// The chrome channel's titlebar band mirror.
@@ -58,6 +62,7 @@ export type Msg =
   | { readonly kind: "stamped"; readonly at: number }
   | { readonly kind: "draft_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "canvas_resized"; readonly width: number }
+  | { readonly kind: "zoomed"; readonly factor: number }
   | { readonly kind: "appearance_changed"; readonly colorScheme: ColorScheme; readonly reduceMotion: boolean; readonly highContrast: boolean }
   | { readonly kind: "chrome_changed"; readonly insets: ChromeInsets; readonly buttons: ChromeButtons; readonly tabsProjected: boolean }
   | { readonly kind: "banner_set"; readonly value: Uint8Array };
@@ -79,6 +84,14 @@ export function keyMsg(key: KeyEvent): Msg | null {
   return null;
 }
 
+/// The pinch channel gates on the change phase (begin/end carry no
+/// delta): the model compounds the cumulative zoom as the product of
+/// (1 + delta), the documented gesture-scale semantics.
+export function pinchMsg(pinch: PinchEvent): Msg | null {
+  if (pinch.phase !== "change" || pinch.scale === 0) return null;
+  return { kind: "zoomed", factor: 1 + pinch.scale };
+}
+
 export const appearanceMsg = "appearance_changed";
 export const chromeMsg = "chrome_changed";
 export const envMsgs = [{ env: "TS_BOARD_BANNER", msg: "banner_set" }] as const;
@@ -94,6 +107,7 @@ export function initialModel(): Model {
     stampMs: -1,
     draft: new Uint8Array(0),
     canvasWidth: 0,
+    zoom: 1,
     dark: false,
     chromeTop: 0,
   };
@@ -158,6 +172,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, draft: applyDraftEdit(model.draft, msg.edit) };
     case "canvas_resized":
       return { ...model, canvasWidth: msg.width };
+    case "zoomed":
+      return { ...model, zoom: model.zoom * msg.factor };
     case "appearance_changed":
       return { ...model, dark: msg.colorScheme === "dark" };
     case "chrome_changed":

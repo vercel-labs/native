@@ -51,6 +51,13 @@ const SessionModel = struct {
     name_anchor: usize = 0,
     name_focus: usize = 0,
     name_edits: u32 = 0,
+    /// The pinch channel's cumulative zoom (the product of 1 + delta
+    /// across change events) plus phase counters: the reference session
+    /// pinches once raw and once through the automation verb, so replay
+    /// re-deriving the identical product pins the journaled scale field.
+    zoom: f32 = 1,
+    pinch_begins: u32 = 0,
+    pinch_ends: u32 = 0,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -73,6 +80,7 @@ const SessionMsg = union(enum) {
     start_audio,
     query_edit: canvas.TextInputEvent,
     name_edit: canvas.TextInputEvent,
+    pinch: platform.PinchEvent,
     fetched: effects_mod.EffectResponse,
     line: effects_mod.EffectLine,
     exited: effects_mod.EffectExit,
@@ -123,6 +131,11 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
         },
         .query_edit => |edit| applyMirrorEdit(&model.query, &model.query_len, &model.query_anchor, &model.query_focus, &model.query_edits, edit),
         .name_edit => |edit| applyMirrorEdit(&model.name, &model.name_len, &model.name_anchor, &model.name_focus, &model.name_edits, edit),
+        .pinch => |pinch| switch (pinch.phase) {
+            .begin => model.pinch_begins += 1,
+            .change => model.zoom *= (1 + pinch.scale),
+            .end => model.pinch_ends += 1,
+        },
         .line => model.line_count += 1,
         .exited => |exit| model.exit_code = exit.code,
         .tick => |timer| model.tick_timestamp_ns = timer.timestamp_ns,
@@ -168,6 +181,7 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
         // sanitized single-line insert both re-derive on replay.
         ui.el(.textarea, .{ .text = "line one\nline two" }, .{}),
         ui.text(.{}, ui.fmt("Query {s} ({d}) Name {s} ({d})", .{ model.queryText(), model.query_edits, model.nameText(), model.name_edits })),
+        ui.text(.{}, ui.fmt("Zoom {d:.4} ({d}/{d})", .{ model.zoom, model.pinch_begins, model.pinch_ends })),
         ui.button(.{ .on_press = .increment }, "Increment"),
     });
 }
@@ -193,6 +207,10 @@ const session_windows = [_]app_manifest.ShellWindow{.{
 }};
 const session_scene: app_manifest.ShellConfig = .{ .windows = &session_windows };
 
+fn sessionPinch(pinch: platform.PinchEvent) ?SessionMsg {
+    return .{ .pinch = pinch };
+}
+
 fn sessionOptions() SessionApp.Options {
     return .{
         .name = "session-demo",
@@ -201,6 +219,7 @@ fn sessionOptions() SessionApp.Options {
         .update_fx = sessionUpdate,
         .view = sessionView,
         .on_command = sessionCommand,
+        .on_pinch = sessionPinch,
     };
 }
 
@@ -389,6 +408,49 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
         .modifiers = .{ .primary = true, .command = true },
     } });
     try std.testing.expectEqualStrings("line oneline two", app_state.model.queryText());
+
+    // A trackpad pinch, twice over: the raw journaled phase stream (the
+    // macOS host shape — begin, two deltas, end; the +25% then -25%
+    // deltas compound as a PRODUCT, 1.25 * 0.75 = 0.9375, never a sum's
+    // 1.0), then the automation verb's synthesized gesture, which
+    // journals the same leaf gpu_surface_input events. Replay must
+    // re-derive the identical cumulative zoom from the journaled scale
+    // fields alone. Every value here is binary-exact in f32, so the
+    // model equality below is exact, not approximate.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_begin,
+        .x = 200,
+        .y = 150,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 200,
+        .y = 150,
+        .scale = 0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_change,
+        .x = 200,
+        .y = 150,
+        .scale = -0.25,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pinch_end,
+        .x = 200,
+        .y = 150,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    var pinch_buffer: [64]u8 = undefined;
+    const pinch_command = try std.fmt.bufPrint(&pinch_buffer, "widget-pinch {s} 1.5 120 80", .{canvas_label});
+    try harness.runtime.dispatchAutomationCommand(app, pinch_command);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
     recorder.finish();
@@ -448,6 +510,11 @@ test "a recorded session replays to identical model state and fingerprints" {
     // paste landing STRIPPED of its line breaks (single-line rule).
     try std.testing.expectEqual(@as(u32, 3), recorded.model.query_edits);
     try std.testing.expectEqualStrings("line oneline two", recorded.model.queryText());
+    // Both pinch gestures reached the model: the raw stream's product
+    // (1.25 * 0.75 = 0.9375) times the verb's exact 1.5.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_begins);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_ends);
+    try std.testing.expectEqual(@as(f32, 1.40625), recorded.model.zoom);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());
