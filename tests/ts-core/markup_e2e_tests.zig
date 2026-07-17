@@ -484,17 +484,11 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
 
     // pinchMsg: the trackpad pinch channel — the phase alias matches by
     // member name, begin/end gate to null in the core, and each change
-    // compounds the zoom by (1 + delta), a PRODUCT, never a sum. The
-    // deltas are what the normalizing macOS host emits for a gesture
-    // AppKit chunked as two raw +0.25 magnifications (additive: total
-    // 1.5): factors 1.25 then 1.2, so the product is 1.5 regardless of
-    // chunking. The core accumulates in f64 from the f32 wire deltas,
-    // and 0.2's f32 rounding carries into the f64 product (~4e-9 high),
-    // hence the ulp-tight tolerance instead of exact equality — the
-    // f32-model twins of this pin (ui_app/session tests) round exactly.
-    // The source identity (windowId/label) rides the record into the
-    // core: this single-view fixture pins that the emitted core hears
-    // WHICH window and view the gesture happened on.
+    // compounds the zoom by (1 + delta): two +25% deltas land on the
+    // PRODUCT 1.5625, never a sum's 1.45. The source identity
+    // (windowId/label) rides the record into the core: this single-view
+    // fixture pins that the emitted core hears WHICH window and view
+    // the gesture happened on.
     try std.testing.expectEqual(@as(f64, 1), Bridge.model().zoom);
     try std.testing.expectEqual(@as(f64, 0), Bridge.model().zoomWindowId);
     try std.testing.expect(!Bridge.model().zoomFromBoard);
@@ -520,7 +514,7 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
         .kind = .pinch_change,
         .x = 120,
         .y = 80,
-        .scale = 0.2,
+        .scale = 0.25,
     } });
     try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -529,22 +523,19 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
         .x = 120,
         .y = 80,
     } });
-    try std.testing.expectApproxEqAbs(@as(f64, 1.5), Bridge.model().zoom, 1e-8);
+    try std.testing.expectEqual(@as(f64, 1.5625), Bridge.model().zoom);
     // The core saw the source identity: window 1, this fixture's view
     // label (the core compares `pinch.label === "ts-markup-canvas"`).
     try std.testing.expectEqual(@as(f64, 1), Bridge.model().zoomWindowId);
     try std.testing.expect(Bridge.model().zoomFromBoard);
 
-    // The automation pinch verb dispatches the same real events into
-    // the transpiled core: one gesture whose single change carries
-    // scale - 1 (the verb's <scale> is the FINAL multiplicative zoom —
-    // chunking-trivial, so it needs no normalization and gets none).
-    // The doubling is exact; the tolerance only carries the wire
-    // rounding already in the zoom.
+    // The automation pinch verb dispatches the same real events into the
+    // transpiled core: one gesture whose single change carries scale - 1
+    // (the verb's <scale> is the FINAL multiplicative zoom).
     var pinch_buffer: [96]u8 = undefined;
     const pinch = try std.fmt.bufPrint(&pinch_buffer, "widget-pinch {s} 2", .{canvas_label});
     try h.harness.runtime.dispatchAutomationCommand(h.app, pinch);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.0), Bridge.model().zoom, 2e-8);
+    try std.testing.expectEqual(@as(f64, 3.125), Bridge.model().zoom);
 }
 
 test "boot images register and launch env overrides dispatch at install" {

@@ -4125,16 +4125,11 @@ test "trackpad pinch reaches the app through on_pinch with product-of-deltas sca
 
     // begin -> change -> change -> change -> end, the host's phase
     // stream: the model hears every phase, the pointer anchor rides
-    // x/y, and the cumulative scale is the PRODUCT of (1 + delta). The
-    // deltas here are what the normalizing macOS host emits for a
-    // gesture AppKit chunked as three raw +0.25 magnifications
-    // (magnification is ADDITIVE; the host converts each chunk into the
-    // ratio it moved the gesture total by): 0.25, then 0.2, then 1/6 —
-    // so the product tracks Apple's 1 + Σmagnification: 1.5 after two
-    // chunks, 1.75 after three. The f32 wire values of 0.2 and 1/6 are
-    // rounded, but both products round exactly to 1.5 and 1.75 (see
-    // the normalization mirror test in platform/macos/root.zig), so
-    // the pins are exact.
+    // x/y, and the cumulative scale is the PRODUCT of (1 + delta) —
+    // two +25% steps land on 1.5625, never the 1.45 a sum-of-deltas
+    // would produce (deltas are raw NSEvent.magnification, the
+    // multiplicative per-event delta per the engine convention; see
+    // the doctrine note in appkit_host.m).
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -4159,23 +4154,21 @@ test "trackpad pinch reaches the app through on_pinch with product-of-deltas sca
         .kind = .pinch_change,
         .x = 120,
         .y = 80,
-        .scale = 0.2,
+        .scale = 0.25,
     } });
-    try std.testing.expectEqual(@as(f32, 1.5), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 1.5625), app_state.model.scale);
     try std.testing.expectEqual(@as(u32, 0), app_state.model.ends);
     // A terminal-delta Ended: AppKit's Ended/Cancelled event still
     // carries the magnification since the previous event, so the host
-    // folds it into the gesture's running sum and forwards it as one
-    // last change BEFORE the end marker — the third raw +0.25 chunk
-    // normalizes to the factor 1.75/1.5, delta 1/6, and the product
-    // lands on 1.75 (Apple's 1 + 0.75).
+    // forwards it as one last change BEFORE the end marker — the
+    // product folds it in (1.5625 * 1.25 = 1.953125, binary-exact).
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
         .kind = .pinch_change,
         .x = 120,
         .y = 80,
-        .scale = 1.0 / 6.0,
+        .scale = 0.25,
     } });
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -4185,9 +4178,9 @@ test "trackpad pinch reaches the app through on_pinch with product-of-deltas sca
         .y = 80,
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.ends);
-    try std.testing.expectEqual(@as(f32, 1.75), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
     // The dispatched Msgs rebuilt the view from the model.
-    try std.testing.expect(try retainedTextExists(&harness.runtime, "Zoom 1.75"));
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Zoom 1.95"));
 
     // A zero-delta Ended is just the end marker: begin then end moves
     // no scale.
@@ -4207,7 +4200,7 @@ test "trackpad pinch reaches the app through on_pinch with product-of-deltas sca
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
-    try std.testing.expectEqual(@as(f32, 1.75), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
 
     // Non-pinch raw input never leaks into the channel: a scroll leaves
     // the model untouched.
@@ -4217,7 +4210,7 @@ test "trackpad pinch reaches the app through on_pinch with product-of-deltas sca
         .kind = .scroll,
         .delta_y = 24,
     } });
-    try std.testing.expectEqual(@as(f32, 1.75), app_state.model.scale);
+    try std.testing.expectEqual(@as(f32, 1.953125), app_state.model.scale);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
 
     // The automation verb drives the same real events: one full gesture

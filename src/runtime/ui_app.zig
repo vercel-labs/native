@@ -542,13 +542,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// shape). Pinch deliberately bypasses the widget pipeline:
             /// it is a view-global gesture (timeline/canvas zoom is an
             /// app-level concern), delivered phase-explicit (`begin`,
-            /// `change`, `end`) with the per-event MULTIPLICATIVE delta
-            /// on `change` — the cumulative gesture scale is the running
-            /// product of `(1 + scale)`, applied memorylessly
-            /// (`zoom *= 1 + scale`); hosts normalize additive OS
-            /// reporting (AppKit's additive `NSEvent.magnification`)
-            /// into these factors, so the product matches what the OS
-            /// measured regardless of event chunking — and the pointer anchor in
+            /// `change`, `end`) with the per-event magnification DELTA
+            /// on `change` — a MULTIPLICATIVE delta: the cumulative
+            /// gesture scale is the running product of `(1 + scale)`,
+            /// applied memorylessly (`zoom *= 1 + scale`); on macOS the
+            /// host forwards AppKit's raw `NSEvent.magnification`,
+            /// which IS that delta per the browser-engine convention
+            /// — and the pointer anchor in
             /// view-local canvas points (`x`/`y`, the zoom-at-cursor
             /// anchor). Every event names its source window and view
             /// (`window_id`/`label`, the `on_frame` identity shape) —

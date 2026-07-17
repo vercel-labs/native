@@ -570,7 +570,6 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
 @property(nonatomic, assign) BOOL controlClickActive;
 @property(nonatomic, assign) BOOL pinchGestureActive;
-@property(nonatomic, assign) double pinchMagnificationSum;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
@@ -616,7 +615,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitQueuedScrollInputEvent;
 - (void)emitPinchInputEventWithKind:(NSInteger)kind event:(NSEvent *)event magnification:(double)magnification;
-- (void)emitNormalizedPinchChangeForEvent:(NSEvent *)event;
+- (void)emitPinchChangeForEvent:(NSEvent *)event;
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
 - (void)updateSurfaceTrackingArea;
@@ -5545,56 +5544,63 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // the cumulative gesture scale is the PRODUCT of (1 + delta), and
     // summing coalesced deltas would drift from what the fingers did.
     //
-    // AppKit's NSEvent.magnification is ADDITIVE: Apple prescribes
-    // adding each event's magnification to the current scale, so the
-    // gesture's total is 1 + Σmagnification no matter how the driver
-    // chunks it into events. Our wire contract is MULTIPLICATIVE
-    // (cumulative scale = product of (1 + delta)), so the host
-    // normalizes here — emitNormalizedPinchChangeForEvent: tracks the
-    // gesture's additive running sum and emits the per-event ratio —
-    // and the product of (1 + delta) over the gesture equals Apple's
-    // 1 + Σmagnification, chunking-invariant. Forwarding the raw
-    // additive chunks instead would make the product depend on how
-    // AppKit happened to slice the gesture (two +0.25 chunks: 1.5625;
-    // one +0.5 chunk: 1.5) — driver/timing-dependent zoom.
+    // HOW TO READ NSEvent.magnification — settled; do not "fix" again.
+    // Apple's documentation contradicts itself: the NSEvent API
+    // reference's prose says to ADD each event's magnification to your
+    // scale factor, while Apple's own Event Handling Guide example
+    // MULTIPLIES (currentSize *= 1 + event.magnification). The de facto
+    // platform behavior is what the browser engines ship, and every
+    // engine reads raw magnification as the MULTIPLICATIVE per-event
+    // delta:
+    //   - WebKit, ViewGestureControllerMac.mm:
+    //       m_magnification += m_magnification * scaleWithResistance;
+    //     i.e. zoom *= 1 + event.magnification, per event.
+    //   - Chromium's mac gesture-event builder emits
+    //       pinch_update.scale = event.magnification + 1.0;
+    //     compounded multiplicatively downstream.
+    // Ruling: raw event.magnification IS the multiplicative per-event
+    // delta. This handler forwards it untransformed (per-event floor
+    // aside — see emitPinchChangeForEvent:), and the app-side product
+    // of (1 + scale) is the zoom users already experience for the same
+    // gesture in Safari and Chrome. Do NOT reintroduce a running-sum
+    // "additive normalization" here: it matches neither Apple's example
+    // nor any engine — a raw +0.25, +0.20 stream must land on
+    // 1.25 * 1.20 = 1.5, where a sum-normalized stream lands on 1.45.
     //
     // EVERY magnifyWithEvent: carries the magnification since the
     // previous event — the terminal (Ended/Cancelled) one included —
-    // so each branch below must fold a nonzero magnification into the
-    // sum and forward it as a PINCH_CHANGE or the cumulative product
-    // diverges from what the OS delivered.
+    // so each branch below must forward a nonzero magnification as a
+    // PINCH_CHANGE or the cumulative product diverges from what the
+    // OS delivered.
     const NSEventPhase phase = event.phase;
     if (phase & NSEventPhaseBegan) {
         [self emitQueuedPointerMotionInputEvent];
         self.pinchGestureActive = YES;
-        self.pinchMagnificationSum = 0;
         [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN event:event magnification:0];
-        [self emitNormalizedPinchChangeForEvent:event];
+        [self emitPinchChangeForEvent:event];
         return;
     }
     if (phase & NSEventPhaseChanged) {
         if (!self.pinchGestureActive) {
             // A gesture already in flight when this view became the
-            // hit target skips Began; open the stream cleanly anyway
-            // (synthesized begin, so the running sum resets here too).
+            // hit target skips Began; open the stream cleanly anyway.
             self.pinchGestureActive = YES;
-            self.pinchMagnificationSum = 0;
             [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN event:event magnification:0];
         }
-        [self emitNormalizedPinchChangeForEvent:event];
+        [self emitPinchChangeForEvent:event];
         return;
     }
     if (phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) {
         if (!self.pinchGestureActive) return;
         self.pinchGestureActive = NO;
-        // The terminal event's nonzero magnification joins the running
-        // sum and emits as a final PINCH_CHANGE before the end marker
-        // (a zero-magnification terminal event emits only PINCH_END).
-        // Cancelled takes the same path deliberately: our model applies
-        // deltas incrementally with no rollback (see above), so the
-        // honest stream reports every delta the OS measured, then says
-        // the gesture is over.
-        [self emitNormalizedPinchChangeForEvent:event];
+        // The terminal event's nonzero magnification emits as a final
+        // PINCH_CHANGE before the end marker (a zero-magnification
+        // terminal event emits only PINCH_END). Cancelled takes the
+        // same path deliberately: our model applies deltas
+        // incrementally with no rollback (see above), so the honest
+        // stream reports every delta the OS measured, then says the
+        // gesture is over.
+        [self emitPinchChangeForEvent:event];
         [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_END event:event magnification:0];
         return;
     }
@@ -5781,56 +5787,35 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                           deltaY:deltaY];
 }
 
-// --- Pinch normalization -----------------------------------------------
-// AppKit's NSEvent.magnification is ADDITIVE (Apple: add each event's
-// magnification to the current scale; gesture total = 1 + Σmagnification).
-// The wire contract is MULTIPLICATIVE (cumulative scale = the product of
-// (1 + delta)), so the host converts each additive chunk into the ratio it
-// moved the gesture total by. The arithmetic lives in tiny pure functions
-// so the Zig-side test can mirror it verbatim (documentation-by-
-// computation; ObjC is unreachable from the Zig test graph).
-//
-// A pinch-in can drive the additive sum negative, but a real gesture can
-// never invert through zero scale — a sum at or below -1 would blow the
-// ratio up (division by 1 + S -> 0) or flip its sign. Clamp the running
-// sum to a floor just above -1: the gesture's cumulative scale bottoms
-// out at 2^-10 (~0.001x, exactly representable) and every emitted factor
-// keeps 1 + delta > 0.
-static const double NativeSdkPinchMagnificationSumFloor = -1.0 + 0x1p-10;
+// --- Pinch change forwarding ---------------------------------------------
+// Raw event.magnification IS the wire's multiplicative per-event delta
+// (see the doctrine note at magnifyWithEvent:); it forwards untransformed.
+// One guard stands between the OS and the wire: a single event whose
+// magnification is at or below -1 would put a factor (1 + delta) <= 0 on
+// the wire — a zoom inverting through zero scale, which no physical pinch
+// can perform (only a driver/toolkit glitch could report it), and which
+// downstream products cannot recover from. Clamp PER EVENT to a floor
+// just above -1; the epsilon is 2^-10 (~0.001, exactly representable in
+// f32 and f64), so a glitched event's factor bottoms out at 2^-10 and
+// every emitted factor stays > 0.
+static const double NativeSdkPinchMagnificationFloor = -1.0 + 0x1p-10;
 
-static double NativeSdkClampedPinchMagnificationSum(double sum) {
-    return sum < NativeSdkPinchMagnificationSumFloor ? NativeSdkPinchMagnificationSumFloor : sum;
+static double NativeSdkClampedPinchMagnification(double magnification) {
+    return magnification < NativeSdkPinchMagnificationFloor ? NativeSdkPinchMagnificationFloor : magnification;
 }
 
-// The multiplicative delta that advances the gesture total from
-// (1 + previousSum) to (1 + sum): the product of (1 + delta) over the
-// gesture telescopes to 1 + Σmagnification — Apple's total — exactly in
-// this f64 math, so the app-side product is invariant to how the driver
-// chunked the gesture into events (up to f32 wire rounding per event).
-static double NativeSdkNormalizedPinchDelta(double previousSum, double sum) {
-    return (1.0 + sum) / (1.0 + previousSum) - 1.0;
-}
-
-// Fold one magnify event's additive magnification into the gesture's
-// running sum and emit the normalized multiplicative delta (nothing to
-// emit when the event measured no magnification, or when the floor clamp
-// swallowed the whole chunk).
-- (void)emitNormalizedPinchChangeForEvent:(NSEvent *)event {
-    if (event.magnification == 0) return;
-    const double previousSum = self.pinchMagnificationSum;
-    const double sum = NativeSdkClampedPinchMagnificationSum(previousSum + event.magnification);
-    self.pinchMagnificationSum = sum;
-    const double delta = NativeSdkNormalizedPinchDelta(previousSum, sum);
-    if (delta == 0) return;
-    [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_CHANGE event:event magnification:delta];
+// Forward one magnify event's raw magnification as a PINCH_CHANGE
+// (nothing to emit when the event measured no magnification).
+- (void)emitPinchChangeForEvent:(NSEvent *)event {
+    const double magnification = NativeSdkClampedPinchMagnification(event.magnification);
+    if (magnification == 0) return;
+    [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_CHANGE event:event magnification:magnification];
 }
 
 // Pinch input: the shared input-emit shape (converted point, top-left
 // origin flip, host timestamp, modifier flags) with the magnification
 // delta riding the event's `scale` field — unused (zero) on every other
-// input kind, so the runtime reads it unconditionally. The delta is
-// computed in f64 here and rounds to the platform event's f32 `scale`
-// at the Zig-side ABI conversion. The x/y point is
+// input kind, so the runtime reads it unconditionally. The x/y point is
 // the POINTER anchor: AppKit reports gesture events at locationInWindow
 // (the pointer location), never a midpoint between the fingers — NSTouch
 // positions are trackpad-normalized and have no view-space meaning, and

@@ -87,13 +87,14 @@ export type PinchPhase = "begin" | "change" | "end";
 /// gesture, phase-explicit. `windowId`/`label` name the source window and
 /// gpu-surface view — `x`/`y` are view-local, so a coordinate without its
 /// view is not a position, and multi-window apps tell pinches apart by
-/// these. `scale` is the MULTIPLICATIVE delta for this event (nonzero
-/// only on "change"; the cumulative gesture scale is the running product
-/// of `1 + scale` — apply it memorylessly, `zoom *= 1 + scale`, no
-/// gesture-start bookkeeping; hosts normalize additive OS reporting like
-/// AppKit's additive `NSEvent.magnification` into these factors, so the
-/// product over a gesture equals what the OS measured regardless of how
-/// events were chunked), and `x`/`y` is the pointer anchor in view-local canvas
+/// these. `scale` is the magnification DELTA for this event (nonzero
+/// only on "change"), and the delta is MULTIPLICATIVE: the cumulative
+/// gesture scale is the running product of `1 + scale` — apply it
+/// memorylessly, `zoom *= 1 + scale`, no gesture-start bookkeeping. On
+/// macOS this is AppKit's raw per-event `NSEvent.magnification`, which
+/// IS that multiplicative delta per the browser-engine convention, so
+/// the product matches the zoom the same gesture performs in Safari and
+/// Chrome. `x`/`y` is the pointer anchor in view-local canvas
 /// points — the pointer location during the gesture (hosts report gesture
 /// events at the pointer, not at a midpoint between the fingers), so a
 /// zoom can anchor under the cursor. Pinch is a view-global gesture — it

@@ -139,7 +139,7 @@ The runtime watches the command queue and processes these actions:
     </tr>
     <tr>
       <td><code>widget-pinch &lt;view-label&gt; &lt;scale&gt; [&lt;x&gt; &lt;y&gt;]</code></td>
-      <td>Dispatch a trackpad pinch gesture at a gpu-surface view: the real <code>pinch_begin</code>/<code>pinch_change</code>/<code>pinch_end</code> events, with one change carrying <code>scale - 1</code>. <code>scale</code> is the FINAL multiplicative zoom for the gesture (1.5 zooms in 50%, 0.5 zooms out to half) — a single change is chunking-trivial, so the cumulative product of <code>1 + delta</code> lands exactly on it. The anchor point defaults to the view center</td>
+      <td>Dispatch a trackpad pinch gesture at a gpu-surface view: the real <code>pinch_begin</code>/<code>pinch_change</code>/<code>pinch_end</code> events, with one change carrying <code>scale - 1</code>. <code>scale</code> is the final multiplicative zoom for the gesture (1.5 zooms in 50%, 0.5 zooms out to half) — the cumulative product of <code>1 + delta</code> lands exactly on it. The anchor point defaults to the view center</td>
     </tr>
     <tr>
       <td><code>shortcut &lt;id&gt;</code></td>

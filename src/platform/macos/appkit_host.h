@@ -77,13 +77,11 @@ typedef enum {
     NATIVE_SDK_APPKIT_GPU_INPUT_IME_CANCEL_COMPOSITION = 10,
     NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL = 11,
     /* Trackpad pinch phases (magnifyWithEvent:). The event's `scale`
-     * field carries the per-event MULTIPLICATIVE delta on PINCH_CHANGE
-     * (cumulative gesture scale is the product of (1 + delta)); 0 on
-     * begin/end. NSEvent.magnification is ADDITIVE (Apple: add each
-     * event's magnification; gesture total = 1 + Σmagnification), so
-     * the host normalizes before emitting: the product of (1 + delta)
-     * over a gesture equals Apple's 1 + Σmagnification, invariant to
-     * how the driver chunked the gesture. The pointer anchor rides
+     * field carries the per-event magnification DELTA on PINCH_CHANGE —
+     * raw NSEvent.magnification, which IS the multiplicative per-event
+     * delta per the browser-engine convention (see the doctrine note at
+     * magnifyWithEvent: in appkit_host.m); cumulative gesture scale is
+     * the product of (1 + delta); 0 on begin/end. The pointer anchor rides
      * x/y (the event's locationInWindow — gesture events report the
      * pointer location, not a midpoint between the fingers). */
     NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_BEGIN = 12,

@@ -409,19 +409,14 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
     } });
     try std.testing.expectEqualStrings("line oneline two", app_state.model.queryText());
 
-    // A trackpad pinch, twice over: the journaled phase stream (the
-    // macOS host shape — begin, two deltas, end; the deltas are what
-    // the normalizing host emits for raw additive magnifications +0.25
-    // then -0.25: factors 1.25 then 1/1.25 = 0.8, so the PRODUCT
-    // returns to 1.0 exactly as the additive sum returns to 0), then
-    // the automation verb's synthesized gesture, which journals the
-    // same leaf gpu_surface_input events. Replay must re-derive the
-    // identical cumulative zoom from the journaled scale fields alone.
-    // -0.2's f32 is rounded, but the f32 product 1.25 * (1 - fl32(0.2))
-    // rounds exactly to 1.0 (verified in the normalization mirror test,
-    // platform/macos/root.zig), so the model equality below stays
-    // exact, not approximate — and replay equality is bitwise anyway,
-    // because replay re-dispatches the very same journaled f32 deltas.
+    // A trackpad pinch, twice over: the raw journaled phase stream (the
+    // macOS host shape — begin, two deltas, end; the +25% then -25%
+    // deltas compound as a PRODUCT, 1.25 * 0.75 = 0.9375, never a sum's
+    // 1.0), then the automation verb's synthesized gesture, which
+    // journals the same leaf gpu_surface_input events. Replay must
+    // re-derive the identical cumulative zoom from the journaled scale
+    // fields alone. Every value here is binary-exact in f32, so the
+    // model equality below is exact, not approximate.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -443,7 +438,7 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
         .kind = .pinch_change,
         .x = 200,
         .y = 150,
-        .scale = -0.2,
+        .scale = -0.25,
     } });
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -515,12 +510,11 @@ test "a recorded session replays to identical model state and fingerprints" {
     // paste landing STRIPPED of its line breaks (single-line rule).
     try std.testing.expectEqual(@as(u32, 3), recorded.model.query_edits);
     try std.testing.expectEqualStrings("line oneline two", recorded.model.queryText());
-    // Both pinch gestures reached the model: the normalized stream's
-    // product (1.25 * 0.8 = 1.0, the round trip back to unity) times
-    // the verb's exact 1.5.
+    // Both pinch gestures reached the model: the raw stream's product
+    // (1.25 * 0.75 = 0.9375) times the verb's exact 1.5.
     try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_begins);
     try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_ends);
-    try std.testing.expectEqual(@as(f32, 1.5), recorded.model.zoom);
+    try std.testing.expectEqual(@as(f32, 1.40625), recorded.model.zoom);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());

@@ -906,10 +906,8 @@ fn gpuSurfaceInputEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.G
         .text = event.input_text[0..event.input_text_len],
         .composition_cursor = if (event.has_composition_cursor != 0) event.composition_cursor else null,
         .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
-        // The pinch delta rides the ABI event's `scale` field (zero on
-        // every non-pinch input emission). The host already normalized
-        // AppKit's additive magnification into a multiplicative factor
-        // in f64; this cast is the wire's f32 rounding point.
+        // The pinch magnification delta rides the ABI event's `scale`
+        // field (zero on every non-pinch input emission).
         .scale = @floatCast(event.scale),
     };
 }
@@ -2276,130 +2274,6 @@ test "mac gpu surface input maps pinch phases and carries the magnification delt
     const end = gpuSurfaceInputEventFromAppKitEvent(&event);
     try std.testing.expectEqual(platform_mod.GpuSurfaceInputKind.pinch_end, end.kind);
     try std.testing.expectEqual(@as(f32, 0), end.scale);
-}
-
-/// MIRROR of appkit_host.m's pinch normalization, not a link: the ObjC
-/// host is unreachable from the Zig test graph, so this restates
-/// `NativeSdkClampedPinchMagnificationSum` / `NativeSdkNormalizedPinchDelta`
-/// verbatim as documentation-by-computation (the file-contains step
-/// `test-appkit-pinch-additive-normalization` pins the ObjC text; this
-/// pins the arithmetic). Keep the two in lockstep.
-const PinchNormalizationMirror = struct {
-    /// Mirrors NativeSdkPinchMagnificationSumFloor.
-    const sum_floor: f64 = -1.0 + 0x1p-10;
-
-    /// Mirrors NativeSdkClampedPinchMagnificationSum.
-    fn clampedSum(sum: f64) f64 {
-        return if (sum < sum_floor) sum_floor else sum;
-    }
-
-    /// Mirrors NativeSdkNormalizedPinchDelta.
-    fn normalizedDelta(previous_sum: f64, sum: f64) f64 {
-        return (1.0 + sum) / (1.0 + previous_sum) - 1.0;
-    }
-
-    /// The host's per-gesture loop over raw additive AppKit
-    /// magnification chunks: fold each into the f64 running sum, emit
-    /// the multiplicative delta rounded to the f32 wire (the
-    /// `gpuSurfaceInputEventFromAppKitEvent` cast), skip zero deltas.
-    /// Returns the number of deltas emitted.
-    fn emittedDeltas(chunks: []const f64, deltas: []f32) usize {
-        var sum: f64 = 0;
-        var count: usize = 0;
-        for (chunks) |chunk| {
-            if (chunk == 0) continue;
-            const previous_sum = sum;
-            sum = clampedSum(previous_sum + chunk);
-            const delta = normalizedDelta(previous_sum, sum);
-            if (delta == 0) continue;
-            deltas[count] = @floatCast(delta);
-            count += 1;
-        }
-        return count;
-    }
-
-    /// The app-side accumulation rule, f32 like the reference models:
-    /// `scale *= 1 + delta` per change event, memoryless.
-    fn product(deltas: []const f32) f32 {
-        var scale: f32 = 1;
-        for (deltas) |delta| scale *= 1 + delta;
-        return scale;
-    }
-};
-
-test "mac appkit pinch normalization telescopes additive magnification into a chunking-invariant product" {
-    const Mirror = PinchNormalizationMirror;
-    var deltas: [8]f32 = undefined;
-
-    // Two raw +0.25 AppKit chunks: the running sums are 0.25 then 0.5,
-    // so the emitted factors are 1.25 then 1.5/1.25 = 1.2 — the product
-    // is Apple's 1 + 0.5 = 1.5, never the 1.5625 that forwarding the
-    // raw chunks would compound to. 0.2 is not exactly representable in
-    // f32 (the wire rounds it to 0.20000000298...), but the f32 literal
-    // 0.2 rounds identically, so the delta pin is exact — and the f32
-    // product 1.25 * (1 + fl32(0.2)) = 1.5000000596... rounds to
-    // exactly 1.5 (ties-to-even lands on 1.5's even mantissa), so the
-    // product pin is exact too.
-    const two_quarters = Mirror.emittedDeltas(&.{ 0.25, 0.25 }, &deltas);
-    try std.testing.expectEqual(@as(usize, 2), two_quarters);
-    try std.testing.expectEqual(@as(f32, 0.25), deltas[0]);
-    try std.testing.expectEqual(@as(f32, 0.2), deltas[1]);
-    try std.testing.expectEqual(@as(f32, 1.5), Mirror.product(deltas[0..two_quarters]));
-
-    // Chunking invariance — the property this normalization exists for:
-    // the same additive total (+0.5) delivered as one chunk, two +0.25
-    // chunks, or four +0.125 chunks produces the same final product.
-    // The chunk values are exactly representable, and each of the three
-    // f32 products happens to round exactly to 1.5, so the agreement
-    // assertion is exact (the general guarantee is one f32 ulp per
-    // emitted event). Forwarding raw chunks instead would give 1.5 vs
-    // 1.5625 vs ~1.6018 — driver/timing-dependent zoom.
-    const one_chunk = Mirror.emittedDeltas(&.{0.5}, &deltas);
-    const final_one = Mirror.product(deltas[0..one_chunk]);
-    const four_chunks = Mirror.emittedDeltas(&.{ 0.125, 0.125, 0.125, 0.125 }, &deltas);
-    const final_four = Mirror.product(deltas[0..four_chunks]);
-    try std.testing.expectEqual(@as(usize, 1), one_chunk);
-    try std.testing.expectEqual(@as(usize, 4), four_chunks);
-    try std.testing.expectEqual(@as(f32, 1.5), final_one);
-    try std.testing.expectEqual(final_one, final_four);
-
-    // The terminal-delta path participates: an Ended event carrying
-    // +0.25 after a +0.25 change joins the same running sum, so the
-    // final product is 1.5 exactly as if both chunks were Changed
-    // events (the host folds the terminal magnification into the sum
-    // before emitting the last change).
-    const terminal = Mirror.emittedDeltas(&.{ 0.25, 0.25 }, &deltas);
-    try std.testing.expectEqual(@as(f32, 1.5), Mirror.product(deltas[0..terminal]));
-
-    // A gesture that returns its additive sum to zero returns the
-    // product to unity: raw +0.25 then -0.25 emits factors 1.25 and
-    // 1/1.25 = 0.8, and the f32 product 1.25 * (1 - fl32(0.2)) rounds
-    // exactly to 1.0 (the session replay reference pins the same fact
-    // through the app channel).
-    const round_trip = Mirror.emittedDeltas(&.{ 0.25, -0.25 }, &deltas);
-    try std.testing.expectEqual(@as(usize, 2), round_trip);
-    try std.testing.expectEqual(@as(f32, -0.2), deltas[1]);
-    try std.testing.expectEqual(@as(f32, 1.0), Mirror.product(deltas[0..round_trip]));
-
-    // Degenerate clamp: a strong pinch-in summing below -1 (here
-    // -0.5 then -0.75 = -1.25) would invert the gesture through zero
-    // scale — impossible physically, and a sum at -1 divides by zero.
-    // The running sum clamps to the floor just above -1: every emitted
-    // factor keeps 1 + delta > 0 (the stream never flips sign) and the
-    // product bottoms out at the floor's scale, 2^-10 exactly (both
-    // emitted deltas, -0.5 and -(1 - 2^-9), are f32-exact).
-    const clamped = Mirror.emittedDeltas(&.{ -0.5, -0.75 }, &deltas);
-    try std.testing.expectEqual(@as(usize, 2), clamped);
-    try std.testing.expectEqual(@as(f32, -0.5), deltas[0]);
-    try std.testing.expectEqual(@as(f32, -0.998046875), deltas[1]);
-    for (deltas[0..clamped]) |delta| try std.testing.expect(1 + delta > 0);
-    try std.testing.expectEqual(@as(f32, 0.0009765625), Mirror.product(deltas[0..clamped]));
-
-    // A further pinch-in chunk against the floor is fully swallowed by
-    // the clamp: the sum cannot move, the delta is zero, nothing emits.
-    const swallowed = Mirror.emittedDeltas(&.{ -0.5, -0.75, -0.5 }, &deltas);
-    try std.testing.expectEqual(@as(usize, 2), swallowed);
-    try std.testing.expectEqual(@as(f32, 0.0009765625), Mirror.product(deltas[0..swallowed]));
 }
 
 test "mac appearance event maps color scheme" {
