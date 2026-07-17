@@ -100,8 +100,9 @@ pub const Action = enum {
     /// pinch gesture against a gpu-surface view — the real
     /// `pinch_begin`/`pinch_change`/`pinch_end` platform events, with
     /// one change carrying `scale - 1` so the cumulative gesture scale
-    /// (the product of `1 + delta`) lands exactly on `<scale>`. The
-    /// anchor point defaults to the view center.
+    /// (the product of `1 + delta`) lands exactly on `<scale>`, the
+    /// gesture's FINAL multiplicative zoom. The anchor point defaults
+    /// to the view center.
     widget_pinch,
     menu_command,
     shortcut,

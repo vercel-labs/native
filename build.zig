@@ -636,19 +636,44 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)requestRetainedCanvasFrame" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
     });
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-pinch-terminal-delta", "Verify the macOS pinch stream forwards a terminal Ended/Cancelled magnification as a change before the end marker", &.{
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-pinch-terminal-delta", "Verify the macOS pinch stream folds a terminal Ended/Cancelled magnification into the gesture before the end marker", &.{
         // AppKit documents every magnifyWithEvent: as carrying the
         // magnification since the previous event — the terminal one
-        // included. The Ended/Cancelled branch must forward a nonzero
-        // terminal delta as PINCH_CHANGE before PINCH_END (zero delta:
-        // end only), or the cumulative product of (1 + delta) diverges
-        // from what the OS delivered. Cancelled deliberately shares the
-        // path: pinch applies deltas incrementally with no rollback.
+        // included. The Ended/Cancelled branch must fold a nonzero
+        // terminal magnification into the gesture's running sum and
+        // forward it as PINCH_CHANGE before PINCH_END (zero
+        // magnification: end only), or the cumulative product of
+        // (1 + delta) diverges from what the OS delivered. Cancelled
+        // deliberately shares the path: pinch applies deltas
+        // incrementally with no rollback.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) {" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "const double terminalDelta = event.magnification;" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (terminalDelta != 0) {" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "PINCH_CHANGE event:event magnification:terminalDelta];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self emitNormalizedPinchChangeForEvent:event];\n        [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_END event:event magnification:0];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "PINCH_END event:event magnification:0];" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-pinch-additive-normalization", "Verify the macOS host normalizes AppKit's additive magnification into multiplicative pinch deltas", &.{
+        // NSEvent.magnification is ADDITIVE (Apple: add each event's
+        // magnification; gesture total = 1 + Σmagnification) while the
+        // wire contract is multiplicative (product of (1 + delta)).
+        // The host must track the gesture's additive running sum in f64
+        // and emit per-event ratios, or the cumulative product depends
+        // on how the driver chunked the gesture (two +0.25 chunks:
+        // 1.5625; one +0.5 chunk: 1.5). The arithmetic itself is pinned
+        // runnably by the Zig mirror test in src/platform/macos/root.zig
+        // ("... normalization telescopes additive magnification ...");
+        // these text pins hold the ObjC side to the mirrored formula.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static const double NativeSdkPinchMagnificationSumFloor = -1.0 + 0x1p-10;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return sum < NativeSdkPinchMagnificationSumFloor ? NativeSdkPinchMagnificationSumFloor : sum;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return (1.0 + sum) / (1.0 + previousSum) - 1.0;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkClampedPinchMagnificationSum(previousSum + event.magnification);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkNormalizedPinchDelta(previousSum, sum);" },
+        // The sum resets at Began and at the synthesized begin (a
+        // gesture already in flight when the view becomes the hit
+        // target), and the normalization lives ONLY in the AppKit
+        // handler: synthesized automation events enter downstream of
+        // magnifyWithEvent: and are never re-normalized.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.pinchMagnificationSum = 0;" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "fn normalizedDelta(previous_sum: f64, sum: f64) f64 {" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "return (1.0 + sum) / (1.0 + previous_sum) - 1.0;" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-paces-retained-canvas", "Verify GPU input frame requests are paced to the display interval", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalNanoseconds" },

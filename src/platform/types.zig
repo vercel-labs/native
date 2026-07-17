@@ -1578,10 +1578,17 @@ pub const GpuSurfaceInputEvent = struct {
     text: []const u8 = "",
     composition_cursor: ?usize = null,
     modifiers: ShortcutModifiers = .{},
-    /// Pinch magnification DELTA for this event (NSEvent.magnification
-    /// semantics): nonzero only on `pinch_change`, 0 on begin/end. The
-    /// cumulative gesture scale is the running product of `(1 + scale)`
-    /// across the gesture's change events. The pointer anchor rides
+    /// Pinch MULTIPLICATIVE delta for this event: nonzero only on
+    /// `pinch_change`, 0 on begin/end. The cumulative gesture scale is
+    /// the running product of `(1 + scale)` across the gesture's change
+    /// events. Hosts whose OS reports pinch additively normalize before
+    /// emitting — AppKit's `NSEvent.magnification` is additive (Apple:
+    /// add each event's magnification; gesture total is
+    /// 1 + Σmagnification), and the macOS host converts each chunk into
+    /// the ratio it moved that total by, so the product of `(1 + scale)`
+    /// over a gesture equals Apple's 1 + Σmagnification (up to f32 wire
+    /// rounding) no matter how the driver chunked the gesture into
+    /// events. The pointer anchor rides
     /// `x`/`y` (view-local, same space as pointer events) — the pointer
     /// location during the gesture, NOT a midpoint between the fingers:
     /// hosts report gesture events at the pointer (AppKit's
@@ -1620,10 +1627,14 @@ pub const PinchEvent = struct {
     window_id: WindowId = 1,
     label: []const u8 = "",
     phase: PinchPhase,
-    /// Magnification DELTA for this event (NSEvent.magnification
-    /// semantics): nonzero only on `.change`, 0 on begin/end. The
-    /// cumulative gesture scale is the running product of `(1 + scale)`
-    /// across the gesture's change events.
+    /// MULTIPLICATIVE delta for this event: nonzero only on `.change`,
+    /// 0 on begin/end. The cumulative gesture scale is the running
+    /// product of `(1 + scale)` across the gesture's change events —
+    /// apply it memorylessly (`zoom *= 1 + scale`), no gesture-start
+    /// bookkeeping. Hosts normalize additive OS reporting (AppKit's
+    /// additive `NSEvent.magnification`) into these factors, so the
+    /// product over a gesture equals what the OS measured regardless of
+    /// event chunking.
     scale: f32 = 0,
     /// The pointer anchor, view-local canvas points (the pointer-event
     /// space): where the zoom should anchor. This is the POINTER

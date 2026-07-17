@@ -452,7 +452,7 @@ fn printUsage() void {
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
         \\  widget-wheel <view-label> <widget-id> <delta-y>
         \\  widget-key <view-label> <key> [text]
-        \\  widget-pinch <view-label> <scale> [x y]   (trackpad pinch: cumulative scale, e.g. 1.5 zooms in; anchor defaults to the view center)
+        \\  widget-pinch <view-label> <scale> [x y]   (trackpad pinch: <scale> is the gesture's final multiplicative zoom, e.g. 1.5 zooms in; anchor defaults to the view center)
         \\  shortcut <id>
         \\  tray-action <item-id>   (status-item dropdown row; snapshots print tray-item #id)
         \\  focus <view-label>

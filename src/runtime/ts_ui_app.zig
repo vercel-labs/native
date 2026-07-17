@@ -372,8 +372,9 @@ pub fn TsUiApp(comptime core: type) type {
         /// without its view is not a position; multi-window cores tell
         /// pinches apart by these), `phase` (the declared
         /// begin/change/end alias, matched by member name), `scale` (the
-        /// magnification DELTA on "change"; cumulative gesture scale is
-        /// the product of `1 + scale`), and the `x`/`y` pointer anchor
+        /// MULTIPLICATIVE delta on "change" — hosts normalize additive
+        /// OS reporting, so the cumulative gesture scale is the product
+        /// of `1 + scale`, chunking-invariant), and the `x`/`y` pointer anchor
         /// in view-local canvas points. The core's return gates the channel
         /// exactly like a Zig `on_pinch` (null drops the event).
         fn pinchMsgAdapter(pinch: platform.PinchEvent) ?Msg {

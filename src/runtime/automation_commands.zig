@@ -59,10 +59,13 @@ pub const AutomationWidgetKey = struct {
 };
 
 /// `widget-pinch <view-label> <scale> [<x> <y>]`: a trackpad pinch
-/// gesture against a gpu-surface view. `scale` is the CUMULATIVE gesture
-/// scale (1.5 zooms in 50%, 0.5 zooms out to half) — the dispatch
-/// synthesizes begin, one change carrying `scale - 1`, and end, so the
-/// product of `(1 + delta)` lands exactly on `scale`. The optional
+/// gesture against a gpu-surface view. `scale` is the FINAL
+/// multiplicative zoom for the gesture (1.5 zooms in 50%, 0.5 zooms out
+/// to half) — the dispatch synthesizes begin, one change carrying
+/// `scale - 1`, and end, so the product of `(1 + delta)` lands exactly
+/// on `scale` (a single change is chunking-trivial: the host-side
+/// additive normalization only concerns real AppKit event streams,
+/// upstream of these synthesized platform events). The optional
 /// anchor point is view-local canvas points (where the zoom anchors,
 /// like the pointer position under a real pinch); omitted, it defaults
 /// to the view center.

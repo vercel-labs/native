@@ -287,8 +287,12 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// Drive a trackpad pinch through the real platform-event path:
         /// `pinch_begin`, one `pinch_change` carrying `scale - 1` (so
         /// the cumulative product of `1 + delta` lands exactly on the
-        /// commanded scale), and `pinch_end`, all at the same anchor
-        /// point.
+        /// commanded scale — the gesture's FINAL multiplicative zoom;
+        /// one change is chunking-trivial), and `pinch_end`, all at the
+        /// same anchor point. These synthesized events enter DOWNSTREAM
+        /// of the AppKit host, so the host's additive-magnification
+        /// normalization (appkit_host.m, real gestures only) never
+        /// touches them.
         /// Plain input synthesis, the `widget-key` discipline: every
         /// event journals as itself and replays through the same
         /// dispatch — no accessibility-action record, because pinch is
