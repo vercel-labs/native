@@ -588,6 +588,271 @@ test "plain Enter inserts a newline in a canvas textarea; chorded Enter never ed
     try std.testing.expectEqualStrings("First\n", retained.nodes[1].widget.text);
 }
 
+test "Enter in a single-line input never inserts, even when the host stuffs a newline into the key event" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-input-enter", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 260, 160),
+    });
+
+    const input = canvas.Widget{
+        .id = 2,
+        .kind = .input,
+        .frame = geometry.RectF.init(12, 16, 180, 32),
+        .text = "Draft",
+        .semantics = .{ .label = "Title" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{input} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 100,
+        .y = 30,
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "a",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+
+    // The macOS-host shape: Return as a bare `enter` keydown. Enter in a
+    // single-line field submits; it is NOT an edit.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Draft", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
+
+    // A host that stuffs the newline into the key event's text payload
+    // still edits nothing: the sanitized insert strips to empty and
+    // suppresses — the live selection is not deleted.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+        .text = "\n",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+        .text = "\r",
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Draft", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
+}
+
+test "automation set_text with line breaks lands sanitized in single-line fields and raw in textareas" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-set-text-breaks", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 220),
+    });
+
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .search_field,
+            .frame = geometry.RectF.init(12, 16, 200, 36),
+            .text = "",
+            .semantics = .{ .label = "Query" },
+        },
+        .{
+            .id = 3,
+            .kind = .textarea,
+            .frame = geometry.RectF.init(12, 64, 280, 100),
+            .text = "",
+            .semantics = .{ .label = "Notes" },
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 220), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Automation set_text rides the REAL text-input event path, so its
+    // line breaks sanitize at the same seam a paste does.
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 2, .action = .set_text, .value = "edge\ncustomers\r\nfirst" });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("edgecustomersfirst", retained.nodes[1].widget.text);
+
+    // The textarea takes the same payload verbatim.
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 3, .action = .set_text, .value = "edge\ncustomers\r\nfirst" });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("edge\ncustomers\r\nfirst", retained.nodes[2].widget.text);
+}
+
+test "ime composition with a newline sanitizes into single-line fields before commit" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-ime-newline", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 260, 120),
+    });
+
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 180, 36),
+        .text = "Cafe",
+        .semantics = .{ .label = "Name" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 260, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 100,
+        .y = 30,
+    } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+
+    // A composition PREVIEW carrying a newline sanitizes at the same
+    // seam every insert does — the preview in the retained editor holds
+    // the stripped bytes, so the COMMIT (which lands whatever the
+    // preview holds) can never commit a line break.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = " au\nlait",
+        .composition_cursor = 8,
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Cafe aulait", retained.nodes[1].widget.text);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(4, 11), retained.nodes[1].widget.text_composition.?);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_commit_composition,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("Cafe aulait", retained.nodes[1].widget.text);
+    try std.testing.expect(retained.nodes[1].widget.text_composition == null);
+}
+
+test "a model-set single-line value with a newline paints one line inside the field" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-value-newline", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 120),
+    });
+
+    // A Zig core can put a newline into a field's VALUE today; the
+    // sanitize seam only guards EDITS. The retained value keeps the raw
+    // bytes (semantics and automation report honestly), but the painted
+    // text presents the breaks as spaces on ONE line, under a forced
+    // content-rect clip — nothing escapes the rounded border.
+    const input = canvas.Widget{
+        .id = 2,
+        .kind = .input,
+        .frame = geometry.RectF.init(12, 16, 200, 32),
+        .text = "one\ntwo",
+        .semantics = .{ .label = "Title" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{input} }, geometry.RectF.init(0, 0, 320, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+
+    const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
+    var saw_presented_text = false;
+    var saw_clip = false;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (text.id == testCanvasWidgetPartId(2, 3)) {
+                    try std.testing.expectEqualStrings("one two", text.text);
+                    saw_presented_text = true;
+                }
+            },
+            .push_clip => |clip| {
+                if (clip.id == testCanvasWidgetPartId(2, 16)) saw_clip = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_presented_text);
+    try std.testing.expect(saw_clip);
+
+    // Semantics (and therefore automation and assistive tech) still read
+    // the RAW model value: presentation never rewrites the model.
+    const snapshot = harness.runtime.automationSnapshot("Widgets");
+    try std.testing.expectEqualStrings("one\ntwo", snapshot.widgets[0].text_value);
+}
+
 test "runtime applies ime composition edits to canvas text fields" {
     const TestApp = struct {
         fn app(self: *@This()) App {

@@ -354,6 +354,36 @@ test "textarea keyboard: enter edits a newline, submit rides the primary chord" 
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(textarea.id, alt_enter));
 }
 
+test "single-line keyboard fallback derivation sanitizes line breaks like the runtime seam" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{ .gap = 8 }, .{
+        ui.el(.text_field, .{ .on_input = InboxUi.inputMsg(.draft) }, .{}),
+        ui.el(.textarea, .{ .on_input = InboxUi.inputMsg(.draft) }, .{}),
+    }));
+    const field = findByKind(tree.root, .text_field).?;
+    const textarea = findByKind(tree.root, .textarea).?;
+
+    // An un-stamped text_input event (a direct Tree consumer — nothing
+    // crossed the runtime) derives its insert locally, and the local
+    // derivation applies the SAME single-line sanitize rule the runtime
+    // seam stamps with: line breaks strip, so a model mirror can never
+    // hear bytes the retained editor would refuse.
+    const multi_line = canvas.WidgetKeyboardEvent{ .phase = .text_input, .text = "a\nb\r\nc" };
+    try testing.expectEqualStrings("abc", tree.msgForKeyboard(field.id, multi_line).?.draft.insert_text);
+    try testing.expectEqualStrings("a\nb\r\nc", tree.msgForKeyboard(textarea.id, multi_line).?.draft.insert_text);
+
+    // An insert that is ONLY breaks suppresses outright.
+    const bare_breaks = canvas.WidgetKeyboardEvent{ .phase = .text_input, .text = "\r\n" };
+    try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(field.id, bare_breaks));
+
+    // A STAMPED edit (the runtime already sanitized it) passes through.
+    const stamped = canvas.WidgetKeyboardEvent{ .phase = .key_down, .edit = .{ .insert_text = "clean" } };
+    try testing.expectEqualStrings("clean", tree.msgForKeyboard(field.id, stamped).?.draft.insert_text);
+}
+
 test "typed handlers imply accessibility actions" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

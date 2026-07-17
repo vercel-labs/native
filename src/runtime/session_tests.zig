@@ -162,6 +162,11 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
             .placeholder = "Name",
             .on_input = SessionApp.Ui.inputMsg(.name_edit),
         }, .{}),
+        // A static multi-line source the paste replay pin copies from:
+        // the journal records only the raw select-all/copy/paste
+        // platform events, so the multi-line clipboard bytes and the
+        // sanitized single-line insert both re-derive on replay.
+        ui.el(.textarea, .{ .text = "line one\nline two" }, .{}),
         ui.text(.{}, ui.fmt("Query {s} ({d}) Name {s} ({d})", .{ model.queryText(), model.query_edits, model.nameText(), model.name_edits })),
         ui.button(.{ .on_press = .increment }, "Increment"),
     });
@@ -337,6 +342,55 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
     try std.testing.expectEqualStrings("", app_state.model.queryText());
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
+    // A recorded MULTI-LINE PASTE replays to the identical sanitized
+    // value: copy the textarea's two lines (select-all + copy — raw
+    // journaled inputs that rebuild the clipboard on replay), then paste
+    // into the single-line search field. Sanitization is deterministic
+    // derivation at the apply seam, so the replayed editor, the model
+    // mirror, and the fingerprint all land on the same stripped bytes.
+    var textarea_frame: ?geometry.RectF = null;
+    for ((try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| {
+        if (node.widget.kind == .textarea) textarea_frame = node.frame;
+    }
+    const source_frame = textarea_frame.?;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = source_frame.x + source_frame.width * 0.5,
+        .y = source_frame.y + source_frame.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "a",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "c",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = field_frame.x + field_frame.width * 0.5,
+        .y = field_frame.y + field_frame.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .key_down,
+        .key = "v",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try std.testing.expectEqualStrings("line oneline two", app_state.model.queryText());
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
     recorder.finish();
     try std.testing.expect(!recorder.failed);
 
@@ -389,10 +443,11 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expect(recorded.model.stamp_ms != 0);
     try std.testing.expectEqual(@as(u32, 1), recorded.model.spectrum_count);
     try std.testing.expect(recorded.model.band_checksum != 0);
-    // The typed insert and the DERIVED Escape-clear both reached the
-    // model's `on_input` mirror, and the clear left it empty.
-    try std.testing.expectEqual(@as(u32, 2), recorded.model.query_edits);
-    try std.testing.expectEqualStrings("", recorded.model.queryText());
+    // The typed insert, the DERIVED Escape-clear, and the sanitized
+    // multi-line paste all reached the model's `on_input` mirror — the
+    // paste landing STRIPPED of its line breaks (single-line rule).
+    try std.testing.expectEqual(@as(u32, 3), recorded.model.query_edits);
+    try std.testing.expectEqualStrings("line oneline two", recorded.model.queryText());
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());

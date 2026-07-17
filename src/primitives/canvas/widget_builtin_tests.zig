@@ -3977,6 +3977,90 @@ test "short single-line values emit no clip and an unshifted origin" {
     }
 }
 
+test "a single-line value holding a line break renders one line inside the border" {
+    // The defensive containment layer: edits can never insert a line
+    // break into a single-line field (they sanitize at the derivation
+    // seam), but a MODEL-SET value still can — a Zig core can put one
+    // there today, as can an old journal or a host API write. The field
+    // presents `\n`/`\r` as spaces (one line, byte-for-byte offsets) and
+    // force-clips to its content rect, so the value never paints outside
+    // the rounded border — identically in both render walks.
+    const field = Widget{
+        .id = 7,
+        .kind = .input,
+        .frame = geometry.RectF.init(10, 12, 200, 32),
+        .text = "one\ntwo\r\nthree",
+        .semantics = .{ .label = "Name" },
+    };
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, .{});
+    try expectSingleLinePresentedField(builder.displayList(), field);
+
+    // Layout walk: the compiled and interpreted engines both emit
+    // retained layouts through this walk, so containment pins here too.
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(field, field.frame, &nodes);
+    var layout_commands: [8]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, .{});
+    try expectSingleLinePresentedField(layout_builder.displayList(), field);
+
+    // A search field (the other emitter) contains the same value the
+    // same way: presented bytes and a forced clip.
+    var search = field;
+    search.kind = .search_field;
+    var search_commands: [32]CanvasCommand = undefined;
+    var search_builder = Builder.init(&search_commands);
+    try emitWidgetTree(&search_builder, search, .{});
+    const search_list = search_builder.displayList();
+    try std.testing.expect(search_list.findCommandById(widgetPartId(7, 7)) != null);
+    switch (search_list.findCommandById(widgetPartId(7, 9)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("one two  three", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A textarea keeps its raw line breaks: it is the one genuinely
+    // multi-line editable kind.
+    var textarea = field;
+    textarea.kind = .textarea;
+    textarea.frame = geometry.RectF.init(10, 12, 200, 120);
+    var area_commands: [8]CanvasCommand = undefined;
+    var area_builder = Builder.init(&area_commands);
+    try emitWidgetTree(&area_builder, textarea, .{});
+    switch (area_builder.displayList().findCommandById(widgetPartId(7, 3)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("one\ntwo\r\nthree", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectSingleLinePresentedField(display_list: DisplayList, field: Widget) !void {
+    // The content-rect clip is FORCED for a value holding a line break,
+    // even though the presented value fits on one line.
+    const viewport = textInputViewportForWidget(field, .{}).?;
+    switch (display_list.findCommandById(widgetPartId(field.id, 16)).?.command) {
+        .push_clip => |clip| try expectRectApprox(viewport, clip.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(field.id, 3)).?.command) {
+        .draw_text => |text| {
+            // `\n` and each byte of `\r\n` present as spaces — same
+            // length, so caret/selection offsets address the raw value.
+            try std.testing.expectEqualStrings("one two  three", text.text);
+            // The presented value lays out as exactly ONE line.
+            var lines: [4]TextLine = undefined;
+            const run = try layoutTextRun(text, text.text_layout.?, &lines);
+            try std.testing.expectEqual(@as(usize, 1), run.lines.len);
+            // ... and that line's painted bounds sit inside the field.
+            const bounds = run.lines[0].bounds;
+            try std.testing.expect(bounds.maxY() <= field.frame.maxY() + 0.001);
+            try std.testing.expect(bounds.y >= field.frame.y - 0.001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "search fields clip an overflowing value and keep chrome outside the clip" {
     const long_text = "an overflowing search query that runs past the narrow field";
     const field = Widget{
