@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli-win32-arm64",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "The native CLI binary for Windows on ARM (arm64)",
   "os": [
     "win32"

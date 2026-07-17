@@ -2,9 +2,43 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.5.2
+## 0.5.3
 
 <!-- release:start -->
+
+### New Features
+
+- **`<media-surface>` — the dynamic texture channel**: a new element compositing textures produced outside the widget tree (video decoders, camera pipelines, external renderers like mpv) into the layout like any widget, with a stable Zig-tier producer API (`runtime.acquireMediaSurfaceProducer`) pushing RGBA8 frames from any thread — latest-wins, damage-tracked, paced by the compositor's presented-frame clock.
+- **Pushes wake an idle compositor**: a push staging new bytes requests one coalesced frame through the platform's thread-safe cross-thread frame request (the automation watcher's wake path), so video keeps playing in an idle demand-driven app and a late-starting producer is adopted promptly; damage-skipped and stale-handle pushes wake nothing, and teardown disarms the binding under the same fence the wake call holds, so an orphaned producer can never wake a dead host.
+- **Markup, both engines, and tooling**: `surface="{binding}"` binds the model-owned u64 surface id in the runtime-image-id grammar (binding-only, required, media-surface-scoped with teaching errors), wired through the validator, the compiled and interpreter engines, `native check`'s model contract, LSP hover docs, and a docs component page plus a "Media Producers" recipe.
+- **Deterministic by policy**: texture contents are presentation chrome — goldens, reference screenshots, and session fingerprints see only the surface's id-derived placeholder, so a session recorded with a live producer replays fingerprint-identical with no producer attached; live GPU hosts composite the real texture through the existing image upload pipeline.
+- **Reserved id namespace**: bit 63 of the ImageId space now belongs to media-surface textures; `registerCanvasImage` rejects ids with it set (`error.InvalidImageId`) so producer textures and registered images can never collide.
+- **Cover fit stays inside the frame**: a `cover`-fit media surface carries the image widget's rectangular clip around its texture draw, so the fit-expanded texture can never paint over siblings on hosts that only mask corner radii.
+- **Adopted-texture memory is on-demand**: each channel's texture buffer is one lazy frame-budget allocation from the new `Runtime.Options.allocator` at first adoption (freed by the new `Runtime.deinit`), so a runtime with no media producers carries zero media-texture bytes — an embedded pool would have put 32 MiB in every Runtime (measured on the docs wasm preview host: 169.5 MB → 137.5 MB per component tile). The allocator freezes into the runtime at init: mutating `options.allocator` on a live runtime never retargets ownership, so allocations and their frees always pair on one allocator.
+- **Trackpad pinch reaches apps**: pinch-to-zoom now flows from the macOS host (`magnifyWithEvent:`) through phase-explicit `pinch_begin`/`pinch_change`/`pinch_end` input events into a view-global app channel — Zig cores declare `Options.on_pinch`, TypeScript cores export `pinchMsg(pinch)` with `PinchPhase`/`PinchEvent` in `@native-sdk/core/events`; each change carries a multiplicative delta (cumulative gesture scale is the product of `1 + scale`, applied memorylessly — `zoom *= 1 + scale`) and the pointer anchor rides view-local `x`/`y` (the pointer location during the gesture — zoom-at-cursor anchoring, not a between-the-fingers midpoint); every event names its source window and view (`window_id`/`label` in Zig, `windowId`/`label` in TypeScript), so multi-window apps tell pinches apart; a terminal Ended/Cancelled event that still measured a nonzero delta arrives as one last change before the end, so the product always matches what the OS reported. On macOS the delta is AppKit's raw per-event `NSEvent.magnification`, forwarded untransformed: raw magnification IS the multiplicative per-event delta — the convention every browser engine ships — so the product of `1 + scale` is the zoom users already experience for the same gesture in Safari and Chrome. The one guard is a per-event floor: a single event's magnification at or below -1 (a zoom inverting through zero scale — physically impossible, only a driver glitch could report it) clamps just above -1, so every emitted factor stays positive. Windows precision-touchpad and GTK gesture sources are staged follow-ups.
+- **`widget-pinch` automation verb**: `native automate widget-pinch <view-label> <scale> [x y]` drives the real pinch event stream without a trackpad (`<scale>` is the gesture's FINAL multiplicative zoom — one change carrying `scale - 1`, anchor point defaulting to the view center), journaled like every synthesized input so recorded sessions replay the identical zoom. Automation protocol bumps to v7.
+- **Session journal v5**: gpu-surface input records gain the pinch `scale` field and the pinch kinds; readers refuse v4 journals loudly in both directions, per the format's skew discipline — re-record sessions with this build.
+
+### Bug Fixes
+
+- **Registered CJK fonts render dense glyphs**: glyph outline budgets are now sized from real CJK faces (Noto Sans JP/SC/TC/KR measured; 1024 points / 128 contours per glyph), so everyday dense kanji like 鬱 ink as real outlines instead of notdef blocks; the per-font registration size bound rose to 24 MiB so full CJK faces register.
+- **Glyph complexity validates at registration, not render**: a face whose `maxp` declares glyphs denser than the outline budgets — simple maxima and flattened-composite maxima (`maxCompositePoints`/`maxCompositeContours`) alike — is refused at registration with a teaching that names its numbers against the budgets (`error.FontExceedsGlyphBudgets`), instead of silently degrading individual glyphs to blocks at render time.
+- **Font bytes are heap-allocated on demand**: the registry copies each registered file into an exact-size allocation from the runtime's new `Options.allocator` (freed by the new `Runtime.deinit`), so the 24 MiB bound is validation, not a storage reservation — a runtime with no registered fonts carries zero font bytes, where a reservation-shaped pool would have embedded 192 MiB in every Runtime (measured on the docs wasm preview host: 313.5 MB → 121.5 MB per component tile).
+- **`EmbeddedApp.deinit` completes the embed lifecycle**: direct embedders end an embedded app with `defer embedded.deinit()` (idempotent), which returns the runtime's heap-owned registrations — without it, a host creating and destroying apps in one process leaked the registered font storage per cycle. The wrapper hosts and the C ABI's `native_sdk_app_destroy` route their teardown through the same deinit, one lifecycle owner.
+- **Glyph raster budgets are derived from the registration gate**: the vector core's glyph-fill capacities (`GlyphRasterizer`: 18,560 edges/crossings, flattening clamped at 16 segments per curve) are computed from the outline budgets registration admits, so a truthfully-declared budget-maximal glyph — a 1024-point zigzag contour included — rasterizes at any size instead of hitting `VectorPathTooComplex` and degrading to the block fallback the gate promises cannot happen; the clamp binds only above ~128-px ems and keeps the polyline within 0.2% of the em, so existing renders are byte-identical.
+- **Single-line fields never hold or paint line breaks**: pasting multi-line text into an input, text field, search field, or combobox now strips the line breaks at the edit seam (the HTML value-sanitization rule — lines join with nothing between them), covering clipboard paste from the shortcut and the context menu, typed and automation `text_input`, and IME composition, with the app's `on_input` hearing the same sanitized bytes the editor applied; a paste of only newlines inserts nothing.
+- **Defensive render containment**: a single-line value that still holds a `\n` (a model-set value, an old journal) now paints as one line — breaks present as spaces — under a forced content-rect clip, so text can never escape the field's rounded border on any renderer.
+
+### Contributors
+
+- @ctate
+- @IFTC-XLKJ
+- @WhiteHades
+- @jhodges10
+
+<!-- release:end -->
+
+## 0.5.2
 
 ### New Features
 
@@ -37,8 +71,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @marcusschiesser
-
-<!-- release:end -->
 
 ## 0.5.1
 

@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli-darwin-arm64",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "The native CLI binary for macOS on Apple silicon (arm64)",
   "os": [
     "darwin"

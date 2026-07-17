@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli-linux-x64-gnu",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "The native CLI binary for Linux x64 (glibc)",
   "os": [
     "linux"
