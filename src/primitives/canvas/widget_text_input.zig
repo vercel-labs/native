@@ -8,6 +8,7 @@ const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 
 const FontId = @import("root.zig").FontId;
+const Builder = @import("commands.zig").Builder;
 const Color = drawing_model.Color;
 const DrawText = text_model.DrawText;
 const TextWrap = text_model.TextWrap;
@@ -79,33 +80,19 @@ pub fn widgetTextInputTextNeedsPresentation(widget: Widget) bool {
 
 /// Presentation scratch, lazily heap-allocated per thread (the
 /// `lazy_tls` pattern all canvas scratch uses; the event loop is
-/// single-threaded):
-///   - `slot` holds ONE presented text at a time — the transient buffer
-///     the geometry seams (caret, selection, hit-test, scroll measures)
-///     substitute into. Every entry point re-derives it, and within one
-///     widget's computation repeated derivations write identical bytes,
-///     so the aliasing is harmless.
-///   - `pool` appends presented texts for the RENDER walk: emitted
-///     `drawText` commands slice into it and must survive until the
-///     runtime copies the display list (same emit call stack — the
-///     chart-label scratch precedent). Reset at each emit entry point.
-/// Sized to the runtime's per-view budgets: `slot` to the widget-text
-/// budget (65536), `pool` to the per-frame text budget (32768) — a frame
-/// retaining more text fails its own budget first. Overflow falls back
-/// to the RAW bytes; the forced clip above keeps even that fallback
-/// inside the field's border.
+/// single-threaded): `slot` holds ONE presented text at a time — the
+/// transient buffer the geometry seams (caret, selection, hit-test,
+/// scroll measures) substitute into. Every entry point re-derives it,
+/// and within one widget's computation repeated derivations write
+/// identical bytes, so the aliasing is harmless. Sized to the runtime's
+/// per-view widget-text budget (65536). Nothing EMITTED may retain a
+/// slice into it: render emitters persist presented bytes into the
+/// display-list builder via `persistWidgetTextInputPresentedText`, whose
+/// storage lives exactly as long as the emitted commands do.
 const WidgetTextPresentationScratch = struct {
     slot: [65536]u8,
-    pool: [32768]u8,
-    pool_len: usize = 0,
 };
 const widget_text_presentation_scratch = @import("lazy_tls.zig").LazyTls(WidgetTextPresentationScratch);
-
-/// Reset the render walk's presentation pool — called by the display-list
-/// emit entry points, next to the chart-label scratch reset.
-pub fn resetWidgetTextInputPresentationPool() void {
-    widget_text_presentation_scratch.get().pool_len = 0;
-}
 
 /// The text a single-line field lays out, measures, and paints: the raw
 /// value with `\n`/`\r` presented as spaces (same byte length). Returns
@@ -126,19 +113,18 @@ fn presentedSingleLineText(text: []const u8) []const u8 {
     return scratch.slot[0..text.len];
 }
 
-/// Persist presented bytes into the render walk's pool so an emitted
+/// Persist presented bytes into the display-list BUILDER so an emitted
 /// command outlives the shared slot (a later widget's presentation
-/// overwrites it). Falls back to the RAW value — stable, view-owned
-/// storage — when the pool is full; the forced clip contains that
-/// fallback inside the field's border.
-pub fn persistWidgetTextInputPresentedText(raw: []const u8, presented: []const u8) []const u8 {
+/// overwrites it) — builder-owned storage, because the builder contract
+/// lets a display list accumulate across several emit calls or be held
+/// while another builder emits, and the emitted `draw_text` must stay
+/// intact through both. Falls back to the RAW value — stable,
+/// view-owned storage — when the builder's text store is full (only
+/// possible on a frame already over the per-view draw-text budget); the
+/// forced clip contains that fallback inside the field's border.
+pub fn persistWidgetTextInputPresentedText(builder: *Builder, raw: []const u8, presented: []const u8) []const u8 {
     if (presented.ptr == raw.ptr) return raw;
-    const scratch = widget_text_presentation_scratch.get();
-    if (scratch.pool_len + presented.len > scratch.pool.len) return raw;
-    const start = scratch.pool_len;
-    scratch.pool_len += presented.len;
-    @memcpy(scratch.pool[start..scratch.pool_len], presented);
-    return scratch.pool[start..scratch.pool_len];
+    return builder.allocTextBytes(presented) catch raw;
 }
 
 pub fn textSelectionForWidgetPoint(widget: Widget, point: geometry.PointF, anchor: ?usize, tokens: DesignTokens) ?TextSelection {

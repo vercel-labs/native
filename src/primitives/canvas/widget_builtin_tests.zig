@@ -4061,6 +4061,51 @@ fn expectSingleLinePresentedField(display_list: DisplayList, field: Widget) !voi
     }
 }
 
+test "presented single-line values survive later emits into any builder" {
+    // The builder contract (the `allocPathElements` rule): a display
+    // list may be HELD while another builder emits, and one builder may
+    // ACCUMULATE several emit calls — either way every emitted command
+    // stays intact. Presented bytes live in the BUILDER's own text
+    // store, so a later presentation can never overwrite an emitted
+    // draw_text the way a per-emit-reset scratch pool would (both
+    // values here present to the same byte length, so a reset pool
+    // would alias the first list's slice exactly).
+    const first = Widget{
+        .id = 7,
+        .kind = .input,
+        .frame = geometry.RectF.init(10, 12, 200, 32),
+        .text = "one\ntwo",
+    };
+    var second = first;
+    second.id = 8;
+    second.text = "AAA\nBBB";
+
+    // Hold the first builder's list across a second builder's emit.
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, first, .{});
+    var other_commands: [8]CanvasCommand = undefined;
+    var other_builder = Builder.init(&other_commands);
+    try emitWidgetTree(&other_builder, second, .{});
+    try expectPresentedFieldText(builder.displayList(), 7, "one two");
+    try expectPresentedFieldText(other_builder.displayList(), 8, "AAA BBB");
+
+    // Sequential emits accumulated into ONE builder keep both intact.
+    var accumulated_commands: [16]CanvasCommand = undefined;
+    var accumulated = Builder.init(&accumulated_commands);
+    try emitWidgetTree(&accumulated, first, .{});
+    try emitWidgetTree(&accumulated, second, .{});
+    try expectPresentedFieldText(accumulated.displayList(), 7, "one two");
+    try expectPresentedFieldText(accumulated.displayList(), 8, "AAA BBB");
+}
+
+fn expectPresentedFieldText(display_list: DisplayList, id: ObjectId, expected: []const u8) !void {
+    switch (display_list.findCommandById(widgetPartId(id, 3)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings(expected, text.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "search fields clip an overflowing value and keep chrome outside the clip" {
     const long_text = "an overflowing search query that runs past the narrow field";
     const field = Widget{

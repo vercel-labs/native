@@ -465,9 +465,10 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
     const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
     var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     // A presented value (single-line kind holding a line break) lives in
-    // shared scratch; persist it so this widget's emitted commands
-    // survive the rest of the walk. No-op for the ordinary raw value.
-    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(widget.text, draw_text.text);
+    // shared scratch; persist it into the builder so this widget's
+    // emitted commands survive the rest of the walk AND any later emit
+    // while this display list is held. No-op for the ordinary raw value.
+    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
     const has_text_affordances = selection_range != null or composition_range != null;
@@ -573,9 +574,10 @@ pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTo
     const composition_range = widgetTextCompositionRange(widget);
     const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
     var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
-    // Presented values persist out of the shared scratch — the
-    // text-field emitter's rule (no-op for ordinary raw values).
-    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(widget.text, draw_text.text);
+    // Presented values persist out of the shared scratch into the
+    // builder — the text-field emitter's rule (no-op for ordinary raw
+    // values).
+    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
     // Same overflow contract as the text-field emitter: clip only once
     // the value (or placeholder) overflows the content rect, so the
     // horizontally scrolled text and its affordances cut at the border.

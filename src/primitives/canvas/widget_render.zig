@@ -113,45 +113,27 @@ pub const sliderWidgetKnobRect = widget_render_controls.sliderWidgetKnobRect;
 
 const max_widget_depth: usize = 32;
 
-// Widget-built path elements (`.chart` lines/bands, the `.spinner` arc
-// and segments, the `.checkbox` check mark — unlike icons, whose
-// elements are comptime-static) allocate from the display-list builder's
-// own store (`Builder.allocPathElements`), so the emitted commands'
-// element slices share the builder's lifetime instead of pointing into
-// shared scratch that a later emission could overwrite.
+// Emit-built bytes that emitted commands RETAIN live in the builder,
+// never in per-emit-reset scratch: path elements (`.chart` lines/bands,
+// the `.spinner` arc and segments, the `.checkbox` check mark — unlike
+// icons, whose elements are comptime-static) allocate from
+// `Builder.allocPathElements`, formatted chart labels from
+// `Builder.allocChartLabelBytes`, and presented single-line values from
+// `Builder.allocTextBytes`, so every emitted command's slices share the
+// builder's lifetime — a display list accumulated across several emit
+// calls, or held while another builder emits, stays intact.
 
-/// Frame-lifetime scratch for formatted chart label text (y tick values
-/// and hover-detail rows): `drawText` commands slice into it. The event
-/// loop is single-threaded and the runtime copies the display list into
-/// per-view storage within the same emit call stack, so one threadlocal
-/// buffer per frame is sound — reset at each emit entry point. Overflow
-/// fails loudly by budget name.
-// Lazily heap-allocated per thread (the label pool plus the chart
-// polyline scratch below): init on first emit/chart use of a thread —
-// the emitting thread by construction — so threads that never emit
-// widgets never allocate it. The arrays carry no default and stay
-// uninitialized, exactly like the `= undefined` statics they replace.
+/// Transient chart scratch, lazily heap-allocated per thread: init on
+/// first chart use of a thread — the emitting thread by construction —
+/// so threads that never emit charts never allocate it. Purely
+/// intra-emit (polyline points are copied into the builder's
+/// path-element store before the emitter returns), so nothing emitted
+/// retains slices into it. The array carries no default and stays
+/// uninitialized, exactly like the `= undefined` static it replaces.
 const WidgetRenderScratch = struct {
-    frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8,
-    frame_label_len: usize = 0,
     chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF,
 };
 const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratch);
-
-fn resetFrameLabelScratch() void {
-    widget_render_scratch.get().frame_label_len = 0;
-}
-
-/// Persist a formatted label into the frame scratch so the emitted
-/// command outlives the local formatting buffer.
-fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
-    const scratch = widget_render_scratch.get();
-    if (scratch.frame_label_len + text.len > scratch.frame_label_bytes.len) return error.ChartLabelBytesFull;
-    const start = scratch.frame_label_len;
-    scratch.frame_label_len += text.len;
-    @memcpy(scratch.frame_label_bytes[start..scratch.frame_label_len], text);
-    return scratch.frame_label_bytes[start..scratch.frame_label_len];
-}
 
 /// Frame-lifetime scratch (same single-threaded emit contract as the
 /// label scratch above) holding the root bounds of the tree being
@@ -161,8 +143,6 @@ fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    resetFrameLabelScratch();
-    widget_text_input.resetWidgetTextInputPresentationPool();
     scrim_viewport = widget.frame.normalized();
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
@@ -172,8 +152,6 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
-    resetFrameLabelScratch();
-    widget_text_input.resetWidgetTextInputPresentationPool();
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutAnchored(builder, layout, tokens, state);
@@ -1832,7 +1810,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         for (0..lattice.count) |ordinal| {
             const value = lattice.value(ordinal);
             const formatted = chart_model.formatChartValue(&buffer, value, lattice.decimals);
-            const text = try allocFrameLabelBytes(formatted);
+            const text = try builder.allocChartLabelBytes(formatted);
             const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
             const line_y = chartMapY(value, domain, plot, 0);
             const top = std.math.clamp(line_y - line_height * 0.5, content.y, @max(content.y, content.maxY() - line_height));
@@ -2336,7 +2314,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
     const line_height = size * 1.25;
     var title_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     const title = chartHoverDetailTitle(data, detail.index, &title_buffer);
-    const title_text = try allocFrameLabelBytes(title);
+    const title_text = try builder.allocChartLabelBytes(title);
     var row_y = card.y + chart_detail_pad_v;
     try builder.drawText(.{
         .id = chartCommandId(widget.id, chart_hover_seed, 0, 4),
@@ -2366,7 +2344,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .text = chartDetailRowName(series),
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
-        const value_text = try allocFrameLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
+        const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
         const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
         try builder.drawText(.{
             .id = chartCommandId(widget.id, chart_hover_row_seed, series_index, 2),

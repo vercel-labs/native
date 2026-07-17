@@ -65,6 +65,18 @@ const builtinBridgeErrorMessage = support.builtinBridgeErrorMessage;
 const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
 
+test "the builder's presented-text store mirrors the per-view draw-text budget" {
+    // The chart path-element lockstep's sibling: presented single-line
+    // bytes persist into `Builder.text_bytes`, and the store can only
+    // overflow (falling back to raw bytes under the forced clip) on a
+    // frame the runtime's per-view display-list copy would refuse
+    // anyway. Keep the two budgets from drifting.
+    try std.testing.expectEqual(
+        @import("canvas_limits.zig").max_canvas_text_bytes_per_view,
+        canvas.max_display_list_text_bytes,
+    );
+}
+
 test "runtime exposes retained canvas widget text geometry" {
     const TestApp = struct {
         fn app(self: *@This()) App {

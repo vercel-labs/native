@@ -44,13 +44,13 @@ pub const max_chart_points_per_series: usize = 256;
 /// filled series — or dozens of sparkline-sized ones — per frame.
 pub const max_chart_path_elements_per_frame: usize = 2048;
 
-/// Per-frame byte budget for the formatted tick/tooltip label scratch
-/// (threadlocal frame-lifetime storage: the emitted `drawText` commands
-/// slice into it until the runtime copies the display list). A y axis
-/// labels at most a handful of ticks and a
-/// hover tooltip a row per series, each `max_chart_value_label_bytes`
-/// long, so 2 KiB holds dozens of charts per frame; overflow fails
-/// loudly with `ChartLabelBytesFull`.
+/// Byte budget for the display-list builder's own formatted tick/tooltip
+/// label store (`Builder.allocChartLabelBytes` — builder-owned like the
+/// path-element store, so the emitted `drawText` commands keep their
+/// label bytes for the builder's lifetime). A y axis labels at most a
+/// handful of ticks and a hover tooltip a row per series, each
+/// `max_chart_value_label_bytes` long, so 2 KiB holds dozens of charts
+/// per frame; overflow fails loudly with `ChartLabelBytesFull`.
 pub const max_chart_label_bytes_per_frame: usize = 2048;
 
 /// Longest formatted value label: the integer digits of f32's full
