@@ -29,6 +29,7 @@ test {
     _ = @import("markdown_app_tests.zig");
     _ = @import("platform_bridge_tests.zig");
     _ = @import("session_journal.zig");
+    _ = @import("session_blobs.zig");
     _ = @import("session_record.zig");
     _ = @import("session_tests.zig");
 }

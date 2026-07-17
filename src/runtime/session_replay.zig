@@ -31,6 +31,7 @@ const canvas = @import("canvas");
 const automation_protocol = @import("../automation/protocol.zig");
 const core = @import("core.zig");
 const journal = @import("session_journal.zig");
+const session_blobs = @import("session_blobs.zig");
 
 pub const ReplayError = error{
     /// The journal was recorded on a different platform; v1 replay is
@@ -46,6 +47,11 @@ pub const ReplayError = error{
     /// The app registered no replay hook (`App.replay_fn`), but the
     /// journal carries effect results that need one.
     ReplayUnsupportedApp,
+    /// The journal references a session blob (an image record's source
+    /// bytes) but no blob source was provided, the blob is missing, or
+    /// its bytes fail their content hash — the journal directory was
+    /// moved without its `blobs/`, or the store was damaged.
+    ReplayMissingBlob,
 };
 
 /// Bounded mismatch detail (first N are kept; the count keeps counting).
@@ -68,6 +74,11 @@ pub const ReplayOptions = struct {
     /// Refuse a journal recorded on another platform (the v1 bar).
     /// Tests recording under the null platform disable this.
     require_same_platform: bool = true,
+    /// Where journal records' out-of-line payloads resolve from (the
+    /// `blobs/` directory beside the journal — see session_blobs.zig).
+    /// Only consulted when a record references a blob; a journal
+    /// without image records replays fine with none.
+    blobs: ?session_blobs.SessionBlobSource = null,
 };
 
 pub const ReplayReport = struct {
@@ -152,10 +163,30 @@ pub fn replaySession(
                 try runtime.dispatchPlatformEvent(app, event);
                 report.events_replayed += 1;
             },
-            .effect => |effect| {
+            .effect => |effect_record| {
+                var effect = effect_record;
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
+                }
+                // Resolve out-of-line payloads: an image record's
+                // source bytes come from the blob store, verified
+                // against the journaled address and length, and feed
+                // as `payload` — the recorded bytes, byte-identical,
+                // no network. The scratch lives until the feed below
+                // returns (the fed bytes are copied into the stub
+                // executor's slot buffer).
+                var blob_scratch: ?[]u8 = null;
+                defer if (blob_scratch) |scratch| std.heap.page_allocator.free(scratch);
+                if (effect.kind == .image and effect.image_blob_len > 0) {
+                    const bytes = resolveBlob(effect, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: image record for id {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
+                            .{ report.events_replayed, effect.key, session_blobs.hexName(effect.image_blob_hash), effect.image_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
                 }
                 app.replayControl(.{ .feed = effect }) catch |err| switch (err) {
                     error.EffectNotFound => {
@@ -207,6 +238,27 @@ pub fn replaySession(
         }
     }
     return report;
+}
+
+/// Read one journal-referenced blob into fresh scratch (handed to the
+/// caller through `scratch_out` for freeing) and verify it against the
+/// record: present, exact length, and hashing to its address — the
+/// same hostile-input honesty the journal reader keeps.
+fn resolveBlob(
+    record: journal.EffectResultRecord,
+    blobs: ?session_blobs.SessionBlobSource,
+    scratch_out: *?[]u8,
+) anyerror![]const u8 {
+    const blob_source = blobs orelse return error.BlobMissing;
+    if (record.image_blob_len > session_blobs.max_blob_bytes) return error.BlobOverBudget;
+    const blob_len: usize = @intCast(record.image_blob_len);
+    // One spare byte proves the stored blob is not LONGER than the
+    // record claims (the source reads at most the buffer).
+    const scratch = try std.heap.page_allocator.alloc(u8, blob_len + 1);
+    scratch_out.* = scratch;
+    const bytes = try blob_source.read_fn(blob_source.context, record.image_blob_hash, scratch);
+    if (bytes.len != blob_len) return error.BlobCorrupt;
+    return bytes;
 }
 
 /// Journaled results that regenerate deterministically from the
