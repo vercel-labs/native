@@ -13,16 +13,27 @@ The id is ordinary model data — pick it like an effect key. Issue the load, an
 <CodeToggle>
 
 ```ts
-import { Cmd, asciiBytes, type ImageState } from "@native-sdk/core";
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+// The engine's outcome vocabulary — a named alias your core declares
+// (the host matches the members by name, so the order is yours).
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
 
 export interface Model {
   readonly cover: number; // 0 until the load lands
-  readonly coverError: ImageState | null;
+  readonly coverState: ImageState;
 }
 
 export type Msg =
   | { readonly kind: "show" }
   | { readonly kind: "cover_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+
+export function initialModel(): Model {
+  return { cover: 0, coverState: "rejected" };
+}
 
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
@@ -32,8 +43,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         url: asciiBytes("https://cdn.example.com/art/cover.png"),
       }, { event: "cover_done" })];
     case "cover_done":
-      if (msg.state === "loaded") return { ...model, cover: 21, coverError: null };
-      return { ...model, coverError: msg.state };
+      if (msg.state === "loaded") return { ...model, cover: 21, coverState: msg.state };
+      return { ...model, coverState: msg.state };
   }
 }
 ```
