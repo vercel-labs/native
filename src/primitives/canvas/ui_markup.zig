@@ -1675,7 +1675,7 @@ fn trimBlank(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\r\n");
 }
 
-pub const font_coverage_message = "this text contains a character outside the bundled font's coverage - it renders as a tofu box on the reference/screenshot and mobile paths; use a vector icon (<icon name=\"...\"/> or the icon attribute) or plain words";
+pub const font_coverage_message = "this text contains a character outside the bundled font's coverage - it renders as a tofu box on the reference/screenshot and mobile paths; register a font that covers it (UiApp Options.fonts) and bind the text from the model, use a vector icon (<icon name=\"...\"/> or the icon attribute), or plain words";
 
 pub const UncoveredCodepoint = struct {
     /// Byte offset of the codepoint within the scanned literal.

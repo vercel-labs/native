@@ -39,18 +39,26 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td><Tier tier="caveats" note="deterministic software renderer; the toolkit host copies pixels into the surface" fn={2} /></td>
     </tr>
     <tr>
+      <td>Text &amp; registered fonts</td>
+      <td><Tier tier="full" note="bundled faces plus app-registered TrueType faces (CJK included); registered bytes reach CoreText at registration, so host measurement and drawn text resolve the exact face" fn={3} /></td>
+      <td><Tier tier="full" note="bundled and registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="bundled and registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
+      <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
+    </tr>
+    <tr>
       <td>Pointer, keyboard &amp; IME input</td>
       <td><Tier tier="full" /></td>
-      <td><Tier tier="caveats" note="IME composition is mapped; real-hardware IME verification is pending" fn={3} /></td>
+      <td><Tier tier="caveats" note="IME composition is mapped; real-hardware IME verification is pending" fn={4} /></td>
       <td><Tier tier="full" note="pointer, keyboard, scroll, IME composition, HiDPI" /></td>
-      <td><Tier tier="caveats" note="touch, system keyboard, and IME through the toolkit host" fn={3} /></td>
-      <td><Tier tier="caveats" note="touch, soft keyboard, and IME through the toolkit host" fn={3} /></td>
+      <td><Tier tier="caveats" note="touch, system keyboard, and IME through the toolkit host" fn={4} /></td>
+      <td><Tier tier="caveats" note="touch, soft keyboard, and IME through the toolkit host" fn={4} /></td>
     </tr>
     <tr>
       <td>Menus</td>
       <td><Tier tier="full" note="native app menus and native context menus" /></td>
-      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={4} /></td>
-      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={4} /></td>
+      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={5} /></td>
+      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={5} /></td>
       <td><Tier tier="none" /></td>
       <td><Tier tier="none" /></td>
     </tr>
@@ -58,29 +66,29 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td>System tray</td>
       <td><Tier tier="full" /></td>
       <td><Tier tier="full" /></td>
-      <td><Tier tier="none" note="returns UnsupportedService until a portable status-notifier implementation is selected" fn={5} /></td>
+      <td><Tier tier="none" note="returns UnsupportedService until a portable status-notifier implementation is selected" fn={6} /></td>
       <td><Tier tier="none" /></td>
       <td><Tier tier="none" /></td>
     </tr>
     <tr>
       <td>Web content (WebViews)</td>
-      <td><Tier tier="full" note="system WebView by default; optional bundled Chromium via CEF" fn={6} /></td>
-      <td><Tier tier="caveats" note="system WebView (WebView2); needs the WebView2 runtime, preinstalled on current Windows" fn={6} /></td>
-      <td><Tier tier="full" note="system WebView" fn={6} /></td>
-      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={6} /></td>
-      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={6} /></td>
+      <td><Tier tier="full" note="system WebView by default; optional bundled Chromium via CEF" fn={7} /></td>
+      <td><Tier tier="caveats" note="system WebView (WebView2); needs the WebView2 runtime, preinstalled on current Windows" fn={7} /></td>
+      <td><Tier tier="full" note="system WebView" fn={7} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={7} /></td>
+      <td><Tier tier="embed" note="system WebView workspace inside your host app" fn={7} /></td>
     </tr>
     <tr>
       <td>Packaging</td>
-      <td><Tier tier="full" note=".app bundle, DMG, generated icons" fn={7} /></td>
-      <td><Tier tier="caveats" note="directory artifact with icons and file-type registration; installer is future work" fn={7} /></td>
-      <td><Tier tier="caveats" note="install tree with desktop entry, icons, MIME metadata; AppImage and packages are future work" fn={7} /></td>
-      <td><Tier tier="caveats" note="complete generated Xcode project, archive-ready with zero edits; signing manual, no .ipa emit" fn={7} /></td>
-      <td><Tier tier="caveats" note="complete generated host project plus a debug APK assembled with zero edits; store signing manual" fn={7} /></td>
+      <td><Tier tier="full" note=".app bundle, DMG, generated icons" fn={8} /></td>
+      <td><Tier tier="caveats" note="directory artifact with icons and file-type registration; installer is future work" fn={8} /></td>
+      <td><Tier tier="caveats" note="install tree with desktop entry, icons, MIME metadata; AppImage and packages are future work" fn={8} /></td>
+      <td><Tier tier="caveats" note="complete generated Xcode project, archive-ready with zero edits; signing manual, no .ipa emit" fn={8} /></td>
+      <td><Tier tier="caveats" note="complete generated host project plus a debug APK assembled with zero edits; store signing manual" fn={8} /></td>
     </tr>
     <tr>
       <td>Code signing</td>
-      <td><Tier tier="full" note="ad-hoc and identity signing with entitlements; notarization is a documented manual step" fn={8} /></td>
+      <td><Tier tier="full" note="ad-hoc and identity signing with entitlements; notarization is a documented manual step" fn={9} /></td>
       <td><Tier tier="none" /></td>
       <td><Tier tier="none" /></td>
       <td><Tier tier="none" /></td>
@@ -89,23 +97,24 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
     <tr>
       <td>Automation</td>
       <td><Tier tier="full" /></td>
-      <td><Tier tier="full" note="driven live on a real Windows desktop and in CI under emulation" fn={9} /></td>
-      <td><Tier tier="full" note="driven live under Xvfb: waits, assertions, input, screenshots" fn={9} /></td>
-      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app container, exercised on the simulator" fn={9} /></td>
-      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app files directory, exercised on the emulator" fn={9} /></td>
+      <td><Tier tier="full" note="driven live on a real Windows desktop and in CI under emulation" fn={10} /></td>
+      <td><Tier tier="full" note="driven live under Xvfb: waits, assertions, input, screenshots" fn={10} /></td>
+      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app container, exercised on the simulator" fn={10} /></td>
+      <td><Tier tier="caveats" note="file-based snapshots and actions inside the app files directory, exercised on the emulator" fn={10} /></td>
     </tr>
   </tbody>
 </table>
 
 1. iOS and Android canvas apps run full screen inside toolkit-owned hosts, which the SDK builds ON the [embed C ABI](/embed) — `native dev` and `native package` with `--target ios|android` generate everything from app.zon, so the app project carries zero host code. Multi-window scenes are desktop-only. Embedding the runtime in a host app you control, driven over the same embed C ABI, works on both platforms and shares the mobile experimental status.
 2. macOS presents through Metal and hands scrolling to OS scroll drivers. Linux and Windows present the deterministic software renderer through the platform blit path and report `backend=software`; a manifest that requests another backend falls back to software there instead of erroring. The iOS toolkit host reads the software renderer's pixels over the ABI and presents them through Metal with the macOS host's presentation discipline — presents are gated on the canvas revision (an idle app acquires no drawables and uploads nothing), the drawable is acquired only after the frame's CPU work is done, and the pump pauses in the background and re-presents the retained canvas on return; the Android toolkit host copies the same pixels into its surface's window buffer (mobile GPU rendering is a later phase); embed hosts present the pixels in their own surfaces.
-3. Windows maps native IME composition onto the shared IME events, with real-hardware IME verification still pending. The iOS toolkit host forwards touch, the system keyboard, and IME composition, verified with real injected input on the simulator; the Android toolkit host forwards touch, shows and hides the soft keyboard from the runtime's focus state, and routes committed text and IME composition through the same embed IME events, verified with injected input on the emulator.
-4. App menus are native on all three desktops. Hosts without a native context-menu presenter — Linux and Windows today — present the same declared context menu as an anchored canvas surface; authors declare one menu either way.
-5. Tray support is implemented on macOS (`NSStatusItem`) and Windows; Linux tray calls return `UnsupportedService` until a portable status-notifier implementation is selected.
-6. Web engines only apply to apps that embed web content; native-rendered apps carry none. The system WebView is the default engine on every desktop platform; bundled Chromium through CEF is available on macOS only, and Linux/Windows Chromium builds fail early instead of silently substituting an engine. The Windows system engine is WebView2: its Evergreen runtime ships with Windows 11 and current Windows 10 (older machines need the runtime installer; `native doctor` checks for it), and the build stages the vendored loader next to the executable automatically. See [Web Engines](/web-engines). The mobile shell examples embed the platform WebView as the content workspace.
-7. `native package` targets all five platforms: macOS gets a `.app` bundle (plus `zig build dmg`), Linux an install tree, Windows a distributable directory with a per-user file-type registration script, iOS a complete generated Xcode project — toolkit host sources, Info.plist, asset catalog, shared scheme, and the device-slice embed library — that `xcodebuild archive` builds with zero edits (code signing stays a manual step, like notarization), and Android a complete generated host project whose debug APK assembles with zero edits, directly with the SDK's build tools (store signing keys stay a manual step). Every platform's icons generate from one square source image. See [Packaging](/packaging).
-8. macOS signing supports `adhoc` and `identity` modes with entitlements; notarization is submitted manually with the platform tools after packaging. No signing tooling exists yet for the other platforms. See [Code Signing](/packaging/signing).
-9. The automation server is a file-based protocol the runtime serves on every desktop platform: snapshots, assertions, synthetic input, screenshots, record/replay. Engine screenshots render through the deterministic CPU reference renderer on every platform, so they are byte-comparable across hosts. Mobile exposes accessibility snapshots and actions through the embed ABI; the iOS and Android toolkit hosts serve the same file-based protocol inside the app's data container when launched with automation enabled.
+3. Text rendering is the SDK's own TrueType pipeline — parsing, outlines, rasterization — identical code on every platform, and apps can [register additional faces](/fonts) (a CJK face is the canonical case) that both renderers resolve exactly like the bundled ones. macOS additionally hands registered bytes to the host at registration, so CoreText measurement and Metal packet text resolve the same face the reference renderer inks. On Windows and Linux the software renderer inks registered outlines directly, and the test suite pins pixel parity between the present path and the reference path for a registered face; the full font-registry suite runs in CI on Linux. Mobile hosts present the same reference-rendered pixels, but no mobile test registers a font today and the mobile hosts' text measurement has no registered-font seam, so registered fonts there are stated as unverified rather than supported.
+4. Windows maps native IME composition onto the shared IME events, with real-hardware IME verification still pending. The iOS toolkit host forwards touch, the system keyboard, and IME composition, verified with real injected input on the simulator; the Android toolkit host forwards touch, shows and hides the soft keyboard from the runtime's focus state, and routes committed text and IME composition through the same embed IME events, verified with injected input on the emulator.
+5. App menus are native on all three desktops. Hosts without a native context-menu presenter — Linux and Windows today — present the same declared context menu as an anchored canvas surface; authors declare one menu either way.
+6. Tray support is implemented on macOS (`NSStatusItem`) and Windows; Linux tray calls return `UnsupportedService` until a portable status-notifier implementation is selected.
+7. Web engines only apply to apps that embed web content; native-rendered apps carry none. The system WebView is the default engine on every desktop platform; bundled Chromium through CEF is available on macOS only, and Linux/Windows Chromium builds fail early instead of silently substituting an engine. The Windows system engine is WebView2: its Evergreen runtime ships with Windows 11 and current Windows 10 (older machines need the runtime installer; `native doctor` checks for it), and the build stages the vendored loader next to the executable automatically. See [Web Engines](/web-engines). The mobile shell examples embed the platform WebView as the content workspace.
+8. `native package` targets all five platforms: macOS gets a `.app` bundle (plus `zig build dmg`), Linux an install tree, Windows a distributable directory with a per-user file-type registration script, iOS a complete generated Xcode project — toolkit host sources, Info.plist, asset catalog, shared scheme, and the device-slice embed library — that `xcodebuild archive` builds with zero edits (code signing stays a manual step, like notarization), and Android a complete generated host project whose debug APK assembles with zero edits, directly with the SDK's build tools (store signing keys stay a manual step). Every platform's icons generate from one square source image. See [Packaging](/packaging).
+9. macOS signing supports `adhoc` and `identity` modes with entitlements; notarization is submitted manually with the platform tools after packaging. No signing tooling exists yet for the other platforms. See [Code Signing](/packaging/signing).
+10. The automation server is a file-based protocol the runtime serves on every desktop platform: snapshots, assertions, synthetic input, screenshots, record/replay. Engine screenshots render through the deterministic CPU reference renderer on every platform, so they are byte-comparable across hosts. Mobile exposes accessibility snapshots and actions through the embed ABI; the iOS and Android toolkit hosts serve the same file-based protocol inside the app's data container when launched with automation enabled.
 
 ## Desktop Hosts
 

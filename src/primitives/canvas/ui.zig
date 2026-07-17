@@ -96,12 +96,16 @@ fn warnTextSizeKind(kind: WidgetKind, size: canvas.WidgetSize) void {
 /// (`automate screenshot`), mobile embeds, provider-less measurement.
 /// Markup literals get the same lesson as a validation error; this
 /// diagnostic is the net for DYNAMIC strings (model-derived text
-/// reaches no static check) and Zig-authored literals. Logs the first
-/// uncovered codepoint per text run and keeps building — live macOS
-/// rendering falls back through CoreText, so this must never fail an
-/// app, and it logs at .debug (the `logAxisChildrenOverflow`
-/// precedent) because a .warn inside a test-built view would fail the
-/// whole suite for a rendering nit.
+/// reaches no static check) and Zig-authored literals. The check
+/// knows only bundled coverage — a builder has no view of the
+/// runtime's font registry — so a run whose tokens point at a
+/// registered face covering the codepoint renders real glyphs and
+/// still logs here; that imprecision is one reason this logs at
+/// .debug. Logs the first uncovered codepoint per text run and keeps
+/// building — live macOS rendering falls back through CoreText, so
+/// this must never fail an app, and .debug (the
+/// `logAxisChildrenOverflow` precedent) because a .warn inside a
+/// test-built view would fail the whole suite for a rendering nit.
 fn warnUncoveredText(kind: WidgetKind, text: []const u8) void {
     if (builtin.mode != .Debug) return;
     var index: usize = 0;
@@ -111,7 +115,7 @@ fn warnUncoveredText(kind: WidgetKind, text: []const u8) void {
         const codepoint = std.unicode.utf8Decode(text[index .. index + len]) catch return;
         if (codepoint >= 0x20 and codepoint != 0x7F and !font_coverage.covers(codepoint)) {
             ui_log.debug(
-                "{s} text contains \"{s}\" (U+{X:0>4}), outside the bundled font's coverage - it renders as a tofu box on the reference/screenshot and mobile paths; use a vector icon (icon option, <icon name>) or plain words",
+                "{s} text contains \"{s}\" (U+{X:0>4}), outside the bundled font's coverage - it renders as a tofu box on the reference/screenshot and mobile paths unless a registered font covers it; register a font (UiApp Options.fonts), use a vector icon (icon option, <icon name>), or plain words",
                 .{ @tagName(kind), text[index .. index + len], codepoint },
             );
             return;

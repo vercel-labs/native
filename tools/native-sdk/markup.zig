@@ -632,7 +632,8 @@ fn usage() void {
         \\follows its <import> closure; a file that is all templates is a
         \\valid component file), font coverage (literal text outside the
         \\bundled face renders as tofu boxes on reference paths - the error
-        \\names the character; use icons or plain words), and accessibility
+        \\names the character; register a covering font and bind the text
+        \\from the model, or use icons or plain words), and accessibility
         \\(unnamed interactive controls, icon-only controls without labels,
         \\and role misuse are errors - a screen reader user is blocked;
         \\unnamed images and redundant labels are warnings).

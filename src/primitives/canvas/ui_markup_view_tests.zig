@@ -3907,7 +3907,8 @@ test "reactions misuse fails the build with the pinned teaching messages" {
 
     // The pill's literal run rides the tofu guard: a codepoint outside
     // the bundled face renders as a tofu box on the reference path, so
-    // the validator teaches vector icons or plain words instead.
+    // the validator teaches the real paths — a registered covering
+    // font behind a binding, a vector icon, or plain words.
     const emoji = "<column>\n  <bubble><text>hi</text><reactions>\u{1F44D}</reactions></bubble>\n</column>";
     var parser = canvas.ui_markup.Parser.init(arena, emoji);
     const document = try parser.parse();
