@@ -123,8 +123,17 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// `error.UnsupportedService` (platform has no codec),
         /// `error.ImageDecodeFailed` (undecodable bytes),
         /// `error.ImageTooLarge` (decoded pixels over the slot bound).
+        /// `error.InvalidImageId` covers the same ids
+        /// `registerCanvasImage` refuses (0 and the reserved
+        /// media-surface namespace) and fires before any decode work.
         pub fn registerCanvasImageBytes(self: *Runtime, id: canvas.ImageId, bytes: []const u8) anyerror!RegisteredCanvasImage {
             if (id == 0) return error.InvalidImageId;
+            // Same reserved-namespace refusal as `registerCanvasImage`
+            // (see the comment there), checked before the decode so an
+            // unusable id never reaches the platform codec — the caller
+            // gets `error.InvalidImageId`, not a codec error, and pays
+            // no decode cost for it.
+            if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
             const decoded = try self.options.platform.services.decodeImage(bytes, &canvas_image_decode_scratch.get().bytes);
             if (decoded.rgba8.len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
             try registerCanvasImage(self, id, decoded.width, decoded.height, decoded.rgba8);

@@ -207,6 +207,32 @@ test "registerCanvasImageBytes decodes through the platform seam" {
     try std.testing.expectError(error.InvalidImageId, harness.runtime.registerCanvasImageBytes(0, encoded));
 }
 
+test "registerCanvasImageBytes refuses reserved media-surface ids before decoding" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    harness.null_platform.image_decode = true;
+
+    const fixture = [_]u8{ 255, 0, 0, 255 };
+    var encoded_buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try canvas.png.writeRgba8(&writer, 1, 1, &fixture);
+    const encoded = writer.buffered();
+
+    // An id inside the reserved media-surface texture namespace is
+    // refused as an invalid id — not surfaced as a codec error — and
+    // the refusal happens before the platform decoder ever runs.
+    const reserved_id: canvas.ImageId = canvas.media_surface_image_id_bit | 9;
+    try std.testing.expectError(error.InvalidImageId, harness.runtime.registerCanvasImageBytes(reserved_id, encoded));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.image_decode_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImageCount());
+
+    // The same bytes under an ordinary id decode and register fine.
+    _ = try harness.runtime.registerCanvasImageBytes(9, encoded);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.image_decode_count);
+}
+
 // ---------------------------------------------------------------- avatar app
 
 const avatar_canvas_label = "avatar-canvas";
