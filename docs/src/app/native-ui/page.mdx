@@ -274,6 +274,33 @@ One rule bridges the registers: **quiet focus on a plain list row routes no keys
 
 `examples/soundboard` is the worked example, pinned end-to-end in its tests: Space toggles the transport from anywhere — after clicking a track row (quiet, transparent), from a focused slider or scroll region (space is not one of their keys, so it falls through) — while a tabbed-to row takes Space for select and Enter for play, and the search field takes every key as typing. Automation note: `native automate widget-action <view> <id> press` escalates a plain list row to the ring register before dispatching its synthesized activation key, so a scripted activation reaches the row the way Tab-then-Enter would.
 
+## Trackpad pinch
+
+Pinch-to-zoom reaches the app as a view-global gesture channel — the `on_key` shape, deliberately outside the widget pipeline (timeline and canvas zoom are app-level concerns, not widget presses). The channel is phase-explicit: `begin`, then a stream of `change` events, then `end` (a host-cancelled gesture folds into `end` — pinch delivers incremental deltas the app applies as they arrive, so there is nothing to roll back). Each `change` carries `scale`, the magnification **delta** for that event: the cumulative gesture scale is the running product of `1 + scale`, never the sum. The gesture centroid rides `x`/`y` in view-local canvas points, so a zoom can anchor under the fingers.
+
+```zig
+// options: .on_pinch = onPinch,
+pub fn onPinch(pinch: platform.PinchEvent) ?Msg {
+    return switch (pinch.phase) {
+        .change => .{ .zoom = .{ .factor = 1 + pinch.scale, .cx = pinch.x, .cy = pinch.y } },
+        .begin, .end => null,
+    };
+}
+```
+
+TypeScript cores export the same channel as `pinchMsg` (the `keyMsg` shape), with the record types importable from `@native-sdk/core/events`:
+
+```ts
+import { type PinchEvent } from "@native-sdk/core/events";
+
+export function pinchMsg(pinch: PinchEvent): Msg | null {
+  if (pinch.phase !== "change") return null;
+  return { kind: "zoomed", factor: 1 + pinch.scale, cx: pinch.x, cy: pinch.y };
+}
+```
+
+macOS emits pinch today (trackpad `magnifyWithEvent:`); Windows precision-touchpad and GTK gesture sources are staged follow-ups — on those platforms the channel simply never fires. Everything flows from the journaled input events, so recorded sessions replay the identical zoom, and tests (or agents without a trackpad) drive the real event stream with `native automate widget-pinch <view-label> <scale> [x y]` — the cumulative scale in one gesture, centroid defaulting to the view center.
+
 ## Native scrolling and context menus
 
 On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScrollView`: momentum and the system overlay scrollbar are OS-computed while the engine renders the content. This needs no app code — scroll offsets stay on the widget (`sync`, snapshot offsets, and programmatic scrolls work unchanged), and the engine's drawn scrollbar stands down for natively driven regions. Other platforms keep the engine's wheel physics.

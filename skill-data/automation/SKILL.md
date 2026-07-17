@@ -71,6 +71,8 @@ native automate widget-drag canvas 4 0.25 0.82
 native automate widget-wheel canvas 5 18
 native automate widget-key canvas tab
 native automate widget-key canvas cmd+c
+native automate widget-pinch canvas 1.5
+native automate widget-pinch canvas 0.5 120 80
 native automate profile on
 native automate profile off
 native automate bridge '{"id":"smoke","command":"native.ping","payload":{"source":"automation"}}'
@@ -113,10 +115,11 @@ Semantics:
 8. Use `native automate widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]` for continuous pointer controls.
 9. Use `native automate widget-wheel <view-label> <widget-id> <delta-y>` for retained widget scroll input. Wheel targets must be interactive/scrollable widgets — a plain layout column or text node is not a wheel target; aim at the scroll/list widget id from the snapshot. Failures land in the snapshot as named reasons: `error event=automation.widget_wheel name=WheelTargetUnknown|WheelTargetNotInteractive|WheelTargetHasEmptyBounds detail="<command args>"`.
 10. Use `native automate widget-key <view-label> <key> [text]` for focused retained widget keyboard input. The key accepts modifier chords — `cmd+a`, `cmd+c`, `cmd+v`, `cmd+x`, `ctrl+shift+arrowleft` (`cmd` sets the primary shortcut modifier on every platform) — so select-all/copy/cut/paste and shift-extended selection are drivable; after a copy, widget lines in the snapshot show the live selection as `selection=a..b`, and the copied text lands on the real system clipboard (`pbpaste` on macOS).
-11. Use `native automate screenshot <view-label> [scale]` to capture the named `gpu_surface` view's canvas as `screenshot-<view-label>.png` (the CLI prints the artifact path and waits for the file).
-12. Use `native automate tray-action <item-id>` to select a status-item dropdown row through the same platform event a real menu-bar click emits (command dispatch with source `.tray`). The live tray is visible in `snapshot.txt` as a `tray title="..." items=N` line followed by `  tray-item #id label="..." command="..." enabled=...` rows — the macOS menu bar is outside every window capture, so the snapshot is the only automation evidence the model-driven tray exists, and the `#id` there is what `tray-action` takes. Unknown ids degrade into the dispatch-error ring as `automation.tray_action`.
-13. Use `native automate reload` to request a WebView reload.
-14. Use `native automate profile on` to enable per-stage frame timing: while on, `snapshot.txt` carries a `frame_profile` line with rolling p50/p90/max microseconds per pipeline stage (`rebuild`, `layout`, `reconcile`, `emit`, `a11y`, `plan`, `patch`, `encode`, `present`, `host_decode`, `host_draw`), each with a lifetime sample count (`<stage>_n=`). Drive some interactions, then `native automate snapshot | grep -o 'frame_profile.*'` to read where frame time goes; `profile off` stops recording and drops the line. Turning it on starts a fresh sample window.
+11. Use `native automate widget-pinch <view-label> <scale> [x y]` for trackpad pinch gestures against a gpu-surface view: the runtime dispatches the real `pinch_begin`/`pinch_change`/`pinch_end` platform events, with one change carrying `scale - 1` so the cumulative gesture scale (the product of `1 + delta`) lands exactly on `<scale>` — `1.5` zooms in 50%, `0.5` zooms out to half. The optional centroid is view-local points, defaulting to the view center. Apps hear it through the pinch channel (`Options.on_pinch` / the TS core's `pinchMsg`).
+12. Use `native automate screenshot <view-label> [scale]` to capture the named `gpu_surface` view's canvas as `screenshot-<view-label>.png` (the CLI prints the artifact path and waits for the file).
+13. Use `native automate tray-action <item-id>` to select a status-item dropdown row through the same platform event a real menu-bar click emits (command dispatch with source `.tray`). The live tray is visible in `snapshot.txt` as a `tray title="..." items=N` line followed by `  tray-item #id label="..." command="..." enabled=...` rows — the macOS menu bar is outside every window capture, so the snapshot is the only automation evidence the model-driven tray exists, and the `#id` there is what `tray-action` takes. Unknown ids degrade into the dispatch-error ring as `automation.tray_action`.
+14. Use `native automate reload` to request a WebView reload.
+15. Use `native automate profile on` to enable per-stage frame timing: while on, `snapshot.txt` carries a `frame_profile` line with rolling p50/p90/max microseconds per pipeline stage (`rebuild`, `layout`, `reconcile`, `emit`, `a11y`, `plan`, `patch`, `encode`, `present`, `host_decode`, `host_draw`), each with a lifetime sample count (`<stage>_n=`). Drive some interactions, then `native automate snapshot | grep -o 'frame_profile.*'` to read where frame time goes; `profile off` stops recording and drops the line. Turning it on starts a fresh sample window.
 
 ## Screenshots
 
