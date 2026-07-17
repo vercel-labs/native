@@ -1526,6 +1526,26 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 matched = true;
             }
             if (matched) view.canvas_tooltip_warm_until_ns = 0;
+            // Explicit dismissal CONSUMES the standing keyboard reveal
+            // intent, not just the visible slot. The provenance
+            // register (`canvas_widget_focus_visible_keyboard`) exists
+            // for exactly one contract — "only rings placed by the
+            // keyboard carry the standing reveal intent a later layout
+            // adoption may honor" — and its only readers are the two
+            // tooltip reveal gates (the adoption binding snapshot's
+            // capture and `reconcileCanvasTooltipIntentForAdoptedFocusBinding`).
+            // The focus RING renders from `canvas_widget_focus_visible_id`
+            // alone, so clearing the register keeps the trigger visibly
+            // focus-visible while stopping the activation's own model
+            // rebuild — which routinely replaces or rekeys the tooltip —
+            // from resurrecting it one frame after this dismissal
+            // ("stays down while focus rests on the trigger"). A fresh
+            // keyboard ARRIVAL (Tab away and back) re-grants the
+            // contract at the one provenance write; the pointer path is
+            // untouched — a post-dismissal hover re-earns its dwell.
+            if (matched and view.canvas_widget_focus_visible_id == target.id) {
+                view.canvas_widget_focus_visible_keyboard = false;
+            }
             if (dismissed_shown) try commitCanvasTooltipVisibility(self, index);
         }
 
@@ -2205,6 +2225,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // The one provenance write that grants the keyboard
             // contract: only rings placed HERE carry the standing
             // reveal intent a later layout adoption may honor.
+            // Explicit dismissal (keyboard activation, Escape) SPENDS
+            // that intent where it dismisses — the register clears
+            // there and only a fresh arrival through this write
+            // re-grants it.
             self.views[view_index].canvas_widget_focus_visible_keyboard = target_id != 0;
             // Keyboard focus-visible is the tooltip's second reveal
             // path: landing on a tooltip-owning trigger shows it

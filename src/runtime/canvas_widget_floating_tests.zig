@@ -2897,6 +2897,129 @@ test "a tooltip mounting beneath a pointer-established ring arms the dwell, neve
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_tooltip_armed_owner_id);
 }
 
+/// Two focus stops — the first trigger owns a rekeyable tooltip
+/// (`tooltip_id`), the second is a bare button — so Tab can genuinely
+/// LEAVE the trigger and return: a fresh keyboard arrival, not the
+/// early-returned in-place move a single-focusable tree would produce.
+fn setTooltipDismissalLayout(harness: anytype, tooltip_id: canvas.ObjectId) !void {
+    const trigger_children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 160, 32), .text = "Run" },
+        .{ .id = tooltip_id, .kind = .tooltip, .text = "Runs the job", .layout = .{ .anchor = .{ .placement = .below } } },
+    };
+    const stacks = [_]canvas.Widget{
+        .{ .id = 4, .kind = .stack, .frame = geometry.RectF.init(0, 0, 160, 32), .children = &trigger_children },
+        .{ .id = 6, .kind = .button, .frame = geometry.RectF.init(0, 80, 160, 32), .text = "Other" },
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(
+        .{ .id = 1, .kind = .stack, .children = &stacks },
+        geometry.RectF.init(0, 0, 220, 120),
+        &nodes,
+    );
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+test "keyboard activation's dismissal holds through the activation's own rebuild rekeying the tooltip" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-activate-rekey", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipBindingView(harness, app);
+    try setTooltipDismissalLayout(harness, 3);
+
+    // Tab reaches the trigger: focus-shown tooltip, keyboard ring.
+    try tooltipKey(harness, app, "tab", tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // Enter dismisses like a press — and the trigger stays visibly
+    // focus-visible through the dismissal: the consumed register is
+    // the reveal PROVENANCE, never the ring, which renders from
+    // `canvas_widget_focus_visible_id`.
+    try tooltipKey(harness, app, "enter", tooltip_t0 + 100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvasWidgetRenderState().focus_visible_id.?);
+
+    // The activation's own model rebuild rekeys the tooltip beneath
+    // the still-focused trigger (3 -> 9): the adoption binding-
+    // reconcile sees a changed binding under a standing ring, but the
+    // dismissal SPENT the reveal intent — the tooltip stays down while
+    // focus rests on the trigger, on the rebuild and on every later
+    // frame.
+    try setTooltipDismissalLayout(harness, 9);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expect(try tooltipHidden(harness, 9));
+    try tooltipFrame(harness, app, tooltip_t0 + 900 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // Tab away and back re-earns the immediate reveal: a fresh
+    // keyboard ARRIVAL re-grants the contract at the one provenance
+    // write.
+    try tooltipKey(harness, app, "tab", tooltip_t0 + 1000 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 6), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try tooltipKey(harness, app, "tab", tooltip_t0 + 1100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 9), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try std.testing.expect(!try tooltipHidden(harness, 9));
+}
+
+test "escape's dismissal holds through a rebuild rekeying the tooltip, pointer dwell re-earns" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-escape-rekey", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try installTooltipBindingView(harness, app);
+    try setTooltipDismissalLayout(harness, 3);
+
+    // Tab reveals, Escape dismisses; the ring survives the dismissal.
+    try tooltipKey(harness, app, "tab", tooltip_t0);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try tooltipKey(harness, app, "escape", tooltip_t0 + 100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, 3));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focus_visible_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvasWidgetRenderState().focus_visible_id.?);
+
+    // A rebuild rekeys the tooltip beneath the still-focused trigger:
+    // Escape's dismissal spent the standing reveal intent, so the
+    // rekeyed tooltip stays down — "stays down while focus rests on
+    // the trigger" holds against adoption, not only against
+    // focus-visible transitions.
+    try setTooltipDismissalLayout(harness, 9);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expect(try tooltipHidden(harness, 9));
+    try tooltipFrame(harness, app, tooltip_t0 + 900 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // The pointer path is untouched by the spent keyboard intent: a
+    // hover after the dismissal arms the normal dwell and completes on
+    // the frame clock, exactly like any other hover.
+    try tooltipHover(harness, app, .{ .x = 200, .y = 60 }, tooltip_t0 + 1000 * tooltip_ms);
+    try tooltipHover(harness, app, .{ .x = 80, .y = 16 }, tooltip_t0 + 1100 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 9), harness.runtime.views[0].canvas_tooltip_armed_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try tooltipFrame(harness, app, tooltip_t0 + 1800 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 9), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(!harness.runtime.views[0].canvas_tooltip_shown_from_focus);
+    try std.testing.expect(!try tooltipHidden(harness, 9));
+}
+
 test "a rebuild that unmounts the tooltip beneath a hovered trigger disarms the pending dwell" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);

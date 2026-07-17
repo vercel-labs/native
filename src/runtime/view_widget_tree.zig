@@ -501,14 +501,32 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // pointer moving on to the next trigger.
             if (surface.kind == .tooltip) {
                 if (self.canvas_tooltip_shown_id == surface.id) {
-                    self.canvas_tooltip_shown_id = 0;
-                    self.canvas_tooltip_shown_owner_id = 0;
-                    self.canvas_tooltip_transit_deadline_ns = 0;
                     // Covers the focus-shown path too: Escape on the
                     // focused trigger clears the reason flag with the
                     // slot, and focus (still on the trigger) does not
                     // re-reveal — reveals fire only on focus-visible
                     // TRANSITIONS, so tabbing away and back re-earns it.
+                    // The one non-transition reveal — the adoption
+                    // binding-reconcile, which honors a STANDING
+                    // keyboard ring when a rebuild swaps the tooltip it
+                    // owns — is blocked by consuming that standing
+                    // intent here: when the ring rests on the dismissed
+                    // tooltip's owner, the dismissal spends
+                    // `canvas_widget_focus_visible_keyboard` (its only
+                    // readers are the tooltip reveal gates; the ring
+                    // itself renders from `canvas_widget_focus_visible_id`
+                    // and stays painted), so a rebuild that rekeys the
+                    // tooltip cannot resurrect it one frame after
+                    // Escape. Same design as the keyboard-activation
+                    // dismissal seam in canvas_widget_events.zig.
+                    if (self.canvas_widget_focus_visible_id != 0 and
+                        self.canvas_widget_focus_visible_id == self.canvas_tooltip_shown_owner_id)
+                    {
+                        self.canvas_widget_focus_visible_keyboard = false;
+                    }
+                    self.canvas_tooltip_shown_id = 0;
+                    self.canvas_tooltip_shown_owner_id = 0;
+                    self.canvas_tooltip_transit_deadline_ns = 0;
                     self.canvas_tooltip_shown_from_focus = false;
                 }
                 if (self.canvas_tooltip_armed_id == surface.id) {
