@@ -3476,6 +3476,26 @@ const streamTail = `
 }
 `;
 
+// The image-load fixture: the fourteen-state union and the four-field
+// result arm imageLoad routes.
+const imageMsg = `
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+export interface Model { readonly w: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+export function initialModel(): Model { return { w: 0, errs: 0 }; }
+`;
+
+const imageTail = `
+    case "image_done": return msg.state === "loaded" ? { ...model, w: msg.width } : { ...model, errs: model.errs + 1 };
+  }
+}
+`;
+
 // Slice E: grammar-completeness round — the new statement/operator/
 // declaration mappings in REALISTIC combinations (the minimal per-production
 // pins live in grammar_matrix.test.ts), plus the new teaching gates.
@@ -3911,6 +3931,75 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.audioSeek("player", -250)];
 ${streamTail}
+`,
+  },
+  {
+    name: "imageLoad emits in its documented shapes (path, url+cache, model-expression ids)",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.imageLoad(7, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+      if (msg.which === 1) return [model, Cmd.imageLoad(model.w + 1, { url: asciiBytes("https://cdn.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 2048 }, { event: "image_done" })];
+      return [model, Cmd.imageLoad(9, { path: asciiBytes("art/b.png"), url: asciiBytes("https://cdn.test/b.png") }, { event: "image_done" })];
+${imageTail}
+`,
+  },
+  {
+    name: "an image result arm whose state union misses a member is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type ImageEventKind } from "@native-sdk/core";
+export type NarrowState = "loaded" | "rejected" | "decode_failed";
+export interface Model { readonly w: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "image_done"; readonly state: NarrowState; readonly width: number; readonly height: number; readonly status: number };
+export function initialModel(): Model { return { w: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { path: asciiBytes("a.png") }, { event: "image_done" as ImageEventKind<Msg> })];
+    case "image_done": return { ...model, w: msg.width };
+  }
+}
+`,
+  },
+  {
+    name: "an image result arm with a wrong field shape is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type ImageEventKind } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { path: asciiBytes("a.png") }, { event: "go" as ImageEventKind<Msg> })];
+${imageTail}
+`,
+  },
+  {
+    name: "an image source without a path or url is taught (nothing could load)",
+    gate: "NS1029",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { cachePath: asciiBytes("cache/a.png") }, { event: "image_done" })];
+${imageTail}
+`,
+  },
+  {
+    name: "an image id literal the registry must refuse stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(0, { path: asciiBytes("a.png") }, { event: "image_done" })];
+${imageTail}
 `,
   },
 ];

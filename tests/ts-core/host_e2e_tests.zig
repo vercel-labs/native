@@ -77,6 +77,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.pause")) return .pause_music;
     if (std.mem.eql(u8, name, "core.volume")) return .set_volume;
     if (std.mem.eql(u8, name, "core.stopmusic")) return .stop_music;
+    if (std.mem.eql(u8, name, "core.cover")) return .show_cover;
+    if (std.mem.eql(u8, name, "core.coveragain")) return .show_cover_again;
     return null;
 }
 
@@ -665,6 +667,66 @@ test "audio playback streams events into the transpiled core through the fake ch
     try std.testing.expect(!fx.audioSnapshot().active);
     try std.testing.expectError(error.EffectNotFound, fx.feedAudioEvent(.position, 3_000, 183_000, true));
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().audioEvents), 3), Bridge.model().audioEvents);
+}
+
+test "image loads route their one terminal into the transpiled core through the fake channel" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // The load parks the whole request shape under the app's own id —
+    // the engine key IS the ImageId, no bridge namespace.
+    try h.menu("core.cover");
+    const request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 21), request.id);
+    try std.testing.expectEqualStrings("art/cover.png", request.path);
+    try std.testing.expectEqualStrings("https://cdn.test/cover.png", request.url);
+
+    // A duplicate LIVE id rejects the new load (the spawn discipline):
+    // the event arm carries state "rejected" and the in-flight load
+    // stays parked.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+
+    // Feeding encoded bytes runs the REAL decode+register path: the
+    // four-field arm carries the decoded dimensions, the model adopts
+    // the id, and the pixels are live in the runtime registry.
+    var pixels: [4 * 3 * 4]u8 = undefined;
+    var seed: u8 = 11;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 37 +% 5;
+    }
+    var encoded_buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 4, 3, &pixels);
+    try fx.feedImageBytes(21, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverW), 4), Bridge.model().coverW);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverH), 3), Bridge.model().coverH);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
+
+    // The entry retired with its terminal: the id is free again, and a
+    // failure class routes the same arm honestly.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try fx.feedImageResult(21, .decode_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 3), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .decode_failed);
+    // The model kept the previously adopted id (store-on-success).
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
 }
 
 // -------------------------------------------------------- record / replay

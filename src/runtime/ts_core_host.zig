@@ -127,6 +127,27 @@
 //!                  the entry: the platform may still speak (soundboard
 //!                  starts the next track from `completed`), and stop
 //!                  is the explicit close.
+//!   image_load  -> `fx.loadImage` keyed by the app's own numeric
+//!                  ImageId (the engine registers the pixels under it,
+//!                  so the bridge holds a small id->tag table rather
+//!                  than minting an engine key). One terminal per load
+//!                  routes the event arm — a four-field record built by
+//!                  field NAME (state/width/height/status; `state`'s
+//!                  enum members are matched by member name) — and the
+//!                  entry retires on it. A URL record carrying no cache
+//!                  path loads under the engine's conventional
+//!                  content-addressed image cache path when the wiring
+//!                  configured a caches directory (`setImageCacheDir` /
+//!                  `TsUiApp`'s `image_cache_dir`), derived bridge-side
+//!                  from the URL alone like the audio cache. A
+//!                  duplicate LIVE id rejects the new load (the spawn
+//!                  discipline: one load per id, never replaced
+//!                  implicitly), dispatching state "rejected" at the
+//!                  post-cycle boundary; ids the wire cannot represent
+//!                  (0, non-integers, past 2^53) reject the same way.
+//!                  Image loads are not cancel's to end (they are keyed
+//!                  by numeric id, not a wire key) — the one terminal
+//!                  always arrives.
 //!   audio_ctl   -> the engine's control verbs (`fx.pauseAudio`/
 //!                  `resumeAudio`/`stopAudio`/`seekAudio`/
 //!                  `setAudioVolume`), gated by the wire key: a verb
@@ -368,6 +389,16 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        /// One in-flight image load, keyed by the app's own numeric
+        /// ImageId (which IS the engine key — the registry id and the
+        /// effect key are one value by design). Retires on its one
+        /// terminal.
+        const ImageEntry = struct {
+            used: bool = false,
+            id: u64 = 0,
+            event_tag: u8 = 0,
+        };
+
         var model_root: *const Model = undefined;
         /// The platform caches directory for URL audio sources, set by
         /// the wiring (`TsUiApp`'s `audio_cache_dir`, or `setAudioCacheDir`
@@ -384,6 +415,14 @@ pub fn TsCoreHost(comptime core: type) type {
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
+        var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
+        /// The platform caches directory for URL image sources, the
+        /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
+        /// `image_cache_dir`): bridge-side derivation of the
+        /// content-addressed cache path, never an env read in update.
+        var image_cache_dir_len: usize = 0;
+        var image_cache_dir_buf: [runtime_effects.max_effect_image_path_bytes]u8 = undefined;
+        var image_cache_path_buf: [runtime_effects.max_effect_image_path_bytes]u8 = undefined;
         var clip_write_counter: u32 = 0;
         /// Set by a result callback whose entry was dropped (replaced
         /// or wire-cancelled): the terminal is journal-visible but must
@@ -434,8 +473,10 @@ pub fn TsCoreHost(comptime core: type) type {
             delays = @splat(.{});
             streams = @splat(.{});
             audio_entry = .{};
+            images = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
+            image_cache_dir_len = 0;
             swallow_next_dispatch = false;
             const initial = core.initialModel();
             model_root = core.commitModelRoot(if (comptime init_returns_cmd) initial.model else initial);
@@ -493,6 +534,33 @@ pub fn TsCoreHost(comptime core: type) type {
             return runtime_effects.audioCachePath(&audio_cache_path_buf, audioCacheDir(), url) catch "";
         }
 
+        /// Configure the caches directory image-cache derivation uses —
+        /// `setAudioCacheDir`'s twin, same wiring-time contract.
+        pub fn setImageCacheDir(dir: []const u8) void {
+            if (dir.len > image_cache_dir_buf.len) {
+                @panic("ts core host: the image cache directory path is longer than the engine's image path bound");
+            }
+            @memcpy(image_cache_dir_buf[0..dir.len], dir);
+            image_cache_dir_len = dir.len;
+        }
+
+        fn imageCacheDir() []const u8 {
+            return image_cache_dir_buf[0..image_cache_dir_len];
+        }
+
+        /// The cache path an image_load record loads under: the
+        /// record's own when it carries one; otherwise, for URL sources
+        /// with a configured caches directory, the engine's
+        /// conventional content-addressed path
+        /// (`<cache_dir>/images/<sha256[..16]>.<ext>` via
+        /// `imageCachePath`) — `effectiveAudioCachePath`'s twin, a
+        /// fixed function of the wire bytes so replay re-derives
+        /// identically.
+        fn effectiveImageCachePath(cache_path: []const u8, url: []const u8) []const u8 {
+            if (cache_path.len > 0 or url.len == 0 or image_cache_dir_len == 0) return cache_path;
+            return runtime_effects.imageCachePath(&image_cache_path_buf, imageCacheDir(), url) catch "";
+        }
+
         /// One full dispatch cycle for `msg`. The `TsUiApp` adapter
         /// wires this to `UiApp.Options.update_fx` (refreshing the
         /// app-held root from `model()` afterwards) so host events and
@@ -540,7 +608,9 @@ pub fn TsCoreHost(comptime core: type) type {
             var now_count: usize = 0;
             var rejects: [max_rejects_per_cmd]u8 = undefined;
             var reject_count: usize = 0;
-            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count);
+            var image_rejects: [max_rejects_per_cmd]u8 = undefined;
+            var image_reject_count: usize = 0;
+            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count, &image_rejects, &image_reject_count);
             reconcileTimers(fx);
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
@@ -548,6 +618,13 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             for (rejects[0..reject_count]) |err_tag| {
                 dispatchDepth(fx, msgFromTagBytes(err_tag, "rejected"), depth + 1);
+            }
+            // Bridge-refused image loads (duplicate live id, an
+            // unrepresentable id): the event arm's "rejected" state,
+            // regenerated deterministically under replay like the spawn
+            // rejections above.
+            for (image_rejects[0..image_reject_count]) |event_tag| {
+                dispatchDepth(fx, msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }), depth + 1);
             }
         }
 
@@ -562,6 +639,8 @@ pub fn TsCoreHost(comptime core: type) type {
             now_count: *usize,
             rejects: *[max_rejects_per_cmd]u8,
             reject_count: *usize,
+            image_rejects: *[max_rejects_per_cmd]u8,
+            image_reject_count: *usize,
         ) void {
             var at: usize = 0;
             while (at < cmd.len) {
@@ -768,6 +847,20 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // quit_app [op]
                     0x11 => fx.quitApp(),
+                    // image_load [op][id f64 LE][event_tag]
+                    //            [path_len u32 LE][path][url_len u32 LE][url]
+                    //            [cache_len u32 LE][cache][expected f64 LE]
+                    0x12 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const image_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache_path = takeLongBytes(cmd, &at);
+                        const expected_bits = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
+                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, image_rejects, image_reject_count);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1028,6 +1121,92 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: an audio event arrived with no open bridge stream");
             }
             return msgFromTagAudio(audio_entry.event_tag, event);
+        }
+
+        /// Issue one image load. The keyed-effect discipline here is
+        /// the SPAWN exception, by the same reasoning: one load per id
+        /// at a time, never replaced implicitly — a duplicate LIVE id
+        /// rejects the new load (event arm, state "rejected", at the
+        /// post-cycle boundary), and so does an id the f64 wire cannot
+        /// honestly carry into the u64 registry (0, negatives,
+        /// fractions, past 2^53). Everything else the engine refuses
+        /// dynamically (a full registry, a bad source) comes back
+        /// through the entry's own event arm — never silent.
+        fn issueImageLoad(
+            fx: *Fx,
+            id_value: f64,
+            event_tag: u8,
+            image_path: []const u8,
+            url: []const u8,
+            cache_path: []const u8,
+            expected: f64,
+            image_rejects: *[max_rejects_per_cmd]u8,
+            image_reject_count: *usize,
+        ) void {
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value <= 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) {
+                pushImageReject(image_rejects, image_reject_count, event_tag);
+                return;
+            }
+            const id: u64 = @intFromFloat(id_value);
+            if (findImage(id) != null) {
+                pushImageReject(image_rejects, image_reject_count, event_tag);
+                return;
+            }
+            const index = freeImageIndex() orelse
+                @panic("ts core host: more than 16 image loads in flight - the image table mirrors the engine's max_effects slots");
+            const entry = &images[index];
+            entry.used = true;
+            entry.id = id;
+            entry.event_tag = event_tag;
+            fx.loadImage(.{
+                .id = id,
+                .path = image_path,
+                .url = url,
+                .cache_path = effectiveImageCachePath(cache_path, url),
+                // The wire carries the app's number; anything that is
+                // not a representable byte count means "unknown size"
+                // (0), the engine's own default.
+                .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0)
+                    @intFromFloat(expected)
+                else
+                    0,
+                .on_result = imageResultMsg,
+            });
+        }
+
+        fn pushImageReject(image_rejects: *[max_rejects_per_cmd]u8, image_reject_count: *usize, event_tag: u8) void {
+            if (image_reject_count.* >= max_rejects_per_cmd) {
+                @panic("ts core host: one command value carries more rejected image loads than the effect table holds");
+            }
+            image_rejects[image_reject_count.*] = event_tag;
+            image_reject_count.* += 1;
+        }
+
+        fn findImage(id: u64) ?usize {
+            for (&images, 0..) |*entry, index| {
+                if (entry.used and entry.id == id) return index;
+            }
+            return null;
+        }
+
+        fn freeImageIndex() ?usize {
+            for (&images, 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        /// `ImageMsgFn` for image loads: the ONE terminal routes the
+        /// entry's event arm and retires the entry.
+        fn imageResultMsg(result: runtime_effects.EffectImageResult) Msg {
+            const index = findImage(result.id) orelse
+                @panic("ts core host: an image result arrived with no open bridge entry");
+            const entry = &images[index];
+            entry.used = false;
+            return msgFromTagImage(entry.event_tag, result);
         }
 
         /// The wire `cancel` record: first match wins across the four
@@ -1468,6 +1647,63 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: an audio event names a Msg tag outside the union");
+        }
+
+        /// The four-field image result record, matched by field name —
+        /// `audioArmShape`'s twin.
+        fn imageArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 4) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
+                    if (f.type != i64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine image outcome,
+        /// matched by member NAME — `audioStateValue`'s twin.
+        fn imageStateValue(comptime E: type, outcome: runtime_effects.EffectImageOutcome) E {
+            const name = @tagName(outcome);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: an image outcome has no member in the result arm's state union - the transpiler's own shape check should have stopped this build");
+        }
+
+        /// Build the four-field image result arm at index `tag` from an
+        /// engine result, by field name.
+        fn msgFromTagImage(tag: u8, result: runtime_effects.EffectImageResult) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime imageArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = imageStateValue(f.type, result.outcome);
+                            } else if (comptime std.mem.eql(u8, f.name, "width")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.width) else @intCast(result.width);
+                            } else if (comptime std.mem.eql(u8, f.name, "height")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.height) else @intCast(result.height);
+                            } else {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.status) else @intCast(result.status);
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: an image result targets Msg arm '" ++ arm.name ++ "', which is not the four-field image result record");
+                }
+            }
+            @panic("ts core host: an image result names a Msg tag outside the union");
         }
 
         /// Build the Msg arm at index `tag` carrying one number (`now`

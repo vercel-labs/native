@@ -103,6 +103,19 @@
 //                                forget control verbs whose consequences arrive
 //                                on the event stream; aimed at a key with no
 //                                open stream they no-op.
+//   Cmd.imageLoad(id, { path?, url?, cachePath?, expectedBytes? }, { event })
+//                                load an image at runtime by its model-owned
+//                                numeric ImageId (the id markup binds:
+//                                <image image="{id}"/>, avatar likewise): the
+//                                host resolves the source cascade (local path
+//                                first, then a verified cache entry, then the
+//                                network), decodes through the platform codec,
+//                                registers the pixels under the id, and
+//                                dispatches exactly ONE `event` arm (the
+//                                four-field record below) — state "loaded"
+//                                with the decoded width/height, or one failure
+//                                class. One load per id at a time: a duplicate
+//                                live id dispatches state "rejected".
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -274,6 +287,56 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish
     : never
   : never;
 
+/// The image load result states, mirroring the engine's outcome vocabulary:
+/// "loaded" means the pixels are registered under the requested id (width and
+/// height carry what the codec decoded); every other state is the failure
+/// class — "rejected" (a refused command: invalid id, no source, a duplicate
+/// live id), "not_found" (missing local file, no url), "io_failed" (a local
+/// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
+/// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
+/// it), "cancelled", "too_large" (source or decoded pixels over budget),
+/// "unsupported" (no platform codec), "decode_failed", and "registry_full".
+export type ImageState =
+  | "loaded"
+  | "rejected"
+  | "not_found"
+  | "io_failed"
+  | "connect_failed"
+  | "tls_failed"
+  | "protocol_failed"
+  | "timed_out"
+  | "http_status"
+  | "cancelled"
+  | "too_large"
+  | "unsupported"
+  | "decode_failed"
+  | "registry_full";
+
+/// The payload shape of an image result arm — four fields, matched by NAME
+/// (the AudioEventArm convention). `state` must be a named string-literal-
+/// union alias carrying exactly the fourteen ImageState members (any
+/// declaration order — the host matches members by name); `width`/`height`
+/// are the decoded pixel dimensions ("loaded" only, 0 otherwise); `status`
+/// is the HTTP status for url sources (0 otherwise).
+export type ImageEventArm = {
+  readonly state: ImageState;
+  readonly width: number;
+  readonly height: number;
+  readonly status: number;
+};
+
+/// The Msg arms an image load result may target: arms whose payload is
+/// exactly the four ImageEventArm fields.
+export type ImageEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageEventArm]
+    ? [keyof ImageEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageEventArm
+        ? M["kind"]
+        : never
+      : never
+    : never
+  : never;
+
 /// One field of a host record payload; see hostRecordBytes for the encoding.
 export type HostScalar = number | boolean | Uint8Array;
 
@@ -348,6 +411,26 @@ export interface AudioSource {
 /// (the six-field AudioEventArm record, matched by field name).
 export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
+}
+
+/// A `Cmd.imageLoad` source: the audio cascade's shape exactly. The local
+/// `path` is tried first; a missing file falls through to `url` (fetched
+/// whole, installed at `cachePath` when given and verified against
+/// `expectedBytes` — 0/omitted means unknown size, existence alone qualifies
+/// a cache entry; omit `cachePath` and the host derives the conventional
+/// content-addressed path when a caches directory is configured). At least
+/// one of path/url must be present.
+export interface ImageSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+/// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
+/// arm (the four-field ImageEventArm record, matched by field name).
+export interface ImageRoute<M extends Msgish> {
+  readonly event: ImageEventKind<M>;
 }
 
 /// The closed HTTP verb set of `Cmd.fetch` (wire value = declaration order).
@@ -448,6 +531,15 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "quit_app" }
+  | {
+      readonly op: "image_load";
+      readonly id: number;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -692,6 +784,29 @@ export const Cmd = {
   /// recording session seals its journal. Fire-and-forget.
   quitApp(): Cmd<never> {
     return { op: "quit_app" };
+  },
+
+  /// Load an image at runtime under the model-owned numeric ImageId your
+  /// markup binds (`<image image="{id}"/>`, `<avatar image="{id}"/>`):
+  /// resolve the source cascade (local path first, then a verified cache
+  /// entry, then the network), decode through the platform codec, register
+  /// the pixels under `id`, and dispatch exactly ONE `event` arm — state
+  /// "loaded" with the decoded width/height, or one failure class. Failure
+  /// is never silent, and views referencing the id repaint on the next
+  /// frame. One load per id at a time: a duplicate live id dispatches state
+  /// "rejected" (finish or re-key instead — ids are model data). Ids are
+  /// positive integers below 2^53 outside the reserved bit-63 namespace;
+  /// 0 is the no-image sentinel and dispatches "rejected".
+  imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M> {
+    return {
+      op: "image_load",
+      id,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
   },
 
   /// Several commands from one dispatch, performed in order.

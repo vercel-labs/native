@@ -12,6 +12,11 @@ import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
 
 export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
 
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+
 export interface Model {
   readonly polling: boolean;
   readonly ticks: number;
@@ -32,6 +37,12 @@ export interface Model {
   readonly playing: boolean;
   readonly bands: Uint8Array;
   readonly audioEvents: number;
+  readonly cover: number;
+  readonly coverW: number;
+  readonly coverH: number;
+  readonly imageState: ImageState;
+  readonly imageStatus: number;
+  readonly imageResults: number;
 }
 
 export type Msg =
@@ -63,7 +74,10 @@ export type Msg =
   | { readonly kind: "pause_music" }
   | { readonly kind: "set_volume" }
   | { readonly kind: "stop_music" }
-  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array };
+  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "show_cover" }
+  | { readonly kind: "show_cover_again" }
+  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -87,6 +101,12 @@ export function initialModel(): [Model, Cmd<Msg>] {
       playing: false,
       bands: new Uint8Array(0),
       audioEvents: 0,
+      cover: 0,
+      coverW: -1,
+      coverH: -1,
+      imageState: "rejected",
+      imageStatus: -1,
+      imageResults: 0,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -174,6 +194,18 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         bands: msg.bands,
         audioEvents: model.audioEvents + 1,
       };
+    case "show_cover":
+      // The runtime ImageId the views bind; the model only adopts it
+      // on a loaded result (the store-the-id-on-success discipline).
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png"), url: asciiBytes("https://cdn.test/cover.png") }, { event: "image_done" })];
+    case "show_cover_again":
+      // A duplicate live id: the bridge rejects it (state "rejected")
+      // — one load per id at a time, the spawn discipline.
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "image_done":
+      if (msg.state === "loaded")
+        return { ...model, cover: 21, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };
+      return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };
   }
 }
 
