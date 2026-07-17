@@ -26,10 +26,27 @@
 //! plus owner-tag/generation stamps. A producer that outlives its view,
 //! its runtime, or the whole app therefore cannot use-after-free by
 //! construction: a push after teardown lands in inert process-lived
-//! memory that no loop ever adopts again. There is no wake channel on
-//! purpose — the compositor's own frame clock (the 60 Hz host timer, a
-//! prompt requested frame, a test-driven frame event) is what samples
-//! the mailbox, which is exactly the pacing the channel promises.
+//! memory that no loop ever adopts again.
+//!
+//! WAKE CONTRACT. Adoption rides the compositor's frame clock (the
+//! 60 Hz host timer, a prompt requested frame, a test-driven frame
+//! event) — but native hosts are demand-driven one-shot schedulers, so
+//! an IDLE app has no clock at all: a 24/30 fps video in an app nobody
+//! touches would stall the moment the scheduler slept, and a producer
+//! that starts after the last frame would never be adopted. A push that
+//! stages NEW bytes therefore requests one frame itself, through the
+//! platform's thread-safe cross-thread frame request (`PlatformServices
+//! .request_frame_fn` — the automation arrival watcher's wake path;
+//! requests coalesce at the platform AND at the slot's `pending` flag,
+//! so a burst of pushes costs at most one). The binding lives in the
+//! slot's `wake` half behind its OWN spin mutex, and the platform call
+//! happens UNDER that mutex — the effects executor's abandon-fence
+//! doctrine: the runtime disarms the binding at teardown under the same
+//! mutex (`disarmMediaSurfaceWakes`, called from the run loop's exit
+//! path and `Runtime.deinit`/TestHarness destroy), so after disarm
+//! returns no producer is inside the call and none can start one — a
+//! stale handle's push can never wake a dead host. Damage-skipped
+//! pushes and pushes through a released/stale generation wake nothing.
 //!
 //! FORMAT AXIS. Slice 0 is tightly-packed RGBA8 only. The push call is
 //! shaped so later formats (BGRA, planar YUV, zero-copy GPU handles)
@@ -73,6 +90,48 @@ const SpinMutex = struct {
     }
 };
 
+/// The producer-to-compositor wake binding, one per slot, guarded by
+/// its OWN spin mutex — never the slot's data mutex, whose guarded
+/// sections must stay bounded memcpys (the thread contract): the wake
+/// path calls into the platform, and holding the data mutex across
+/// that call would make every colliding push spin behind a host call.
+///
+/// Ownership story (the effects executor's abandon-fence doctrine,
+/// matched exactly): `request_frame_fn`/`context` point into the
+/// claiming runtime's PLATFORM host — the same pair the automation
+/// arrival watcher carries to its own thread — and the platform call
+/// happens UNDER `mutex`. Teardown disarms under the same mutex before
+/// the host dies (`disarmMediaSurfaceWakes`, from the run loop's exit
+/// defer, `TestHarness.destroy`, and the embed host's destroy), so
+/// after disarm returns no producer thread is inside the call and none
+/// can start one. The implementations behind `request_frame_fn` are
+/// enqueue-only (macOS: main-queue dispatch, GTK: `g_idle_add`, Win32:
+/// `PostMessage`, null platform: an atomic counter), so the section
+/// stays bounded — a colliding push spins for one enqueue, never I/O.
+const MediaSurfaceWake = struct {
+    mutex: SpinMutex = .{},
+    /// The claim generation this binding serves (see the slot's
+    /// `generation`): a push wakes only when its handle's generation
+    /// matches, so a stale producer of a released — or re-claimed —
+    /// slot can never wake the slot's new owner spuriously.
+    generation: u64 = 0,
+    /// The arming runtime's process-unique tag, for the teardown
+    /// disarm sweep (`disarmMediaSurfaceWakes` disarms exactly the
+    /// bindings its runtime armed).
+    owner_tag: u64 = 0,
+    /// The platform's thread-safe cross-thread frame request, or null
+    /// when the host has none (then pacing stays purely demand-driven,
+    /// the pre-wake behavior) or the binding is disarmed.
+    request_frame_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    context: ?*anyopaque = null,
+    /// A requested frame has not yet reached adoption: the wake
+    /// coalescer. Set when a push requests a frame, cleared by
+    /// `adoptMediaSurfaceFrames` BEFORE it samples the slot, so a burst
+    /// of pushes costs at most one platform call and a push landing
+    /// after the clear requests the next frame itself.
+    pending: bool = false,
+};
+
 /// One process-lived mailbox slot: the ONLY memory a producer handle
 /// ever touches. Claimed by a runtime at acquire (owner tag + fresh
 /// generation), staged into by producer pushes, drained by loop-thread
@@ -110,6 +169,9 @@ const MediaSurfaceSlot = struct {
     /// the push-boundary damage short-circuit — identical bytes pushed
     /// again cost one hash, no copy, no staging, no invalidation.
     last_push_fingerprint: u64 = 0,
+    /// The idle-compositor wake binding (its own mutex; see
+    /// `MediaSurfaceWake` for the ownership story).
+    wake: MediaSurfaceWake = .{},
 };
 
 var media_surface_slots: [max_media_surface_channels]MediaSurfaceSlot =
@@ -174,19 +236,55 @@ pub const MediaSurfaceProducer = struct {
         const fingerprint = frameFingerprint(width, height, rgba8);
 
         const slot = self.slot;
-        slot.mutex.lock();
-        defer slot.mutex.unlock();
-        if (!slot.active or slot.generation != self.generation) return error.MediaSurfaceReleased;
-        // Push-boundary damage short-circuit: same bytes as the last
-        // push (adopted or still staged) change nothing downstream.
-        if (slot.last_push_fingerprint == fingerprint) return;
-        @memcpy(slot.staging[0..byte_len], rgba8);
-        slot.staged = true;
-        slot.staged_width = width;
-        slot.staged_height = height;
-        slot.staged_byte_len = byte_len;
-        slot.staged_fingerprint = fingerprint;
-        slot.last_push_fingerprint = fingerprint;
+        {
+            slot.mutex.lock();
+            defer slot.mutex.unlock();
+            if (!slot.active or slot.generation != self.generation) return error.MediaSurfaceReleased;
+            // Push-boundary damage short-circuit: same bytes as the last
+            // push (adopted or still staged) change nothing downstream —
+            // including the wake below: unchanged pixels never stir an
+            // idle compositor.
+            if (slot.last_push_fingerprint == fingerprint) return;
+            @memcpy(slot.staging[0..byte_len], rgba8);
+            slot.staged = true;
+            slot.staged_width = width;
+            slot.staged_height = height;
+            slot.staged_byte_len = byte_len;
+            slot.staged_fingerprint = fingerprint;
+            slot.last_push_fingerprint = fingerprint;
+        }
+        // NEW bytes are staged: make sure a frame is coming to adopt
+        // them, even in an idle app whose demand-driven scheduler is
+        // asleep (the wake contract in the module header). Outside the
+        // data mutex — the wake half has its own lock — and gated on the
+        // handle's generation again, so a release/re-claim racing this
+        // gap wakes nobody spuriously.
+        requestWake(slot, self.generation);
+    }
+
+    /// Request ONE coalesced frame from the claiming runtime's platform
+    /// loop. Any-thread; touches only the slot's process-lived wake
+    /// half. The platform call runs UNDER the wake mutex (the abandon-
+    /// fence doctrine — see `MediaSurfaceWake`): teardown's disarm takes
+    /// the same mutex, so it can never complete while a call into the
+    /// host is in flight, and after it returns no call can start.
+    fn requestWake(slot: *MediaSurfaceSlot, generation: u64) void {
+        const wake = &slot.wake;
+        wake.mutex.lock();
+        defer wake.mutex.unlock();
+        // Stale claim (released, re-claimed, or torn down): no wake.
+        if (wake.generation != generation) return;
+        // Coalesce: a burst of pushes rides the one already-requested
+        // frame; `adoptMediaSurfaceFrames` clears the flag before it
+        // samples, so nothing staged after the clear is left frameless.
+        if (wake.pending) return;
+        // Unarmed: no thread-safe frame request on this host (or the
+        // binding was disarmed) — pacing stays purely demand-driven.
+        const request_fn = wake.request_frame_fn orelse return;
+        // A refused request leaves `pending` clear so the next push
+        // retries instead of latching a wake that never comes.
+        request_fn(wake.context) catch return;
+        wake.pending = true;
     }
 
     /// End this claim: later pushes through this handle (or any copy)
@@ -196,13 +294,28 @@ pub const MediaSurfaceProducer = struct {
     /// the slot after this. Idempotent.
     pub fn release(self: MediaSurfaceProducer) void {
         const slot = self.slot;
-        slot.mutex.lock();
-        defer slot.mutex.unlock();
-        if (!slot.active or slot.generation != self.generation) return;
-        slot.active = false;
-        slot.staged = false;
-        slot.last_push_fingerprint = 0;
-        slot.generation +%= 1;
+        {
+            slot.mutex.lock();
+            defer slot.mutex.unlock();
+            if (!slot.active or slot.generation != self.generation) return;
+            slot.active = false;
+            slot.staged = false;
+            slot.last_push_fingerprint = 0;
+            slot.generation +%= 1;
+        }
+        // The ended claim's wake binding is already fenced off by the
+        // generation bump above; clearing it too keeps no host pointer
+        // parked in process-lived memory longer than its claim. Taken
+        // AFTER the data mutex dropped — the two locks never nest.
+        const wake = &slot.wake;
+        wake.mutex.lock();
+        defer wake.mutex.unlock();
+        if (wake.generation != self.generation) return;
+        wake.generation = 0;
+        wake.owner_tag = 0;
+        wake.request_frame_fn = null;
+        wake.context = null;
+        wake.pending = false;
     }
 };
 
@@ -256,6 +369,20 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                 slot.last_push_fingerprint = 0;
                 const generation = slot.generation;
                 slot.mutex.unlock();
+                // Arm the wake binding for this claim (after the data
+                // mutex dropped — the locks never nest). No producer of
+                // THIS generation exists before we return the handle,
+                // so nothing races the arm; a stale generation taking
+                // the wake mutex fails its generation gate.
+                const services = &self.options.platform.services;
+                const wake = &slot.wake;
+                wake.mutex.lock();
+                wake.generation = generation;
+                wake.owner_tag = tag;
+                wake.request_frame_fn = services.request_frame_fn;
+                wake.context = if (services.request_frame_fn != null) services.context else null;
+                wake.pending = false;
+                wake.mutex.unlock();
                 return .{ .slot = slot, .generation = generation, .surface_id = surface_id };
             }
             return error.MediaSurfaceChannelsExhausted;
@@ -274,6 +401,16 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
             if (tag == 0) return;
             var changed = false;
             for (&media_surface_slots) |*slot| {
+                // Drain the wake coalescer BEFORE sampling the staged
+                // flag: a push that staged bytes before this clear is
+                // adopted by this very pass (its stage happened before
+                // its wake attempt, which is what we are answering); a
+                // push landing after the clear requests its own frame.
+                // Either way nothing staged is ever left frameless.
+                slot.wake.mutex.lock();
+                if (slot.wake.owner_tag == tag) slot.wake.pending = false;
+                slot.wake.mutex.unlock();
+
                 slot.mutex.lock();
                 if (!slot.active or slot.owner_tag != tag or !slot.staged) {
                     slot.mutex.unlock();
@@ -325,6 +462,38 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                 // content fingerprint changed, caches re-upload, views
                 // re-render their next frame.
                 runtime_canvas_images.RuntimeCanvasImages(Runtime).noteCanvasImagesChanged(self);
+            }
+        }
+
+        /// Disarm every wake binding this runtime armed: after this
+        /// returns, no producer push can call into the runtime's
+        /// platform host — not even one already past its generation
+        /// check, because the platform call happens under the wake
+        /// mutex this sweep takes (the abandon-fence doctrine; see
+        /// `MediaSurfaceWake`). MUST run before the platform host dies
+        /// when a producer may still hold an unreleased handle: the run
+        /// loop's exit defer covers real apps (the same ordering that
+        /// stops the automation arrival watcher), `TestHarness.destroy`
+        /// covers tests, and the embed host's destroy covers embedded
+        /// runtimes. Idempotent; a pending (already requested) frame is
+        /// simply never answered — the host may still deliver or drop
+        /// it, and an unclaimed `frame_requested` on a dying loop is a
+        /// no-op, so teardown loses nothing. The slots' DATA halves are
+        /// deliberately untouched: pushes keep landing in inert
+        /// process-lived memory, the existing UAF-safety story.
+        pub fn disarmMediaSurfaceWakes(self: *Runtime) void {
+            const tag = self.media_surface_runtime_tag;
+            if (tag == 0) return;
+            for (&media_surface_slots) |*slot| {
+                const wake = &slot.wake;
+                wake.mutex.lock();
+                defer wake.mutex.unlock();
+                if (wake.owner_tag != tag) continue;
+                wake.generation = 0;
+                wake.owner_tag = 0;
+                wake.request_frame_fn = null;
+                wake.context = null;
+                wake.pending = false;
             }
         }
 

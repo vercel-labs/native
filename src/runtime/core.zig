@@ -773,6 +773,7 @@ pub const Runtime = struct {
     const MediaSurfaceMethods = runtime_media_surface.RuntimeMediaSurfaces(Runtime);
     pub const acquireMediaSurfaceProducer = MediaSurfaceMethods.acquireMediaSurfaceProducer;
     pub const adoptMediaSurfaceFrames = MediaSurfaceMethods.adoptMediaSurfaceFrames;
+    pub const disarmMediaSurfaceWakes = MediaSurfaceMethods.disarmMediaSurfaceWakes;
     pub const adoptedMediaSurfaceTexture = MediaSurfaceMethods.adoptedMediaSurfaceTexture;
     const adoptedMediaSurfaceTextures = MediaSurfaceMethods.adoptedMediaSurfaceTextures;
 
@@ -897,6 +898,12 @@ pub fn TestHarness() type {
         }
 
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+// The harness embeds the runtime's platform: a producer
+            // handle a test keeps past destroy (the orphan tests) must
+            // find its wake binding disarmed before the host memory is
+            // returned — the run loop's exit defer for real apps, this
+            // line for harness-driven ones.
+            self.runtime.disarmMediaSurfaceWakes();
             self.runtime.deinit();
             gpa.destroy(self);
         }

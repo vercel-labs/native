@@ -881,6 +881,160 @@ test "docs example: the typed producer callback is writable against the public e
     try std.testing.expect(player.stopped);
 }
 
+// ------------------------------------------------------- producer wakes
+
+test "a push wakes an idle compositor: one coalesced frame request that adopts on dispatch" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    defer producer.release();
+
+    // The idle shape: NO frame is scheduled (the demand-driven host is
+    // asleep), and a producer pushes. The push itself must request one
+    // cross-thread frame — the same `request_frame_fn` channel the
+    // automation arrival watcher wakes the loop through.
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+    const red = solidFrame(.{ 255, 0, 0, 255 });
+    try producer.pushFrame(2, 2, &red);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+
+    // Burst pushes coalesce: the wake already in flight carries them
+    // (latest-wins), no second platform call.
+    const green = solidFrame(.{ 0, 255, 0, 255 });
+    const blue = solidFrame(.{ 0, 0, 255, 255 });
+    try producer.pushFrame(2, 2, &green);
+    try producer.pushFrame(2, 2, &blue);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+
+    // The loop drains the request exactly like a live host marshals it:
+    // one `.frame_requested` on the loop thread. That frame ADOPTS the
+    // newest staged bytes (no gpu_surface_frame ever dispatched), and
+    // adoption's invalidation arms the prompt gpu frame that will
+    // composite them.
+    const gpu_requests_before = harness.null_platform.gpu_surface_frame_request_count;
+    const wake_event = harness.null_platform.takeFrameRequest().?;
+    try harness.runtime.dispatchPlatformEvent(app, wake_event);
+    const adopted = harness.runtime.adoptedMediaSurfaceTexture(surface_id).?;
+    try std.testing.expect(adopted.fingerprint != 0);
+    const resources = harness.runtime.registeredCanvasImages();
+    try std.testing.expectEqual(@as(usize, 1), resources.len);
+    try std.testing.expectEqualSlices(u8, &blue, resources[0].pixels);
+    try std.testing.expect(harness.null_platform.gpu_surface_frame_request_count > gpu_requests_before);
+
+    // The adoption drained the coalescer: the NEXT changed push wakes
+    // again — a paced producer gets one wake per adopted frame, never
+    // fewer (the stall this channel exists to prevent) and never a
+    // backlog of platform calls.
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+    const white = solidFrame(.{ 255, 255, 255, 255 });
+    try producer.pushFrame(2, 2, &white);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+}
+
+test "damage-skipped and refused pushes wake nothing" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+
+    // Adopt one frame through the wake path so the channel is warm.
+    const gray = solidFrame(.{ 40, 40, 40, 255 });
+    try producer.pushFrame(2, 2, &gray);
+    while (harness.null_platform.takeFrameRequest()) |event| {
+        try harness.runtime.dispatchPlatformEvent(app, event);
+    }
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
+
+    // Identical bytes: the push-boundary damage gate fires BEFORE the
+    // wake — unchanged video never stirs an idle scheduler.
+    try producer.pushFrame(2, 2, &gray);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+
+    // A released handle's push is refused before staging AND wakes
+    // nothing — a stale producer cannot burn the loop awake.
+    producer.release();
+    const after = solidFrame(.{ 9, 9, 9, 255 });
+    try std.testing.expectError(error.MediaSurfaceReleased, producer.pushFrame(2, 2, &after));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+
+    // An invalid frame is refused at validation, long before the wake.
+    const reclaimed = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    defer reclaimed.release();
+    const pixel = [_]u8{ 1, 2, 3, 255 };
+    try std.testing.expectError(error.InvalidFrameDimensions, reclaimed.pushFrame(2, 1, &pixel));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+}
+
+test "disarmed wake bindings never touch the platform again; pushes stay functional" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    defer producer.release();
+
+    // Armed: a fresh push wakes.
+    const red = solidFrame(.{ 255, 0, 0, 255 });
+    try producer.pushFrame(2, 2, &red);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+    while (harness.null_platform.takeFrameRequest()) |event| {
+        try harness.runtime.dispatchPlatformEvent(app, event);
+    }
+
+    // Disarmed (what the run loop's exit defer, TestHarness.destroy,
+    // and the embed host's destroy invoke before the platform dies):
+    // pushes still stage — and the compositor's own frame clock still
+    // adopts them — but NOTHING calls into the platform anymore. This
+    // is the whole teardown-safety contract: after disarm returns, a
+    // producer thread cannot reach the host, so the host may die.
+    harness.runtime.disarmMediaSurfaceWakes();
+    const green = solidFrame(.{ 0, 255, 0, 255 });
+    try producer.pushFrame(2, 2, &green);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.pendingFrameRequestCount());
+    try dispatchFrame(harness, app, 2);
+    const resources = harness.runtime.registeredCanvasImages();
+    try std.testing.expectEqual(@as(usize, 1), resources.len);
+    try std.testing.expectEqualSlices(u8, &green, resources[0].pixels);
+
+    // Re-acquiring re-arms: the disarm ends BINDINGS, not the channel.
+    producer.release();
+    const rearmed = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    defer rearmed.release();
+    const blue = solidFrame(.{ 0, 0, 255, 255 });
+    try rearmed.pushFrame(2, 2, &blue);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+    while (harness.null_platform.takeFrameRequest()) |event| {
+        try harness.runtime.dispatchPlatformEvent(app, event);
+    }
+}
+
 // -------------------------------------------------- threads and teardown
 
 test "cross-thread pushes stage safely and the loop adopts the newest" {
@@ -915,6 +1069,11 @@ test "cross-thread pushes stage safely and the loop adopts the newest" {
     const thread = try std.Thread.spawn(.{}, Worker.run, .{producer});
     thread.join();
 
+    // Fifty distinct cross-thread pushes with no adoption in between:
+    // the wake coalescer latched after the first, so the idle loop was
+    // asked for exactly ONE frame.
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.pendingFrameRequestCount());
+
     try dispatchFrame(harness, app, 1);
     const final = solidFrame(.{ 50, 0, 50, 255 });
     const resources = harness.runtime.registeredCanvasImages();
@@ -944,13 +1103,23 @@ test "a producer outliving its runtime pushes into inert process-lived memory" {
         try orphan.pushFrame(2, 2, &first);
         try dispatchFrame(harness, app, 1);
         try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
-        // The harness (and the whole Runtime) dies here with the
-        // producer NOT released — the decoder-outlives-the-view shape.
+        // Leave a WAKE PENDING at teardown: the staged-but-never-adopted
+        // push below arms the coalescer, and the harness dies without
+        // ever answering it — teardown with a pending wake must be safe.
+        const requests_before_parting = harness.null_platform.pendingFrameRequestCount();
+        const parting = solidFrame(.{ 4, 5, 6, 255 });
+        try orphan.pushFrame(2, 2, &parting);
+        try std.testing.expectEqual(requests_before_parting + 1, harness.null_platform.pendingFrameRequestCount());
+        // The harness (and the whole Runtime, and its PLATFORM) dies
+        // here with the producer NOT released — the decoder-outlives-
+        // the-view shape. destroy disarms the wake bindings first, so
+        // the orphan's later pushes can never call into the freed host.
     }
 
     // The orphan handle keeps pushing after its runtime is gone: the
     // pushes land in the process-lived mailbox slot (never freed, never
-    // adopted again) — no use-after-free by construction.
+    // adopted again) and its wake binding is DISARMED — no use-after-
+    // free by construction on either half.
     const after_teardown = solidFrame(.{ 200, 100, 50, 255 });
     try orphan.pushFrame(2, 2, &after_teardown);
 

@@ -30,7 +30,7 @@ producer.release();
 ## The contract
 
 - **Latest-wins.** Pushes never queue: an unpresented staged frame is replaced by the next one, so a producer running faster than the display can never build a backlog. Push at your source's native rate and let the compositor sample.
-- **Paced by the presented-frame clock.** Staged frames are adopted when the compositor's frame ticks (the 60 Hz host timer, or a prompt requested frame). There is no wake channel to manage.
+- **Paced by the presented-frame clock, woken by your pushes.** Staged frames are adopted when the compositor's frame ticks (the 60 Hz host timer, or a prompt requested frame) — and a push that stages new bytes while the app is idle requests one coalesced frame itself, so a 24 fps video in an app nobody touches never stalls and a producer that starts late is adopted promptly. There is no wake channel to manage; pushing is waking.
 - **Damage-tracked.** A frame whose bytes match the previous push costs one hash and nothing else — no copy, no repaint. Idle video is free.
 - **Any-thread pushes, teardown-safe.** `pushFrame` and `release` are callable from any thread and touch only process-lived channel memory. A producer that outlives its view — or the whole runtime — pushes into inert memory; it can never use-after-free. Pushes through a released handle report `error.MediaSurfaceReleased` loudly.
 - **RGBA8 today, the format axis is open.** Tightly-packed straight-alpha RGBA8 is the slice-0 format; BGRA, planar YUV, and zero-copy GPU handles are planned as additional entry points on the same channel.

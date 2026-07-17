@@ -136,6 +136,16 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             // away, so the watcher can never call into a dead host.
             defer if (command_watcher_running) command_watcher.stop();
 
+            // Media-surface wake teardown: producers a slow app forgot
+            // to release may push (and try to wake this platform) at
+            // any later time from their own threads. Disarm their wake
+            // bindings before the caller's later-declared defers tear
+            // the host down — declared BEFORE the app-stop defer below
+            // so it runs AFTER the stop hook (LIFO), letting the hook
+            // join producer threads first. The same run-exit ordering
+            // that stops the automation arrival watcher.
+            defer self.disarmMediaSurfaceWakes();
+
             // Teardown ordering contract: everything the app must do
             // against the live platform — silencing an active audio
             // player, disarming platform timers, joining effect workers
@@ -524,6 +534,18 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
         pub fn frame(self: *Runtime, app: App) anyerror!void {
             const start_ns = nowNanoseconds();
+            // A media-surface producer's wake arrives as THIS event (the
+            // platform's cross-thread frame request): adopt staged
+            // frames here so an idle app's push reaches the runtime —
+            // adoption's invalidation then arms the prompt gpu-surface
+            // frame that composites it (`noteCanvasImagesChanged` ->
+            // `requestCanvasFrameForView`). Runs before the invalidation
+            // check below because adoption IS an invalidation source; a
+            // busy app pays one fenced flag check per idle channel, and
+            // the gpu-surface frame dispatch's own adoption call keeps
+            // pacing consumption for hosts whose frame events do not
+            // pass through here.
+            self.adoptMediaSurfaceFrames();
             try consumeAutomationCommand(self, app);
             if (!self.invalidated) return;
 
