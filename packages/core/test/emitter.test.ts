@@ -1706,3 +1706,46 @@ export function update(model: Model, msg: Msg): Model {
   assert.equal(bad_key.ok, false);
   assert.ok(bad_key.diagnostics.some((d) => d.id === "NS1033"), JSON.stringify(bad_key.diagnostics));
 });
+
+test("pinchMsg emits with boundary-float record fields and holds its channel contract", () => {
+  // The good shape: the record's number fields are HOST values classed
+  // f64 even against an integer-literal comparison (`scale === 0` must
+  // never int-claim the slot — a rounded magnification delta would zero
+  // every zoom product), and the zoom chain fed from them floats too.
+  const zig = emit(`
+export type PinchPhase = "begin" | "change" | "end";
+export interface PinchEvent { readonly phase: PinchPhase; readonly scale: number; readonly x: number; readonly y: number; }
+export interface Model { readonly zoom: number; }
+export type Msg =
+  | { readonly kind: "zoomed"; readonly factor: number }
+  | { readonly kind: "noop" };
+export function pinchMsg(pinch: PinchEvent): Msg | null {
+  if (pinch.phase !== "change" || pinch.scale === 0) return null;
+  return { kind: "zoomed", factor: 1 + pinch.scale };
+}
+export function initialModel(): Model { return { zoom: 1 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "zoomed": return { ...model, zoom: model.zoom * msg.factor };
+    case "noop": return model;
+  }
+}
+`);
+  assert.match(zig, /scale: f64/);
+  assert.match(zig, /zoom: f64/);
+  assert.match(zig, /pub fn pinchMsg/);
+
+  // The bad shape (missing centroid fields) is a taught NS1033.
+  const bad_pinch = transpile(`
+export type PinchPhase = "begin" | "change" | "end";
+export interface PinchEvent { readonly phase: PinchPhase; readonly scale: number; }
+export interface Model { readonly w: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function pinchMsg(pinch: PinchEvent): Msg | null { return null; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "a": return model; case "b": return model; }
+}
+`);
+  assert.equal(bad_pinch.ok, false);
+  assert.ok(bad_pinch.diagnostics.some((d) => d.id === "NS1033"), JSON.stringify(bad_pinch.diagnostics));
+});

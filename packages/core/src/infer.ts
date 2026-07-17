@@ -502,6 +502,32 @@ export class IntInference {
             slot.proven = false;
           }
         }
+        // The pinch channel's parameter record is intrinsically
+        // fractional: magnification deltas are ~0.01..0.3 per event and
+        // the centroid is sub-point, so its number fields are HOST
+        // values, never provable integers. Marking them boundary-fed
+        // keeps a core's `pinch.scale === 0` comparison from
+        // int-claiming the slot (which would round every zoom product
+        // to whole numbers); the integer side of such a comparison
+        // widens to f64 instead. frameMsg/keyMsg records keep their
+        // historical by-usage classing.
+        if (stmt.name?.text === "pinchMsg") {
+          for (const p of stmt.parameters) {
+            if (!p.type) continue;
+            const t = this.table.resolveTypeNode(p.type);
+            if (t.k !== "struct") continue;
+            const struct = this.table.structs.get(t.name);
+            if (!struct) continue;
+            for (const f of struct.fields) {
+              const slot = this.slots.get(f.decl);
+              if (slot) {
+                slot.external = true;
+                slot.hostBoundary = true;
+                slot.proven = false;
+              }
+            }
+          }
+        }
       }
     }
   }
