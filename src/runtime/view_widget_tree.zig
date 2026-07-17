@@ -423,6 +423,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// would leave Escape dead. A focused editable with live IME
         /// composition always wins: Escape cancels the composition and
         /// never dismisses a surface, not even through the fallback.
+        /// With SEVERAL surfaces anchored on one stack (the select
+        /// trigger's focus-shown tooltip floating over its open menu),
+        /// each Escape peels exactly one, topmost (last-mounted) first —
+        /// the tooltip goes, then the menu.
         pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             if (focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index| {
@@ -440,12 +444,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// transient choice, so moving the keyboard on closes it WITHOUT
         /// committing, exactly like a click outside. Scoped to menu
         /// surfaces only: Tab through a persistent popover's form fields
-        /// must not tear the popover down.
+        /// must not tear the popover down. The lookup scans FOR menu
+        /// kinds rather than kind-checking whatever floats topmost — a
+        /// trigger can anchor a tooltip beside its menu, and the
+        /// focus-visible tooltip shadowing the open menu left Tab unable
+        /// to close it.
         pub fn dismissCanvasWidgetMenuSurfaceForFocusDeparture(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .menu) orelse return null;
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
@@ -459,9 +465,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
+        /// Outside-click light dismissal targets INTERACTIVE surfaces
+        /// only. A tooltip's whole lifecycle already belongs to the
+        /// intent machine's own causes on any outside down — hover
+        /// leave, focus moving with the click, the press itself — so
+        /// letting the topmost tooltip absorb this gesture would both
+        /// double-cover those and leave the menu beneath it floating
+        /// after the user clicked away.
         pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .interactive) orelse return null;
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
             // Clicking the ANCHOR region of an anchored surface (the
             // trigger, or the stack that wraps trigger + surface) is the
@@ -532,20 +545,59 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return .{ .id = surface.id, .dirty = dirty };
         }
 
+        /// Which anchored dismissible surfaces a lookup means to see. A
+        /// widget stack can anchor SEVERAL surfaces at once (a select
+        /// trigger with both its dropdown-menu and a tooltip), so every
+        /// consumer names the population it is really after — grabbing
+        /// "the anchored child" and kind-checking the winner let a
+        /// focus-visible tooltip shadow the open menu mounted before it.
+        pub const CanvasWidgetAnchoredSurfaceScope = enum {
+            /// Every dismissible surface, tooltips included. Escape and
+            /// the automation/accessibility dismiss actions peel
+            /// whatever floats TOPMOST, one surface per gesture.
+            any,
+            /// Surfaces that can hold interaction and keyboard focus —
+            /// everything but tooltips, which are hover chrome the
+            /// intent machine owns: outside-click dismissal and focus
+            /// scoping.
+            interactive,
+            /// Menu surfaces only (`menu_surface`/`dropdown_menu`): the
+            /// open-select keymap and Tab's focus-departure close.
+            menu,
+        };
+
+        fn canvasWidgetAnchoredSurfaceKindInScope(kind: canvas.WidgetKind, comptime scope: CanvasWidgetAnchoredSurfaceScope) bool {
+            if (!canvasWidgetDismissibleSurfaceKind(kind)) return false;
+            return switch (scope) {
+                .any => true,
+                .interactive => kind != .tooltip,
+                .menu => kind == .menu_surface or kind == .dropdown_menu,
+            };
+        }
+
         pub fn canvasWidgetDismissibleSurfaceIndexForTarget(self: *const RuntimeView, target_index: usize) ?usize {
+            return canvasWidgetSurfaceIndexForTargetInScope(self, target_index, .any);
+        }
+
+        /// The nearest in-scope surface up the target's chain: the first
+        /// visible dismissible ancestor, or an in-scope anchored surface
+        /// HANGING OFF an ancestor (the ancestor is its anchor) — Escape
+        /// on the focused trigger, or on the stack wrapping trigger +
+        /// surface, closes its own menu even though the surface is a
+        /// descendant, not an ancestor, of the focus. A visible ancestor
+        /// surface OUTSIDE the scope shields rather than defers: the
+        /// keyboard living in a persistent popover must not reach past
+        /// it to a menu further out.
+        fn canvasWidgetSurfaceIndexForTargetInScope(self: *const RuntimeView, target_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             if (target_index >= self.widget_layout_node_count) return null;
             var current: ?usize = target_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return null;
                 const widget = self.widget_layout_nodes[index].widget;
-                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) return index;
-                // An anchored dismissible surface HANGING OFF this
-                // ancestor (the ancestor is its anchor) is the nearest
-                // floating surface: Escape on the focused trigger — or on
-                // the stack wrapping trigger + surface — closes its own
-                // menu even though the surface is a descendant, not an
-                // ancestor, of the focus.
-                if (self.canvasWidgetAnchoredDismissibleChildIndex(index)) |surface_index| return surface_index;
+                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) {
+                    return if (canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope)) index else null;
+                }
+                if (canvasWidgetAnchoredChildIndexInScope(self, index, scope)) |surface_index| return surface_index;
                 current = self.widget_layout_nodes[index].parent_index;
             }
             return null;
@@ -554,11 +606,19 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// The topmost (last-mounted) visible anchored dismissible surface
         /// whose anchor is `anchor_index`, or null.
         pub fn canvasWidgetAnchoredDismissibleChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .any);
+        }
+
+        /// The topmost visible anchored child of `anchor_index` whose
+        /// kind is IN SCOPE — the scope filters DURING the scan, so an
+        /// out-of-scope sibling mounted later (the tooltip above the
+        /// menu) never masks the surface the caller asked for.
+        fn canvasWidgetAnchoredChildIndexInScope(self: *const RuntimeView, anchor_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             var found: ?usize = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.parent_index != anchor_index) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
-                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (node.widget.semantics.hidden) continue;
                 found = index;
             }
@@ -578,10 +638,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         fn canvasWidgetAnchoredMenuChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
-            const surface_index = self.canvasWidgetAnchoredDismissibleChildIndex(anchor_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
-            return surface_index;
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .menu);
         }
 
         /// The anchored tooltip a trigger owns: the last-mounted anchored
@@ -813,9 +870,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return false;
         }
 
+        /// Tab cycling scopes to the INTERACTIVE surface around the
+        /// focus: a tooltip can never hold a focus target, so scoping to
+        /// one (the trigger's visible tooltip shadowing its popover or
+        /// menu) would always come up empty and spill the keyboard out
+        /// of the trap into the page's global walk.
         pub fn canvasWidgetScopedFocusTarget(self: *const RuntimeView, current_id: canvas.ObjectId, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
             const current_index = self.canvasWidgetNodeIndexById(current_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(current_index) orelse return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, current_index, .interactive) orelse return null;
             return self.canvasWidgetFocusTargetInScope(surface_index, current_index, direction);
         }
 

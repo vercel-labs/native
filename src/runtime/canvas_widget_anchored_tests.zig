@@ -132,80 +132,89 @@ fn pickerOptions() PickerApp.Options {
     };
 }
 
-const Fixture = struct {
-    harness: *core.TestHarness(),
-    app_state: *PickerApp,
-    app: core.App,
+/// The TEA harness shape every anchored fixture in this file shares,
+/// parameterized over the app so the tooltip-coexistence picker below
+/// reuses the picker's dispatch helpers verbatim.
+fn AppFixture(comptime AppType: type, comptime appOptions: fn () AppType.Options) type {
+    return struct {
+        harness: *core.TestHarness(),
+        app_state: *AppType,
+        app: core.App,
 
-    fn create() !Fixture {
-        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
-        errdefer harness.destroy(std.testing.allocator);
-        harness.null_platform.gpu_surfaces = true;
-        const app_state = try PickerApp.create(std.heap.page_allocator, pickerOptions());
-        const app = app_state.app();
-        try harness.start(app);
-        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
-            .label = canvas_label,
-            .size = geometry.SizeF.init(400, 300),
-            .scale_factor = 2,
-            .frame_index = 1,
-            .timestamp_ns = 1_000_000,
-            .nonblank = true,
-        } });
-        return .{ .harness = harness, .app_state = app_state, .app = app };
-    }
+        const Self = @This();
 
-    fn destroy(self: Fixture) void {
-        self.app_state.destroy();
-        self.harness.destroy(std.testing.allocator);
-    }
-
-    fn widgetIdByText(self: Fixture, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
-        return findIn(self.app_state.tree.?.root, kind, text);
-    }
-
-    fn findIn(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
-        if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget.id;
-        for (widget.children) |child| {
-            if (findIn(child, kind, text)) |id| return id;
+        fn create() !Self {
+            const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+            errdefer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            const app_state = try AppType.create(std.heap.page_allocator, appOptions());
+            const app = app_state.app();
+            try harness.start(app);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+                .label = canvas_label,
+                .size = geometry.SizeF.init(400, 300),
+                .scale_factor = 2,
+                .frame_index = 1,
+                .timestamp_ns = 1_000_000,
+                .nonblank = true,
+            } });
+            return .{ .harness = harness, .app_state = app_state, .app = app };
         }
-        return null;
-    }
 
-    fn retainedFrame(self: Fixture, id: canvas.ObjectId) !?geometry.RectF {
-        const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
-        const node = layout.findById(id) orelse return null;
-        if (node.widget.semantics.hidden) return null;
-        return node.frame;
-    }
+        fn destroy(self: Self) void {
+            self.app_state.destroy();
+            self.harness.destroy(std.testing.allocator);
+        }
 
-    fn pointer(self: Fixture, kind: support.platform.GpuSurfaceInputKind, point: geometry.PointF) !void {
-        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
-            .label = canvas_label,
-            .kind = kind,
-            .x = point.x,
-            .y = point.y,
-        } });
-    }
+        fn widgetIdByText(self: Self, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+            return findIn(self.app_state.tree.?.root, kind, text);
+        }
 
-    fn click(self: Fixture, point: geometry.PointF) !void {
-        try self.pointer(.pointer_down, point);
-        try self.pointer(.pointer_up, point);
-    }
+        fn findIn(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
+            if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget.id;
+            for (widget.children) |child| {
+                if (findIn(child, kind, text)) |id| return id;
+            }
+            return null;
+        }
 
-    fn clickWidget(self: Fixture, id: canvas.ObjectId) !void {
-        const frame = (try self.retainedFrame(id)) orelse return error.TestUnexpectedResult;
-        try self.click(frame.center());
-    }
+        fn retainedFrame(self: Self, id: canvas.ObjectId) !?geometry.RectF {
+            const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
+            const node = layout.findById(id) orelse return null;
+            if (node.widget.semantics.hidden) return null;
+            return node.frame;
+        }
 
-    fn key(self: Fixture, name: []const u8) !void {
-        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
-            .label = canvas_label,
-            .kind = .key_down,
-            .key = name,
-        } });
-    }
-};
+        fn pointer(self: Self, kind: support.platform.GpuSurfaceInputKind, point: geometry.PointF) !void {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .label = canvas_label,
+                .kind = kind,
+                .x = point.x,
+                .y = point.y,
+            } });
+        }
+
+        fn click(self: Self, point: geometry.PointF) !void {
+            try self.pointer(.pointer_down, point);
+            try self.pointer(.pointer_up, point);
+        }
+
+        fn clickWidget(self: Self, id: canvas.ObjectId) !void {
+            const frame = (try self.retainedFrame(id)) orelse return error.TestUnexpectedResult;
+            try self.click(frame.center());
+        }
+
+        fn key(self: Self, name: []const u8) !void {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .label = canvas_label,
+                .kind = .key_down,
+                .key = name,
+            } });
+        }
+    };
+}
+
+const Fixture = AppFixture(PickerApp, pickerOptions);
 
 test "anchored picker: trigger opens, menu floats, item click picks and closes" {
     const fixture = try Fixture.create();
@@ -675,4 +684,183 @@ test "the per-view anchored budget rejects a surface per row loudly" {
         error.WidgetAnchoredSurfaceLimitReached,
         harness.runtime.setCanvasWidgetLayout(1, "canvas", over_budget),
     );
+}
+
+// ------------------------------------------- tooltip + menu coexistence
+//
+// With `<tooltip>` anchorable beside `dropdown-menu`, one trigger stack
+// can float TWO anchored surfaces at once: Tab earns the focus-shown
+// tooltip, ArrowDown opens the menu beneath it. The tests below pin the
+// keymap against that coexistence — the menu-specific lookups must scan
+// FOR menu kinds instead of kind-checking whatever floats topmost, and
+// Escape peels one surface per press, topmost (the tooltip) first.
+
+const CoexistModel = struct {
+    open: bool = false,
+    picked: u32 = 99,
+    picks: u32 = 0,
+    toggles: u32 = 0,
+    dismissals: u32 = 0,
+};
+
+const CoexistMsg = union(enum) {
+    toggle_picker,
+    close_picker,
+    pick: u32,
+    noop,
+};
+
+const CoexistApp = ui_app_model.UiApp(CoexistModel, CoexistMsg);
+
+fn coexistUpdate(model: *CoexistModel, msg: CoexistMsg) void {
+    switch (msg) {
+        .toggle_picker => {
+            model.open = !model.open;
+            model.toggles += 1;
+        },
+        .close_picker => {
+            model.open = false;
+            model.dismissals += 1;
+        },
+        .pick => |index| {
+            model.picked = index;
+            model.picks += 1;
+            model.open = false;
+        },
+        .noop => {},
+    }
+}
+
+/// The coexistence stack in the order that shadows: select trigger,
+/// then the anchored dropdown-menu, then the anchored tooltip LAST —
+/// while focus-shown, the tooltip is the topmost anchored child of the
+/// very stack that anchors the open menu. The tooltip carries an
+/// explicit key so its identity survives the open/close rebuilds that
+/// insert and remove the menu ahead of it.
+fn coexistView(ui: *CoexistApp.Ui, model: *const CoexistModel) CoexistApp.Ui.Node {
+    const trigger = ui.el(.select, .{ .text = "Repo", .width = 160, .on_press = .toggle_picker }, .{});
+    const tooltip = ui.el(.tooltip, .{ .key = .{ .int = 7 }, .text = "Choose the repository", .anchor = .above }, .{});
+    const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
+        trigger,
+        ui.el(.dropdown_menu, .{
+            .key = .{ .int = 3 },
+            .anchor = .below,
+            .anchor_alignment = .stretch,
+            .width = 160,
+            .height = 90,
+            .on_dismiss = .close_picker,
+        }, .{
+            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "Alpha", .height = 26, .selected = model.picked == 0, .on_press = CoexistMsg{ .pick = 0 } }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "Beta", .height = 26, .selected = model.picked == 1, .on_press = CoexistMsg{ .pick = 1 } }, .{}),
+        }),
+        tooltip,
+    }) else ui.stack(.{ .height = 28 }, .{ trigger, tooltip });
+
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        picker,
+        ui.button(.{ .on_press = .noop }, "After"),
+    });
+}
+
+fn coexistOptions() CoexistApp.Options {
+    return .{
+        .name = "ui-app-coexist",
+        .scene = picker_scene,
+        .canvas_label = canvas_label,
+        .update = coexistUpdate,
+        .view = coexistView,
+    };
+}
+
+const CoexistFixture = AppFixture(CoexistApp, coexistOptions);
+
+/// Tab onto the select earns the focus-shown tooltip, then ArrowDown
+/// opens the menu beneath it. Returns the trigger id after asserting
+/// the coexistence really holds: menu mounted AND tooltip shown.
+fn coexistOpenWithTooltip(fixture: CoexistFixture) !canvas.ObjectId {
+    const trigger_id = fixture.widgetIdByText(.select, "Repo").?;
+    try fixture.key("tab");
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focus_visible_id);
+    const tooltip_id = fixture.widgetIdByText(.tooltip, "Choose the repository").?;
+    try std.testing.expectEqual(tooltip_id, fixture.harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // ArrowDown on the closed trigger presses it (the model-owned
+    // open); the arrow is no activation key, so the focus-shown
+    // tooltip survives the press AND the rebuild that mounts the menu.
+    try fixture.key("arrowdown");
+    try std.testing.expect(fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(tooltip_id, fixture.harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect((try fixture.retainedFrame(tooltip_id)) != null);
+    try std.testing.expect((try fixture.retainedFrame(fixture.widgetIdByText(.menu_item, "Alpha").?)) != null);
+    return trigger_id;
+}
+
+test "tooltip coexistence: arrows walk into the open menu beneath the focus-shown tooltip" {
+    const fixture = try CoexistFixture.create();
+    defer fixture.destroy();
+
+    _ = try coexistOpenWithTooltip(fixture);
+
+    // The next ArrowDown walks INTO the menu — the tooltip floating
+    // topmost must not shadow the owned-menu lookup into re-pressing
+    // the trigger (which would toggle the picker closed).
+    const alpha_id = fixture.widgetIdByText(.menu_item, "Alpha").?;
+    try fixture.key("arrowdown");
+    try std.testing.expectEqual(alpha_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expect(fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.toggles);
+
+    // Entering the menu moved focus off the trigger: the focus-shown
+    // tooltip hides through its own blur cause, not through any menu
+    // machinery.
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.harness.runtime.views[0].canvas_tooltip_shown_id);
+}
+
+test "tooltip coexistence: Tab departure closes the menu the tooltip floats over" {
+    const fixture = try CoexistFixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = try coexistOpenWithTooltip(fixture);
+    const tooltip_id = fixture.harness.runtime.views[0].canvas_tooltip_shown_id;
+
+    // Tab is focus departure: it must find and dismiss the MENU even
+    // though the tooltip is the topmost anchored child, consume the
+    // Tab, and leave the keyboard on the trigger. The tooltip is not
+    // the departure's business: focus never left the trigger, so the
+    // focus-shown tooltip stays.
+    try fixture.key("tab");
+    try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+    try std.testing.expectEqual(tooltip_id, fixture.harness.runtime.views[0].canvas_tooltip_shown_id);
+}
+
+test "tooltip coexistence: escape peels the tooltip first, then the menu, one per press" {
+    const fixture = try CoexistFixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = try coexistOpenWithTooltip(fixture);
+    const tooltip_id = fixture.harness.runtime.views[0].canvas_tooltip_shown_id;
+
+    // Escape dismisses exactly one surface per press, topmost
+    // (last-mounted) first: the tooltip goes while the menu stays
+    // open and the keyboard stays on the trigger.
+    try fixture.key("escape");
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), fixture.harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect((try fixture.retainedFrame(tooltip_id)) == null);
+    try std.testing.expect(fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
+
+    // The next Escape reaches the menu through the model's on_dismiss,
+    // still without committing, and the keyboard stays on the trigger.
+    try fixture.key("escape");
+    try std.testing.expect(!fixture.app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.picks);
+    try std.testing.expectEqual(@as(u32, 99), fixture.app_state.model.picked);
+    try std.testing.expectEqual(trigger_id, fixture.harness.runtime.views[0].canvas_widget_focused_id);
 }
