@@ -79,6 +79,71 @@ test "embedded app starts and loads source" {
     try @import("std").testing.expectEqualStrings("<p>Embedded</p>", null_platform.loaded_source.?.bytes);
 }
 
+test "embedded app deinit returns registered font bytes across create-destroy cycles" {
+    // A direct embedder that creates and destroys apps in one process:
+    // every cycle registers a face (font bytes are the embedded
+    // runtime's only heap ownership) and tears down through the public
+    // `deinit` — the lifecycle end the doc comment promises. The
+    // leak-checking test allocator behind the `Options.allocator` seam
+    // fails this test if any cycle strands the storage, which is
+    // exactly what a stop()-only teardown did.
+    var cycle: usize = 0;
+    while (cycle < 3) : (cycle += 1) {
+        var null_platform = platform.NullPlatform.init(.{});
+        var state: u8 = 0;
+        const embedded = try std.testing.allocator.create(EmbeddedApp);
+        defer std.testing.allocator.destroy(embedded);
+        embedded.initInPlace(.{
+            .context = &state,
+            .name = "embedded-font-cycle",
+            .source = platform.WebViewSource.html("<p>Fonts</p>"),
+        }, null_platform.platform());
+        defer embedded.deinit();
+        embedded.runtime.options.allocator = std.testing.allocator;
+
+        try embedded.start();
+        try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+        try std.testing.expectEqual(@as(usize, 1), embedded.runtime.registeredCanvasFontCount());
+        try embedded.stop();
+    }
+}
+
+test "embedded app deinit is idempotent" {
+    var null_platform = platform.NullPlatform.init(.{});
+    var state: u8 = 0;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
+    embedded.initInPlace(.{
+        .context = &state,
+        .name = "embedded-deinit-twice",
+        .source = platform.WebViewSource.html("<p>Fonts</p>"),
+    }, null_platform.platform());
+    embedded.runtime.options.allocator = std.testing.allocator;
+    try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+
+    // The documented idiom is `defer embedded.deinit()`, which must
+    // compose with an explicit early teardown: the second call is a
+    // no-op, never a double free.
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), embedded.runtime.registeredCanvasFontCount());
+    embedded.deinit();
+}
+
+test "mobile C ABI destroy returns registered font bytes through the embedded deinit" {
+    const app = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    errdefer native_sdk_app_destroy(app);
+
+    const self = mobileApp(app).?;
+    self.embedded.runtime.options.allocator = std.testing.allocator;
+    try self.embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), self.embedded.runtime.registeredCanvasFontCount());
+
+    // `native_sdk_app_destroy` is the shim's whole teardown: it routes
+    // through `EmbeddedApp.deinit` (one lifecycle owner), so the
+    // leak-checked font bytes must come back here.
+    native_sdk_app_destroy(app);
+}
+
 test "mobile C ABI can load packaged asset source" {
     const app = native_sdk_app_create() orelse return error.TestUnexpectedResult;
     defer native_sdk_app_destroy(app);

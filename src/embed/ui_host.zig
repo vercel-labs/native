@@ -174,9 +174,10 @@ pub fn UiAppHost(comptime AppDef: type) type {
             host.disableAutomation(self);
             self.render_memo.deinit();
             self.ui.deinit();
-            // Registered canvas fonts are heap-owned by the embedded
-            // runtime; return them before the host storage goes.
-            self.embedded.runtime.deinit();
+            // One lifecycle owner: the embedded app's own deinit returns
+            // its heap-owned registrations (registered canvas font
+            // bytes) before the host storage goes.
+            self.embedded.deinit();
             std.heap.page_allocator.destroy(self);
         }
 
