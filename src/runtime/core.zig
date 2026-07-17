@@ -180,8 +180,9 @@ pub const DispatchErrorPolicy = enum { degrade, propagate };
 pub const Runtime = struct {
     options: Options,
     /// The allocator that owns every runtime-lifetime heap allocation
-    /// (registered canvas font bytes, adopted media-surface texture
-    /// buffers). Captured from `Options.allocator` at init precisely
+    /// (registered canvas font bytes, registered canvas image slot
+    /// buffers, adopted media-surface texture buffers). Captured from
+    /// `Options.allocator` at init precisely
     /// because `options` is public and mutable: allocation and free of
     /// owned storage can be a whole runtime lifetime apart, and they
     /// must resolve through ONE allocator identity. Mutating
@@ -361,11 +362,18 @@ pub const Runtime = struct {
     canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
-    /// metadata, the per-slot pixel pool, and the `ReferenceImage` scratch
-    /// the frame planner hands to renderers each plan.
+    /// metadata, the per-slot pixel buffers, and the `ReferenceImage`
+    /// scratch the frame planner hands to renderers each plan. Each
+    /// slot's buffer is ONE lazy slot-budget allocation from the frozen
+    /// `owned_allocator` at the slot's first registration (freed only by
+    /// `deinit`; unregister compaction swaps pointers and keeps vacated
+    /// buffers for reuse) — zero registered images cost zero bytes,
+    /// where an embedded pool at the budget would put 16 x 1 MiB =
+    /// 16 MiB in EVERY Runtime, the media-texture-pool regression's
+    /// twin.
     canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
-    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
+    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][]u8 = [_][]u8{&.{}} ** canvas_limits.max_registered_canvas_images,
     /// `ReferenceImage` scratch the frame planner hands to renderers
     /// each plan: the registered images plus the adopted media-surface
     /// textures (appended as `presentation_only` entries).
@@ -451,8 +459,9 @@ pub const Runtime = struct {
     }
 
     /// Release the runtime's heap-owned on-demand storage (registered
-    /// canvas font bytes and adopted media-surface texture buffers,
-    /// allocated from the init-frozen `owned_allocator`) and disarm the
+    /// canvas font bytes, registered canvas image slot buffers, and
+    /// adopted media-surface texture buffers, allocated from the
+    /// init-frozen `owned_allocator`) and disarm the
     /// media-surface wake bindings (a producer thread must never wake a
     /// dead host). Ends the runtime's life: parsed faces, atlas keys,
     /// measure providers, adopted textures, and the resource slices
@@ -472,6 +481,12 @@ pub const Runtime = struct {
             self.owned_allocator.free(entry.bytes);
         }
         self.canvas_font_count = 0;
+        for (&self.canvas_image_pixels) |*buffer| {
+            if (buffer.len != 0) self.owned_allocator.free(buffer.*);
+            buffer.* = &.{};
+        }
+        self.canvas_image_entries = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images;
+        self.canvas_image_count = 0;
         for (&self.media_surface_pixels) |*buffer| {
             if (buffer.len != 0) self.owned_allocator.free(buffer.*);
             buffer.* = &.{};
@@ -917,7 +932,7 @@ pub fn TestHarness() type {
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
             // The harness embeds the runtime's platform: deinit both
             // returns the runtime's heap-owned storage (registered font
-            // bytes, lazily allocated media buffers) to the leak-checked
+            // bytes, lazily allocated image and media buffers) to the leak-checked
             // test allocator AND disarms the wake bindings, so a
             // producer handle a test keeps past destroy (the orphan
             // tests) can never wake the freed host — the run loop's exit
@@ -933,7 +948,8 @@ pub fn TestHarness() type {
                 .platform = self.null_platform.platform(),
                 .trace_sink = self.trace_sink.sink(),
                 // On-demand runtime storage (registered font bytes,
-                // adopted media-surface texture buffers) routes through
+                // registered image slot buffers, adopted media-surface
+                // texture buffers) routes through
                 // the leak-checked test allocator (freed by `destroy`
                 // via Runtime.deinit), so a registration or adoption
                 // that leaks fails the test that made it.

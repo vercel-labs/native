@@ -2350,8 +2350,10 @@ pub fn Effects(comptime Msg: type) type {
         /// copied before this returns), not an effect: no Msg follows.
         /// Errors are the registry's (`error.InvalidImageId`,
         /// `error.InvalidImageDimensions`, `error.ImageTooLarge`,
-        /// `error.ImageRegistryFull`) plus `error.UnsupportedService`
-        /// when no registry is bound.
+        /// `error.ImageRegistryFull`, `error.OutOfMemory` — the slot's
+        /// lazy pixel buffer could not be allocated; the registry is
+        /// unchanged and the registration can be retried) plus
+        /// `error.UnsupportedService` when no registry is bound.
         pub fn registerImage(self: *Self, id: u64, width: usize, height: usize, rgba8: []const u8) anyerror!void {
             const binding = self.images orelse return error.UnsupportedService;
             return binding.register_fn(binding.context, id, width, height, rgba8);
