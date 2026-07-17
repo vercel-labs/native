@@ -26,8 +26,9 @@
 //   - `TextInputEvent`, `ScrollState`: Msg-arm PAYLOAD fields —
 //     `{ kind: "draft_edit"; edit: TextInputEvent }`,
 //     `{ kind: "scrolled"; scroll: ScrollState }`.
-//   - `FrameEvent`, `KeyEvent`: the wiring channels' parameter records —
-//     `frameMsg(model, frame: FrameEvent)`, `keyMsg(key: KeyEvent)`.
+//   - `FrameEvent`, `KeyEvent`, `PinchEvent`: the wiring channels'
+//     parameter records — `frameMsg(model, frame: FrameEvent)`,
+//     `keyMsg(key: KeyEvent)`, `pinchMsg(pinch: PinchEvent)`.
 //   - `ColorScheme`, `ChromeInsets`, `ChromeButtons`, `AudioState`: field
 //     types INSIDE the arm records the `appearanceMsg`/`chromeMsg`/audio
 //     routes name (the arms themselves stay inline unions of `kind` plus
@@ -70,6 +71,27 @@ export interface KeyEvent {
   readonly control: boolean;
   readonly alt: boolean;
   readonly super: boolean;
+}
+
+/// The pinch phase vocabulary — a NAMED begin/change/end alias (the host
+/// matches enum members by name, so this is the `phase` field's type in
+/// `pinchMsg`'s parameter record). A host-cancelled gesture folds into
+/// "end": pinch delivers incremental deltas the app applies as they
+/// arrive, so there is no transient state to roll back.
+export type PinchPhase = "begin" | "change" | "end";
+
+/// The pinch channel's record (`pinchMsg(pinch)`): the trackpad pinch
+/// gesture, phase-explicit. `scale` is the magnification DELTA for this
+/// event (nonzero only on "change"; the cumulative gesture scale is the
+/// running product of `1 + scale`), and `x`/`y` is the gesture centroid
+/// in view-local canvas points. Pinch is a view-global gesture — it never
+/// routes through widgets — so this is the honest home for timeline and
+/// canvas zoom. Only hosts with a pinch source emit it (macOS today).
+export interface PinchEvent {
+  readonly phase: PinchPhase;
+  readonly scale: number;
+  readonly x: number;
+  readonly y: number;
 }
 
 /// The appearance vocabulary — a NAMED light/dark alias (the host matches

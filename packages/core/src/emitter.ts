@@ -1171,7 +1171,7 @@ export class Emitter {
   }
 
   /// Validate the generated-wiring channel exports (`appearanceMsg`,
-  /// `chromeMsg`, `frameMsg`, `keyMsg`; `envMsgs` validates during its own
+  /// `chromeMsg`, `frameMsg`, `keyMsg`, `pinchMsg`; `envMsgs` validates during its own
   /// emission and `commandMsg` needs only its fn form): the wiring builds
   /// these host events structurally from the declarations, so a wrong
   /// shape must be a teaching NS1033 at check time — transpile-clean
@@ -1252,7 +1252,7 @@ export class Emitter {
       }
       if (ts.isFunctionDeclaration(stmt) && stmt.name && this.isExportedDecl(stmt)) {
         const name = stmt.name.text;
-        if (name !== "frameMsg" && name !== "keyMsg") continue;
+        if (name !== "frameMsg" && name !== "keyMsg" && name !== "pinchMsg") continue;
         const returnsMsgOrNull = ((): boolean => {
           if (!stmt.type) return false;
           const t = this.table.resolveTypeNode(stmt.type);
@@ -1281,7 +1281,7 @@ export class Emitter {
               "NS1033",
             );
           }
-        } else {
+        } else if (name === "keyMsg") {
           const paramT = stmt.parameters.length === 1 && stmt.parameters[0].type
             ? this.table.resolveTypeNode(stmt.parameters[0].type!)
             : null;
@@ -1297,6 +1297,38 @@ export class Emitter {
             this.fail(
               stmt,
               "`keyMsg` takes one `KeyEvent` parameter, exactly `{ key: string; shift: boolean; control: boolean; alt: boolean; super: boolean }`",
+              "NS1033",
+            );
+          }
+        } else {
+          // pinchMsg: { phase: <named "begin"|"change"|"end" alias>,
+          //   scale, x, y } — matched by NAME (the wiring maps the phase
+          //   enum by member name and widens the numbers).
+          const paramT = stmt.parameters.length === 1 && stmt.parameters[0].type
+            ? this.table.resolveTypeNode(stmt.parameters[0].type!)
+            : null;
+          const fields = paramT ? recordFields(paramT) : null;
+          const phase = fields ? fieldNamed(fields, "phase") : undefined;
+          const phaseEnum = phase && phase.type.k === "enum" ? this.table.enums.get(phase.type.name) : null;
+          const phaseOk =
+            phaseEnum !== null &&
+            phaseEnum !== undefined &&
+            phaseEnum.members.length === 3 &&
+            phaseEnum.members.includes("begin") &&
+            phaseEnum.members.includes("change") &&
+            phaseEnum.members.includes("end");
+          const ok =
+            fields !== null &&
+            fields.length === 4 &&
+            phaseOk &&
+            (["scale", "x", "y"] as const).every((n) => {
+              const f = fieldNamed(fields, n);
+              return f !== undefined && isNum(f.type.k);
+            });
+          if (!ok) {
+            this.fail(
+              stmt,
+              '`pinchMsg` takes one `PinchEvent` parameter, exactly `{ phase: PinchPhase; scale: number; x: number; y: number }` where PinchPhase is a named "begin" | "change" | "end" alias',
               "NS1033",
             );
           }

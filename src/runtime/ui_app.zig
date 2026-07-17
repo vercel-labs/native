@@ -537,6 +537,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// can never steal typing — a fallback that yields to every
             /// consuming widget can carry them safely.
             on_key: ?*const fn (keyboard: canvas.WidgetKeyboardEvent) ?MsgT = null,
+            /// Optional mapping from trackpad pinch gestures into
+            /// messages — the app-level gesture channel (the `on_key`
+            /// shape). Pinch deliberately bypasses the widget pipeline:
+            /// it is a view-global gesture (timeline/canvas zoom is an
+            /// app-level concern), delivered phase-explicit (`begin`,
+            /// `change`, `end`) with the per-event magnification DELTA
+            /// on `change` — the cumulative gesture scale is the running
+            /// product of `(1 + scale)` — and the centroid in view-local
+            /// canvas points. Only hosts with a pinch source emit these
+            /// (macOS today); everywhere else the channel simply never
+            /// fires.
+            on_pinch: ?*const fn (pinch: platform.PinchEvent) ?MsgT = null,
             /// Optional mapping from runtime timer events (started via
             /// `runtime.startTimer`) into messages. Framework-reserved timer
             /// ids (>= `platform.reserved_timer_id_base`) are handled
@@ -2770,6 +2782,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_change => |change_event| try self.handleWidgetChange(runtime, change_event),
                 .window_closed => |closed| try self.handleWindowClosed(runtime, closed),
                 .automation_provenance => |query| try self.handleProvenanceQuery(runtime, query),
+                // Raw gpu-surface input stays runtime-internal EXCEPT the
+                // pinch kinds, which surface through the app-level pinch
+                // channel (widget routing never claims a pinch).
+                .gpu_surface_input => |input_event| try self.handlePinch(runtime, input_event),
                 else => {},
             }
         }
@@ -3340,6 +3356,31 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (keyboard_event.keyboard.phase != .key_down) return;
             if (map(keyboard_event.keyboard)) |msg| {
                 try self.dispatch(runtime, keyboard_event.window_id, msg);
+            }
+        }
+
+        /// Trackpad pinch reaches the app as the view-global gesture
+        /// channel (`Options.on_pinch`): only the pinch kinds of the raw
+        /// gpu-surface input surface here — every other raw input kind
+        /// stays runtime-internal (widgets and the semantic Msg surface
+        /// already carry it). The Msg dispatch rides the same journaled
+        /// input event, so a recorded pinch replays to the identical
+        /// model.
+        fn handlePinch(self: *Self, runtime: *Runtime, input_event: platform.GpuSurfaceInputEvent) anyerror!void {
+            const map = self.options.on_pinch orelse return;
+            const phase: platform.PinchPhase = switch (input_event.kind) {
+                .pinch_begin => .begin,
+                .pinch_change => .change,
+                .pinch_end => .end,
+                else => return,
+            };
+            if (map(.{
+                .phase = phase,
+                .scale = input_event.scale,
+                .x = input_event.x,
+                .y = input_event.y,
+            })) |msg| {
+                try self.dispatch(runtime, input_event.window_id, msg);
             }
         }
 

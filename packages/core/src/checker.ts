@@ -795,7 +795,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions",
-    "commandMsg", "keyMsg", "frameMsg", "appearanceMsg", "chromeMsg", "envMsgs",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "appearanceMsg", "chromeMsg", "envMsgs",
     "viewUnbound",
   ]);
 
