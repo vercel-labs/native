@@ -34,7 +34,10 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 /// never touches (same loud timeout) — and both directions are refused
 /// up front by this handshake whenever a live snapshot exists.
 /// Snapshots without a `protocol=` field predate the handshake entirely.
-pub const version: u32 = 6;
+/// 7 = the `widget-pinch` verb (drive a trackpad pinch gesture as the
+/// real begin/change/end platform input events, journaled like every
+/// synthesized input).
+pub const version: u32 = 7;
 
 /// How many commands may sit in the dropbox queue at once. Automation
 /// drivers are scripts, not firehoses: the app drains one command per
@@ -93,6 +96,13 @@ pub const Action = enum {
     widget_drag,
     widget_wheel,
     widget_key,
+    /// `widget-pinch <view-label> <scale> [<x> <y>]`: drive a trackpad
+    /// pinch gesture against a gpu-surface view — the real
+    /// `pinch_begin`/`pinch_change`/`pinch_end` platform events, with
+    /// one change carrying `scale - 1` so the cumulative gesture scale
+    /// (the product of `1 + delta`) lands exactly on `<scale>`. The
+    /// centroid defaults to the view center.
+    widget_pinch,
     menu_command,
     shortcut,
     tray_action,
@@ -133,6 +143,7 @@ pub const Command = struct {
         if (std.mem.eql(u8, action_text, "widget-drag") and value.len > 0) return .{ .action = .widget_drag, .value = value };
         if (std.mem.eql(u8, action_text, "widget-wheel") and value.len > 0) return .{ .action = .widget_wheel, .value = value };
         if (std.mem.eql(u8, action_text, "widget-key") and value.len > 0) return .{ .action = .widget_key, .value = value };
+        if (std.mem.eql(u8, action_text, "widget-pinch") and value.len > 0) return .{ .action = .widget_pinch, .value = value };
         if (std.mem.eql(u8, action_text, "menu-command") and value.len > 0) return .{ .action = .menu_command, .value = value };
         if (std.mem.eql(u8, action_text, "shortcut") and value.len > 0) return .{ .action = .shortcut, .value = value };
         if (std.mem.eql(u8, action_text, "tray-action") and value.len > 0) return .{ .action = .tray_action, .value = value };
@@ -226,6 +237,13 @@ test "commands parse reload and wait" {
     const widget_key = try Command.parse("widget-key canvas tab");
     try std.testing.expectEqual(Action.widget_key, widget_key.action);
     try std.testing.expectEqualStrings("canvas tab", widget_key.value);
+    const widget_pinch = try Command.parse("widget-pinch canvas 1.5");
+    try std.testing.expectEqual(Action.widget_pinch, widget_pinch.action);
+    try std.testing.expectEqualStrings("canvas 1.5", widget_pinch.value);
+    const widget_pinch_at = try Command.parse("widget-pinch canvas 0.5 120 80");
+    try std.testing.expectEqual(Action.widget_pinch, widget_pinch_at.action);
+    try std.testing.expectEqualStrings("canvas 0.5 120 80", widget_pinch_at.value);
+    try std.testing.expectError(error.InvalidCommand, Command.parse("widget-pinch"));
     const menu_command = try Command.parse("menu-command app.refresh");
     try std.testing.expectEqual(Action.menu_command, menu_command.action);
     const shortcut = try Command.parse("shortcut app.refresh");

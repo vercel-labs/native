@@ -58,6 +58,19 @@ pub const AutomationWidgetKey = struct {
     modifiers: AutomationKeyModifiers = .{},
 };
 
+/// `widget-pinch <view-label> <scale> [<x> <y>]`: a trackpad pinch
+/// gesture against a gpu-surface view. `scale` is the CUMULATIVE gesture
+/// scale (1.5 zooms in 50%, 0.5 zooms out to half) — the dispatch
+/// synthesizes begin, one change carrying `scale - 1`, and end, so the
+/// product of `(1 + delta)` lands exactly on `scale`. The optional
+/// centroid is view-local canvas points; omitted, it defaults to the
+/// view center.
+pub const AutomationWidgetPinch = struct {
+    view_label: []const u8,
+    scale: f32,
+    point: ?geometry.PointF = null,
+};
+
 /// Modifier chord for automation key dispatch, mirroring
 /// `platform.ShortcutModifiers` field-for-field (automation stays
 /// platform-agnostic; the dispatch layer copies these across).
@@ -259,6 +272,24 @@ pub fn parseAutomationWidgetKey(value: []const u8) !AutomationWidgetKey {
     if (key_part.token.len == 0) return error.InvalidCommand;
     const chord = parseAutomationKeyChord(key_part.token);
     return .{ .view_label = view.token, .key = chord.key, .text = text, .modifiers = chord.modifiers };
+}
+
+pub fn parseAutomationWidgetPinch(value: []const u8) !AutomationWidgetPinch {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const scale_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    const scale = std.fmt.parseFloat(f32, scale_part.token) catch return error.InvalidCommand;
+    // A non-positive cumulative scale is not a gesture two fingers can
+    // perform (the product of 1 + delta stays positive); refuse loudly.
+    if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidCommand;
+    const x_part = takeAutomationToken(scale_part.rest) orelse {
+        return .{ .view_label = view.token, .scale = scale };
+    };
+    const y_part = takeAutomationToken(x_part.rest) orelse return error.InvalidCommand;
+    if (takeAutomationToken(y_part.rest) != null) return error.InvalidCommand;
+    const x = std.fmt.parseFloat(f32, x_part.token) catch return error.InvalidCommand;
+    const y = std.fmt.parseFloat(f32, y_part.token) catch return error.InvalidCommand;
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return error.InvalidCommand;
+    return .{ .view_label = view.token, .scale = scale, .point = geometry.PointF.init(x, y) };
 }
 
 pub fn parseAutomationWidgetPointerDrag(value: []const u8) !AutomationWidgetPointerDrag {

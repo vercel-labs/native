@@ -99,6 +99,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         const value = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-key", value);
+    } else if (std.mem.eql(u8, command, "widget-pinch")) {
+        if (args.len != 3 and args.len != 5) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
+        defer allocator.free(value);
+        try sendCommand(allocator, io, "widget-pinch", value);
     } else if (std.mem.eql(u8, command, "shortcut")) {
         if (args.len != 2) return usage();
         try sendCommand(allocator, io, "shortcut", args[1]);
@@ -447,6 +452,7 @@ fn printUsage() void {
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
         \\  widget-wheel <view-label> <widget-id> <delta-y>
         \\  widget-key <view-label> <key> [text]
+        \\  widget-pinch <view-label> <scale> [x y]   (trackpad pinch: cumulative scale, e.g. 1.5 zooms in; centroid defaults to the view center)
         \\  shortcut <id>
         \\  tray-action <item-id>   (status-item dropdown row; snapshots print tray-item #id)
         \\  focus <view-label>

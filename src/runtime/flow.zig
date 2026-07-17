@@ -39,6 +39,7 @@ const parseAutomationProvenanceTarget = automation_commands.parseAutomationProve
 const parseAutomationWidgetWheel = automation_commands.parseAutomationWidgetWheel;
 const parseAutomationWidgetContextMenuItem = automation_commands.parseAutomationWidgetContextMenuItem;
 const parseAutomationWidgetKey = automation_commands.parseAutomationWidgetKey;
+const parseAutomationWidgetPinch = automation_commands.parseAutomationWidgetPinch;
 const parseAutomationWidgetPointerDrag = automation_commands.parseAutomationWidgetPointerDrag;
 const parseAutomationResizeCommand = automation_commands.parseAutomationResizeCommand;
 const parseAutomationTrayItemId = automation_commands.parseAutomationTrayItemId;
@@ -816,6 +817,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .widget_drag => "automation.widget_drag",
                 .widget_wheel => "automation.widget_wheel",
                 .widget_key => "automation.widget_key",
+                .widget_pinch => "automation.widget_pinch",
                 .tray_action => "automation.tray_action",
                 .provenance => "automation.provenance",
                 else => "automation.command",
@@ -876,6 +878,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .widget_key => {
                     try AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, try parseAutomationWidgetKey(command.value));
+                },
+                .widget_pinch => {
+                    try AutomationWidgetMethods().dispatchAutomationWidgetPinch(self, app, try parseAutomationWidgetPinch(command.value));
                 },
                 .menu_command => {
                     try dispatchPlatformEvent(self, app, .{ .menu_command = .{

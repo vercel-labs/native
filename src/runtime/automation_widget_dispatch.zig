@@ -284,6 +284,51 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             } });
         }
 
+        /// Drive a trackpad pinch through the real platform-event path:
+        /// `pinch_begin`, one `pinch_change` carrying `scale - 1` (so
+        /// the cumulative product of `1 + delta` lands exactly on the
+        /// commanded scale), and `pinch_end`, all at the same centroid.
+        /// Plain input synthesis, the `widget-key` discipline: every
+        /// event journals as itself and replays through the same
+        /// dispatch — no accessibility-action record, because pinch is
+        /// not a widget verb (it never routes into the widget tree; the
+        /// app hears it through the pinch channel).
+        pub fn dispatchAutomationWidgetPinch(self: *Runtime, app: runtime_api.App(Runtime), pinch: automation_commands.AutomationWidgetPinch) anyerror!void {
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, pinch.view_label);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const point = pinch.point orelse geometry.PointF.init(
+                self.views[view_index].gpu_size.width / 2,
+                self.views[view_index].gpu_size.height / 2,
+            );
+            const timestamp_ns = automationInputTimestampNs();
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_begin,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_change,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .scale = pinch.scale - 1,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_end,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+            } });
+        }
+
         pub fn dispatchAutomationWidgetPointerDrag(self: *Runtime, app: runtime_api.App(Runtime), drag: AutomationWidgetPointerDrag) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, drag.target);
             const layout = self.views[view_index].widgetLayoutTree();
