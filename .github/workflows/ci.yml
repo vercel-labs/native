@@ -112,6 +112,16 @@ jobs:
       # include path, or a conformance error in the embedded layer — is a
       # compile failure here, not a silent WebViewNotFound at runtime.
       - run: zig build test-webview-system-link -Dplatform=windows
+      # The registered-font receipt, natively on Windows: runs the
+      # font-registry suite — registration validation, the glyph-budget
+      # gate, present/reference pixel parity, and the Chinese-receipt
+      # test that registers the committed subsetted Noto Sans SC through
+      # the app-fonts seam and proves the rendered string is real glyphs,
+      # not tofu — on real Windows, not under emulation. The font
+      # pipeline is platform-neutral Zig, so this lane pins that neutral
+      # truth on a Windows host (the Linux run lives in the Zig Core
+      # lane's `zig build test`).
+      - run: zig build test-canvas-fonts
 
   cef-platform-tooling:
     name: CEF Platform Tooling

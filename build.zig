@@ -916,6 +916,15 @@ pub fn build(b: *std.Build) void {
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
         addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);
     }
+    // The font-registry suite as its own step so CI lanes on real
+    // Windows hardware can run it natively: the whole font pipeline
+    // (TrueType parsing, glyph rasterization, the reference renderer)
+    // is platform-neutral Zig, and this suite's Chinese-receipt test
+    // registers a committed CJK face through the app-fonts seam and
+    // proves the rendered string is real glyphs, not tofu — running it
+    // on a Windows runner makes that a Windows-native receipt. The same
+    // tests also run inside `zig build test` via the canvas-frame shard.
+    addTestStep(b, "test-canvas-fonts", "Run the runtime font-registry tests (includes the registered-CJK Chinese receipt)", filteredTestArtifact(b, desktop_mod, "canvas-fonts-tests", &.{"runtime.canvas_font_tests.test"}));
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
     addTestStep(b, "test-automation-cli", "Run native automate CLI tests", automation_cli_tests);
     addTestStep(b, "test-markup-cli", "Run native markup CLI tests", markup_cli_tests);

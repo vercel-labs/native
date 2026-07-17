@@ -642,6 +642,139 @@ test "ui app declared font failures are teaching errors, not crashes or silent f
     try std.testing.expectEqual(first_errors, harness.runtime.dispatchErrorTotal());
 }
 
+// ---------------------------------------------- the Chinese receipt
+
+/// Committed CJK fixture: Noto Sans SC (OFL — the license rides beside
+/// the file in testdata/fonts/OFL.txt), instanced at wght=400 from the
+/// Google Fonts variable TrueType build and subsetted to exactly the
+/// receipt string's four ideographs plus notdef (2.2 KB — the license
+/// permits subsetting; full font binaries stay out of the repo). The
+/// subset keeps the format-4 unicode cmap, real `glyf` outlines, and
+/// the full font's truthful `maxp` declaration (584 points / 84
+/// contours — past the old Latin-sized budgets, inside the CJK-sized
+/// ones), so registration exercises the real gate and rendering inks
+/// real Han ideograph outlines, deterministically, on every CI host.
+const cjk_receipt_bytes = @embedFile("testdata/fonts/NotoSansSC-Receipt.ttf");
+
+/// 你好世界 — "Hello, world".
+const cjk_receipt_text = "\u{4F60}\u{597D}\u{4E16}\u{754C}";
+
+fn cjkAppView(ui: *FontApp.Ui, model: *const FontAppModel) FontApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, cjk_receipt_text),
+    });
+}
+
+test "the Chinese receipt: a scaffold-shaped app registers a CJK face and renders real glyphs, not tofu" {
+    const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 200) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    // The scaffold shape: fonts declared on Options.fonts, tokens
+    // pointing the typography face slot at the registered id, Chinese
+    // text in the view.
+    const fonts = [_]FontApp.FontRegistration{.{
+        .id = registered_font_id,
+        .name = "NotoSansSC-Receipt.ttf",
+        .ttf = cjk_receipt_bytes,
+    }};
+    var options = fontAppOptions(&fonts);
+    options.view = cjkAppView;
+    const app_state = try std.testing.allocator.create(FontApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = FontApp.init(std.testing.allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = font_app_canvas_label,
+        .size = geometry.SizeF.init(240, 200),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasFontCount());
+
+    // Per-glyph receipt: every ideograph resolves to its own real glyph
+    // in the registered face (the bundled face maps NONE of them — the
+    // exact gap the registration closes) and rasterizes with nonzero
+    // ink at body and headline sizes.
+    const face = harness.runtime.registeredCanvasFontFace(registered_font_id).?;
+    const InkCounter = struct {
+        covered: usize = 0,
+        pub fn pixel(self: *@This(), x: i32, y: i32, coverage: f32) void {
+            _ = x;
+            _ = y;
+            if (coverage > 0) self.covered += 1;
+        }
+    };
+    var seen_glyphs: [4]u16 = undefined;
+    var index: usize = 0;
+    var glyph_count: usize = 0;
+    while (index < cjk_receipt_text.len) : (glyph_count += 1) {
+        const len = try std.unicode.utf8ByteSequenceLength(cjk_receipt_text[index]);
+        const codepoint = try std.unicode.utf8Decode(cjk_receipt_text[index .. index + len]);
+        index += len;
+
+        try std.testing.expectEqual(@as(u16, 0), canvas.font_ttf.geist_regular.glyphIndex(codepoint));
+        const glyph = face.glyphIndex(codepoint);
+        try std.testing.expect(glyph != 0);
+        // cmap distinguishes the codepoints — four ideographs, four
+        // distinct glyphs, never one shared fallback shape.
+        for (seen_glyphs[0..glyph_count]) |seen| try std.testing.expect(seen != glyph);
+        seen_glyphs[glyph_count] = glyph;
+
+        for ([_]f32{ 16, 40 }) |size| {
+            const scale = size / face.units_per_em;
+            var builder = canvas.vector.PathBuilder(2048){};
+            try face.glyphOutline(glyph, .{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = 4, .ty = size }, &builder);
+            try std.testing.expect(builder.slice().len > 0);
+            var counter = InkCounter{};
+            try canvas.vector.fillPath(
+                builder.slice(),
+                canvas.Affine.identity(),
+                .nonzero,
+                canvas.vector.default_tolerance,
+                .{ .x0 = 0, .y0 = 0, .x1 = 64, .y1 = 64 },
+                &counter,
+            );
+            try std.testing.expect(counter.covered > 0);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), glyph_count);
+
+    // Layout measures the ideographs with the registered face's own
+    // advances, so measured line breaking agrees with the inked glyphs.
+    const provider = harness.runtime.textMeasureProvider().?;
+    try std.testing.expect(provider.measureWidth(registered_font_id, 16.0, cjk_receipt_text) > 0);
+
+    // End-to-end pixels through the deterministic reference renderer —
+    // the same path Windows and Linux present. The registered face
+    // draws the string as real outlines; the same view under the
+    // bundled face can only draw notdef boxes, so the two screenshots
+    // MUST differ. That difference is the receipt: the Chinese text on
+    // screen came from the registered face, not tofu.
+    const registered_shot = try fontFixtureScreenshot(harness, std.testing.allocator, registered_font_id);
+    defer std.testing.allocator.free(registered_shot);
+    const tofu_shot = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(tofu_shot);
+    var nonblank = false;
+    var pixel: usize = 0;
+    while (pixel + 4 <= registered_shot.len) : (pixel += 4) {
+        if (registered_shot[pixel + 3] != 0 and (registered_shot[pixel] != 0 or registered_shot[pixel + 1] != 0 or registered_shot[pixel + 2] != 0)) {
+            nonblank = true;
+            break;
+        }
+    }
+    try std.testing.expect(nonblank);
+    try std.testing.expect(!std.mem.eql(u8, registered_shot, tofu_shot));
+}
+
 test "ui app fonts option surfaces the glyph-budget refusal as a teaching error" {
     const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 200) });
     defer harness.destroy(std.testing.allocator);
