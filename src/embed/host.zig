@@ -777,13 +777,12 @@ pub const MobileHostApp = struct {
 
     pub fn destroy(self: *MobileHostApp) void {
         disableAutomation(self);
-// A media producer the embedding app keeps past destroy must
-        // find its wake binding disarmed before the host storage (the
-        // embedded null platform included) is returned.
-        self.embedded.runtime.disarmMediaSurfaceWakes();
-        // One lifecycle owner: the embedded app's own deinit returns its
-        // heap-owned registrations (registered canvas font bytes) before
-        // the host storage goes.
+        // One lifecycle owner: the embedded app's own deinit returns
+        // the runtime's heap-owned storage (registered canvas font
+        // bytes, lazily allocated media-surface texture buffers) AND
+        // disarms the producer wake bindings, so a media producer the
+        // embedding app keeps past destroy can never wake the freed
+        // host storage (the embedded null platform included).
         self.embedded.deinit();
         std.heap.page_allocator.destroy(self);
     }

@@ -428,8 +428,10 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    // Fonts registered at startup are heap-owned by the runtime; return
-    // them before the runtime storage itself goes.
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
@@ -486,8 +488,10 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    // Fonts registered at startup are heap-owned by the runtime; return
-    // them before the runtime storage itself goes.
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
@@ -541,8 +545,10 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    // Fonts registered at startup are heap-owned by the runtime; return
-    // them before the runtime storage itself goes.
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
@@ -595,8 +601,10 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    // Fonts registered at startup are heap-owned by the runtime; return
-    // them before the runtime storage itself goes.
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
@@ -711,8 +719,10 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
-    // Fonts registered at startup are heap-owned by the runtime; return
-    // them before the runtime storage itself goes.
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
     defer runtime.deinit();
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,

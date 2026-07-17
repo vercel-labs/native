@@ -61,6 +61,7 @@
 //! session replays fingerprint-identical with NO producer attached.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_images = @import("canvas_images.zig");
@@ -73,6 +74,26 @@ pub const max_media_surface_pixel_bytes = canvas_limits.max_media_surface_pixel_
 /// by construction (no deinit), thread-safe, and available on every
 /// target — the effects executor's storage doctrine exactly.
 const process_allocator = std.heap.page_allocator;
+
+/// Atomic accessors for the slot ownership triple the reclaim scan
+/// reads WITHOUT a lock (`mediaSurfaceHasActiveSlot`): on threaded
+/// targets a plain access racing an atomic one is a data race in the
+/// Zig/LLVM memory model, so both sides go through these. On
+/// single-threaded targets (the docs wasm preview's
+/// wasm32-freestanding, which also lacks 64-bit atomics) there is no
+/// second thread to race and the plain access is exact.
+inline fn ownershipStore(comptime T: type, ptr: *T, value: T, comptime ordering: std.builtin.AtomicOrder) void {
+    if (builtin.single_threaded) {
+        ptr.* = value;
+    } else {
+        @atomicStore(T, ptr, value, ordering);
+    }
+}
+
+inline fn ownershipLoad(comptime T: type, ptr: *const T, comptime ordering: std.builtin.AtomicOrder) T {
+    if (builtin.single_threaded) return ptr.*;
+    return @atomicLoad(T, ptr, ordering);
+}
 
 /// Debug-only lock-discipline sentinel: how many media-surface spin
 /// mutexes (slot data or wake) THIS thread currently holds. The
@@ -206,7 +227,9 @@ var media_surface_slots: [max_media_surface_channels]MediaSurfaceSlot =
 var media_surface_tag_counter = std.atomic.Value(u64).init(1);
 
 /// Adopted-texture entry on the RUNTIME (the loop-thread half); pixels
-/// live in the runtime's slot pool at the same index.
+/// live in the runtime's lazily allocated per-entry buffer at the same
+/// index (`media_surface_pixels`, one frame-budget block from
+/// `options.allocator` at first adoption, freed by `Runtime.deinit`).
 pub const MediaSurfaceTextureEntry = struct {
     surface_id: u64 = 0,
     width: usize = 0,
@@ -323,7 +346,7 @@ pub const MediaSurfaceProducer = struct {
             if (!slot.active or slot.generation != self.generation) return;
             // Atomic for the lock-free reclaim scan's benefit, exactly
             // like the claim stores in acquire.
-            @atomicStore(bool, &slot.active, false, .release);
+            ownershipStore(bool, &slot.active, false, .release);
             slot.staged = false;
             slot.last_push_fingerprint = 0;
             slot.generation +%= 1;
@@ -396,10 +419,10 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                 // lock-free reader that sees it true sees a fully
                 // stamped claim on this slot's other two fields (the
                 // .release/.acquire pair orders them).
-                @atomicStore(u64, &slot.owner_tag, tag, .monotonic);
-                @atomicStore(u64, &slot.surface_id, surface_id, .monotonic);
+                ownershipStore(u64, &slot.owner_tag, tag, .monotonic);
+                ownershipStore(u64, &slot.surface_id, surface_id, .monotonic);
                 slot.generation +%= 1;
-                @atomicStore(bool, &slot.active, true, .release);
+                ownershipStore(bool, &slot.active, true, .release);
                 slot.staged = false;
                 slot.last_push_fingerprint = 0;
                 const generation = slot.generation;
@@ -457,10 +480,16 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                     // released channels; loud, never silent.
                     slot.staged = false;
                     slot.mutex.unlock();
-                    std.debug.print(
-                        "[native-sdk] media-surface texture registry full: dropping frames for surface {d} (max_media_surface_channels = {d})\n",
-                        .{ slot.surface_id, max_media_surface_channels },
-                    );
+                    // No stderr on freestanding targets (the docs' wasm
+                    // preview host): analyzing the print would drag
+                    // `std.Io.Threaded` in — the session recorder's
+                    // fail() guard, mirrored.
+                    if (comptime builtin.os.tag != .freestanding) {
+                        std.debug.print(
+                            "[native-sdk] media-surface texture registry full: dropping frames for surface {d} (max_media_surface_channels = {d})\n",
+                            .{ slot.surface_id, max_media_surface_channels },
+                        );
+                    }
                     continue;
                 };
                 if (self.media_surface_entries[entry_index].fingerprint == slot.staged_fingerprint) {
@@ -469,6 +498,36 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                     slot.staged = false;
                     slot.mutex.unlock();
                     continue;
+                }
+                if (self.media_surface_pixels[entry_index].len == 0) {
+                    // The entry's texture buffer, allocated LAZILY at
+                    // first adoption (one frame-budget block from the
+                    // runtime's allocator, freed by `Runtime.deinit`):
+                    // a runtime that never adopts a producer frame
+                    // carries zero media-texture bytes — an embedded
+                    // pool at this budget was 32 MiB in every Runtime,
+                    // the registered-font-pool regression's twin.
+                    self.media_surface_pixels[entry_index] = self.options.allocator.alloc(u8, max_media_surface_pixel_bytes) catch {
+                        // OOM degrades like the saturated registry:
+                        // this frame drops loudly, the channel stays
+                        // healthy, the next adoption retries. An entry
+                        // reclaim that already happened still removes
+                        // the reclaimed host texture (below, outside
+                        // the lock) — the entry now names the new
+                        // surface either way.
+                        slot.staged = false;
+                        slot.mutex.unlock();
+                        if (comptime builtin.os.tag != .freestanding) {
+                            std.debug.print(
+                                "[native-sdk] media-surface texture buffer allocation failed: dropping frames for surface {d} ({d} bytes requested)\n",
+                                .{ slot.surface_id, max_media_surface_pixel_bytes },
+                            );
+                        }
+                        if (reclaimed_texture_id != 0) {
+                            self.options.platform.services.removeGpuSurfaceImage(reclaimed_texture_id) catch {};
+                        }
+                        continue;
+                    };
                 }
                 @memcpy(
                     self.media_surface_pixels[entry_index][0..slot.staged_byte_len],
@@ -636,9 +695,9 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         /// never a predecessor's torn remains.
         fn mediaSurfaceHasActiveSlot(tag: u64, surface_id: u64) bool {
             for (&media_surface_slots) |*slot| {
-                if (!@atomicLoad(bool, &slot.active, .acquire)) continue;
-                if (@atomicLoad(u64, &slot.owner_tag, .monotonic) != tag) continue;
-                if (@atomicLoad(u64, &slot.surface_id, .monotonic) != surface_id) continue;
+                if (!ownershipLoad(bool, &slot.active, .acquire)) continue;
+                if (ownershipLoad(u64, &slot.owner_tag, .monotonic) != tag) continue;
+                if (ownershipLoad(u64, &slot.surface_id, .monotonic) != surface_id) continue;
                 return true;
             }
             return false;

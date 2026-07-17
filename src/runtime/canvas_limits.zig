@@ -111,13 +111,21 @@ pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 // per-channel bound fits it exactly (8 MiB) and refuses 4K until the
 // format axis grows real zero-copy paths; 4 concurrent channels covers
 // a player plus a camera preview plus headroom, and a fifth acquire
-// fails loudly (`error.MediaSurfaceChannelsExhausted`). Memory is
-// fixed-capacity address space in the Runtime for the ADOPTED textures
-// (4 x 8 MiB = 32 MiB, pages touched only as channels adopt) plus the
-// same again in process-lived staging buffers allocated at first claim
-// and kept for the process's life — the mailbox a producer thread may
-// touch after its runtime died, which is why it can never be freed
-// (the effects executor's process-lifetime doctrine).
+// fails loudly (`error.MediaSurfaceChannelsExhausted`). Both bounds are
+// VALIDATION bounds plus per-USE allocation sizes, never Runtime-struct
+// reservations: an ADOPTED texture's buffer is one lazy frame-budget
+// allocation from the runtime's `options.allocator` at the entry's
+// first adoption (freed by `Runtime.deinit`), so a runtime with no
+// media producers carries zero media-texture bytes — an embedded pool
+// at this bound put 4 x 8 MiB = 32 MiB in EVERY Runtime, measured on
+// the docs wasm preview host (one Runtime per component tile, wasm
+// linear memory never overcommits) as 137.5 -> 169.5 MB per instance
+// before any producer existed, the registered-font-pool regression's
+// twin. The producer-side STAGING buffers are allocated at first claim
+// into process-lived module state and kept for the process's life —
+// the mailbox a producer thread may touch after its runtime died,
+// which is why they can never be freed (the effects executor's
+// process-lifetime doctrine).
 pub const max_media_surface_channels: usize = 4;
 pub const max_media_surface_pixel_bytes: usize = 8 * 1024 * 1024;
 

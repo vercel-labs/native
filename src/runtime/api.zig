@@ -384,13 +384,15 @@ pub fn App(comptime Runtime: type) type {
 
 pub const Options = struct {
     platform: platform.Platform,
-    /// Allocator for the runtime's on-demand registrations (registered
-    /// canvas font bytes — sized per file at registration, so a runtime
-    /// with no registered fonts allocates nothing; the fixed-capacity
-    /// per-view storage stays embedded in the Runtime struct). The
-    /// default suits process-lifetime runtimes; embedders that create
-    /// and destroy runtimes in one process (tests, the docs wasm
-    /// preview host) pass their own and call `Runtime.deinit`. The
+    /// Allocator for the runtime's on-demand storage (registered
+    /// canvas font bytes, sized per file at registration, and adopted
+    /// media-surface texture buffers, one frame-budget buffer per
+    /// texture entry allocated at first adoption — a runtime with no
+    /// registered fonts and no media producers allocates nothing; the
+    /// fixed-capacity per-view storage stays embedded in the Runtime
+    /// struct). The default suits process-lifetime runtimes; embedders
+    /// that create and destroy runtimes in one process (tests, the docs
+    /// wasm preview host) pass their own and call `Runtime.deinit`. The
     /// runtime captures this into its `owned_allocator` at init:
     /// mutating `options.allocator` on a live runtime retargets
     /// nothing — pick the owning allocator here, before init.
