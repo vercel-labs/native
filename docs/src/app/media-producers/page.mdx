@@ -35,6 +35,7 @@ producer.release();
 - **Any-thread pushes, teardown-safe.** `pushFrame` and `release` are callable from any thread and touch only process-lived channel memory. A producer that outlives its view — or the whole runtime — pushes into inert memory; it can never use-after-free. Pushes through a released handle report `error.MediaSurfaceReleased` loudly.
 - **RGBA8 today, the format axis is open.** Tightly-packed straight-alpha RGBA8 is the slice-0 format; BGRA, planar YUV, and zero-copy GPU handles are planned as additional entry points on the same channel.
 - **Bounded and loud.** Frames are bounded per channel (1080p RGBA8 fits; `error.FrameTooLarge` past it) and channels are bounded process-wide (`error.MediaSurfaceChannelsExhausted`); one live producer per surface id (`error.MediaSurfaceInUse`).
+- **GPU hosts composite; software hosts show the placeholder.** Textures reach the screen through the GPU packet pipeline. A host on the software pixel fallback renders through the deterministic reference path, which shows the placeholder by policy in this release.
 
 ## Determinism, honestly
 
