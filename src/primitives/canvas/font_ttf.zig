@@ -43,26 +43,42 @@ pub const Error = error{
 /// faces (Google Fonts TrueType builds, July 2026) so dense CJK renders
 /// as outlines, never block fallbacks:
 ///
-///   face                     maxPoints  maxContours  compDepth  compElems
-///   Geist Regular (bundled)      96         16           3          4
-///   Geist Mono (bundled)        116         16           1          3
-///   Noto Sans JP                520         84           0          0
-///   Noto Sans SC                584         84           0          0
-///   Noto Sans TC                685         87           0          0
-///   Noto Sans KR                479         61           0          0
-///   Noto Serif JP               465         40           0          0
-///   Yuji Mai (brush kanji)      738         22           1          3
+///   face                     maxPoints  maxContours  compPts  compCtrs  compDepth  compElems
+///   Geist Regular (bundled)      96         16          89        5        3          4
+///   Geist Mono (bundled)        116         16         104       10        1          3
+///   Noto Sans JP                520         84           0        0        0          0
+///   Noto Sans SC                584         84           0        0        0          0
+///   Noto Sans TC                685         87           0        0        0          0
+///   Noto Sans KR                479         61           0        0        0          0
+///   Noto Serif JP               465         40           0        0        0          0
+///   Yuji Mai (brush kanji)      738         22         198        5        1          3
 ///
 /// 1024 points / 128 contours cover the densest measured glyph (Yuji
 /// Mai's 738-point brush kanji; Noto Sans TC's 685) with ~1.4x headroom;
-/// the composite budgets already carry 1.3-2x over the deepest measured
-/// use (the bundled Geist's own accent stacking). Stack shape: the
-/// simple-glyph parse buffers (`flags`/`xs`/`ys`/`end_points`) total
-/// ~9.5 KiB and live in exactly ONE frame at a time — simple glyphs are
-/// leaves, so composite recursion stacks only the small component-walk
-/// frames (depth <= 4), never these arrays.
+/// the depth/element budgets carry 1.3-2x over the deepest measured
+/// use (the bundled Geist's own accent stacking).
+///
+/// The composite budgets bound a composite glyph's FLATTENED outline
+/// (`maxp.maxCompositePoints`/`maxCompositeContours`: totals across the
+/// whole component tree). They equal the simple budgets deliberately: a
+/// composite flattens through the same path sink and rides the same
+/// per-glyph path capacity as a simple glyph (the reference renderer
+/// sizes its builder as max over both forms), so "densest renderable
+/// glyph" is one answer, not two. Nested components could otherwise
+/// multiply — depth 4 of 8 elements is 8^4 leaves, far past any
+/// capacity — which is why these are gated at parse like the simple
+/// maxima, not left to render-time refusal. Measured worst composite:
+/// 198 points (Yuji Mai), 10 contours (Geist Mono) — 5-12x headroom.
+///
+/// Stack shape: the simple-glyph parse buffers
+/// (`flags`/`xs`/`ys`/`end_points`) total ~9.5 KiB and live in exactly
+/// ONE frame at a time — simple glyphs are leaves, so composite
+/// recursion stacks only the small component-walk frames (depth <= 4),
+/// never these arrays.
 pub const max_glyph_points: usize = 1024;
 pub const max_glyph_contours: usize = 128;
+pub const max_composite_points: usize = max_glyph_points;
+pub const max_composite_contours: usize = max_glyph_contours;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
 
@@ -159,6 +175,8 @@ pub const Face = struct {
         // `maxp` under-declares.
         if (try readU16(bytes, maxp_r.offset + 6) > max_glyph_points or
             try readU16(bytes, maxp_r.offset + 8) > max_glyph_contours or
+            try readU16(bytes, maxp_r.offset + 10) > max_composite_points or
+            try readU16(bytes, maxp_r.offset + 12) > max_composite_contours or
             try readU16(bytes, maxp_r.offset + 28) > max_composite_components or
             try readU16(bytes, maxp_r.offset + 30) > max_composite_depth)
         {
@@ -488,12 +506,22 @@ fn emitContour(transform: Affine, sink: anytype, flags: []const u8, xs: []const 
 pub const GlyphMaxima = struct {
     points: u16,
     contours: u16,
+    /// Flattened totals across a composite glyph's whole component tree
+    /// (`maxp.maxCompositePoints`/`maxCompositeContours`) — the maxima
+    /// the path builder actually receives when a composite renders, so
+    /// the gate must read them alongside the simple maxima or a
+    /// composite-heavy face would pass registration and overflow the
+    /// builder at render time.
+    composite_points: u16,
+    composite_contours: u16,
     component_elements: u16,
     component_depth: u16,
 
     pub fn withinBudgets(self: GlyphMaxima) bool {
         return self.points <= max_glyph_points and
             self.contours <= max_glyph_contours and
+            self.composite_points <= max_composite_points and
+            self.composite_contours <= max_composite_contours and
             self.component_elements <= max_composite_components and
             self.component_depth <= max_composite_depth;
     }
@@ -516,6 +544,8 @@ pub fn declaredGlyphMaxima(bytes: []const u8) ?GlyphMaxima {
         return .{
             .points = readU16(bytes, offset + 6) catch return null,
             .contours = readU16(bytes, offset + 8) catch return null,
+            .composite_points = readU16(bytes, offset + 10) catch return null,
+            .composite_contours = readU16(bytes, offset + 12) catch return null,
             .component_elements = readU16(bytes, offset + 28) catch return null,
             .component_depth = readU16(bytes, offset + 30) catch return null,
         };
@@ -576,8 +606,8 @@ fn diagnoseParseFailure(bytes: []const u8) []const u8 {
     if (declaredGlyphMaxima(bytes)) |maxima| {
         if (!maxima.withinBudgets()) {
             return std.fmt.comptimePrint(
-                "font declares glyph outlines denser than the renderer's budgets ({d} points / {d} contours per glyph, composites {d} deep of {d} components); past-budget glyphs would render as block fallbacks, so registration refuses the face",
-                .{ max_glyph_points, max_glyph_contours, max_composite_depth, max_composite_components },
+                "font declares glyph outlines denser than the renderer's budgets ({d} points / {d} contours per simple glyph, {d} points / {d} contours per flattened composite, composites {d} deep of {d} components); past-budget glyphs would render as block fallbacks, so registration refuses the face",
+                .{ max_glyph_points, max_glyph_contours, max_composite_points, max_composite_contours, max_composite_depth, max_composite_components },
             );
         }
     } else {

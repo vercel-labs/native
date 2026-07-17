@@ -397,6 +397,8 @@ fn appendPointMatchedComposite(glyf: *ByteBuilder, child: u16) void {
 const DeclaredMaxima = struct {
     points: u16,
     contours: u16,
+    composite_points: u16 = 0,
+    composite_contours: u16 = 0,
     component_elements: u16 = 0,
     component_depth: u16 = 0,
     maxp_version: u32 = 0x00010000,
@@ -449,7 +451,9 @@ fn buildSyntheticFont(declared: DeclaredMaxima, glyf_bytes: []const u8, loca_off
     font.appendU16(num_glyphs);
     font.appendU16(declared.points);
     font.appendU16(declared.contours);
-    font.appendZeros(18); // composite points/contours, zones..instruction sizes
+    font.appendU16(declared.composite_points);
+    font.appendU16(declared.composite_contours);
+    font.appendZeros(14); // zones..instruction sizes
     font.appendU16(declared.component_elements);
     font.appendU16(declared.component_depth);
 
@@ -578,6 +582,8 @@ test "synthetic composites at the depth and component budgets parse and outline"
     const font = buildSyntheticFont(.{
         .points = 4,
         .contours = 1,
+        .composite_points = 8 * 4, // the component fan, flattened
+        .composite_contours = 8,
         .component_elements = font_ttf.max_composite_components,
         .component_depth = font_ttf.max_composite_depth,
     }, glyf.slice(), &loca);
@@ -597,6 +603,61 @@ test "synthetic composites at the depth and component budgets parse and outline"
     try std.testing.expectEqual(@as(usize, 6 * font_ttf.max_composite_components), builder.slice().len);
 }
 
+test "a composite flattening to more points than any simple glyph renders within the derived path capacity" {
+    // The failure the composite gate exists to prevent: a face whose
+    // simple glyphs are modest but whose composites flatten far denser.
+    // Glyph 1: a 128-point ring (the face's densest simple glyph).
+    // Glyph 2: a composite fanning 8 offset copies of it — flattened
+    // 1024 points / 8 contours, exactly `max_composite_points`, eight
+    // times denser than any simple glyph in the face.
+    var glyf = ByteBuilder{};
+    var loca: [4]u32 = undefined;
+    loca[0] = 0;
+    loca[1] = 0;
+    appendSimpleGlyph(&glyf, 1, 128);
+    loca[2] = @intCast(glyf.len);
+    var components: [font_ttf.max_composite_components]Component = undefined;
+    for (&components, 0..) |*component, index| {
+        component.* = .{ .glyph = 1, .dx = @intCast(index * 40), .dy = 0 };
+    }
+    appendCompositeGlyph(&glyf, &components);
+    loca[3] = @intCast(glyf.len);
+    const font = buildSyntheticFont(.{
+        .points = 128,
+        .contours = 1,
+        .composite_points = @intCast(font_ttf.max_composite_points),
+        .composite_contours = 8,
+        .component_elements = font_ttf.max_composite_components,
+        .component_depth = 1,
+    }, glyf.slice(), &loca);
+
+    // Truthful at-budget composite maxima pass the gate...
+    const face = try font_ttf.Face.parse(font.slice());
+
+    // ...and the flattened outline fits a builder sized exactly like
+    // the reference renderer's glyph path capacity: points + 3*contours
+    // taken over max(simple budgets, composite budgets). Each ring
+    // emits moveTo + 128 lineTo + close, so the fan is 8 * 130 = 1040
+    // elements — past what the face's simple maxima alone could emit
+    // (130 + 3), inside the composite-aware bound.
+    const capacity = @max(
+        font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
+        font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
+    );
+    var builder = vector.PathBuilder(capacity){};
+    try face.glyphOutline(2, Affine.identity(), &builder);
+    try std.testing.expectEqual(@as(usize, 8 * 130), builder.slice().len);
+    try std.testing.expect(builder.slice().len > 128 + 3 * 1);
+
+    // The same fan rasterizes through the vector core.
+    var grid = Grid{};
+    const scale: f32 = 16.0 / face.units_per_em;
+    var raster_builder = vector.PathBuilder(capacity){};
+    try face.glyphOutline(2, .{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = 2, .ty = 20 }, &raster_builder);
+    try vector.fillPath(raster_builder.slice(), Affine.identity(), .nonzero, vector.default_tolerance, fullClip(), &grid);
+    try std.testing.expect(grid.inkCount() > 0);
+}
+
 test "a face declaring maxima beyond the budgets is refused at parse with a teaching" {
     var glyf = ByteBuilder{};
     var loca: [3]u32 = undefined;
@@ -608,18 +669,24 @@ test "a face declaring maxima beyond the budgets is refused at parse with a teac
     const over_budget = [_]DeclaredMaxima{
         .{ .points = font_ttf.max_glyph_points + 1, .contours = 1 },
         .{ .points = 4, .contours = font_ttf.max_glyph_contours + 1 },
+        .{ .points = 4, .contours = 1, .composite_points = font_ttf.max_composite_points + 1 },
+        .{ .points = 4, .contours = 1, .composite_contours = font_ttf.max_composite_contours + 1 },
         .{ .points = 4, .contours = 1, .component_elements = font_ttf.max_composite_components + 1 },
         .{ .points = 4, .contours = 1, .component_depth = font_ttf.max_composite_depth + 1 },
     };
     for (over_budget) |declared| {
         const font = buildSyntheticFont(declared, glyf.slice(), &loca);
         try std.testing.expectError(error.FontGlyphTooComplex, font_ttf.Face.parse(font.slice()));
-        // The teaching machinery names the refusal and the maxima stay
+        // The teaching machinery names the refusal — simple AND
+        // flattened-composite budgets by name — and the maxima stay
         // readable for callers that format the face's numbers.
         const reason = font_ttf.parseFailureReason(font.slice()).?;
         try std.testing.expect(std.mem.indexOf(u8, reason, "budgets") != null);
+        try std.testing.expect(std.mem.indexOf(u8, reason, "flattened composite") != null);
         const maxima = font_ttf.declaredGlyphMaxima(font.slice()).?;
         try std.testing.expect(!maxima.withinBudgets());
+        try std.testing.expectEqual(declared.composite_points, maxima.composite_points);
+        try std.testing.expectEqual(declared.composite_contours, maxima.composite_contours);
     }
 
     // The same font declared truthfully parses: the gate reads maxima,
@@ -681,6 +748,8 @@ test "declaredGlyphMaxima reads the bundled faces' true maxima" {
     const regular = font_ttf.declaredGlyphMaxima(font_ttf.geist_regular_bytes).?;
     try std.testing.expectEqual(@as(u16, 96), regular.points);
     try std.testing.expectEqual(@as(u16, 16), regular.contours);
+    try std.testing.expectEqual(@as(u16, 89), regular.composite_points);
+    try std.testing.expectEqual(@as(u16, 5), regular.composite_contours);
     try std.testing.expectEqual(@as(u16, 4), regular.component_elements);
     try std.testing.expectEqual(@as(u16, 3), regular.component_depth);
     try std.testing.expect(regular.withinBudgets());
@@ -688,6 +757,8 @@ test "declaredGlyphMaxima reads the bundled faces' true maxima" {
     const mono = font_ttf.declaredGlyphMaxima(font_ttf.geist_mono_bytes).?;
     try std.testing.expectEqual(@as(u16, 116), mono.points);
     try std.testing.expectEqual(@as(u16, 16), mono.contours);
+    try std.testing.expectEqual(@as(u16, 104), mono.composite_points);
+    try std.testing.expectEqual(@as(u16, 10), mono.composite_contours);
     try std.testing.expectEqual(@as(u16, 3), mono.component_elements);
     try std.testing.expectEqual(@as(u16, 1), mono.component_depth);
     try std.testing.expect(mono.withinBudgets());

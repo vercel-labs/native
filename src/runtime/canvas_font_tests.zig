@@ -260,6 +260,18 @@ fn overBudgetFontBytes(allocator: std.mem.Allocator) ![]u8 {
     return patched;
 }
 
+/// The bundled mono bytes with `maxp.maxCompositePoints` (offset 10)
+/// patched one past the flattened-composite budget: modest simple
+/// maxima, composite flattening the path builder could not hold — the
+/// exact face shape a simple-only gate would admit and then silently
+/// block at render time.
+fn overCompositeBudgetFontBytes(allocator: std.mem.Allocator) ![]u8 {
+    const patched = try allocator.dupe(u8, mono_bytes);
+    const maxp = maxpTableOffset(patched);
+    std.mem.writeInt(u16, patched[maxp + 10 ..][0..2], @intCast(canvas.font_ttf.max_composite_points + 1), .big);
+    return patched;
+}
+
 test "a face declaring glyphs denser than the budgets is refused at registration" {
     const harness = try startedGpuHarness(std.testing.allocator);
     defer harness.destroy(std.testing.allocator);
@@ -281,6 +293,37 @@ test "a face declaring glyphs denser than the budgets is refused at registration
     try std.testing.expect(!maxima.withinBudgets());
 
     // No partial slot: the honest twin registers under the same id.
+    try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasFontCount());
+}
+
+test "a face declaring flattened composites denser than the budgets is refused at registration" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    // Simple maxima untouched (well within budget) — only the
+    // flattened-composite declaration is over. A gate reading simple
+    // maxima alone admits this face; its composites then overflow the
+    // reference path builder at render time and degrade to blocks, the
+    // exact silent failure registration-time validation forbids.
+    const patched = try overCompositeBudgetFontBytes(std.testing.allocator);
+    defer std.testing.allocator.free(patched);
+
+    try std.testing.expectError(error.FontExceedsGlyphBudgets, harness.runtime.registerCanvasFont(registered_font_id, patched));
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasFontCount());
+
+    // The teaching names the composite budgets and the declared maxima
+    // expose the face's own composite numbers.
+    const reason = canvas.font_ttf.parseFailureReason(patched).?;
+    try std.testing.expect(std.mem.indexOf(u8, reason, "flattened composite") != null);
+    const maxima = canvas.font_ttf.declaredGlyphMaxima(patched).?;
+    try std.testing.expectEqual(@as(u16, @intCast(canvas.font_ttf.max_composite_points + 1)), maxima.composite_points);
+    try std.testing.expect(!maxima.withinBudgets());
+
+    // The unpatched twin registers: the gate reads the declaration, not
+    // the patch's collateral.
     try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasFontCount());
 }

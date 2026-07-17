@@ -47,11 +47,19 @@ const font_ttf = @import("font_ttf.zig");
 /// Element budget for one glyph outline, derived from the parser's
 /// glyph budgets so every glyph a parsed face maps fits: a contour
 /// emits at most one element per point plus a move, a closing quad, and
-/// a close (points + 3*contours = 1408). Stack shape: at 28 B per
-/// element this is ~39 KiB in `drawGlyphOutline`, next to the ~80 KiB
-/// edge accumulator `vector.fillPath` already stacks below it — one
-/// glyph is inked at a time, so neither multiplies.
-const reference_glyph_path_capacity: usize = font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours;
+/// a close (points + 3*contours), taken over BOTH glyph forms the gate
+/// admits — a simple glyph's maxima and a composite's flattened maxima
+/// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
+/// this builder actually receives when a composite renders). The
+/// budgets are currently equal, so the max is 1408 either way; the
+/// derivation keeps capacity honest if they ever diverge. Stack shape:
+/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`, next to
+/// the ~80 KiB edge accumulator `vector.fillPath` already stacks below
+/// it — one glyph is inked at a time, so neither multiplies.
+const reference_glyph_path_capacity: usize = @max(
+    font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
+    font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
+);
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
