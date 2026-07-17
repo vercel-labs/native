@@ -299,6 +299,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>The menu-bar lifecycle verbs: un-hide + activate the labeled window (the tray "Open" consequence, the counterpart to <code>close_policy = "hide"</code>), and the real graceful terminate</td>
     </tr>
     <tr>
+      <td><code>Cmd.imageLoad(id, source, &#123; event &#125;)</code></td>
+      <td>Load an image at runtime under the model-owned numeric ImageId your markup binds; one <code>event</code> result — <code>loaded</code> with the decoded width/height, or a failure class — see <a href="/dynamic-images">Dynamic Images</a></td>
+    </tr>
+    <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
       <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
     </tr>

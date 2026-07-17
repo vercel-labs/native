@@ -1,0 +1,102 @@
+import { CodeToggle } from "@/components/code-toggle";
+
+# Dynamic Images
+
+Load images at **runtime** — from disk or the network — decode them through the platform codec, and show them in views by id. `Cmd.imageLoad` is effects-as-data all the way down: your core names a model-owned `ImageId` and a source, the host does the I/O and the decode, and exactly one result Msg comes back — `loaded` with the decoded dimensions, or one honest failure class. Views bind the id; nothing in `update` ever touches a file, a socket, or a codec.
+
+Static images that ship with the app stay in [`app.zon`'s `.assets.images`](/app-zon) — read once at launch, registered before the first frame. This page is the **dynamic** half: cover art fetched from a CDN, a chart PNG a subprocess rendered, an avatar that arrives after login.
+
+## Load, then show
+
+The id is ordinary model data — pick it like an effect key. Issue the load, and write the id into the model **only when the result says `loaded`** (the store-on-success discipline): the view renders its fallback while the load is in flight and keeps it when the load failed, because an id of `0` — the no-image sentinel — draws nothing.
+
+<CodeToggle>
+
+```ts
+import { Cmd, asciiBytes, type ImageState } from "@native-sdk/core";
+
+export interface Model {
+  readonly cover: number; // 0 until the load lands
+  readonly coverError: ImageState | null;
+}
+
+export type Msg =
+  | { readonly kind: "show" }
+  | { readonly kind: "cover_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "show":
+      return [model, Cmd.imageLoad(21, {
+        path: asciiBytes("art/cover.png"),
+        url: asciiBytes("https://cdn.example.com/art/cover.png"),
+      }, { event: "cover_done" })];
+    case "cover_done":
+      if (msg.state === "loaded") return { ...model, cover: 21, coverError: null };
+      return { ...model, coverError: msg.state };
+  }
+}
+```
+
+```zig
+const Model = struct {
+    cover: canvas.ImageId = 0, // 0 until the load lands
+};
+
+// in update:
+.show => fx.loadImage(.{
+    .id = 21,
+    .path = "art/cover.png",
+    .url = "https://cdn.example.com/art/cover.png",
+    .on_result = Effects.imageMsg(.cover_done),
+}),
+.cover_done => |result| if (result.outcome == .loaded) {
+    model.cover = result.id;
+},
+```
+
+</CodeToggle>
+
+The view binds the same model id. Markup's `image` element is the display-only leaf for exactly this — the binding is required (an unbound `<image>` is dead markup), the id is always `{binding}` model data (never a literal), and avatars carry the same attribute with an initials fallback:
+
+```html
+<image image="{cover}" width="120" height="80" label="Cover art" />
+<avatar image="{avatar}" label="Octocat">OC</avatar>
+```
+
+The moment the result lands and `update` stores the id, every view referencing it repaints with the pixels — GPU caches re-upload off the changed content fingerprint, no invalidation calls. Zig views use `ui.image(.{ .image = model.cover, ... })`; both markup engines refuse a negative id binding at build time with a teaching message, never a trap.
+
+## The source cascade
+
+The source resolves the way `Cmd.audioPlay` resolves — local first, network last, with a verified cache between:
+
+1. **The local `path` is tried first.** A missing file falls through to `url` (when one is given); every other local failure is terminal — retrying a different source would mask the real problem.
+2. **A verified cache entry loads without the network.** A URL source checks its cache path before fetching; `expectedBytes` (when you know the size, e.g. from a manifest) is the integrity gate — an entry whose size disagrees is discarded and re-fetched.
+3. **The network fetch installs the cache behind it.** The bytes are fetched whole (no truncated delivery — a cut image can never decode), written beside the cache path, and atomically renamed into place only after the size verifies, so a partial download never occupies the cache name.
+
+Prefer **omitting** `cachePath` for URL sources: when the app wiring configures a caches directory (`TsUiApp`'s `image_cache_dir`; the app runner points it at the platform caches directory automatically), the host derives the conventional content-addressed path — `<caches>/images/<sha256[..16]>.<ext>` — from the URL itself. Your update never builds filesystem paths, replay re-derives the same path by construction, and clearing the cache is deleting one directory the OS already treats as reclaimable.
+
+## One result, honest classes
+
+Exactly one event arm dispatches per load — a four-field record matched by field name: `state`, `width`, `height`, `status`. `loaded` means the pixels are registered and drawable; everything else names what actually happened:
+
+- **Source classes** — `not_found` (missing local file, no url), `io_failed` (a local read failure), `connect_failed` / `tls_failed` / `protocol_failed` / `timed_out` (the fetch taxonomy, on the fetch machinery's own timeout), `http_status` (a non-2xx answer, with the status carried through — an error page is not an image, so the body is discarded).
+- **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`.
+- **Discipline classes** — `rejected` (an invalid id, no source at all, or a duplicate live id: one load per id at a time, the spawn rule — a load in flight is never replaced implicitly) and `cancelled`.
+
+## Limits, honestly
+
+Decode limits are the registered-image limits, fixed and loud: **16 slots** of **1 MiB decoded pixels** each (512×512 RGBA8 — avatar and cover-art scale, not photo scale). The encoded source is bounded at **1.25 MiB** from every source alike, and over-bound sources fail whole with `too_large` — never a silently cropped decode. Loaded pixels live in the existing registered-image storage; there is no separate pool to size. The framework bundles no codecs: bytes decode through CGImageSource on macOS, gdk-pixbuf on GTK, WIC on Windows, and the mobile hosts' embed image service — a host without one answers `unsupported`, never silence.
+
+For textures **produced** by your own renderer at video rates — a decoder, a camera, mpv — this is the wrong tool: that is the [media surface](/media-producers)'s dynamic texture channel. `imageLoad` is for images that exist as encoded bytes somewhere and should become long-lived registered pixels.
+
+## Recorded sessions replay byte-identical, offline
+
+The loaded bytes **are** the effect result, and the session journal treats them that way. When a recorded session performs an image load, the encoded source bytes are written — at effect-result time — into a content-addressed blob store beside the journal (`blobs/<sha256[..16]>` in the session directory), and the journal record carries the hash and length. Loading the same bytes twice stores one blob: content addressing is deduplication.
+
+Replay reads the blob, re-runs the same decode and registration with the recorded bytes, and delivers the recorded result — **byte-identical and fully offline**: the original file, the network, and the cache are never consulted, and the fingerprint checkpoints verify the replayed session against the recording frame by frame. A journal whose `blobs/` directory is missing or damaged refuses loudly (the bytes are verified against their address) rather than replaying a different session. The blob record kind is journal format **v6** — older journals are refused at the preamble with the standard re-record teaching, the format's usual honest break.
+
+```sh
+NATIVE_SDK_SESSION_RECORD=session/app.journal native run   # records blobs/ beside the journal
+NATIVE_SDK_SESSION_REPLAY=session/app.journal native run   # replays offline, verifying fingerprints
+```

@@ -28,6 +28,7 @@ export const navSections: NavSection[] = [
       { name: "TypeScript Cores", href: "/typescript" },
       { name: "Where Packages Go", href: "/typescript/packages" },
       { name: "Native UI", href: "/native-ui" },
+      { name: "Dynamic Images", href: "/dynamic-images" },
       { name: "State & Data Flow", href: "/state" },
       { name: "Theming", href: "/theming" },
       { name: "Fonts", href: "/fonts" },

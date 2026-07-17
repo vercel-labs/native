@@ -11,6 +11,7 @@ export const PAGE_TITLES: Record<string, string> = {
   typescript: "TypeScript Cores",
   "typescript/packages": "Where Packages Go",
   "native-ui": "Native UI",
+  "dynamic-images": "Dynamic Images",
   state: "State & Data Flow",
   theming: "Theming",
   fonts: "Fonts",
