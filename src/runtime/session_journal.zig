@@ -81,7 +81,12 @@ pub const magic = "NSDKSJNL";
 /// `pinch_begin`/`pinch_change`/`pinch_end` input kinds (codes 12-14);
 /// v6 added the `hidden` flag to window-frame records (the
 /// `close_policy = .hide` window state — a layout change every v5
-/// reader would misparse).
+/// reader would misparse) and the `.image` effect-result kind
+/// (code 11) with its outcome/dimension fields and the blob-store
+/// content address (`image_blob_hash`/`image_blob_len`) appended to
+/// every effect record — a v5 reader would have called an image
+/// record's kind code corrupt and misparsed the longer layouts, so it
+/// refuses the skew at the preamble instead.
 pub const format_version: u32 = 6;
 
 // ------------------------------------------------------------- budgets
@@ -751,25 +756,27 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             if (try cursor.readBool()) {
                 composition_cursor = std.math.cast(usize, try cursor.readInt(u64)) orelse return error.JournalCorrupt;
             }
-            break :blk .{ .gpu_surface_input = .{
-                .window_id = window_id,
-                .label = label,
-                .kind = kind,
-                .timestamp_ns = timestamp_ns,
-                .pointer_id = pointer_id,
-                .x = x,
-                .y = y,
-                .button = button,
-                .pressure = pressure,
-                .delta_x = delta_x,
-                .delta_y = delta_y,
-                .key = key,
-                .text = text,
-                .composition_cursor = composition_cursor,
-                .modifiers = try readModifiers(&cursor),
-                // v5: the pinch magnification delta (0 on non-pinch kinds).
-                .scale = try cursor.readF32(),
-            } };
+            break :blk .{
+                .gpu_surface_input = .{
+                    .window_id = window_id,
+                    .label = label,
+                    .kind = kind,
+                    .timestamp_ns = timestamp_ns,
+                    .pointer_id = pointer_id,
+                    .x = x,
+                    .y = y,
+                    .button = button,
+                    .pressure = pressure,
+                    .delta_x = delta_x,
+                    .delta_y = delta_y,
+                    .key = key,
+                    .text = text,
+                    .composition_cursor = composition_cursor,
+                    .modifiers = try readModifiers(&cursor),
+                    // v5: the pinch magnification delta (0 on non-pinch kinds).
+                    .scale = try cursor.readF32(),
+                },
+            };
         },
         .gpu_surface_scroll_driver => blk: {
             const window_id = try cursor.readInt(u64);
@@ -850,6 +857,13 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
     try cursor.writeBytes(&record.audio_bands);
+    // v6: image terminals — outcome, decoded dimensions, and the blob
+    // store content address of the journaled source bytes.
+    try cursor.writeEnum(record.image_outcome);
+    try cursor.writeInt(u64, record.image_width);
+    try cursor.writeInt(u64, record.image_height);
+    try cursor.writeBytes(&record.image_blob_hash);
+    try cursor.writeInt(u64, record.image_blob_len);
     return buffer[0..cursor.len];
 }
 
@@ -882,6 +896,12 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_buffering = try cursor.readBool(),
     };
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
+    // v6: image terminals.
+    record.image_outcome = try cursor.readEnum(runtime_effects.EffectImageOutcome);
+    record.image_width = try cursor.readInt(u64);
+    record.image_height = try cursor.readInt(u64);
+    @memcpy(&record.image_blob_hash, try cursor.readBytes(record.image_blob_hash.len));
+    record.image_blob_len = try cursor.readInt(u64);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }

@@ -21,6 +21,7 @@ test {
     _ = @import("effects_file_tests.zig");
     _ = @import("effects_clipboard_tests.zig");
     _ = @import("effects_audio_tests.zig");
+    _ = @import("effects_image_tests.zig");
     _ = @import("effects_host_tests.zig");
     _ = @import("ts_core_host_tests.zig");
     _ = @import("clock.zig");

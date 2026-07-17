@@ -229,6 +229,10 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
+        // Image rejections are loop-side validation that refuses again;
+        // every other terminal — loaded bytes, source and decode
+        // failures — is an external input and must be fed.
+        .image => record.image_outcome == .rejected,
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.

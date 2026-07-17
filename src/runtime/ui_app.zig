@@ -1102,6 +1102,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // envMsgs dispatch consumes the queue on the
                     // replayed installing frame (zero env reads).
                     .env => try self.effects.pushReplayEnv(record.stderr_tail, record.payload),
+                    // `.image` records deliver the RECORDED terminal
+                    // verbatim (byte-identical Msg stream on any host)
+                    // and re-register the journaled source bytes —
+                    // resolved from the blob store into `payload` by
+                    // the replayer — best-effort for presentation.
+                    .image => try self.effects.feedImageResult(
+                        record.key,
+                        record.image_outcome,
+                        record.image_width,
+                        record.image_height,
+                        record.status,
+                        record.payload,
+                    ),
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every
                     // other audio kind rides the plain shape.
