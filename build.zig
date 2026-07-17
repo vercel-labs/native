@@ -536,6 +536,10 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-shell-manifest-contracts", "Verify app.zon docs describe shell compatibility window labels", &.{
         .{ .path = "docs/src/app/app-zon/page.mdx", .pattern = "labels must stay unique across both lists" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-media-producer-contracts", "Verify the media producer docs' typed callback stays mirrored by the compile-shaped pin in media_surface_tests.zig", &.{
+        .{ .path = "docs/src/app/media-producers/page.mdx", .pattern = "producer: media.MediaSurfaceProducer" },
+        .{ .path = "src/runtime/media_surface_tests.zig", .pattern = "producer: media.MediaSurfaceProducer" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-js-view-helper-contracts", "Verify injected view helpers support label-first updates", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "update:function(options,patch)" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "update:function(options,patch)" },

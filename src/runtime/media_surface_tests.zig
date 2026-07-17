@@ -808,6 +808,79 @@ test "a session recorded with a live producer replays fingerprint-identical with
     }
 }
 
+// ---------------------------------------------------- docs example pin
+
+/// The public SDK root, exactly as an app or a toolkit extension
+/// imports it: the docs' producer recipe must be writable against THESE
+/// exports, not module-internal paths.
+const media = @import("../root.zig");
+
+test "docs example: the typed producer callback is writable against the public exports" {
+    // docs/src/app/media-producers/page.mdx, "The mpv shape": the docs
+    // machinery checks prose patterns, not Zig fences (the
+    // test-docs-media-producer-contracts step pins the signature in the
+    // page AND in this file), so this test is the compile-shaped mirror
+    // of the example — the same callback signature, driven against a
+    // real claim so the pin is behavior, not just types.
+    const Mpv = struct {
+        pixels: [16]u8,
+        stopped: bool = false,
+
+        const Frame = struct { width: usize, height: usize, pixels: []const u8 };
+
+        fn renderFrameRgba8(self: *@This()) Frame {
+            return .{ .width = 2, .height = 2, .pixels = &self.pixels };
+        }
+
+        fn stop(self: *@This()) void {
+            self.stopped = true;
+        }
+    };
+    const Glue = struct {
+        // The docs example's exact signature (`media` being the app's
+        // alias for the SDK root).
+        fn onMpvFrame(player: *Mpv, producer: media.MediaSurfaceProducer) void {
+            const frame = player.renderFrameRgba8();
+            producer.pushFrame(frame.width, frame.height, frame.pixels) catch |err| switch (err) {
+                error.MediaSurfaceReleased => player.stop(), // the app tore the surface down
+                else => {},
+            };
+        }
+    };
+
+    // The handle `Runtime.acquireMediaSurfaceProducer` returns IS the
+    // exported type, at the SDK root and the runtime root alike (and
+    // the channel budgets ride beside it, like the image registry's).
+    comptime std.debug.assert(media.MediaSurfaceProducer == media_surface.MediaSurfaceProducer);
+    comptime std.debug.assert(media.runtime.MediaSurfaceProducer == media.MediaSurfaceProducer);
+    comptime std.debug.assert(media.max_media_surface_channels == canvas_limits.max_media_surface_channels);
+    comptime std.debug.assert(media.max_media_surface_pixel_bytes == canvas_limits.max_media_surface_pixel_bytes);
+
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    var player: Mpv = .{ .pixels = solidFrame(.{ 9, 8, 7, 255 }) };
+    const producer: media.MediaSurfaceProducer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    Glue.onMpvFrame(&player, producer);
+    try dispatchFrame(harness, app, 1);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
+    try std.testing.expect(!player.stopped);
+
+    // A released handle drives the example's teardown arm.
+    producer.release();
+    Glue.onMpvFrame(&player, producer);
+    try std.testing.expect(player.stopped);
+}
+
 // -------------------------------------------------- threads and teardown
 
 test "cross-thread pushes stage safely and the loop adopts the newest" {

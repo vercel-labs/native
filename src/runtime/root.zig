@@ -154,6 +154,15 @@ pub const RegisteredCanvasImage = runtime_canvas_images.RegisteredCanvasImage;
 pub const max_registered_canvas_images = runtime_canvas_images.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = runtime_canvas_images.max_registered_canvas_image_pixel_bytes;
 
+// The media-surface producer channel (media_surface.zig): the handle
+// type `Runtime.acquireMediaSurfaceProducer` returns rides the public
+// root so producer callbacks can be TYPED (the docs' mpv recipe takes a
+// `MediaSurfaceProducer` parameter), alongside the channel budgets.
+const runtime_media_surface = @import("media_surface.zig");
+pub const MediaSurfaceProducer = runtime_media_surface.MediaSurfaceProducer;
+pub const max_media_surface_channels = runtime_media_surface.max_media_surface_channels;
+pub const max_media_surface_pixel_bytes = runtime_media_surface.max_media_surface_pixel_bytes;
+
 const runtime_canvas_fonts = @import("canvas_fonts.zig");
 pub const max_registered_canvas_fonts = runtime_canvas_fonts.max_registered_canvas_fonts;
 pub const max_registered_canvas_font_bytes = runtime_canvas_fonts.max_registered_canvas_font_bytes;
