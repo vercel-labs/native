@@ -1567,28 +1567,29 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
-        /// `image="{binding}"` on avatar: one binding producing a `u64`
-        /// `canvas.ImageId` the app registered at runtime
-        /// (`fx.registerImageBytes`) — the id is model data, never a
-        /// markup literal, and 0 keeps the initials fallback. Scoped to
-        /// avatar; the other image-bearing widgets (image, icon,
-        /// icon-button) stay Zig views.
+        /// `image="{binding}"` on avatar and image: one binding
+        /// producing a `u64` `canvas.ImageId` the app registered at
+        /// runtime (`Cmd.imageLoad`, `fx.loadImage`,
+        /// `fx.registerImageBytes`) — the id is model data, never a
+        /// markup literal, and 0 draws nothing (an avatar keeps its
+        /// initials fallback). The remaining image-bearing widget
+        /// (icon-button) stays a Zig view.
         fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
-            if (!std.mem.eql(u8, node.name, "avatar")) {
-                return self.failVoid(node, markup.avatar_image_element_message);
+            if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                return self.failVoid(node, markup.image_binding_element_message);
             }
             const typed = markup.attrTyped(attribute);
-            if (typed != .binding) return self.failVoid(node, markup.avatar_image_message);
+            if (typed != .binding) return self.failVoid(node, markup.image_binding_message);
             const value = try self.evalBinding(scope, node, typed.binding, true);
             // Range-checked before the u64 cast: expression values are
             // i64, so a signed model field (`image: i64 = -1`) can
             // deliver a negative — the teaching failure, never a trap.
             options.image = switch (value) {
                 .integer => |int| if (int < 0)
-                    return self.failVoid(node, markup.avatar_image_message)
+                    return self.failVoid(node, markup.image_binding_message)
                 else
                     @intCast(int),
-                else => return self.failVoid(node, markup.avatar_image_message),
+                else => return self.failVoid(node, markup.image_binding_message),
             };
         }
 

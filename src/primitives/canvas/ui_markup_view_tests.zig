@@ -1322,10 +1322,10 @@ test "the registry's a11y name classes match the engine's control predicates" {
             try testing.expect(canvas.widgetKindClaimsPress(kind));
         }
         // Image-class elements are announced under the image role:
-        // avatar and the media surface (pictorial content whose missing
-        // label degrades but never blocks).
+        // avatar, the media surface, and the image leaf (pictorial
+        // content whose missing label degrades but never blocks).
         if (entry.a11y_name == .image) {
-            try testing.expect(kind == .avatar or kind == .media_surface);
+            try testing.expect(kind == .avatar or kind == .media_surface or kind == .image);
         }
     }
 }
@@ -1408,7 +1408,7 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   lowered through `Ui.inputGroup`), so no plain element maps to the
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .image, .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
+    .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
 };
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
@@ -2457,23 +2457,23 @@ test "avatar image misuse fails the build with the teaching messages" {
         .{
             // A literal id is not model data.
             .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>",
-            .message = canvas.ui_markup.avatar_image_message,
+            .message = canvas.ui_markup.image_binding_message,
         },
         .{
             // The binding must produce an integer ImageId (user_name is text).
             .source = "<row>\n  <avatar image=\"{user_name}\">CT</avatar>\n</row>",
-            .message = canvas.ui_markup.avatar_image_message,
+            .message = canvas.ui_markup.image_binding_message,
         },
         .{
             // A negative integer can never be a u64 ImageId: the
             // teaching failure, not an @intCast trap.
             .source = avatar_negative_markup_source,
-            .message = canvas.ui_markup.avatar_image_message,
+            .message = canvas.ui_markup.image_binding_message,
         },
         .{
             // Scoped to avatar: the other image elements stay Zig views.
             .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>",
-            .message = canvas.ui_markup.avatar_image_element_message,
+            .message = canvas.ui_markup.image_binding_element_message,
         },
     };
     for (cases) |case| {
@@ -2535,6 +2535,119 @@ test "the media-surface surface binding resolves the model id; negatives fail th
     try testing.expectError(error.MarkupBuild, negative_view.build(&negative_ui, &model));
     try testing.expectEqualStrings(canvas.ui_markup.media_surface_surface_message, negative_view.diagnostic.message);
     try testing.expect(negative_view.diagnostic.line > 0);
+}
+
+// ------------------------------------------------ image leaf id binding
+
+pub const ImageLeafMsg = union(enum) { refresh };
+
+pub const ImageLeafModel = struct {
+    /// Runtime-registered ImageId kept in the model (0 = no image, the
+    /// leaf draws nothing) — the id lands here from `Cmd.imageLoad`'s
+    /// loaded result (or `fx.registerImageBytes` on the Zig tier).
+    cover: canvas.ImageId = 0,
+    /// A signed id field: bindings evaluate as i64, so a negative must
+    /// reach the image seam as a value, never trap in the u64 cast.
+    stale_image: i64 = -2,
+
+    /// A pub fn producing an ImageId binds like a field.
+    pub fn thumbnail(model: *const ImageLeafModel) canvas.ImageId {
+        return model.cover + 1;
+    }
+};
+
+pub const image_markup_source =
+    \\<row gap="8">
+    \\  <image image="{cover}" width="120" height="80" label="Cover art" />
+    \\  <image image="{thumbnail}" width="48" height="48" label="" />
+    \\</row>
+;
+
+/// A negative model value into the image leaf's u64 id seam: both
+/// engines must fail the build with the image teaching, never trap.
+pub const image_negative_markup_source =
+    \\<row>
+    \\  <image image="{stale_image}" label="Cover art" />
+    \\</row>
+;
+
+pub const ImageLeafUi = canvas.Ui(ImageLeafMsg);
+
+/// The hand-written equivalent of the image markup: `ui.image` with
+/// `ElementOptions.image`, the parity baseline the compiled suite
+/// shares.
+pub fn handImageLeafView(ui: *ImageLeafUi, model: *const ImageLeafModel) ImageLeafUi.Node {
+    return ui.row(.{ .gap = 8 }, .{
+        ui.image(.{ .image = model.cover, .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
+        ui.image(.{ .image = model.thumbnail(), .width = 48, .height = 48, .semantics = .{ .label = "" } }),
+    });
+}
+
+test "the image leaf binds a dynamic ImageId from model fields and fns" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ImageMarkup = markup_view.MarkupView(ImageLeafModel, ImageLeafMsg);
+    const model = ImageLeafModel{ .cover = 42 };
+
+    var view = try ImageMarkup.init(arena, image_markup_source);
+    var markup_ui = ImageLeafUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = ImageLeafUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handImageLeafView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+
+    // The field binding and the fn binding both land in image_id.
+    const cover = markup_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualStrings("Cover art", cover.semantics.label);
+    const thumbnail = markup_tree.root.children[1];
+    try testing.expectEqual(@as(canvas.ImageId, 43), thumbnail.image_id);
+
+    // 0 is the "no image" sentinel: the leaf renders nothing (the
+    // model simply has not loaded the image yet).
+    const empty_model = ImageLeafModel{};
+    var empty_ui = ImageLeafUi.init(arena);
+    const empty_tree = try empty_ui.finalize(try view.build(&empty_ui, &empty_model));
+    try testing.expectEqual(@as(canvas.ImageId, 0), empty_tree.root.children[0].image_id);
+}
+
+test "image leaf misuse fails the build with the teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = ImageLeafModel{};
+    const ImageMarkup = markup_view.MarkupView(ImageLeafModel, ImageLeafMsg);
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            // A literal id is not model data.
+            .source = "<row>\n  <image image=\"7\" label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_binding_message,
+        },
+        .{
+            // A negative integer can never be a u64 ImageId: the
+            // teaching failure, not an @intCast trap.
+            .source = image_negative_markup_source,
+            .message = canvas.ui_markup.image_binding_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try ImageMarkup.init(arena, case.source);
+        var ui = ImageLeafUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
 }
 
 // ------------------------------------- text alignment and grid columns

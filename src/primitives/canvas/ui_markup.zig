@@ -1246,8 +1246,9 @@ pub const tooltip_delay_element_message = "tooltip-delay is only supported on to
 
 pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on the same tooltip - only an anchored tooltip is hover-shown by the runtime (a static tooltip paints whenever the view renders it), so without anchor the delay is silently inert";
 
-pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
-pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
+pub const image_binding_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders nothing (an avatar falls back to its initials)";
+pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays a Zig view (ElementOptions.image)";
+pub const image_missing_image_message = "image requires image={binding} naming the u64 ImageId the app registered at runtime - without one the leaf can never draw anything (dead markup, same policy as icon without name)";
 
 pub const media_surface_surface_message = "surface takes one {binding} to the u64 surface id a producer targets (runtime.acquireMediaSurfaceProducer) - surface ids are model data, not markup literals; 0 leaves the surface unbound and it draws nothing";
 pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
@@ -2937,6 +2938,11 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 // teaching (the icon-without-name policy).
                 if (node.attr("surface") == null) return errorAt(node, media_surface_missing_surface_message);
             }
+            if (std.mem.eql(u8, node.name, "image")) {
+                // An image leaf without its id binding can never draw:
+                // the same dead-markup policy as media-surface.
+                if (node.attr("image") == null) return errorAt(node, image_missing_image_message);
+            }
             if (std.mem.eql(u8, node.name, "split")) {
                 // Exactly two pane children, statically: the divider sits
                 // between fixed panes, so conditional/repeated content
@@ -3061,14 +3067,16 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "image")) {
-                    // Runtime image binding, avatar-scoped: ids are model
-                    // data the app registered, never markup literals.
-                    if (!std.mem.eql(u8, node.name, "avatar")) {
-                        return attrError(node, attribute, avatar_image_element_message);
+                    // Runtime image binding, scoped to the two widgets
+                    // drawing a registered ImageId (avatar's fallback
+                    // circle and the image leaf): ids are model data
+                    // the app registered, never markup literals.
+                    if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                        return attrError(node, attribute, image_binding_element_message);
                     }
                     const expression = parseAttrExpression(attribute.value);
                     if (expression == null or expression.? != .binding) {
-                        return attrError(node, attribute, avatar_image_message);
+                        return attrError(node, attribute, image_binding_message);
                     }
                     continue;
                 }

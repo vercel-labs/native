@@ -263,6 +263,10 @@
     {
       "name": "media-surface",
       "doc": "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers."
+    },
+    {
+      "name": "image",
+      "doc": "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). Display-only (presses fall through); size it with width/height or grow (no intrinsic size); label it for screen readers."
     }
   ],
   "structure": [
@@ -631,7 +635,7 @@
     "avatar": [
       {
         "name": "image",
-        "doc": "avatar: one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes); 0 renders the initials fallback."
+        "doc": "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); 0 draws nothing (an avatar falls back to its initials). Required on the image leaf."
       }
     ],
     "media-surface": [

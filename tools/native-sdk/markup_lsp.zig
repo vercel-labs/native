@@ -829,9 +829,9 @@ test "analyze reports parser and validation findings with positions" {
 
     // avatar image misuse surfaces the validator's teaching messages.
     const literal_image = analyze(arena, "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_message, literal_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_message, literal_image.message);
     const misplaced_image = analyze(arena, "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_element_message, misplaced_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_element_message, misplaced_image.message);
     try testing.expectEqual(@as(?ui_markup.MarkupErrorInfo, null), analyze(arena, "<row><avatar image=\"{user_image}\">CT</avatar></row>"));
 
     // The a11y lint's error half rides analyze (an unnamed control is

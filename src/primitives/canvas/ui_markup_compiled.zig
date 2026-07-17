@@ -1656,18 +1656,18 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         }
 
         /// Comptime mirror of the interpreter's `applyImageAttr`:
-        /// `image="{binding}"` on avatar resolves to a `u64` ImageId the
-        /// app registered at runtime — avatar-only, binding-only, and the
-        /// binding must produce an integer, all checked at comptime with
-        /// the interpreter's messages.
+        /// `image="{binding}"` on avatar and image resolves to a `u64`
+        /// ImageId the app registered at runtime — binding-only, and
+        /// the binding must produce an integer, all checked at comptime
+        /// with the interpreter's messages.
         fn applyImageAttr(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
             comptime {
-                if (!std.mem.eql(u8, node.name, "avatar")) fail(node, markup.avatar_image_element_message);
-                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.avatar_image_message);
-                if (expression != .binding) fail(node, markup.avatar_image_message);
+                if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) fail(node, markup.image_binding_element_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.image_binding_message);
+                if (expression != .binding) fail(node, markup.image_binding_message);
             }
             const path = comptime markup.parseAttrExpression(raw).?.binding;
-            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.avatar_image_message);
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.image_binding_message);
             // Range-checked before the u64 cast (the interpreter fails
             // the same way): a signed model field (`image: i64 = -1`)
             // can deliver a negative — fail the build, never trap.

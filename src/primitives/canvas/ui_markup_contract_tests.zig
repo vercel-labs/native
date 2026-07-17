@@ -743,6 +743,32 @@ test "the media-surface surface binding checks as a model integer" {
     try testing.expectEqualStrings(markup.media_surface_surface_message, message);
 }
 
+test "the image leaf's image binding checks as a model integer" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // An integer-producing binding passes on avatar and the image leaf
+    // alike — the exact grammar `native check`'s model-aware pass
+    // applies to TS and Zig cores.
+    const good = try parseFixture(arena,
+        \\<column>
+        \\  <image image="{count}" label="Cover art" />
+        \\  <avatar image="{count}">CT</avatar>
+        \\</column>
+    );
+    try testing.expectEqual(null, try contractMessage(arena, good, null));
+
+    // A non-integer binding is refused with the image teaching.
+    const wrong = try parseFixture(arena,
+        \\<column>
+        \\  <image image="{name}" label="Cover art" />
+        \\</column>
+    );
+    const message = (try contractMessage(arena, wrong, null)).?;
+    try testing.expectEqualStrings(markup.image_binding_message, message);
+}
+
 test "app: icon references check against the contract's registered icon list" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

@@ -673,22 +673,33 @@ test "gap on stacking containers is rejected with the teaching error" {
     }
 }
 
-test "the avatar image attribute validates as one binding, avatar-only" {
+test "the image attribute validates as one binding on avatar and image" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // One {binding} on avatar is the whole grammar.
-    var parser = markup.Parser.init(arena, "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>");
-    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    // One {binding} on avatar or the image leaf is the whole grammar.
+    const valid = [_][]const u8{
+        "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>",
+        "<row>\n  <image image=\"{cover}\" width=\"120\" height=\"80\" label=\"Cover art\" />\n</row>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
 
     const cases = [_]struct { source: []const u8, message: []const u8 }{
         // Runtime image ids are model data, never markup literals.
-        .{ .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>", .message = markup.avatar_image_message },
-        .{ .source = "<row>\n  <avatar image=\"{a == b}\">CT</avatar>\n</row>", .message = markup.avatar_image_message },
-        // Scoped to avatar: the other image elements stay Zig views.
-        .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.avatar_image_element_message },
-        .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.avatar_image_element_message },
+        .{ .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>", .message = markup.image_binding_message },
+        .{ .source = "<row>\n  <avatar image=\"{a == b}\">CT</avatar>\n</row>", .message = markup.image_binding_message },
+        .{ .source = "<row>\n  <image image=\"7\" label=\"Art\" />\n</row>", .message = markup.image_binding_message },
+        // Scoped to the two ImageId-drawing widgets: anywhere else the
+        // attribute would be silently inert.
+        .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
+        .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        // ...and required on the leaf: an unbound image is statically
+        // dead markup (avatar keeps its initials fallback instead).
+        .{ .source = "<row>\n  <image label=\"Art\" />\n</row>", .message = markup.image_missing_image_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena, case.source);

@@ -320,6 +320,15 @@ pub const elements = [_]ElementInfo{
     // binding shape, never a markup literal. Display-only like image
     // and chart (presses fall through); pictorial for the a11y lint.
     .{ .code = 66, .name = "media-surface", .widget_kind = "media_surface", .hit_target = false, .a11y_name = .image },
+    // The image leaf: draws a RUNTIME-REGISTERED image by its
+    // model-owned u64 ImageId — the id `Cmd.imageLoad` /
+    // `fx.loadImage` / `fx.registerImageBytes` registered pixels
+    // under. Its `image` attribute is the avatar binding shape exactly
+    // (attr 38, scope broadened): one {binding}, never a markup
+    // literal; 0 draws nothing (the image-leaf convention — an avatar
+    // falls back to initials instead). Display-only like media-surface
+    // and chart (presses fall through); pictorial for the a11y lint.
+    .{ .code = 67, .name = "image", .widget_kind = "image", .hit_target = false, .a11y_name = .image },
 };
 
 // ------------------------------------------------------------- attributes
@@ -371,6 +380,10 @@ pub const attrs = [_]AttrInfo{
     // Element-scoped specials.
     .{ .code = 36, .name = "name", .class = .icon, .group = .element },
     .{ .code = 37, .name = "icon", .class = .icon, .group = .element },
+    // The runtime-image binding (avatar and image; the validator
+    // scopes it): one {binding} to the model-owned u64 ImageId the app
+    // registered at runtime — ids are model data, never markup
+    // literals; 0 is the no-image sentinel.
     .{ .code = 38, .name = "image", .class = .binding_only, .group = .element },
     .{ .code = 39, .name = "anchor", .class = .option, .group = .element },
     .{ .code = 40, .name = "anchor-alignment", .class = .option, .group = .element },
