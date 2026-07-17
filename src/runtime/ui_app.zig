@@ -2835,6 +2835,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             "font \"{s}\" (id {d}) failed to register: {s}",
                             .{ font.name, font.id, canvas.font_ttf.parseFailureReason(font.ttf) orelse "not a parseable TrueType face" },
                         ),
+                        error.FontExceedsGlyphBudgets => if (canvas.font_ttf.declaredGlyphMaxima(font.ttf)) |maxima| ui_app_log.warn(
+                            "font \"{s}\" (id {d}) failed to register: its 'maxp' declares glyphs up to {d} points / {d} contours, with composites {d} deep of {d} components, beyond the outline budgets ({d} points, {d} contours, {d} deep, {d} components — canvas.font_ttf); past-budget glyphs would render as block fallbacks, so registration refuses the face whole",
+                            .{ font.name, font.id, maxima.points, maxima.contours, maxima.component_depth, maxima.component_elements, canvas.font_ttf.max_glyph_points, canvas.font_ttf.max_glyph_contours, canvas.font_ttf.max_composite_depth, canvas.font_ttf.max_composite_components },
+                        ) else ui_app_log.warn(
+                            "font \"{s}\" (id {d}) failed to register: it declares glyph outlines denser than the renderer's budgets ({d} points / {d} contours per glyph — canvas.font_ttf), so its densest glyphs could not render as outlines",
+                            .{ font.name, font.id, canvas.font_ttf.max_glyph_points, canvas.font_ttf.max_glyph_contours },
+                        ),
                         error.FontTooLarge => ui_app_log.warn(
                             "font \"{s}\" (id {d}) failed to register: the file is {d} bytes but the per-font budget is {d} bytes (canvas_limits.max_registered_canvas_font_bytes)",
                             .{ font.name, font.id, font.ttf.len, canvas_limits.max_registered_canvas_font_bytes },

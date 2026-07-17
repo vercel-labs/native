@@ -7,12 +7,18 @@
 //!
 //! Validation is loud and registration-time only: the bytes must parse as
 //! a TrueType face (`canvas.font_ttf.Face.parse`) under the registry
-//! bounds, or registration fails with a recoverable error — a registered
-//! id therefore ALWAYS resolves at render time, and the only per-glyph
+//! bounds — including the glyph-outline budget gate on the face's
+//! declared `maxp` maxima (`error.FontExceedsGlyphBudgets` when a face
+//! declares denser glyphs than `canvas.font_ttf`'s budgets; the budgets
+//! are sized from real CJK faces, so this refuses only outliers) — or
+//! registration fails with a recoverable error. A registered id
+//! therefore ALWAYS resolves at render time, and the only per-glyph
 //! fallback is the same notdef block built-in faces use for codepoints a
 //! face does not cover. `canvas.font_ttf.parseFailureReason` turns a
-//! rejected file into a teaching sentence for callers that know the
-//! file's name (UiApp's `fonts` option does this).
+//! rejected file into a teaching sentence, and
+//! `canvas.font_ttf.declaredGlyphMaxima` names a budget-refused face's
+//! declared numbers, for callers that know the file's name (UiApp's
+//! `fonts` option uses both).
 //!
 //! Both renderers resolve registered ids exactly like built-ins:
 //! - The frame planner threads the registered set into
@@ -89,7 +95,11 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// `canvas_limits.max_registered_canvas_fonts` slots hold other
         /// ids), `error.FontParseFailed` (not a parseable TrueType face —
         /// `canvas.font_ttf.parseFailureReason(ttf)` names what is wrong),
-        /// `error.FontHostRegistrationUnsupported` (the platform measures
+        /// `error.FontExceedsGlyphBudgets` (the face's `maxp` declares
+        /// glyphs denser than `canvas.font_ttf`'s outline budgets, so its
+        /// densest glyphs could not render as outlines —
+        /// `canvas.font_ttf.declaredGlyphMaxima(ttf)` names the declared
+        /// maxima), `error.FontHostRegistrationUnsupported` (the platform measures
         /// and draws text host-side but has no font registration seam, so
         /// the face could not be honored pixel-honestly).
         pub fn registerCanvasFont(self: *Runtime, id: canvas.FontId, ttf: []const u8) anyerror!void {
@@ -102,7 +112,14 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             const index = self.canvas_font_count;
             const pooled = self.canvas_font_bytes[index][0..ttf.len];
             @memcpy(pooled, ttf);
-            const face = canvas.font_ttf.Face.parse(pooled) catch return error.FontParseFailed;
+            const face = canvas.font_ttf.Face.parse(pooled) catch |err| switch (err) {
+                // The registration-time glyph-budget gate: refusing the
+                // face here (loudly, with its declared numbers available
+                // via `declaredGlyphMaxima`) is what keeps render-time
+                // glyph resolution total for registered ids.
+                error.FontGlyphTooComplex => return error.FontExceedsGlyphBudgets,
+                else => return error.FontParseFailed,
+            };
 
             // Host sync BEFORE committing the slot: platforms with
             // host-side text (measure_text_fn) must learn the face or the

@@ -1,8 +1,11 @@
 //! Runtime canvas font registry tests: registration validation and
 //! capacity bounds (loud, one-past-budget), hostile/truncated font
-//! files, the font-aware measure provider, pixel parity between the
-//! present path and the reference screenshot path for a registered
-//! face, and the UiApp `Options.fonts` startup seam.
+//! files, the registration-time glyph-budget gate (over-declaring
+//! `maxp` refused whole; the real Noto Sans JP accepted and outlining
+//! dense kanji when the /tmp fixture is present), the font-aware
+//! measure provider, pixel parity between the present path and the
+//! reference screenshot path for a registered face, and the UiApp
+//! `Options.fonts` startup seam.
 //!
 //! The registered fixture is the ALREADY-BUNDLED Geist Mono bytes
 //! (`canvas.font_ttf.geist_mono_bytes`) under a registered id: the
@@ -197,6 +200,124 @@ test "registered faces answer the batched advances seam identically to per-prefi
         for (advances) |advance| sum += advance;
         try std.testing.expectEqual(provider.measureWidth(font_id, 10.0, text), sum);
     }
+}
+
+/// Byte offset of the `maxp` table in a TrueType file (test fixture
+/// helper for building over-declaring faces out of the bundled bytes).
+fn maxpTableOffset(bytes: []const u8) usize {
+    const table_count = std.mem.readInt(u16, bytes[4..6], .big);
+    var index: usize = 0;
+    while (index < table_count) : (index += 1) {
+        const record = 12 + index * 16;
+        if (std.mem.eql(u8, bytes[record .. record + 4], "maxp")) {
+            return std.mem.readInt(u32, bytes[record + 8 ..][0..4], .big);
+        }
+    }
+    unreachable; // the bundled faces always carry maxp
+}
+
+/// The bundled mono bytes with `maxp.maxPoints` patched one past the
+/// glyph-point budget: a face that DECLARES denser glyphs than the
+/// outline pipeline's budgets and must be refused whole at
+/// registration, never degraded per glyph at render time.
+fn overBudgetFontBytes(allocator: std.mem.Allocator) ![]u8 {
+    const patched = try allocator.dupe(u8, mono_bytes);
+    const maxp = maxpTableOffset(patched);
+    std.mem.writeInt(u16, patched[maxp + 6 ..][0..2], @intCast(canvas.font_ttf.max_glyph_points + 1), .big);
+    return patched;
+}
+
+test "a face declaring glyphs denser than the budgets is refused at registration" {
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    const patched = try overBudgetFontBytes(std.testing.allocator);
+    defer std.testing.allocator.free(patched);
+
+    try std.testing.expectError(error.FontExceedsGlyphBudgets, harness.runtime.registerCanvasFont(registered_font_id, patched));
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasFontCount());
+
+    // The teaching machinery names the refusal: parse-reason carries the
+    // budget sentence, and the declared maxima expose the face's own
+    // numbers for callers that format (UiApp's fonts teaching).
+    try std.testing.expect(std.mem.indexOf(u8, canvas.font_ttf.parseFailureReason(patched).?, "budgets") != null);
+    const maxima = canvas.font_ttf.declaredGlyphMaxima(patched).?;
+    try std.testing.expectEqual(@as(u16, @intCast(canvas.font_ttf.max_glyph_points + 1)), maxima.points);
+    try std.testing.expect(!maxima.withinBudgets());
+
+    // No partial slot: the honest twin registers under the same id.
+    try harness.runtime.registerCanvasFont(registered_font_id, mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasFontCount());
+}
+
+test "the real Noto Sans JP face registers and outlines dense kanji (guarded by /tmp/NotoSansJP.ttf)" {
+    // Ground-truth end-to-end proof with the face the budgets were
+    // sized from: the Google Fonts TrueType build of Noto Sans JP
+    // (OFL). Font binaries stay out of the repo, so the fixture is a
+    // local download; environments without it skip.
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "/tmp/NotoSansJP.ttf",
+        std.testing.allocator,
+        .limited(canvas_limits.max_registered_canvas_font_bytes),
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(bytes);
+
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+
+    // Registration passes the byte bound, the maxp gate, and the host
+    // seam — the whole registration-time validation doctrine.
+    try harness.runtime.registerCanvasFont(registered_font_id, bytes);
+    const face = harness.runtime.registeredCanvasFontFace(registered_font_id).?;
+
+    // Everyday-dense kanji resolve to real outlines, not notdef blocks:
+    // 鬱 U+9B31 measures 237 points / 26 contours in this face — far
+    // past the old Latin-sized 128-point/24-contour budgets that made
+    // it render as a block.
+    const dense_kanji = [_]u21{ 0x9B31, 0x9A5A, 0x7C60, 0x9451 }; // 鬱 驚 籠 鑑
+    for (dense_kanji) |codepoint| {
+        const glyph = face.glyphIndex(codepoint);
+        try std.testing.expect(glyph != 0);
+        var builder = canvas.vector.PathBuilder(2048){};
+        try face.glyphOutline(glyph, canvas.Affine.identity(), &builder);
+        try std.testing.expect(builder.slice().len > 0);
+    }
+
+    // The dense outline rasterizes within the vector budgets at body
+    // and headline sizes.
+    const InkCounter = struct {
+        covered: usize = 0,
+        pub fn pixel(self: *@This(), x: i32, y: i32, coverage: f32) void {
+            _ = x;
+            _ = y;
+            if (coverage > 0) self.covered += 1;
+        }
+    };
+    for ([_]f32{ 16, 96 }) |size| {
+        const glyph = face.glyphIndex(0x9B31);
+        const scale = size / face.units_per_em;
+        var builder = canvas.vector.PathBuilder(2048){};
+        try face.glyphOutline(glyph, .{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = 4, .ty = size }, &builder);
+        var counter = InkCounter{};
+        try canvas.vector.fillPath(
+            builder.slice(),
+            canvas.Affine.identity(),
+            .nonzero,
+            canvas.vector.default_tolerance,
+            .{ .x0 = 0, .y0 = 0, .x1 = 128, .y1 = 128 },
+            &counter,
+        );
+        try std.testing.expect(counter.covered > 0);
+    }
+
+    // Layout measures the registered face's own advances for the kanji.
+    const provider = harness.runtime.textMeasureProvider().?;
+    try std.testing.expect(provider.measureWidth(registered_font_id, 16.0, "鬱") > 0);
 }
 
 fn installFontFixtureWidgets(harness: anytype) !void {
@@ -407,4 +528,40 @@ test "ui app declared font failures are teaching errors, not crashes or silent f
     } });
     try std.testing.expect(app_state.installed);
     try std.testing.expectEqual(first_errors, harness.runtime.dispatchErrorTotal());
+}
+
+test "ui app fonts option surfaces the glyph-budget refusal as a teaching error" {
+    const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 200) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const patched = try overBudgetFontBytes(std.testing.allocator);
+    defer std.testing.allocator.free(patched);
+
+    const fonts = [_]FontApp.FontRegistration{.{
+        .id = registered_font_id,
+        .name = "TooDense.ttf",
+        .ttf = patched,
+    }};
+    const app_state = try std.testing.allocator.create(FontApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = FontApp.init(std.testing.allocator, .{}, fontAppOptions(&fonts));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    harness.runtime.dispatch_error_policy = .degrade;
+
+    // The installing frame surfaces the refusal through the dispatch
+    // error channel (the warn log names the face's declared maxima
+    // against the budgets); nothing registers, the app stays alive.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = font_app_canvas_label,
+        .size = geometry.SizeF.init(240, 200),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasFontCount());
+    try std.testing.expect(harness.runtime.dispatchErrorTotal() > 0);
 }

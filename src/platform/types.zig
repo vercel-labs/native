@@ -260,8 +260,10 @@ pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
 /// Per-font bound for the gpu-surface font registration side-channel;
 /// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_font_bytes`).
-pub const max_gpu_surface_font_bytes: usize = 2 * 1024 * 1024;
+/// (`canvas_limits.max_registered_canvas_font_bytes`), sized so full
+/// CJK faces register (Noto Sans SC's TrueType build, the largest
+/// measured, is 17.8 MB).
+pub const max_gpu_surface_font_bytes: usize = 24 * 1024 * 1024;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,
