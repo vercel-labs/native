@@ -312,6 +312,14 @@ pub const elements = [_]ElementInfo{
     // end, the reference's trailing dock), so the element mints ONE
     // code and no attribute codes at all.
     .{ .code = 65, .name = "reactions", .rule_hook = "reactions" },
+    // The media surface: a leaf compositing a texture PRODUCED OUTSIDE
+    // the widget tree (video decoder, camera preview, an external
+    // renderer like mpv) into the layout like any widget. Its `surface`
+    // attribute binds the model-owned u64 surface id a producer targets
+    // (`Runtime.acquireMediaSurfaceProducer`) — the runtime-image-id
+    // binding shape, never a markup literal. Display-only like image
+    // and chart (presses fall through); pictorial for the a11y lint.
+    .{ .code = 66, .name = "media-surface", .widget_kind = "media_surface", .hit_target = false, .a11y_name = .image },
 };
 
 // ------------------------------------------------------------- attributes
@@ -464,6 +472,13 @@ pub const attrs = [_]AttrInfo{
     // unreachable from markup; absent keeps the token default
     // (`ControlMetricTokens.tooltip_show_delay_ms`).
     .{ .code = 80, .name = "tooltip-delay", .class = .whole, .group = .option, .field = "tooltip_delay" },
+    // The media-surface producer rendezvous (media-surface only; the
+    // validator scopes it): one {binding} to the model-owned u64 surface
+    // id a producer targets (`Runtime.acquireMediaSurfaceProducer`) —
+    // ids are model data in the runtime-image-id spirit, never markup
+    // literals; 0 is the unbound sentinel (the surface draws nothing,
+    // like an image leaf with id 0).
+    .{ .code = 81, .name = "surface", .class = .binding_only, .group = .element },
 };
 
 // ----------------------------------------------------------------- events

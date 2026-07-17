@@ -1321,9 +1321,11 @@ test "the registry's a11y name classes match the engine's control predicates" {
             try testing.expect(canvas.widgetKindHitTarget(kind));
             try testing.expect(canvas.widgetKindClaimsPress(kind));
         }
-        // Image-class elements are announced under the image role.
+        // Image-class elements are announced under the image role:
+        // avatar and the media surface (pictorial content whose missing
+        // label degrades but never blocks).
         if (entry.a11y_name == .image) {
-            try testing.expectEqual(canvas.WidgetKind.avatar, kind);
+            try testing.expect(kind == .avatar or kind == .media_surface);
         }
     }
 }

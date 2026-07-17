@@ -133,6 +133,19 @@ pub const WidgetKind = enum {
     /// never double-draw. Not a hit target itself: the textarea fills the
     /// group's body, so a click "in the field" IS a click in the textarea.
     input_group,
+    /// The media surface leaf: composites a texture PRODUCED OUTSIDE the
+    /// widget tree (a video decoder, a camera pipeline, an external
+    /// renderer) into the layout like any widget — clipped, z-ordered,
+    /// transformed. `image_id` carries the SURFACE id the producer
+    /// targets (`Runtime.acquireMediaSurfaceProducer`), a model-owned
+    /// u64 in the ImageId value space; 0 is the unbound sentinel.
+    /// Display-only like `image` and `chart`: not a hit target, presses
+    /// fall through to the nearest pressable ancestor. Texture CONTENTS
+    /// are presentation chrome — the deterministic reference renderer
+    /// draws the surface's id-derived placeholder instead (see
+    /// `ReferenceImage.presentation_only`), so goldens and session
+    /// fingerprints never depend on producer output.
+    media_surface,
 };
 
 /// STABLE code for a widget kind: assigned at birth, never reused or
@@ -210,6 +223,7 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
         .split_divider => 58,
         .tree => 59,
         .input_group => 60,
+        .media_surface => 61,
     };
 }
 

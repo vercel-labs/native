@@ -75,7 +75,7 @@ pub fn isDragSource(widget: Widget) bool {
 /// widget a hit target, so `on_press` on a row/stack/icon works.
 pub fn widgetKindHitTarget(kind: WidgetKind) bool {
     return switch (kind) {
-        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group => false,
+        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group, .media_surface => false,
         .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .split_divider => true,
     };
 }

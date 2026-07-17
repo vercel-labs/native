@@ -144,7 +144,7 @@ pub fn layoutWidgetDepth(
         // Span paragraphs and span-carrying table cells share the link
         // hotspot child convention (no spans or no children is a no-op).
         .text, .data_cell => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider => {},
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface => {},
     }
 
     // Anchored floating children are excluded from every flow above (they
@@ -284,8 +284,10 @@ fn widgetIsWindowControlContent(widget: Widget) bool {
     return switch (widget.kind) {
         // Layout and surface containers: judged through their children.
         .stack, .row, .column, .grid, .data_grid, .table, .scroll_view, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .dialog, .drawer, .sheet, .panel, .popover, .menu_surface, .dropdown_menu, .list_item, .data_row, .split, .tree, .input_group => false,
-        // Full-bleed decoration: expected under the cluster.
-        .separator, .skeleton, .progress, .image, .split_divider => false,
+        // Full-bleed decoration: expected under the cluster. Media
+        // surfaces join images here — full-bleed video/preview content
+        // composites under the OS controls exactly like header cover art.
+        .separator, .skeleton, .progress, .image, .split_divider, .media_surface => false,
         // A text leaf with no bytes and no spans is a hit/semantics
         // overlay, not readable content.
         .text => widget.text.len > 0 or widget.spans.len > 0,
@@ -1587,7 +1589,10 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         .split_divider => geometry.SizeF.init(splitDividerExtent(widget), 0),
         // A split fills the space it is given (panes partition it);
         // like scroll viewports it reports no intrinsic size of its own.
-        .scroll_view, .image, .split => geometry.SizeF.zero(),
+        // Media surfaces measure like images: the texture is external
+        // content with no natural layout size — definite width/height
+        // (or flex grow) size the surface, exactly like an image leaf.
+        .scroll_view, .image, .split, .media_surface => geometry.SizeF.zero(),
     };
 }
 

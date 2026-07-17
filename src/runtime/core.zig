@@ -15,6 +15,7 @@ const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_images = @import("canvas_images.zig");
+const runtime_media_surface = @import("media_surface.zig");
 const runtime_canvas_fonts = @import("canvas_fonts.zig");
 const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
@@ -364,7 +365,22 @@ pub const Runtime = struct {
     canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
     canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
-    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage = undefined,
+    /// `ReferenceImage` scratch the frame planner hands to renderers
+    /// each plan: the registered images plus the adopted media-surface
+    /// textures (appended as `presentation_only` entries).
+    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images + canvas_limits.max_media_surface_channels]canvas.ReferenceImage = undefined,
+    /// Adopted media-surface textures (see media_surface.zig): entry
+    /// metadata and the per-channel pixel pool the loop thread owns.
+    /// The cross-thread mailbox producers push into is process-lived
+    /// module state, deliberately NOT here — a producer outliving this
+    /// runtime must never reach runtime memory.
+    media_surface_entries: [canvas_limits.max_media_surface_channels]runtime_media_surface.MediaSurfaceTextureEntry = [_]runtime_media_surface.MediaSurfaceTextureEntry{.{}} ** canvas_limits.max_media_surface_channels,
+    media_surface_count: usize = 0,
+    media_surface_pixels: [canvas_limits.max_media_surface_channels][canvas_limits.max_media_surface_pixel_bytes]u8 = undefined,
+    /// Process-unique tag stamped on mailbox slots this runtime claims
+    /// (0 until the first acquire): slot ownership survives allocator
+    /// address reuse across runtimes in one process.
+    media_surface_runtime_tag: u64 = 0,
     /// Runtime-registered canvas fonts (see canvas_fonts.zig): entry
     /// metadata carrying each face's heap-owned TrueType bytes (exact
     /// file size, allocated from the init-frozen `owned_allocator` at
@@ -753,6 +769,12 @@ pub const Runtime = struct {
     pub const registeredCanvasImage = CanvasImageMethods.registeredCanvasImage;
     pub const registeredCanvasImageCount = CanvasImageMethods.registeredCanvasImageCount;
     pub const canvasImageRegistryBinding = CanvasImageMethods.canvasImageRegistryBinding;
+
+    const MediaSurfaceMethods = runtime_media_surface.RuntimeMediaSurfaces(Runtime);
+    pub const acquireMediaSurfaceProducer = MediaSurfaceMethods.acquireMediaSurfaceProducer;
+    pub const adoptMediaSurfaceFrames = MediaSurfaceMethods.adoptMediaSurfaceFrames;
+    pub const adoptedMediaSurfaceTexture = MediaSurfaceMethods.adoptedMediaSurfaceTexture;
+    const adoptedMediaSurfaceTextures = MediaSurfaceMethods.adoptedMediaSurfaceTextures;
 
     const CanvasFontMethods = runtime_canvas_fonts.RuntimeCanvasFonts(Runtime);
     pub const registerCanvasFont = CanvasFontMethods.registerCanvasFont;

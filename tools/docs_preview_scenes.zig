@@ -172,6 +172,7 @@ pub const scenes = [_]Scene{
     .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
+    .{ .name = "media-surface", .height = 280, .build = stateless(buildMediaSurface) },
     .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
     .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
     .{ .name = "chart-bar", .height = 260, .build = stateless(buildChartBar) },
@@ -204,6 +205,7 @@ pub const scenes = [_]Scene{
     heroScene("input-group-hero", buildInputGroupHero),
     heroScene("list-hero", buildListHero),
     heroScene("markdown-hero", buildMarkdownHero),
+    heroScene("media-surface-hero", buildMediaSurfaceHero),
     heroScene("pagination-hero", buildPaginationHero),
     heroScene("panel-hero", buildPanelHero),
     heroScene("progress-hero", buildProgressHero),
@@ -572,6 +574,36 @@ fn buildAvatar(ui: *Ui) Node {
             ui.avatar(.{}, "ZN"),
             ui.avatar(.{}, "CT"),
             ui.avatar(.{}, "NS"),
+        }),
+    });
+}
+
+fn buildMediaSurface(ui: *Ui) Node {
+    // The docs previews render through the deterministic reference
+    // renderer, so this shows exactly what goldens show: the surface's
+    // id-derived placeholder. Producer frames exist only on live GPU
+    // hosts — presentation chrome by policy.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 340 }, .{
+            ui.mediaSurface(.{
+                .image = 7,
+                .height = 180,
+                .style_tokens = .{ .radius = .md },
+                .semantics = .{ .label = "Camera preview" },
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Awaiting producer frames"),
+        }),
+    });
+}
+
+fn buildMediaSurfaceHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.mediaSurface(.{
+            .image = 7,
+            .width = 300,
+            .height = 150,
+            .style_tokens = .{ .radius = .md },
+            .semantics = .{ .label = "Media surface" },
         }),
     });
 }

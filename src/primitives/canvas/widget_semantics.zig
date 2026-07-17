@@ -120,7 +120,12 @@ pub fn semanticRole(widget: Widget) WidgetRole {
         .menu_surface, .dropdown_menu => .menu,
         .list => .list,
         .text, .status_bar => .text,
-        .icon, .image, .avatar => .image,
+        // Media surfaces announce as images: pictorial content whose
+        // TEXTURE is presentation chrome — the semantic node carries only
+        // role, label, and bounds, never frame-varying producer state, so
+        // session fingerprints (hashed over the a11y tree) stay identical
+        // whether or not a producer is attached.
+        .icon, .image, .avatar, .media_surface => .image,
         .badge => .text,
         .button, .toggle_button, .toggle => .button,
         .icon_button, .select => .button,

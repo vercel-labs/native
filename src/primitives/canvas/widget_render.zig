@@ -234,6 +234,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -568,6 +569,7 @@ fn emitWidgetLayoutNodeContent(
         .text => try emitTextWidget(builder, paint_widget, tokens),
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
+        .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -1128,6 +1130,54 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .sampling = widget.image_sampling,
     });
     if (clips_image) try builder.popClip();
+}
+
+/// The deterministic placeholder color a media surface paints under its
+/// texture: a muted flat fill DERIVED FROM THE SURFACE ID alone, so
+/// every renderer — and every replay, with or without a producer
+/// attached — derives the identical pixels from the identical display
+/// list. Channels land in the 0x40..0x7F band: distinct per surface,
+/// never garish, honest "no frame yet" chrome.
+pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
+    const hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&surface_id));
+    return Color.rgba8(
+        0x40 + @as(u8, @truncate(hash)) % 0x40,
+        0x40 + @as(u8, @truncate(hash >> 8)) % 0x40,
+        0x40 + @as(u8, @truncate(hash >> 16)) % 0x40,
+        0xff,
+    );
+}
+
+/// The media surface: an id-derived placeholder fill with the surface's
+/// externally produced texture composited over it. ONE display list
+/// serves both renderers — the texture rides a `draw_image` whose
+/// resource is marked `presentation_only`, so the deterministic
+/// reference renderer (goldens, screenshots, replay pixel marks) skips
+/// the draw and shows the placeholder, while live GPU/packet hosts
+/// composite the real texture. `image_id` is the SURFACE id (0 = the
+/// unbound sentinel: placeholder only, like an image leaf with id 0
+/// draws nothing).
+fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
+    if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
+    const radius = Radius.all(widget.style.radius orelse 0);
+    try builder.fillRoundedRect(.{
+        .id = widgetPartId(widget.id, 1),
+        .rect = widget.frame,
+        .radius = radius,
+        .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+    });
+    try builder.drawImage(.{
+        .id = widgetPartId(widget.id, 2),
+        .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
+        .src = widget.image_src,
+        .dst = widget.frame,
+        .opacity = widget.image_opacity,
+        .fit = widget.image_fit,
+        .sampling = widget.image_sampling,
+        // The render plan flattens clip stacks to rects, so a rounded
+        // surface masks on the draw itself (the avatar convention).
+        .radius = radius,
+    });
 }
 
 fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

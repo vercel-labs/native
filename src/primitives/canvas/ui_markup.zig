@@ -1250,6 +1250,10 @@ pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on 
 pub const avatar_image_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders the initials fallback";
 pub const avatar_image_element_message = "image is only supported on avatar - the other image-bearing widgets (image, icon-button) stay Zig views (ui.image with ElementOptions.image)";
 
+pub const media_surface_surface_message = "surface takes one {binding} to the u64 surface id a producer targets (runtime.acquireMediaSurfaceProducer) - surface ids are model data, not markup literals; 0 leaves the surface unbound and it draws nothing";
+pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
+pub const media_surface_missing_surface_message = "media-surface requires surface={binding} naming the u64 surface id its producer targets - without one the surface can never show anything (dead markup, same policy as icon without name)";
+
 /// The built-in vector icon vocabulary behind `<icon name="..."/>`.
 /// Registry section mirroring `canvas.icons.known_icon_names` (the
 /// comptime-parsed registry; this layer stays std-only); a test in
@@ -2928,6 +2932,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 if (node.attr("name") == null) return errorAt(node, icon_missing_name_message);
                 if (node.children.len > 0) return errorAt(node.children[0], icon_children_message);
             }
+            if (std.mem.eql(u8, node.name, "media-surface")) {
+                // A media surface without a producer rendezvous can never
+                // show anything: statically dead markup, refused with a
+                // teaching (the icon-without-name policy).
+                if (node.attr("surface") == null) return errorAt(node, media_surface_missing_surface_message);
+            }
             if (std.mem.eql(u8, node.name, "split")) {
                 // Exactly two pane children, statically: the divider sits
                 // between fixed panes, so conditional/repeated content
@@ -3060,6 +3070,20 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     const expression = parseAttrExpression(attribute.value);
                     if (expression == null or expression.? != .binding) {
                         return attrError(node, attribute, avatar_image_message);
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "surface")) {
+                    // The media-surface producer rendezvous, media-surface
+                    // scoped: surface ids are model data a producer
+                    // targets, never markup literals (the runtime-image-id
+                    // grammar exactly).
+                    if (!std.mem.eql(u8, node.name, "media-surface")) {
+                        return attrError(node, attribute, media_surface_surface_element_message);
+                    }
+                    const expression = parseAttrExpression(attribute.value);
+                    if (expression == null or expression.? != .binding) {
+                        return attrError(node, attribute, media_surface_surface_message);
                     }
                     continue;
                 }

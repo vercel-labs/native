@@ -21,15 +21,13 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 65), schema.elements.len);
-    try testing.expectEqual(@as(usize, 80), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 66), schema.elements.len);
+    try testing.expectEqual(@as(usize, 81), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
-    // The element table runs through the span composite (64) and the
-    // bubble-reactions composite (65); the reaction pill's dock rides
-    // the existing text-alignment attribute, so element additions can
-    // leave the attr table untouched.
+    // The element table runs through the span composite (64), the
+    // bubble-reactions composite (65), and the media surface (66).
     try testing.expectEqual(
-        @as(u64, 0x961be186c9929e4c),
+        @as(u64, 0x65ed870d5b6e279e),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -37,10 +35,11 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // attributes x-labels (73), y-labels (74), and hover-details (75),
     // the later span additions scale (76) and underline (77), the
     // split enter-from attribute resize-origin (78), the quiet-surface
-    // hover knob quiet-hover (79), and the anchored-tooltip hover-intent
-    // delay tooltip-delay (80).
+    // hover knob quiet-hover (79), the anchored-tooltip hover-intent
+    // delay tooltip-delay (80), and the media-surface producer
+    // rendezvous surface (81).
     try testing.expectEqual(
-        @as(u64, 0x5348b0f92c314d2a),
+        @as(u64, 0x046479d29c4f0c5e),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     try testing.expectEqual(
@@ -91,7 +90,7 @@ test "registry event scoping names registry elements" {
 test "derived name lists mirror the registry" {
     // The derivations are the vocabulary every consumer reads; hold them
     // to the registry's own predicates.
-    try testing.expectEqual(@as(usize, 53), schema.element_names.len);
+    try testing.expectEqual(@as(usize, 54), schema.element_names.len);
     for (schema.element_names) |name| {
         try testing.expect(schema.elementByName(name).?.rule_hook == null);
     }

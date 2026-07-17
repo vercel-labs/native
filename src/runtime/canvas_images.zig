@@ -28,6 +28,7 @@ const canvas = @import("canvas");
 const canvas_frame_module = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const effects_mod = @import("effects.zig");
+const runtime_media_surface = @import("media_surface.zig");
 
 pub const max_registered_canvas_images = canvas_limits.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = canvas_limits.max_registered_canvas_image_pixel_bytes;
@@ -78,6 +79,12 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// `max_registered_canvas_images` slots hold other ids).
         pub fn registerCanvasImage(self: *Runtime, id: canvas.ImageId, width: usize, height: usize, rgba8: []const u8) anyerror!void {
             if (id == 0) return error.InvalidImageId;
+            // The high bit is the media-surface texture namespace
+            // (`canvas.media_surface_image_id_bit`): producer-pushed
+            // textures and registered images share one flat id space,
+            // so a registration inside the reserved namespace is
+            // refused loudly rather than shadowed silently.
+            if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
             if (width == 0 or height == 0) return error.InvalidImageDimensions;
             const row_len = std.math.mul(usize, width, 4) catch return error.InvalidImageDimensions;
             const byte_len = std.math.mul(usize, row_len, height) catch return error.InvalidImageDimensions;
@@ -153,7 +160,11 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// The registered set as the `ReferenceImage` slice both
         /// renderers consume, rebuilt into runtime scratch (pixels are
         /// borrowed from the slot pool, valid until the next
-        /// register/unregister).
+        /// register/unregister), with the adopted media-surface
+        /// textures appended as `presentation_only` entries — GPU and
+        /// packet hosts upload and composite those, the deterministic
+        /// reference renderer skips them by policy (the media surface's
+        /// id-derived placeholder is what it draws instead).
         pub fn registeredCanvasImages(self: *Runtime) []const canvas.ReferenceImage {
             for (self.canvas_image_entries[0..self.canvas_image_count], 0..) |entry, index| {
                 self.canvas_image_resources_scratch[index] = .{
@@ -163,7 +174,11 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                     .pixels = self.canvas_image_pixels[index][0..entry.byte_len],
                 };
             }
-            return self.canvas_image_resources_scratch[0..self.canvas_image_count];
+            const media = runtime_media_surface.RuntimeMediaSurfaces(Runtime).adoptedMediaSurfaceTextures(
+                self,
+                self.canvas_image_resources_scratch[self.canvas_image_count..],
+            );
+            return self.canvas_image_resources_scratch[0 .. self.canvas_image_count + media.len];
         }
 
         /// Dimensions of a registered image, or null when `id` is not
@@ -213,11 +228,13 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             return null;
         }
 
-        /// Registered pixels changed: force every gpu_surface view to
-        /// re-render its next frame (an image swap with an unchanged
-        /// display list would otherwise take the skip path) and request
-        /// frames so the repaint is not gated on other input.
-        fn noteCanvasImagesChanged(self: *Runtime) void {
+        /// Registered pixels (or adopted media-surface textures, which
+        /// ride the same resource set) changed: force every gpu_surface
+        /// view to re-render its next frame (an image swap with an
+        /// unchanged display list would otherwise take the skip path)
+        /// and request frames so the repaint is not gated on other
+        /// input. Pub for media_surface.zig's adoption path.
+        pub fn noteCanvasImagesChanged(self: *Runtime) void {
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
             for (self.views[0..self.view_count], 0..) |*view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;

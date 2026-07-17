@@ -105,6 +105,22 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 pub const max_registered_canvas_images: usize = 16;
 pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 
+// Media-surface texture channels (media_surface.zig): producer-pushed
+// dynamic textures composited by media_surface widgets. Sized at video
+// scale, not avatar scale — one 1080p RGBA8 frame is ~7.9 MiB, so the
+// per-channel bound fits it exactly (8 MiB) and refuses 4K until the
+// format axis grows real zero-copy paths; 4 concurrent channels covers
+// a player plus a camera preview plus headroom, and a fifth acquire
+// fails loudly (`error.MediaSurfaceChannelsExhausted`). Memory is
+// fixed-capacity address space in the Runtime for the ADOPTED textures
+// (4 x 8 MiB = 32 MiB, pages touched only as channels adopt) plus the
+// same again in process-lived staging buffers allocated at first claim
+// and kept for the process's life — the mailbox a producer thread may
+// touch after its runtime died, which is why it can never be freed
+// (the effects executor's process-lifetime doctrine).
+pub const max_media_surface_channels: usize = 4;
+pub const max_media_surface_pixel_bytes: usize = 8 * 1024 * 1024;
+
 // Runtime-registered font faces: TrueType bytes apps register under a
 // caller-chosen FontId (>= canvas.min_registered_font_id) so their own
 // typefaces resolve everywhere a font id rides — token overrides, text

@@ -1196,6 +1196,15 @@ const Checker = struct {
                 try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.avatar_image_message);
                 continue;
             }
+            if (std.mem.eql(u8, attribute.name, "surface")) {
+                // Media-surface ids are model integers (engine parity —
+                // the runtime-image-id shape exactly).
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.media_surface_surface_message);
+                continue;
+            }
             if (std.mem.eql(u8, attribute.name, "icon") or
                 (std.mem.eql(u8, attribute.name, "name") and std.mem.eql(u8, node.name, "icon")))
             {

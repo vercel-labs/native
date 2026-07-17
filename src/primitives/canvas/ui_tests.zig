@@ -1432,6 +1432,7 @@ test "widget kind codes are pinned: assigned at birth, declaration-order-indepen
         .{ .kind = .split_divider, .code = 58 },
         .{ .kind = .tree, .code = 59 },
         .{ .kind = .input_group, .code = 60 },
+        .{ .kind = .media_surface, .code = 61 },
     };
     try testing.expectEqual(std.enums.values(canvas.WidgetKind).len, expected.len);
     for (expected) |entry| {

@@ -1495,6 +1495,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyImageAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "surface")) {
+                    try self.applySurfaceAttr(scope, node, options, attribute);
+                    continue;
+                }
                 if (std.mem.eql(u8, attribute.name, "name")) {
                     // Consumed by the icon branch in buildElement.
                     if (!std.mem.eql(u8, node.name, "icon")) {
@@ -1575,6 +1579,24 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             options.image = switch (value) {
                 .integer => |int| @intCast(int),
                 else => return self.failVoid(node, markup.avatar_image_message),
+            };
+        }
+
+        /// `surface="{binding}"` on media-surface: the model-owned u64
+        /// surface id a producer targets — media-surface-only,
+        /// binding-only, integer-valued (the runtime-image-id grammar
+        /// exactly). The id rides `options.image` into
+        /// `Widget.image_id`, the media surface's surface-id channel.
+        fn applySurfaceAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!std.mem.eql(u8, node.name, "media-surface")) {
+                return self.failVoid(node, markup.media_surface_surface_element_message);
+            }
+            const typed = markup.attrTyped(attribute);
+            if (typed != .binding) return self.failVoid(node, markup.media_surface_surface_message);
+            const value = try self.evalBinding(scope, node, typed.binding, true);
+            options.image = switch (value) {
+                .integer => |int| @intCast(int),
+                else => return self.failVoid(node, markup.media_surface_surface_message),
             };
         }
 

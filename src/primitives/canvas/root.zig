@@ -58,6 +58,22 @@ pub const ObjectId = u64;
 pub const ImageId = u64;
 pub const FontId = u64;
 
+/// Reserved namespace bit for MEDIA-SURFACE textures inside the ImageId
+/// value space: a media surface bound to `surface_id` composites the
+/// texture registered under `surface_id | media_surface_image_id_bit`,
+/// so producer-pushed textures and app-registered canvas images can
+/// never collide in the one flat id space draw commands reference.
+/// Surface ids and registered canvas image ids must both stay BELOW the
+/// bit — `Runtime.acquireMediaSurfaceProducer` and
+/// `Runtime.registerCanvasImage` reject ids with it set, loudly.
+pub const media_surface_image_id_bit: ImageId = 1 << 63;
+
+/// The texture image id a media surface's draw command references for a
+/// bound surface id (see `media_surface_image_id_bit`).
+pub fn mediaSurfaceTextureImageId(surface_id: u64) ImageId {
+    return surface_id | media_surface_image_id_bit;
+}
+
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
 // Reserved sans variant ids for inline span styling. The deterministic

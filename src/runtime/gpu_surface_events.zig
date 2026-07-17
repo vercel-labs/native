@@ -17,6 +17,13 @@ const sizesEqual = canvas_frame_helpers.sizesEqual;
 pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
     return struct {
         pub fn dispatchGpuSurfaceFrame(self: *Runtime, app: runtime_api.App(Runtime), frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+            // Media-surface adoption rides the compositor's
+            // presented-frame clock: staged producer frames (latest
+            // wins) are sampled once per frame event, BEFORE view state
+            // and the app dispatch, so a changed texture invalidates
+            // the very frame this event is about to present. Idle
+            // channels cost one fenced flag check each.
+            self.adoptMediaSurfaceFrames();
             var enriched_frame_event = frame_event;
             var had_pending_input = false;
             if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {

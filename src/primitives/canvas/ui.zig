@@ -455,7 +455,12 @@ pub fn Ui(comptime Msg: type) type {
             /// app registered at runtime (`Runtime.registerCanvasImage`,
             /// `fx.registerImageBytes`). 0 — the "no image" sentinel —
             /// keeps the widget on its non-image rendering (an avatar
-            /// falls back to initials).
+            /// falls back to initials). For `media_surface` this same
+            /// channel carries the SURFACE id its producer targets
+            /// (`Runtime.acquireMediaSurfaceProducer`, markup
+            /// `surface={binding}`) — the identical model-owned-u64
+            /// shape, one bit of the id space apart (see
+            /// `canvas.media_surface_image_id_bit`).
             image: canvas.ImageId = 0,
             /// Vector icon name drawn inside icon-bearing controls
             /// (`button`, `toggle_button`, `icon_button`, `list_item`,
@@ -1735,6 +1740,23 @@ pub fn Ui(comptime Msg: type) type {
         /// unregistered).
         pub fn image(self: *Self, options: ElementOptions) Node {
             return self.el(.image, options, .{});
+        }
+
+        /// The media surface leaf (markup `<media-surface surface={id}>`):
+        /// composites a texture PRODUCED OUTSIDE the widget tree — a
+        /// video decoder, a camera pipeline, an external renderer —
+        /// into the layout like any widget. `options.image` carries the
+        /// SURFACE id the producer targets
+        /// (`Runtime.acquireMediaSurfaceProducer`), a model-owned u64 in
+        /// the ImageId value space; 0 draws nothing (the image-leaf
+        /// convention). Until the first producer frame arrives, live
+        /// hosts show the surface's deterministic id-derived placeholder
+        /// — which is also ALL the reference renderer (goldens,
+        /// screenshots, replay pixel marks) ever shows, because texture
+        /// contents are presentation chrome by policy. Size it like an
+        /// image: definite width/height or flex grow (no intrinsic size).
+        pub fn mediaSurface(self: *Self, options: ElementOptions) Node {
+            return self.el(.media_surface, options, .{});
         }
 
         /// A built-in vector icon leaf: `name` is one of

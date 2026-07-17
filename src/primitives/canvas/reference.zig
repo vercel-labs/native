@@ -90,6 +90,19 @@ pub const ReferenceImage = struct {
     width: usize,
     height: usize,
     pixels: []const u8,
+    /// Precomputed content fingerprint for the GPU cache planner
+    /// (`renderImageFingerprintForResource` uses it when nonzero instead
+    /// of hashing `pixels` at plan time). Media-surface textures set it
+    /// at adoption so a 60 fps producer never pays a full-buffer hash
+    /// per planned frame; 0 — every registered canvas image — keeps the
+    /// classic hash-the-bytes keying byte-identically.
+    content_fingerprint: u64 = 0,
+    /// PRESENTATION-ONLY resource: composited by live GPU/packet hosts,
+    /// invisible to the deterministic reference renderer (see the
+    /// policy comment in `findReferenceImage`). Media-surface textures
+    /// ride the image pipeline with this set, so producer output can
+    /// never leak into goldens, screenshots, or replay pixel marks.
+    presentation_only: bool = false,
 };
 
 /// One runtime-registered font face the reference renderer resolves text
@@ -1292,6 +1305,15 @@ fn referenceImagePixelLen(width: usize, height: usize) ?usize {
 
 fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceImage {
     for (images) |image| {
+        // THE REFERENCE-RENDERER MEDIA POLICY: presentation-only
+        // resources (media-surface textures pushed by external
+        // producers) do not exist for the deterministic CPU path. The
+        // draw referencing one skips — exactly like an unregistered id —
+        // so the surface's id-derived placeholder beneath it is what
+        // reference renders, screenshots, replay pixel marks, and
+        // GOLDENS show. Goldens can therefore never depend on producer
+        // output; only live GPU/packet hosts composite the real texture.
+        if (image.presentation_only) continue;
         if (image.id == id) return image;
     }
     return null;

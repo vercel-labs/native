@@ -83,6 +83,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
+    .{ .name = "media-surface", .doc = "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -201,6 +202,10 @@ pub const avatar_attr_docs = [_]Doc{
     .{ .name = "image", .doc = "avatar: one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes); 0 renders the initials fallback." },
 };
 
+pub const media_surface_attr_docs = [_]Doc{
+    .{ .name = "surface", .doc = "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing." },
+};
+
 pub const chart_attr_docs = [_]Doc{
     .{ .name = "y-min", .doc = "chart: explicit y-domain floor (a number or one {binding}); omit to derive from the data. Bars always force 0 into a derived domain." },
     .{ .name = "y-max", .doc = "chart: explicit y-domain ceiling (a number or one {binding}); omit to derive from the data." },
@@ -289,6 +294,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&timeline_attr_docs, name)) |doc| return doc;
     if (findDoc(&timeline_item_attr_docs, name)) |doc| return doc;
     if (findDoc(&avatar_attr_docs, name)) |doc| return doc;
+    if (findDoc(&media_surface_attr_docs, name)) |doc| return doc;
     if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     if (findDoc(&chart_attr_docs, name)) |doc| return doc;
     if (findDoc(&series_attr_docs, name)) |doc| return doc;
