@@ -3148,6 +3148,93 @@ test "window key-loss hides tooltips in that window's views only, re-key reveals
     try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[2]));
 }
 
+test "window key-loss announced loss-first (Windows/GTK ordering) hides the tooltip at the loss itself" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-tooltip-key-loss-first", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
+        }
+    };
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const toolbar = try installTooltipToolbar(harness, app, arena.allocator());
+
+    // A second window with its own canvas view and a delay-0 tooltip,
+    // exactly like the gain-only key-loss test above.
+    const second = try harness.runtime.createWindow(.{ .label = "tools", .title = "Tools" });
+    _ = try harness.runtime.createView(.{
+        .window_id = second.id,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 220, 120),
+    });
+    const second_children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 40, 96, 32), .text = "Run" },
+        .{ .id = 3, .kind = .tooltip, .text = "Runs the job", .tooltip_delay_ms = 0, .layout = .{ .anchor = .{ .placement = .above } } },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &second_children }, geometry.RectF.init(0, 0, 220, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(second.id, "canvas", layout);
+
+    // The startup window holds key; hover earns Link's delay-0 tooltip.
+    try std.testing.expect(harness.runtime.windows[0].info.focused);
+    try tooltipHoverInWindow(harness, app, 1, toolbar.button_centers[2], tooltip_t0);
+    try std.testing.expectEqual(toolbar.tooltip_ids[2], harness.runtime.views[0].canvas_tooltip_shown_id);
+
+    // Windows and GTK announce the key change LOSS-first: a state echo
+    // carrying focused=false for the window the user left, BEFORE any
+    // gain event for the next one. The tooltip must hide AT the loss —
+    // the later gain's dethroning loop sees this window already
+    // unfocused, so nothing downstream can fire it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = harness.runtime.windows[0].info.label,
+        .title = harness.runtime.windows[0].info.title,
+        .frame = harness.runtime.windows[0].info.frame,
+        .focused = false,
+    } });
+    try std.testing.expect(!harness.runtime.windows[0].info.focused);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[2]));
+    try std.testing.expectEqual(@as(u64, 0), harness.runtime.views[0].canvas_tooltip_warm_until_ns);
+
+    // The gain lands afterwards: it changes nothing about the first
+    // window (already unfocused, already reset) and reveals nothing in
+    // the second (a key gain replays no transition).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_focused = second.id });
+    try std.testing.expect(harness.runtime.windows[1].info.focused);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHidden(harness, toolbar.tooltip_ids[2]));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[1].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHiddenInView(harness, 1, 3));
+
+    // A fresh hover transition in the now-key second window earns
+    // instantly (delay 0)...
+    try tooltipHoverInWindow(harness, app, second.id, .{ .x = 200, .y = 10 }, tooltip_t0 + 100 * tooltip_ms);
+    try tooltipHoverInWindow(harness, app, second.id, .{ .x = 58, .y = 56 }, tooltip_t0 + 150 * tooltip_ms);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[1].canvas_tooltip_shown_id);
+    try std.testing.expect(!try tooltipHiddenInView(harness, 1, 3));
+
+    // ...and a loss with NO subsequent gain — the user keyed into some
+    // other app's window, so every tracked window is now inactive —
+    // still resets: the seam observes the flag's own edge, not any
+    // gain's dethroning loop.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = second.id,
+        .label = harness.runtime.windows[1].info.label,
+        .title = harness.runtime.windows[1].info.title,
+        .frame = harness.runtime.windows[1].info.frame,
+        .focused = false,
+    } });
+    try std.testing.expect(!harness.runtime.windows[0].info.focused);
+    try std.testing.expect(!harness.runtime.windows[1].info.focused);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[1].canvas_tooltip_shown_id);
+    try std.testing.expect(try tooltipHiddenInView(harness, 1, 3));
+}
+
 test "a rebuild from the deactivation callback reveals and arms nothing while the app is inactive" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);

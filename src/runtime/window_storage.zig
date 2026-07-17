@@ -136,26 +136,28 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.windows[index].info.frame = native_info.frame;
             self.windows[index].info.scale_factor = native_info.scale_factor;
             self.windows[index].info.open = native_info.open;
-            self.windows[index].info.focused = native_info.focused;
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, native_info.frame.width, native_info.frame.height);
             }
-            if (native_info.focused) try Self.setFocusedIndex(self, index);
+            if (native_info.focused)
+                try Self.setFocusedIndex(self, index)
+            else
+                try Self.setWindowFocused(self, index, false);
         }
 
         pub fn updateWindowState(self: *Runtime, state: platform.WindowState) !void {
             const existing_index = Self.findWindowIndexById(self, state.id);
             const index = existing_index orelse try Self.reserveWindow(self, state.id, state.label, state.title, null, true);
-            var info = self.windows[index].info;
-            info.frame = state.frame;
-            info.scale_factor = state.scale_factor;
-            info.open = state.open;
-            info.focused = state.focused;
-            self.windows[index].info = info;
+            self.windows[index].info.frame = state.frame;
+            self.windows[index].info.scale_factor = state.scale_factor;
+            self.windows[index].info.open = state.open;
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, state.frame.width, state.frame.height);
             }
-            if (state.focused) try Self.setFocusedIndex(self, index);
+            if (state.focused)
+                try Self.setFocusedIndex(self, index)
+            else
+                try Self.setWindowFocused(self, index, false);
         }
 
         pub fn runtimeWindowStateForPersistence(self: *const Runtime, state: platform.WindowState) platform.WindowState {
@@ -238,13 +240,39 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         /// and the re-key restores focus where it was without revealing
         /// anything.
         pub fn setFocusedIndex(self: *Runtime, focused_index: usize) anyerror!void {
+            for (0..self.window_count) |index| {
+                try Self.setWindowFocused(self, index, index == focused_index);
+            }
+        }
+
+        /// The ONE writer of a tracked window's `focused` flag: the
+        /// key-LOSS consequence fires on the flag's own focused→
+        /// unfocused edge, HERE, so it cannot depend on which platform
+        /// event carried the loss or in what order. macOS announces a
+        /// key change as one GAIN (`window_focused`), and the dethroning
+        /// loop in `setFocusedIndex` observes the old window's edge —
+        /// but Windows and GTK announce the LOSS first (a state echo
+        /// carrying `focused = false` for the window the user left,
+        /// before any gain for the next one), and a loss written past
+        /// this seam would leave the later gain nothing to observe:
+        /// the tooltip stayed painted, and a11y-visible, in the
+        /// inactive window. Callers pass the flag they were told;
+        /// the transition logic lives only here.
+        ///
+        /// The two writes that deliberately stay OUTSIDE the seam:
+        /// `reserveWindow`'s creation-time init (a fresh slot has no
+        /// prior state — no edge exists) and `closeWindow`'s
+        /// transactional flip in window_views.zig (its views are
+        /// removed with the window on success, so there is no tooltip
+        /// left to reset, and its rollback on platform failure must
+        /// not have fired one).
+        pub fn setWindowFocused(self: *Runtime, index: usize, focused: bool) anyerror!void {
             const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
-            for (self.windows[0..self.window_count], 0..) |*window, index| {
-                const was_focused = window.info.focused;
-                window.info.focused = index == focused_index;
-                if (was_focused and !window.info.focused) {
-                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForWindowKeyLoss(self, window.info.id);
-                }
+            const window = &self.windows[index];
+            const was_focused = window.info.focused;
+            window.info.focused = focused;
+            if (was_focused and !focused) {
+                try CanvasWidgetEventMethods.resetCanvasTooltipIntentForWindowKeyLoss(self, window.info.id);
             }
         }
 

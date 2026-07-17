@@ -105,6 +105,12 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             // open=false event, and the open->closed TRANSITION — which
             // dispatches the `window_closed` app event — must stay
             // reserved for closes the app did not initiate.
+            // The `focused` flip deliberately bypasses the
+            // `setWindowFocused` seam (see window_storage.zig): on
+            // success the window's views — and any tooltip state in
+            // them — are removed below, and the rollback on platform
+            // failure must not have fired a key-loss tooltip reset for
+            // a window that never lost key.
             const was_open = self.windows[index].info.open;
             const was_focused = self.windows[index].info.focused;
             self.windows[index].info.open = false;
