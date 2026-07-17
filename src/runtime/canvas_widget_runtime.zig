@@ -393,16 +393,33 @@ pub fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
     return kind == .input or kind == .text_field or kind == .search_field or kind == .combobox or kind == .textarea;
 }
 
-/// Clipboard paste text clamped to what the view's shared widget text
-/// storage can absorb (the bytes the edit replaces are freed first).
-/// Clamping lands on a UTF-8 boundary; `truncated` is the loud flag the
-/// runtime forwards to apps on the keyboard event.
+/// Clipboard paste text sanitized for the target kind and then clamped
+/// to what the view's shared widget text storage can absorb (the bytes
+/// the edit replaces are freed first). Clamping lands on a UTF-8
+/// boundary; `truncated` is the loud flag the runtime forwards to apps
+/// on the keyboard event.
 pub const CanvasWidgetPasteClamp = struct {
     text: []const u8 = "",
     truncated: bool = false,
 };
 
 pub fn clampCanvasWidgetPasteText(widget: canvas.Widget, view_text_len: usize, text: []const u8) CanvasWidgetPasteClamp {
+    // Sanitize BEFORE clamping — the shared step for BOTH paste entry
+    // points (the cmd+V shortcut and the context-menu Paste). A
+    // single-line target strips \r/\n at the edit-derivation seam
+    // anyway, so capacity must be measured against the bytes that
+    // actually land: clamping the raw clipboard first discarded valid
+    // suffix text near the limit ("a\nbc" into 3 free bytes clamped to
+    // "a\nb" and then sanitized to "ab", when the sanitized "abc" fits
+    // whole). The stamped edit is the post-clamp bytes, so the retained
+    // editor and the app's `on_input` mirror still hear identically —
+    // the seam's re-sanitize is a no-op on already-stripped text. A
+    // paste that sanitizes to nothing clamps to nothing; that is the
+    // sanitize rule speaking, NOT capacity, so `truncated` stays false.
+    const sanitized = if (canvas.sanitizedSingleLineTextInputEvent(widget.kind, .{ .insert_text = text })) |event|
+        event.insert_text
+    else
+        return .{};
     const capacity = @import("canvas_limits.zig").max_canvas_widget_text_bytes_per_view;
     const replaced_len = blk: {
         if (widget.text_composition) |composition| break :blk composition.byteLen(widget.text.len);
@@ -411,9 +428,9 @@ pub fn clampCanvasWidgetPasteText(widget: canvas.Widget, view_text_len: usize, t
     };
     const used = view_text_len -| replaced_len;
     const available = capacity -| used;
-    if (text.len <= available) return .{ .text = text };
-    const clamped = canvas.snapTextOffset(text, available);
-    return .{ .text = text[0..clamped], .truncated = true };
+    if (sanitized.len <= available) return .{ .text = sanitized };
+    const clamped = canvas.snapTextOffset(sanitized, available);
+    return .{ .text = sanitized[0..clamped], .truncated = true };
 }
 
 pub fn canvasWidgetSingleLineTextKind(kind: canvas.WidgetKind) bool {

@@ -1796,9 +1796,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// - cut: copy, then stamp a delete-selection edit onto the routed
         ///   keyboard event so runtime widget and app model apply the same
         ///   removal.
-        /// - paste: reads the clipboard into `paste_buffer`, clamps it to
-        ///   the view's text capacity (setting `edit_truncated` loudly),
-        ///   and stamps the insertion onto the routed keyboard event.
+        /// - paste: reads the clipboard into `paste_buffer`, sanitizes it
+        ///   for the target kind and THEN clamps to the view's text
+        ///   capacity (setting `edit_truncated` loudly) — order matters:
+        ///   clamping first would spend capacity on line-break bytes the
+        ///   seam strips anyway — and stamps the insertion onto the
+        ///   routed keyboard event.
         ///
         /// Platforms without a clipboard capability report
         /// `UnsupportedService`; the shortcut degrades to a no-op instead
@@ -1883,7 +1886,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // `on_input` mirror hear byte-identical sanitized inserts
             // (clipboard paste from both entry points, typed and
             // automation text_input, IME composition — every insertion
-            // source flows through this one seam). A suppressed edit (an
+            // source flows through this one seam). Pre-stamped pastes
+            // arrive already sanitized (`clampCanvasWidgetPasteText`
+            // strips BEFORE clamping so capacity never counts stripped
+            // bytes); re-sanitizing them is a no-op. A suppressed edit (an
             // insert that was ONLY line breaks) also clears any raw
             // pre-stamped paste so the app can never hear bytes the
             // editor refused; the app-side fallback derivation applies

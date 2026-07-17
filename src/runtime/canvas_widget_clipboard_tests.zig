@@ -245,6 +245,52 @@ test "a paste of only line breaks into a single-line field inserts nothing and k
     try std.testing.expectEqual(@as(usize, 0), app_state.last_edit_insert_len);
 }
 
+test "a near-capacity multi-line paste sanitizes before it clamps" {
+    var app_state: ClipboardTestApp = .{};
+    const app = app_state.app();
+    const harness = try createClipboardHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Fill the view's shared widget-text storage to EXACTLY three free
+    // bytes, the boundary where the sanitize/clamp ordering shows:
+    // pasting "a\nbc" must land "abc" (sanitized 3 bytes, fits whole).
+    // Clamping the raw clipboard first would spend the third byte on
+    // the '\n' the seam strips anyway — "a\nb" then "ab" — silently
+    // discarding the valid 'c' and flagging a truncation that never
+    // happened to the bytes that count.
+    const fill_len = canvas_limits.max_canvas_widget_text_bytes_per_view - 3;
+    const fill = try std.testing.allocator.alloc(u8, fill_len);
+    defer std.testing.allocator.free(fill);
+    @memset(fill, 'x');
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 200, 36),
+        .text = fill,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    // Pin the boundary premise: exactly 3 bytes of capacity remain.
+    try std.testing.expectEqual(fill_len, harness.runtime.views[0].widget_text_len);
+
+    try harness.runtime.writeClipboard("a\nbc");
+    try harness.runtime.dispatchPlatformEvent(app, pointerInput(.pointer_down, 100, 30));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("end", .{}));
+    try harness.runtime.dispatchPlatformEvent(app, keyInput("v", cmd));
+
+    // The retained editor holds the whole sanitized suffix ...
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const text = retained.nodes[1].widget.text;
+    try std.testing.expectEqual(fill_len + 3, text.len);
+    try std.testing.expectEqualStrings("abc", text[text.len - 3 ..]);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(text.len), retained.nodes[1].widget.text_selection.?);
+    // ... the app's stamped edit is byte-identical to what the editor
+    // applied, and nothing was (falsely) reported truncated.
+    try std.testing.expectEqualStrings("abc", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+    try std.testing.expect(!app_state.saw_truncated);
+}
+
 test "paste clamps to view text capacity and flags truncation loudly" {
     var app_state: ClipboardTestApp = .{};
     const app = app_state.app();

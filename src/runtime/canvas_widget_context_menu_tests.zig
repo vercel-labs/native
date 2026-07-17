@@ -25,6 +25,9 @@ const MenuTestApp = struct {
     last_menu_item_index: usize = 0,
     request_count: u32 = 0,
     last_request_target: canvas.ObjectId = 0,
+    last_edit_insert: [64]u8 = undefined,
+    last_edit_insert_len: usize = 0,
+    saw_truncated: bool = false,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -44,6 +47,17 @@ const MenuTestApp = struct {
             .canvas_widget_context_menu_request => |request_event| {
                 self.request_count += 1;
                 self.last_request_target = request_event.target_id;
+            },
+            .canvas_widget_keyboard => |keyboard_event| {
+                if (keyboard_event.keyboard.edit_truncated) self.saw_truncated = true;
+                if (keyboard_event.keyboard.edit) |edit| switch (edit) {
+                    .insert_text => |text| {
+                        const len = @min(text.len, self.last_edit_insert.len);
+                        @memcpy(self.last_edit_insert[0..len], text[0..len]);
+                        self.last_edit_insert_len = len;
+                    },
+                    else => {},
+                };
             },
             else => {},
         }
@@ -208,6 +222,47 @@ test "right click on editable text presents the default edit menu wired to clipb
     try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 4));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
+}
+
+test "a near-capacity multi-line context-menu paste sanitizes before it clamps" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Same boundary as the cmd+V shortcut test: exactly three free bytes
+    // in the view's shared widget-text storage, clipboard "a\nbc". The
+    // context menu's Paste flows through the same sanitize-then-clamp
+    // helper, so the sanitized "abc" lands whole instead of the raw
+    // clamp's "a\nb" -> "ab".
+    const fill_len = canvas_limits.max_canvas_widget_text_bytes_per_view - 3;
+    const fill = try std.testing.allocator.alloc(u8, fill_len);
+    defer std.testing.allocator.free(fill);
+    @memset(fill, 'x');
+    const text_field = canvas.Widget{
+        .id = 2,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(12, 16, 200, 36),
+        .text = fill,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try std.testing.expectEqual(fill_len, harness.runtime.views[0].widget_text_len);
+
+    try harness.runtime.writeClipboard("a\nbc");
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+    // Paste is the default edit menu's third item.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 3));
+
+    // Retained editor and the app's stamped edit hear the same whole
+    // sanitized suffix, with no false truncation flag.
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const text = retained.nodes[1].widget.text;
+    try std.testing.expectEqual(fill_len + 3, text.len);
+    try std.testing.expectEqualStrings("abc", text[text.len - 3 ..]);
+    try std.testing.expectEqualStrings("abc", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+    try std.testing.expect(!app_state.saw_truncated);
 }
 
 test "right click on selected static text presents a copy-only menu" {
