@@ -162,6 +162,7 @@ threadlocal var scrim_viewport: ?geometry.RectF = null;
 
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     resetFrameLabelScratch();
+    widget_text_input.resetWidgetTextInputPresentationPool();
     scrim_viewport = widget.frame.normalized();
     try emitWidgetDepth(builder, widget, tokens, 0);
 }
@@ -172,6 +173,7 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     resetFrameLabelScratch();
+    widget_text_input.resetWidgetTextInputPresentationPool();
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutAnchored(builder, layout, tokens, state);

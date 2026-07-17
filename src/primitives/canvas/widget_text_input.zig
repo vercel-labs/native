@@ -36,6 +36,111 @@ pub fn widgetPlaceholder(widget: Widget) []const u8 {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Single-line presentation: a single-line field NEVER paints a second line.
+//
+// Edits into single-line kinds are sanitized at the runtime's derivation
+// seam (`sanitizedSingleLineTextInputEvent`), but the retained VALUE can
+// still legitimately hold a line break — a model-set value, an old journal,
+// a host API write. The honest presentation for such a value is the one
+// the paint layers already give whitespace: `\n`/`\r` lay out and measure
+// as a SPACE (nothing inked, one space advance) instead of breaking the
+// line. The substitution is byte-for-byte (1 → 1), so every caret,
+// selection, composition, and hit-test offset computed against the
+// presented bytes addresses the raw value unchanged — and because the
+// presented bytes contain no `\n`, the single-line layout (`wrap = .none`)
+// produces exactly one line on every renderer: the GPU engine, the
+// reference renderer, and packet hosts that draw engine-broken lines
+// verbatim. Copy, semantics, and automation still read the RAW value.
+//
+// The clip is the independent second guard: `widgetTextInputClipsText`
+// forces the content-rect clip whenever the raw value holds a break, so
+// even a path that somehow lays out raw bytes (presentation scratch
+// exhausted) stays inside the field's border.
+
+/// The editable kinds that present single-line: every text-input kind but
+/// the textarea (the one genuinely multi-line editor). Deliberately
+/// includes the tall wrapping `text_field` variant — its kind contract is
+/// single-line entry, and `\n`-as-space is consistent under word wrap too.
+fn widgetTextInputPresentsSingleLine(kind: widget_model.WidgetKind) bool {
+    return kind != .textarea and widget_access.widgetTextInputKind(kind);
+}
+
+fn textContainsLineBreakByte(text: []const u8) bool {
+    return std.mem.indexOfAny(u8, text, "\r\n") != null;
+}
+
+/// Whether this widget's PAINTED text differs from its raw value (a
+/// single-line kind whose value holds a line break). Render emitters use
+/// it to persist the presented bytes for the display list's lifetime.
+pub fn widgetTextInputTextNeedsPresentation(widget: Widget) bool {
+    return widgetTextInputPresentsSingleLine(widget.kind) and textContainsLineBreakByte(widget.text);
+}
+
+/// Presentation scratch, lazily heap-allocated per thread (the
+/// `lazy_tls` pattern all canvas scratch uses; the event loop is
+/// single-threaded):
+///   - `slot` holds ONE presented text at a time — the transient buffer
+///     the geometry seams (caret, selection, hit-test, scroll measures)
+///     substitute into. Every entry point re-derives it, and within one
+///     widget's computation repeated derivations write identical bytes,
+///     so the aliasing is harmless.
+///   - `pool` appends presented texts for the RENDER walk: emitted
+///     `drawText` commands slice into it and must survive until the
+///     runtime copies the display list (same emit call stack — the
+///     chart-label scratch precedent). Reset at each emit entry point.
+/// Sized to the runtime's per-view budgets: `slot` to the widget-text
+/// budget (65536), `pool` to the per-frame text budget (32768) — a frame
+/// retaining more text fails its own budget first. Overflow falls back
+/// to the RAW bytes; the forced clip above keeps even that fallback
+/// inside the field's border.
+const WidgetTextPresentationScratch = struct {
+    slot: [65536]u8,
+    pool: [32768]u8,
+    pool_len: usize = 0,
+};
+const widget_text_presentation_scratch = @import("lazy_tls.zig").LazyTls(WidgetTextPresentationScratch);
+
+/// Reset the render walk's presentation pool — called by the display-list
+/// emit entry points, next to the chart-label scratch reset.
+pub fn resetWidgetTextInputPresentationPool() void {
+    widget_text_presentation_scratch.get().pool_len = 0;
+}
+
+/// The text a single-line field lays out, measures, and paints: the raw
+/// value with `\n`/`\r` presented as spaces (same byte length). Returns
+/// the raw slice untouched when nothing needs presenting — the
+/// overwhelmingly common case costs one byte scan.
+pub fn widgetTextInputPresentedText(widget: Widget) []const u8 {
+    if (!widgetTextInputPresentsSingleLine(widget.kind)) return widget.text;
+    return presentedSingleLineText(widget.text);
+}
+
+fn presentedSingleLineText(text: []const u8) []const u8 {
+    if (!textContainsLineBreakByte(text)) return text;
+    const scratch = widget_text_presentation_scratch.get();
+    if (text.len > scratch.slot.len) return text;
+    for (text, 0..) |byte, index| {
+        scratch.slot[index] = if (byte == '\n' or byte == '\r') ' ' else byte;
+    }
+    return scratch.slot[0..text.len];
+}
+
+/// Persist presented bytes into the render walk's pool so an emitted
+/// command outlives the shared slot (a later widget's presentation
+/// overwrites it). Falls back to the RAW value — stable, view-owned
+/// storage — when the pool is full; the forced clip contains that
+/// fallback inside the field's border.
+pub fn persistWidgetTextInputPresentedText(raw: []const u8, presented: []const u8) []const u8 {
+    if (presented.ptr == raw.ptr) return raw;
+    const scratch = widget_text_presentation_scratch.get();
+    if (scratch.pool_len + presented.len > scratch.pool.len) return raw;
+    const start = scratch.pool_len;
+    scratch.pool_len += presented.len;
+    @memcpy(scratch.pool[start..scratch.pool_len], presented);
+    return scratch.pool[start..scratch.pool_len];
+}
+
 pub fn textSelectionForWidgetPoint(widget: Widget, point: geometry.PointF, anchor: ?usize, tokens: DesignTokens) ?TextSelection {
     const offset = textOffsetForWidgetPoint(widget, point, tokens) orelse return null;
     const selection = if (anchor) |anchor_offset|
@@ -115,7 +220,10 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
     if (options.wrap != .none or widget.text.len == 0) return 0;
     const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
     if (viewport.width <= 0) return 0;
-    const text_width = measureTextWidthForFont(options.measure, tokens.typography.font_id, widget.text, text_size);
+    // Measure the PRESENTED bytes — the ones the field lays out and
+    // paints — so a value holding a line break scrolls by the same
+    // single-line extent it draws.
+    const text_width = measureTextWidthForFont(options.measure, tokens.typography.font_id, widgetTextInputPresentedText(widget), text_size);
     return @max(0, text_width + text_input_caret_reserve - viewport.width);
 }
 
@@ -220,9 +328,10 @@ pub fn textInputCaretVisibleScrollOffsetForWidget(widget: Widget, tokens: Design
 
     // Caret x in content (unscrolled) coordinates: the width of the value
     // up to the caret byte, measured on the same seam the line layout and
-    // selection rects measure with.
+    // selection rects measure with — the PRESENTED bytes (byte offsets
+    // are interchangeable: the presentation substitutes 1:1).
     const caret_offset = snapTextOffset(widget.text, selection.focus);
-    const caret_x = measureTextWidthForFont(options.measure, tokens.typography.font_id, widget.text[0..caret_offset], text_size);
+    const caret_x = measureTextWidthForFont(options.measure, tokens.typography.font_id, widgetTextInputPresentedText(widget)[0..caret_offset], text_size);
     const margin = textInputCaretVisibleMargin(viewport.width);
     var next = clamped;
     const scrolled_in = caret_x + text_input_caret_reserve + margin - viewport.width;
@@ -239,6 +348,11 @@ pub fn textInputCaretVisibleScrollOffsetForWidget(widget: Widget, tokens: Design
 /// exactly as before fields scrolled.
 pub fn widgetTextInputClipsText(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) bool {
     if (widget.kind == .textarea) return true;
+    // A raw value holding a line break ALWAYS clips: presentation lays it
+    // out as one line, but the clip is the independent guard that keeps
+    // even a raw-bytes fallback (presentation scratch exhausted) from
+    // painting a second line outside the field's border.
+    if (widgetTextInputTextNeedsPresentation(widget)) return true;
     if (options.wrap != .none) return false;
     if (widgetTextInputMaxHorizontalScrollOffset(widget, tokens, text_size, text_inset, options) > 0) return true;
     if (widget.text.len == 0) {
@@ -260,16 +374,19 @@ fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, t
 }
 
 fn widgetTextInputLineCount(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) usize {
-    if (widget.text.len == 0) return 1;
+    // Count lines over the PRESENTED bytes: a single-line field's value
+    // holding a `\n` still lays out (and therefore extends) as one line.
+    const text = widgetTextInputPresentedText(widget);
+    if (text.len == 0) return 1;
     var count: usize = 0;
     var start: usize = 0;
-    while (start <= widget.text.len) {
-        const end = nextTextLineEnd(widget.text, start, font_id, text_size, options);
+    while (start <= text.len) {
+        const end = nextTextLineEnd(text, start, font_id, text_size, options);
         count += 1;
-        if (end >= widget.text.len) break;
+        if (end >= text.len) break;
         start = end;
-        if (start < widget.text.len and widget.text[start] == '\n') start += 1;
-        while (options.wrap == .word and start < widget.text.len and isTextBreakByte(widget.text[start])) start += 1;
+        if (start < text.len and text[start] == '\n') start += 1;
+        while (options.wrap == .word and start < text.len and isTextBreakByte(text[start])) start += 1;
     }
     return @max(1, count);
 }
@@ -287,7 +404,12 @@ pub fn widgetTextInputDrawText(
         .size = text_size,
         .origin = pixelSnapTextPoint(tokens, origin),
         .color = color,
-        .text = widget.text,
+        // The presented bytes: identical to `widget.text` unless a
+        // single-line field's value holds a line break (then `\n`/`\r`
+        // present as spaces — one line, same byte offsets). Geometry
+        // consumers (caret, selection, hit-test) and the paint emitters
+        // both build from this seam, so they can never disagree.
+        .text = widgetTextInputPresentedText(widget),
         .text_layout = options,
     };
 }
