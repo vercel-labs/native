@@ -138,7 +138,9 @@ pub const WidgetKind = enum {
     /// renderer) into the layout like any widget — clipped, z-ordered,
     /// transformed. `image_id` carries the SURFACE id the producer
     /// targets (`Runtime.acquireMediaSurfaceProducer`), a model-owned
-    /// u64 in the ImageId value space; 0 is the unbound sentinel.
+    /// u64 in the ImageId value space; 0 is the unbound sentinel, and
+    /// usable ids are nonzero values below the reserved namespace bit
+    /// (`media_surface_image_id_bit`, refused at acquire).
     /// Display-only like `image` and `chart`: not a hit target, presses
     /// fall through to the nearest pressable ancestor. Texture CONTENTS
     /// are presentation chrome — the deterministic reference renderer

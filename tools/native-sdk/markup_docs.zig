@@ -203,7 +203,7 @@ pub const avatar_attr_docs = [_]Doc{
 };
 
 pub const media_surface_attr_docs = [_]Doc{
-    .{ .name = "surface", .doc = "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing." },
+    .{ .name = "surface", .doc = "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing, and usable ids are nonzero values below bit 63 — the reserved media-surface texture namespace, which the producer acquire refuses." },
 };
 
 pub const chart_attr_docs = [_]Doc{

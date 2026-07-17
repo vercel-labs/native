@@ -7,12 +7,13 @@ Drive a `media-surface` from your own renderer: a video decoder, a camera pipeli
 A [`media-surface`](/components/media-surface) widget binds a model-owned `u64` surface id. Your producer acquires a handle for the same id and pushes frames; the compositor does the rest — layout, clipping, z-order, damage tracking, and pacing against the presented-frame clock.
 
 ```zig
-// 1. The model owns the surface id (any nonzero u64 you choose).
+// 1. The model owns the surface id — any nonzero id below the reserved
+// media-surface texture bit (if you hash into a u64, clear bit 63).
 const Model = struct {
     player_surface: u64 = 1,
 };
 
-// 2. The view binds it (markup: <media-surface surface="{playerSurface}">).
+// 2. The view binds it (markup: <media-surface surface="{player_surface}">).
 ui.mediaSurface(.{ .image = model.player_surface, .grow = 1, .semantics = .{ .label = "Player" } })
 
 // 3. Your producer claims the channel once (loop thread)...

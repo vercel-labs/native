@@ -477,7 +477,8 @@ pub const attrs = [_]AttrInfo{
     // id a producer targets (`Runtime.acquireMediaSurfaceProducer`) —
     // ids are model data in the runtime-image-id spirit, never markup
     // literals; 0 is the unbound sentinel (the surface draws nothing,
-    // like an image leaf with id 0).
+    // like an image leaf with id 0), and usable ids stay below the
+    // reserved namespace bit (bit 63), which acquire refuses.
     .{ .code = 81, .name = "surface", .class = .binding_only, .group = .element },
 };
 
