@@ -22,8 +22,10 @@ const app_fonts = [_]MyApp.FontRegistration{.{
 
 fn tokensFromModel(model: *const Model) canvas.DesignTokens {
     var tokens = canvas.DesignTokens.theme(.{ .color_scheme = model.scheme });
-    // Every text run reads the typography tokens: point the face slot
-    // at the registered id and the whole app prints in that face.
+    // Text resolves its face through the typography tokens: pointing
+    // font_id at the registered id covers every ordinary run. Mono
+    // spans keep the bundled mono face unless you also point
+    // typography.mono_font_id at a face that covers your script.
     tokens.typography.font_id = cjk_font_id;
     return tokens;
 }
@@ -70,7 +72,7 @@ Registration copies the file into an exact-size heap allocation owned by the run
 
 There is no per-widget font attribute. Text resolves its face through the typography tokens — `typography.font_id` for every ordinary run, `typography.mono_font_id` for mono-flagged runs, and optional `typography.button_font_id` for control labels — so a registered face is a theme decision, and the id rides everywhere a `canvas.FontId` rides: token overrides, both renderers, glyph atlas keys, render fingerprints.
 
-Layout and ink stay in lockstep. On platforms that measure text host-side (macOS), the raw bytes reach the host at registration time, so CoreText measurement and packet text drawing resolve the exact registered face even when the family is not installed system-wide. On platforms without host-side text measurement, layout charges the parsed face's own `cmap`/`hmtx` advances, and the deterministic reference renderer inks the same outlines — CJK advances measure as the face declares them, not as the Latin estimator would guess.
+Layout and ink stay in lockstep on the desktop paths. On macOS, the raw bytes reach the host at registration time, so CoreText measurement and packet text drawing resolve the exact registered face even when the family is not installed system-wide. On Windows and Linux, layout charges the parsed face's own `cmap`/`hmtx` advances, and the deterministic reference renderer inks the same outlines — CJK advances measure as the face declares them, not as the Latin estimator would guess. Mobile hosts do not yet have a registered-font measurement seam, so this guarantee does not extend there — see the platform notes below.
 
 Codepoints the registered face does not cover keep the same per-glyph fallback as the built-ins: the face's own notdef box. A registered face never silently cascades into another family — missing coverage is visible, never approximated.
 
