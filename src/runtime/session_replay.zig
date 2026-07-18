@@ -281,10 +281,17 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
-        // Image rejections are loop-side validation that refuses again;
-        // every other terminal — loaded bytes, source and decode
-        // failures — is an external input and must be fed.
-        .image => record.image_outcome == .rejected,
+        // Image `.rejected` terminals journal from BOTH sides of the
+        // executor seam, so the outcome alone is not provenance: only
+        // loop-side validation refusals — which the replayed
+        // `loadImage` regenerates — mark themselves with the exit
+        // reason (the `.host` records' convention, above). Worker-side
+        // rejections (a URL that passes the loop's scheme check but
+        // cannot become a request, an executor that could not start a
+        // cancelable load) keep `.exited`: the fake executor parks
+        // those requests, so the journaled record is the ONLY terminal
+        // and must be fed like every other worker truth.
+        .image => record.exit_reason == .rejected,
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.

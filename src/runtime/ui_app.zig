@@ -1107,6 +1107,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // and re-register the journaled source bytes —
                     // resolved from the blob store into `payload` by
                     // the replayer — best-effort for presentation.
+                    // Loop-side validation rejections never reach here
+                    // (marked by `exit_reason == .rejected`, they
+                    // regenerate and are skipped); a worker-origin
+                    // `.rejected` terminal feeds like any failure class.
                     .image => try self.effects.feedImageResult(
                         record.key,
                         record.image_outcome,

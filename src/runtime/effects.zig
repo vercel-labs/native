@@ -1702,9 +1702,17 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
-            /// Loop-thread image terminals (rejections and fake
-            /// cancels) — always payload-free, fully formed at enqueue.
-            image: struct { result: EffectImageResult, image_fn: ?ImageMsgFn },
+            /// Loop-thread image terminals (rejections, fake cancels,
+            /// feed fallbacks) — always payload-free, fully formed at
+            /// enqueue. `regenerates` is true only for pre-executor
+            /// validation refusals: the same deterministic checks in
+            /// `loadImage` refuse again under session replay, so their
+            /// journaled records are skipped rather than fed. Every
+            /// other terminal through this ring — fake cancels, feed
+            /// fallbacks, an executor that could not start the load —
+            /// is executor truth the replayed request cannot reproduce
+            /// and must be fed from the journal.
+            image: struct { result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -3069,23 +3077,26 @@ pub fn Effects(comptime Msg: type) type {
                 options.cache_path.len > max_effect_image_path_bytes or
                 options.url.len > max_effect_url_bytes)
             {
-                return self.rejectImage(options.id, options.on_result);
+                return self.rejectImage(options.id, options.on_result, true);
             }
             if (options.url.len > 0) {
-                const uri = std.Uri.parse(options.url) catch return self.rejectImage(options.id, options.on_result);
+                const uri = std.Uri.parse(options.url) catch return self.rejectImage(options.id, options.on_result, true);
                 const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
                     std.ascii.eqlIgnoreCase(uri.scheme, "https");
-                if (!scheme_ok) return self.rejectImage(options.id, options.on_result);
+                if (!scheme_ok) return self.rejectImage(options.id, options.on_result, true);
             }
-            if (self.findActiveSlot(options.id) != null) return self.rejectImage(options.id, options.on_result);
-            const slot_index = self.findIdleSlot() orelse return self.rejectImage(options.id, options.on_result);
+            if (self.findActiveSlot(options.id) != null) return self.rejectImage(options.id, options.on_result, true);
+            const slot_index = self.findIdleSlot() orelse return self.rejectImage(options.id, options.on_result, true);
 
             const slot = &self.slots[slot_index];
             // One spare byte past the source bound detects over-bound
             // files and bodies without a stat round trip (the file
             // effect's trick).
+            // An allocation failure is NOT regenerable validation: the
+            // replayed request allocates its own buffer and parks, so
+            // this terminal must journal as executor truth and feed.
             const buffer = self.allocator.alloc(u8, max_effect_image_bytes + 1) catch {
-                return self.rejectImage(options.id, options.on_result);
+                return self.rejectImage(options.id, options.on_result, false);
             };
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
@@ -3127,13 +3138,17 @@ pub fn Effects(comptime Msg: type) type {
 
             if (slot.fake) return;
 
+            // Executor-start failures are NOT regenerable validation
+            // either: under replay the fake executor parks the request
+            // before ever touching io or threads, so these terminals
+            // journal as executor truth and feed.
             const io = self.ensureIo() catch {
                 self.releaseFetchSlot(slot);
-                return self.rejectImage(options.id, options.on_result);
+                return self.rejectImage(options.id, options.on_result, false);
             };
             const thread = std.Thread.spawn(.{}, imageWorkerMain, .{ self, slot_index, slot.generation, io }) catch {
                 self.releaseFetchSlot(slot);
-                return self.rejectImage(options.id, options.on_result);
+                return self.rejectImage(options.id, options.on_result, false);
             };
             slot.worker_thread = thread;
         }
@@ -3480,7 +3495,7 @@ pub fn Effects(comptime Msg: type) type {
                     const image_fn = slot.on_image;
                     const key_copy = slot.key;
                     self.releaseFetchSlot(slot);
-                    self.deliverLoopImage(.{ .id = key_copy, .outcome = .cancelled }, image_fn);
+                    self.deliverLoopImage(.{ .id = key_copy, .outcome = .cancelled }, image_fn, false);
                     return;
                 }
                 // No process: retire the slot and surface the exit now.
@@ -4037,6 +4052,16 @@ pub fn Effects(comptime Msg: type) type {
                                 .image_outcome = entry.result.outcome,
                                 .image_width = entry.result.width,
                                 .image_height = entry.result.height,
+                                // `.image` journal encoding, the `.host`
+                                // records' convention: ONLY loop-side
+                                // validation refusals — regenerated by
+                                // the same checks under replay — mark
+                                // themselves with the exit reason. Every
+                                // other terminal (including worker-side
+                                // `.rejected`, which rides the slot
+                                // queue, not this ring) keeps `.exited`
+                                // and is fed from the journal.
+                                .exit_reason = if (entry.regenerates) .rejected else .exited,
                             });
                             return image_fn(entry.result);
                         },
@@ -4851,7 +4876,7 @@ pub fn Effects(comptime Msg: type) type {
                     .width = std.math.cast(usize, entry.image_fed_width) orelse 0,
                     .height = std.math.cast(usize, entry.image_fed_height) orelse 0,
                     .status = entry.status,
-                }, image_fn);
+                }, image_fn, false);
             }
             self.wakeHost();
         }
@@ -5041,20 +5066,27 @@ pub fn Effects(comptime Msg: type) type {
             self.deliverPending(.{ .clipboard = .{ .result = result, .clipboard_fn = clipboard_fn } });
         }
 
-        fn rejectImage(self: *Self, id: u64, image_fn: ?ImageMsgFn) void {
+        /// `regenerates` distinguishes the rejection's provenance for
+        /// the session journal: true for pre-executor validation
+        /// refusals (deterministic — the replayed `loadImage` refuses
+        /// again), false when the executor could not run an otherwise
+        /// valid request (io/thread/buffer failures the replay's fake
+        /// executor never reproduces — those journal as executor truth
+        /// and feed at replay).
+        fn rejectImage(self: *Self, id: u64, image_fn: ?ImageMsgFn, regenerates: bool) void {
             self.deliverLoopImage(.{
                 .id = id,
                 .outcome = .rejected,
-            }, image_fn);
+            }, image_fn, regenerates);
         }
 
         /// Queue a terminal image result produced on the loop thread
         /// (rejections, fake cancels, feed fallbacks) for the next
         /// drain. No bytes ride here — nothing decodes, nothing
         /// registers.
-        fn deliverLoopImage(self: *Self, result: EffectImageResult, image_fn: ?ImageMsgFn) void {
+        fn deliverLoopImage(self: *Self, result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool) void {
             if (image_fn == null) return;
-            self.deliverPending(.{ .image = .{ .result = result, .image_fn = image_fn } });
+            self.deliverPending(.{ .image = .{ .result = result, .image_fn = image_fn, .regenerates = regenerates } });
         }
 
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {

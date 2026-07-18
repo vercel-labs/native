@@ -1357,6 +1357,7 @@ const ImageSessionMsg = union(enum) {
     load_cover_again,
     load_broken,
     load_invalid,
+    load_hostless,
     image: effects_mod.EffectImageResult,
 };
 
@@ -1372,6 +1373,13 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
         // Id 0 is refused loop-side: a `.rejected` record that must
         // REGENERATE under replay rather than feed.
         .load_invalid => fx.loadImage(.{ .id = 0, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // A URL that PASSES loop-side validation ("http:hostless"
+        // parses with an http scheme) and is refused INSIDE the worker
+        // (`std.http` cannot build a request without a host — no
+        // network is ever touched): a `.rejected` terminal that is
+        // worker truth, so its journaled record must FEED under replay
+        // rather than be mistaken for regenerable validation.
+        .load_hostless => fx.loadImage(.{ .id = 24, .url = "http:hostless", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
         .image => |result| {
             model.results += 1;
             switch (result.outcome) {
@@ -1404,6 +1412,7 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.again")) return .load_cover_again;
     if (std.mem.eql(u8, name, "image.broken")) return .load_broken;
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
+    if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
     return null;
 }
 
@@ -1572,6 +1581,99 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
     try std.testing.expect(harness.runtime.registeredCanvasImage(22) != null);
     try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
+}
+
+/// Record a session whose single image load passes every loop-side
+/// check and is refused by the REAL executor's worker: "http:hostless"
+/// parses with an http scheme (the loop's whole validation) but has no
+/// host, so building the request fails inside the worker before any
+/// connection is attempted — a `.rejected` terminal with worker
+/// provenance. The recording therefore holds a rejected image record
+/// that the replayed `loadImage` can NOT regenerate (the fake executor
+/// parks the request), which replay must feed from the journal.
+fn recordWorkerRejectedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.hostless", .window_id = 1 } });
+    // The real worker delivers asynchronously: pump its wake nudges
+    // into `.wake` dispatches (each journals like any platform event)
+    // until the terminal Msg lands.
+    const io = std.testing.io;
+    var waited_ms: usize = 0;
+    while (app_state.model.results < 1) : (waited_ms += 10) {
+        if (waited_ms >= 20_000) return error.TestTimedOut;
+        var nudged = false;
+        while (harness.null_platform.takeWake()) |_| nudged = true;
+        if (nudged) try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a worker-refused image load journals as executor truth and feeds under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordWorkerRejectedImageSession(gpa, buffer);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+
+    // Replay offline into a fresh app: the journaled rejected terminal
+    // is worker truth — the fake executor parks the replayed request,
+    // so the record must FEED (never skip) for the Msg to be delivered
+    // at all. No blob store is needed: a rejection carries no bytes.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
 }
 
 test "a journal referencing blobs refuses to replay without its blob store" {
