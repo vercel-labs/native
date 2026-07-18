@@ -2314,6 +2314,7 @@ fn runnerZig() []const u8 {
     \\        .resizable = windowBool(window, "resizable", true),
     \\        .restore_state = windowBool(window, "restore_state", true),
     \\        .restore_policy = windowRestorePolicy(window),
+    \\        .close_policy = windowClosePolicy(window),
     \\    };
     \\}
     \\
@@ -2345,6 +2346,24 @@ fn runnerZig() []const u8 {
     \\    if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     \\    if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     \\    @compileError("unknown app.zon window restore_policy");
+    \\}
+    \\
+    \\/// What the window's close affordance does, from app.zon. `.hide` is
+    \\/// validated against the TARGET platform at comptime: a host with no
+    \\/// affordance to bring a hidden window back (GTK has no status item)
+    \\/// refuses the declaration here, at build time, instead of stranding a
+    \\/// hidden window at runtime.
+    \\fn windowClosePolicy(comptime window: anytype) native_sdk.WindowClosePolicy {
+    \\    if (comptime !@hasField(@TypeOf(window), "close_policy")) return .quit;
+    \\    const value = window.close_policy;
+    \\    if (comptime std.mem.eql(u8, value, "quit")) return .quit;
+    \\    if (comptime std.mem.eql(u8, value, "hide")) {
+    \\        if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
+    \\            @compileError("app.zon window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds");
+    \\        }
+    \\        return .hide;
+    \\    }
+    \\    @compileError("unknown app.zon window close_policy - supported values: \"quit\" (close really closes; the default) and \"hide\" (the menu-bar-app shape: close hides the window and the app keeps running)");
     \\}
     \\
     \\fn menuItem(comptime item: anytype) native_sdk.MenuItem {
@@ -3651,6 +3670,16 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);
+    // The generated manifestWindow must thread every declarable window
+    // option into WindowOptions — a dropped field is a silent no-op for
+    // every `native create` app (the manifest accepts the declaration,
+    // the window ignores it). close_policy shipped with exactly that gap
+    // once; these pins hold the field AND the Linux comptime refusal (a
+    // .hide window with no tray to bring it back must fail the build,
+    // not strand a hidden window at runtime).
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".restore_policy = windowRestorePolicy(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".close_policy = windowClosePolicy(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" is not supported on linux") != null);
     // The Runtime is multi-megabyte; the generated runner must heap-allocate
     // it and construct in place, never build it by value on the stack.
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "std.heap.page_allocator.create(native_sdk.Runtime)") != null);
