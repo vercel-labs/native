@@ -1,0 +1,1 @@
+feature: **Command palette example**: `examples/command-palette` is the `openCommandPalette()` the keyboard-shortcuts docs call, implemented as a TypeScript-core task app: Cmd+Shift+P toggles it, typing filters static and per-task commands, Enter runs the selection, and plain ArrowUp/Down navigate the list in pure userland over the edit-derivation seam, no runtime changes.

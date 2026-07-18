@@ -1048,6 +1048,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-collapse", "Run split collapse example tests", "examples/split-collapse", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor-ts", "Run system-monitor-ts example tests", "examples/system-monitor-ts", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-palette", "Run command palette example tests", "examples/command-palette", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed);

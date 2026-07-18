@@ -23,6 +23,7 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 | `deck` | Two model-declared windows and a dense track ledger. |
 | `markdown-viewer` | Real file I/O through effects, hidden-inset titlebar retrofit, preview + editor. |
 | `system-monitor` | Live process sampling, confirmation dialogs, a settings window. |
+| `command-palette` | Cmd+Shift+P palette over a task list: type-to-filter commands, userland arrow navigation, TypeScript core. |
 | `gpu-surface` | A Metal-backed GPU surface composed beside native controls and WebView content. |
 | `gpu-dashboard` | Native chrome, a GPU surface, and a retained canvas display list. |
 | `gpu-components` | The retained GPU widget controls in one native-first component lab. |
