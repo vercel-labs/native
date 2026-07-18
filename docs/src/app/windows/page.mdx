@@ -102,6 +102,8 @@ Each window declares what the user's close affordance (the red traffic light, cm
 
 `hide` is supported where the host can re-show a hidden window: macOS (`windowShouldClose` orders the window out) and Windows (`WM_CLOSE` hides via `SW_HIDE`; the tray icon is the re-show affordance). Linux has no status item in this toolkit yet, so nothing could bring a hidden window back — the declaration is refused loudly at build time (a compile error for manifest windows) and at window create (`error.UnsupportedWindowClosePolicy`), never a silent no-op. The hidden state is session-transient: it never persists to the window-state store, so every launch starts shown.
 
+A policy-hidden window is occluded for pacing, exactly like a minimized one: its canvas frame completions drop to the ~1 Hz occluded heartbeat instead of the display grid (a menu-bar app parks hidden for days — full-rate frames there would be pure background CPU burn), and it does not count as a visible display for `.spectrum` emissions. `fx.showWindow` restores full cadence with the window.
+
 See the [tray page's lifecycle recipe](/tray#the-menu-bar-app-lifecycle) and `examples/menu-bar` for the whole pattern. A future `event` tier (the model receives the close request and decides) is deliberately left room for and is not implemented yet.
 
 ## Platform limits

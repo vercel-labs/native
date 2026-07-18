@@ -1821,11 +1821,15 @@ constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
  * riding the frame channel (on_frame interpolation, armed tweens) and
  * snap it on restore; the heartbeat keeps those models gently current
  * while event-driven truth (audio position, input) flows at its own
- * cadence. Minimize (IsIconic on the root window) is the one occlusion
- * signal Win32 reports reliably for this GDI-presenting host; a window
- * fully covered by other windows has no dependable signal without a
- * DXGI presentation path, so covered-but-not-minimized windows keep
- * full cadence deliberately rather than guess. */
+ * cadence. Two occlusion facts key the throttle: minimize (IsIconic on
+ * the root window — the one signal Win32 reports reliably for this
+ * GDI-presenting host) and the close_policy .hide hide (host-owned
+ * bookkeeping: a policy-hidden window is SW_HIDE'd off the glass, and
+ * the menu-bar app shape keeps it that way for days — full-rate frame
+ * completions there are pure background CPU burn). A window fully
+ * covered by OTHER windows has no dependable signal without a DXGI
+ * presentation path, so covered-but-not-minimized windows keep full
+ * cadence deliberately rather than guess. */
 constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
 /* Placeholder pump timer (repeating, retired by the first present). */
 constexpr UINT_PTR kGpuFrameTimerId = 1;
@@ -2402,13 +2406,19 @@ static void gpuSurfaceAdvancePacingClock(NativeView &view) {
     }
 }
 
-/* Frame completions run on the minimized heartbeat when the surface has
- * presented at least once and its top-level window is iconic — the same
- * first-present exemption the macOS occluded pacing keeps, so surface
- * establishment (and the nonblank verdict automation reads) is never
- * throttled. */
-static bool gpuSurfaceOccludedPacingActive(const NativeView &view) {
+/* Frame completions run on the occluded heartbeat when the surface has
+ * presented at least once and its window is off the glass — iconic, or
+ * alive-but-hidden under close_policy .hide (see kGpuOccludedHeartbeatNs:
+ * both facts are reliable, and a policy-hidden menu-bar app would
+ * otherwise spin its frame loop full-rate for days). First-present
+ * exemption as on macOS, so surface establishment (and the nonblank
+ * verdict automation reads) is never throttled. */
+static bool gpuSurfaceOccludedPacingActive(Host *host, const NativeView &view) {
     if (!view.gpu_presented || !view.hwnd) return false;
+    if (host) {
+        auto owner = host->windows.find(view.window_id);
+        if (owner != host->windows.end() && owner->second.policy_hidden) return true;
+    }
     HWND root = GetAncestor(view.hwnd, GA_ROOT);
     return root != nullptr && IsIconic(root);
 }
@@ -2442,7 +2452,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
     /* Heartbeat-paced completions are not latency endpoints: their
      * timestamp measures the deliberate minimized cadence, not a paint
      * — the runtime skips input-latency stamping for them. */
-    event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
+    event.occluded = gpuSurfaceOccludedPacingActive(host, view) ? 1 : 0;
     emitGpuSurfaceEvent(host, view, event);
 }
 
@@ -2453,16 +2463,17 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
  * re-enter the engine — and the pacing clock's grid stamping keeps the
  * message hop out of the period. SetTimer clamps short delays up to its
  * ~10 ms floor; the clock absorbs that as jitter, not drift. */
-static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
+static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
     if (!view.hwnd || view.gpu_emission_scheduled) return;
     const uint64_t now = gpuTimestampNs();
-    /* Minimized surfaces pace on the heartbeat, not the frame grid —
-     * see kGpuOccludedHeartbeatNs. Exempt: an input's responding frame
-     * (external truth on its own cadence; it cannot sustain a spin).
-     * Restore re-arms the pending timer at the grid delay (the
-     * top-level WM_SIZE handler), so the long delay never gates the
-     * return to full cadence. */
-    const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
+    /* Occluded surfaces (minimized or policy-hidden) pace on the
+     * heartbeat, not the frame grid — see kGpuOccludedHeartbeatNs.
+     * Exempt: an input's responding frame (external truth on its own
+     * cadence; it cannot sustain a spin). Reveal re-arms the pending
+     * timer at the grid delay (restore through the top-level WM_SIZE
+     * handler, re-show through the show verb), so the long delay never
+     * gates the return to full cadence. */
+    const uint64_t pace_ns = (!view.gpu_prompt_frame_pending && gpuSurfaceOccludedPacingActive(host, view)) ? kGpuOccludedHeartbeatNs : kGpuFrameIntervalNs;
     uint64_t delay_ns = 0;
     if (view.gpu_last_emit_ns > 0 && now < view.gpu_last_emit_ns + pace_ns) {
         delay_ns = view.gpu_last_emit_ns + pace_ns - now;
@@ -2558,7 +2569,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                     KillTimer(hwnd, kGpuFrameTimerId);
                     return 0;
                 }
-                gpuSurfaceScheduleFrameEmission(*view);
+                gpuSurfaceScheduleFrameEmission(host, *view);
                 return 0;
             }
             if (wparam == kGpuEmitTimerId) {
@@ -3568,16 +3579,19 @@ static void audioSpectrumStartCapture(Host *host) {
 }
 
 /* Whether any of the host's top-level windows still reaches the glass.
- * Minimize-keyed on purpose: IsIconic is the one occlusion fact this
- * host trusts (the same decision the minimized frame heartbeat makes —
- * the covered-but-not-minimized case has no reliable cheap signal on
- * the DXGI presentation path), so covered windows keep full spectrum
- * cadence and only an all-minimized app goes quiet. Checked across the
- * whole window table because a spectrum consumer may draw its bands in
- * any of the app's windows. */
+ * Keyed on the two occlusion facts this host trusts (the same decision
+ * the occluded frame heartbeat makes): minimize (IsIconic) and the
+ * close_policy .hide hide (policy_hidden — a menu-bar app's window off
+ * the glass behind its tray icon must not keep 25 Hz spectrum
+ * emissions flowing for a display nobody can see). The
+ * covered-but-not-minimized case has no reliable cheap signal without
+ * a DXGI presentation path, so covered windows keep full spectrum
+ * cadence and only an app with every window minimized or policy-hidden
+ * goes quiet. Checked across the whole window table because a spectrum
+ * consumer may draw its bands in any of the app's windows. */
 static bool audioAnyWindowReachesGlass(Host *host) {
     for (auto &entry : host->windows) {
-        if (entry.second.hwnd && !IsIconic(entry.second.hwnd)) return true;
+        if (entry.second.hwnd && !IsIconic(entry.second.hwnd) && !entry.second.policy_hidden) return true;
     }
     return false;
 }
@@ -3588,12 +3602,13 @@ static bool audioAnyWindowReachesGlass(Host *host) {
  * transports emit nothing — the bars freeze honestly — while silence on
  * a rolling transport still emits its row of zeros. The occluded-
  * emission rule gates delivery too: SPECTRUM bands describe a display,
- * so while every window is minimized no report is emitted — no event
- * wakes the runtime's update loop for glass nobody can see, and the
- * journal records the stretch as honest silence. The capture thread
- * keeps its ring fresh (it must drain the loopback client regardless,
- * and its FFT runs off the loop thread), so the first beat after a
- * restore delivers current bands — honest within one report. */
+ * so while every window is minimized or policy-hidden no report is
+ * emitted — no event wakes the runtime's update loop for glass nobody
+ * can see, and the journal records the stretch as honest silence. The
+ * capture thread keeps its ring fresh (it must drain the loopback
+ * client regardless, and its FFT runs off the loop thread), so the
+ * first beat after a restore or re-show delivers current bands —
+ * honest within one report. */
 static void audioHandleSpectrumMessage(Host *host, WPARAM generation) {
     AudioState &audio = host->audio;
     AudioSpectrumState &spectrum = host->spectrum;
@@ -4796,7 +4811,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
                         if (GetAncestor(surface.hwnd, GA_ROOT) != hwnd) continue;
                         surface.gpu_emission_scheduled = false;
-                        gpuSurfaceScheduleFrameEmission(surface);
+                        gpuSurfaceScheduleFrameEmission(host, surface);
                     }
                 }
             }
@@ -5634,6 +5649,21 @@ int native_sdk_windows_show_window(Host *host, uint64_t window_id) {
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     found->second.policy_hidden = false;
     ShowWindow(found->second.hwnd, IsIconic(found->second.hwnd) ? SW_RESTORE : SW_SHOW);
+    /* Re-show returns full frame cadence without dropping a beat, the
+     * same supersede the top-level WM_SIZE handler runs on restore:
+     * SW_SHOW on a same-size window dispatches no WM_SIZE, so a
+     * heartbeat-paced emission parked up to a second out on a child
+     * surface's one-shot timer is re-armed here at the frame-grid
+     * delay (policy_hidden just cleared, so the scheduler paces on the
+     * grid again; SetTimer with the same id replaces the pending
+     * timer). */
+    for (auto &view_entry : host->native_views) {
+        NativeView &surface = view_entry.second;
+        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
+        if (surface.window_id != window_id) continue;
+        surface.gpu_emission_scheduled = false;
+        gpuSurfaceScheduleFrameEmission(host, surface);
+    }
     SetForegroundWindow(found->second.hwnd);
     SetFocus(found->second.hwnd);
     emit(host, found->second, kWindowFrame);
@@ -5797,7 +5827,7 @@ int native_sdk_windows_request_gpu_surface_frame(Host *host, uint64_t window_id,
      * frame-event scheduler: repaint retained content and arm the next
      * grid-paced emission (folding into one already in flight). */
     InvalidateRect(found->second.hwnd, nullptr, FALSE);
-    gpuSurfaceScheduleFrameEmission(found->second);
+    gpuSurfaceScheduleFrameEmission(host, found->second);
     return 1;
 }
 
@@ -5815,7 +5845,7 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
     view.gpu_prompt_frame_pending = true;
     if (view.gpu_emission_scheduled) {
         view.gpu_emission_scheduled = false;
-        gpuSurfaceScheduleFrameEmission(view);
+        gpuSurfaceScheduleFrameEmission(host, view);
     }
     return 1;
 }
@@ -5883,7 +5913,7 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     const bool first_present = !view.gpu_presented;
     view.gpu_presented = true;
     if (first_present) view.gpu_prompt_frame_pending = true;
-    gpuSurfaceScheduleFrameEmission(view);
+    gpuSurfaceScheduleFrameEmission(host, view);
     return 1;
 }
 

@@ -728,13 +728,20 @@ pub fn build(b: *std.Build) void {
         // sustain a spin.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "scheduleFrameEventEmissionForPresentCompletion:YES" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)noteGpuSurfaceInputActivity" },
-        // Windows: the same throttle keyed on the one reliable Win32
-        // occlusion signal (minimize); restore re-arms the pending
-        // one-shot timer at the frame-grid delay, and the input /
+        // Windows: the same throttle keyed on the two reliable
+        // occlusion facts — minimize (IsIconic) and the close_policy
+        // .hide hide (policy_hidden: a hidden menu-bar app must not
+        // spin its frame loop or its spectrum emissions full-rate for
+        // days). Restore re-arms the pending one-shot timer at the
+        // frame-grid delay through WM_SIZE, re-show through the show
+        // verb (SW_SHOW dispatches no WM_SIZE), and the input /
         // first-present exemptions ride one prompt-frame flag.
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kGpuOccludedHeartbeatNs = 1000000000ull" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuSurfaceOccludedPacingActive" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "owner->second.policy_hidden) return true;" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "IsIconic(root)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "!IsIconic(entry.second.hwnd) && !entry.second.policy_hidden" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "Re-show returns full frame cadence without dropping a beat" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpu_prompt_frame_pending" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "native_sdk_windows_note_gpu_surface_input" },
         // The runtime side of the measurement honesty: occluded logical
