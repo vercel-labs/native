@@ -113,11 +113,19 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             // a window that never lost key.
             const was_open = self.windows[index].info.open;
             const was_focused = self.windows[index].info.focused;
+            // `hidden` clears with `open`: an app-driven close of a
+            // policy-hidden window (a menu-bar app tearing down its
+            // hidden panel) must not leave {open=false, hidden=true}
+            // in the runtime table — the JS bridge exposes hidden, and
+            // a closed window is not "hidden", it is gone.
+            const was_hidden = self.windows[index].info.hidden;
             self.windows[index].info.open = false;
             self.windows[index].info.focused = false;
+            self.windows[index].info.hidden = false;
             self.options.platform.services.closeWindow(window_id) catch |err| {
                 self.windows[index].info.open = was_open;
                 self.windows[index].info.focused = was_focused;
+                self.windows[index].info.hidden = was_hidden;
                 return err;
             };
             Self.removeWindowRuntimeViews(self, window_id);

@@ -300,6 +300,12 @@ pub const NullPlatform = struct {
     /// real hosts' close delegates, hiding instead of closing under
     /// `.hide`.
     window_close_policy: [max_windows]types.WindowClosePolicy = [_]types.WindowClosePolicy{.quit} ** max_windows,
+    /// Test seam: make the NEXT `close_window_fn` call fail with
+    /// `error.CloseFailed` (the real hosts' refusal), consuming the
+    /// flag — the injection runtime rollback tests use to assert
+    /// `closeWindow` restores every flag it flipped optimistically
+    /// (open, focused, hidden).
+    fail_next_close_window: bool = false,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -913,6 +919,10 @@ pub const NullPlatform = struct {
 
     fn closeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_close_window) {
+            self.fail_next_close_window = false;
+            return error.CloseFailed;
+        }
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         self.windows[index].open = false;
         self.windows[index].focused = false;

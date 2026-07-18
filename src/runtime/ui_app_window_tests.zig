@@ -854,6 +854,54 @@ test "close_policy .hide: the user close hides the window, nothing tears down, a
     try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
 }
 
+test "an app-driven close of a policy-hidden window clears hidden with open, and rolls it back on platform failure" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A menu-bar-shaped window through the REAL create seam, hidden by
+    // its .hide close policy (the user clicked the red button).
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(window.hidden);
+    }
+
+    // The platform refuses the close: EVERY optimistically flipped flag
+    // rolls back — the window is still open, still policy-hidden.
+    fixture.harness.null_platform.fail_next_close_window = true;
+    try std.testing.expectError(error.CloseFailed, fixture.harness.runtime.closeWindow(info.id));
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(window.hidden);
+    }
+
+    // The app closes its hidden window for real: a closed window is not
+    // "hidden", it is gone — the runtime table (the JS bridge's window
+    // list) must read {open=false, hidden=false}, never a closed window
+    // still flying the hidden flag.
+    try fixture.harness.runtime.closeWindow(info.id);
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+    try std.testing.expect(found);
+}
+
 test "focus-while-hidden routes through the show verb: hidden clears before the window takes key" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
