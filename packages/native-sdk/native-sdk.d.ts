@@ -25,6 +25,8 @@ export interface NativeSdkWindowInfo {
   title: string;
   open: boolean;
   focused: boolean;
+  /** Alive but hidden by `close_policy = "hide"` — still open, not focused, invisible until re-shown. */
+  hidden: boolean;
   x: number;
   y: number;
   width: number;

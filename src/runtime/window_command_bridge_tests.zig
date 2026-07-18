@@ -153,6 +153,30 @@ test "runtime handles built-in JavaScript window bridge commands" {
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"focused\":true") != null);
 
+    // The window JSON must expose alive-but-policy-hidden: open:true /
+    // focused:false alone cannot distinguish a close_policy = "hide"
+    // window from a visible unfocused one, so "hidden" rides every
+    // window response. Visible window first...
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
+    // ...then the host reports the palette window policy-hidden (still
+    // open) and the bridge list reflects it.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"hidden\",\"command\":\"native-sdk.window.list\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":true") != null);
+
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"4\",\"command\":\"native-sdk.window.close\",\"payload\":{\"label\":\"palette\"}}",
         .origin = "zero://inline",

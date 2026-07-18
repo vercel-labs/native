@@ -275,6 +275,11 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
     try writer.writeAll(if (window.open) "true" else "false");
     try writer.writeAll(",\"focused\":");
     try writer.writeAll(if (window.focused) "true" else "false");
+    // Alive-but-policy-hidden rides beside open/focused: without it a JS
+    // consumer cannot tell a close_policy = "hide" window (open:true,
+    // focused:false) from a visible unfocused one.
+    try writer.writeAll(",\"hidden\":");
+    try writer.writeAll(if (window.hidden) "true" else "false");
     try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"scale\":{d}", .{
         window.frame.x,
         window.frame.y,
