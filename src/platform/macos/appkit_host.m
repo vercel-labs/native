@@ -1771,7 +1771,11 @@ static NSMutableDictionary<NSNumber *, id> *NativeSdkRegisteredFontDescriptors(v
 // valid id in a new runtime is inside the documented lifecycle. Entries
 // therefore go stale exactly when an id's descriptor is (re)installed,
 // so `native_sdk_appkit_register_font` evicts the id's cached sizes
-// before installing the new descriptor. Accessed only under the
+// before installing the new descriptor. The measured-width NSCache in
+// `native_sdk_appkit_measure_text` goes stale at the same moment but
+// cannot be prefix-evicted (NSCache does not enumerate keys), so it is
+// invalidated by generation instead — see
+// NativeSdkRegisteredFontGenerations below. Accessed only under the
 // descriptor table's @synchronized guard, like the descriptors.
 static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCache(void) {
     static NSMutableDictionary<NSString *, NSFont *> *cache = nil;
@@ -1780,6 +1784,35 @@ static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCac
         cache = [[NSMutableDictionary alloc] init];
     });
     return cache;
+}
+
+// Per-id registration generations, the invalidation handle for the
+// measured-width NSCache in `native_sdk_appkit_measure_text`. That
+// cache has the same lifetime hazard as the size cache above (per-
+// process cache, per-runtime id permanence) but no way to evict an
+// id's entries — NSCache cannot enumerate keys — so every registration
+// bumps the id's generation here and the width-cache key includes it:
+// a previous runtime's widths become unreachable and age out under the
+// cache's own count limit. Ids never registered (the built-in faces)
+// stay at generation 0 forever. Accessed only under the descriptor
+// table's @synchronized guard, like the descriptors.
+static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontGenerations(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *table = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = [[NSMutableDictionary alloc] init];
+    });
+    return table;
+}
+
+// The current registration generation for a font id: 0 until the id
+// first registers, bumped by every (re)registration.
+static unsigned long long NativeSdkRegisteredFontGeneration(unsigned long long value) {
+    NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
+    @synchronized (table) {
+        NSNumber *generation = NativeSdkRegisteredFontGenerations()[@(value)];
+        return generation ? generation.unsignedLongLongValue : 0;
+    }
 }
 
 // The registered face for a canvas font id at `size`, or nil when the id
@@ -1831,6 +1864,13 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
             for (NSString *cachedKey in cachedKeys) {
                 if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
             }
+            // The measured-width cache holds the same stale state but
+            // cannot be enumerated for eviction, so bump the id's
+            // generation instead: width-cache keys include it, and the
+            // old generation's entries become unreachable.
+            NSMutableDictionary<NSNumber *, NSNumber *> *generations = NativeSdkRegisteredFontGenerations();
+            NSNumber *previous = generations[@(font_id)];
+            generations[@(font_id)] = @((previous ? previous.unsignedLongLongValue : 0) + 1);
             table[@(font_id)] = (__bridge_transfer id)descriptor;
         }
         return 1;
@@ -1917,7 +1957,13 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
             widthCache = [[NSCache alloc] init];
             widthCache.countLimit = 16384;
         });
-        NSString *key = [NSString stringWithFormat:@"%llu/%.3f/%@", (unsigned long long)font_id, (double)clamped, value];
+        // The key carries the id's registration generation so a face
+        // re-registered under the same id (a new runtime in this
+        // process) never serves the previous face's widths — see
+        // NativeSdkRegisteredFontGenerations for why generation, not
+        // eviction, invalidates this cache.
+        unsigned long long generation = NativeSdkRegisteredFontGeneration((unsigned long long)font_id);
+        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f/%@", (unsigned long long)font_id, generation, (double)clamped, value];
         NSNumber *cached = [widthCache objectForKey:key];
         if (cached) return cached.doubleValue;
         NSFont *font = NativeSdkFontForFontId(font_id, clamped);
