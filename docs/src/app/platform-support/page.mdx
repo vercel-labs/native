@@ -39,10 +39,18 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td><Tier tier="caveats" note="deterministic software renderer; the toolkit host copies pixels into the surface" fn={2} /></td>
     </tr>
     <tr>
-      <td>Text &amp; registered fonts</td>
-      <td><Tier tier="full" note="bundled faces plus app-registered TrueType faces (CJK included); registered bytes reach CoreText at registration, so host measurement and drawn text resolve the exact face" fn={3} /></td>
-      <td><Tier tier="full" note="bundled and registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
-      <td><Tier tier="full" note="bundled and registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td>Text</td>
+      <td><Tier tier="full" note="the SDK's own TrueType pipeline plans every layout; CoreText measurement and Metal packet text resolve the same bundled faces" fn={3} /></td>
+      <td><Tier tier="full" note="bundled faces ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="bundled faces ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="the toolkit host presents the same reference-renderer pixels the desktop software hosts ink" fn={3} /></td>
+      <td><Tier tier="full" note="the toolkit host presents the same reference-renderer pixels the desktop software hosts ink" fn={3} /></td>
+    </tr>
+    <tr>
+      <td>Registered fonts</td>
+      <td><Tier tier="full" note="app-registered TrueType faces (CJK included); registered bytes reach CoreText at registration, so host measurement and drawn text resolve the exact face" fn={3} /></td>
+      <td><Tier tier="full" note="registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
+      <td><Tier tier="full" note="registered faces (CJK included) ink through the deterministic software renderer" fn={3} /></td>
       <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
       <td><Tier tier="none" note="registered fonts unverified: the ink path is the same reference renderer, but no mobile test registers a font and host text measurement has no registered-font seam" fn={3} /></td>
     </tr>
