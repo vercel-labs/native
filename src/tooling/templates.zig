@@ -1728,7 +1728,14 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // the layer stays out even on machines where the
         \\                // development package is installed — libwebkitgtk is
         \\                // neither linked nor required at runtime, and the
-        \\                // executable carries no WebKit reference at all.
+        \\                // executable carries no WebKit reference at all. This
+        \\                // is the expected, configured state of every canvas
+        \\                // app on Linux, so the stub compile is deliberately
+        \\                // silent — no build note, no compiler diagnostic (the
+        \\                // host's seam comment explains why even an
+        \\                // informational pragma is dangerous); a stubbed host
+        \\                // teaches at runtime by reporting WebViewNotFound the
+        \\                // moment an app actually uses a WebView.
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
         \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("dl", .{});
@@ -1774,6 +1781,14 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // headers are reachable through the system include paths
         \\                // — no WebView2Loader.dll is installed or path-wired,
         \\                // and the executable carries no reference to it at all.
+        \\                // This is the expected, configured state of every
+        \\                // canvas app on Windows, so the stub compile is
+        \\                // deliberately silent — no build note, no compiler
+        \\                // diagnostic (the host's seam comment explains why
+        \\                // even an informational pragma is dangerous); a
+        \\                // stubbed host teaches at runtime by reporting
+        \\                // WebViewNotFound the moment an app actually uses a
+        \\                // WebView.
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
         \\            },
         \\            .chromium => {

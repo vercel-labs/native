@@ -41,7 +41,16 @@
  * WebView loads report WebViewNotFound at runtime. */
 #if defined(NATIVE_SDK_ALLOW_WEBVIEW2_STUB)
 #define NATIVE_SDK_HAS_WEBVIEW2 0
-#pragma message("Embedded WebView layer excluded by the build configuration: building the Windows host without it (canvas apps unaffected; WebView loads will report WebViewNotFound)")
+/* Deliberately NO compiler diagnostic in this branch — not even an
+ * informational #pragma message. The stub is the expected, configured
+ * state of every native-only Windows build, and zig renders every
+ * clang diagnostic of a failing translation unit as `error:` (its
+ * serialized clang diagnostics carry no severity into the error
+ * bundle), so an informational note here masquerades as the
+ * build-killing error the moment any unrelated real error appears
+ * anywhere in this file. The teaching lives where it is actionable
+ * instead: a stubbed host reports WebViewNotFound the moment an app
+ * actually uses a WebView. */
 #elif __has_include(<WebView2.h>) && __has_include(<wrl.h>)
 #include <WebView2.h>
 #include <wrl.h>

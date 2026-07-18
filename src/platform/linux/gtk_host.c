@@ -24,8 +24,17 @@
  * NATIVE_SDK_ALLOW_WEBVIEW2_STUB. */
 #if defined(NATIVE_SDK_ALLOW_WEBKITGTK_STUB)
 #define NATIVE_SDK_HAS_WEBKITGTK 0
-#pragma message("Embedded web layer excluded by the build configuration: building the GTK host without WebKitGTK (canvas apps unaffected; WebView loads will report WebViewNotFound)")
-/* The stubbed web layer keeps the window/webview bookkeeping SHAPE so
+/* Deliberately NO compiler diagnostic in this branch — not even an
+ * informational #pragma message. The stub is the expected, configured
+ * state of every native-only Linux build, and zig renders every clang
+ * diagnostic of a failing translation unit as `error:` (its serialized
+ * clang diagnostics carry no severity into the error bundle), so an
+ * informational note here masquerades as the build-killing error the
+ * moment any unrelated real error appears anywhere in this file. The
+ * teaching lives where it is actionable instead: a stubbed host
+ * reports WebViewNotFound the moment an app actually uses a WebView.
+ *
+ * The stubbed web layer keeps the window/webview bookkeeping SHAPE so
  * every GTK-only path (overlay reordering, focus lookups, window
  * teardown) compiles unchanged: the web-view pointers below are opaque
  * and permanently NULL — every path that could create one is compiled
