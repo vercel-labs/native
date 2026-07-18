@@ -523,6 +523,39 @@ static int native_sdk_valid_native_view_frame(double x, double y, double width, 
     return x >= 0 && y >= 0 && width >= 0 && height >= 0;
 }
 
+/* String-parameter byte caps for the native-view calls, mirroring the
+ * runtime's platform limits (types.zig: max_view_label_bytes 64,
+ * max_view_role_bytes 64, max_view_accessibility_label_bytes 256,
+ * max_view_text_bytes 1024, and the command-id cap 128). The runtime
+ * validates the same bounds before ever calling in, so a length past
+ * them at THIS boundary means the arguments were corrupted in transit —
+ * a caller compiled with a broken C ABI hands over shifted stack slots
+ * where a pointer poses as a length. Refuse loudly and name the field
+ * instead of memcpy-ing from a garbage pointer and faulting. */
+#define NATIVE_SDK_MAX_VIEW_LABEL_BYTES 64
+#define NATIVE_SDK_MAX_VIEW_ROLE_BYTES 64
+#define NATIVE_SDK_MAX_VIEW_ACCESSIBILITY_LABEL_BYTES 256
+#define NATIVE_SDK_MAX_VIEW_TEXT_BYTES 1024
+#define NATIVE_SDK_MAX_VIEW_COMMAND_BYTES 128
+
+static int native_sdk_valid_native_view_string(const char *what, size_t len, size_t max_len) {
+    if (len <= max_len) return 1;
+    g_warning("native view %s length %zu exceeds the platform cap %zu; refusing the call - "
+              "the runtime never sends this, so the arguments likely arrived corrupted "
+              "(a miscompiled C-ABI boundary hands the host shifted stack slots)",
+        what, len, max_len);
+    return 0;
+}
+
+static int native_sdk_valid_native_view_strings(size_t label_len, size_t parent_len, size_t role_len, size_t accessibility_label_len, size_t text_len, size_t command_len) {
+    return native_sdk_valid_native_view_string("label", label_len, NATIVE_SDK_MAX_VIEW_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("parent", parent_len, NATIVE_SDK_MAX_VIEW_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("role", role_len, NATIVE_SDK_MAX_VIEW_ROLE_BYTES) &&
+        native_sdk_valid_native_view_string("accessibility_label", accessibility_label_len, NATIVE_SDK_MAX_VIEW_ACCESSIBILITY_LABEL_BYTES) &&
+        native_sdk_valid_native_view_string("text", text_len, NATIVE_SDK_MAX_VIEW_TEXT_BYTES) &&
+        native_sdk_valid_native_view_string("command", command_len, NATIVE_SDK_MAX_VIEW_COMMAND_BYTES);
+}
+
 static int native_sdk_native_extent(double value) {
     return value > 0 ? (int)(value + 0.5) : 0;
 }
@@ -3433,6 +3466,7 @@ int native_sdk_gtk_create_view(native_sdk_gtk_host_t *host, uint64_t window_id, 
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     if (!win || !win->stack_root || label_len == 0 || !native_sdk_valid_native_view_frame(x, y, width, height)) return 0;
     if (!native_sdk_is_supported_native_view_kind(kind)) return 0;
+    if (!native_sdk_valid_native_view_strings(label_len, parent_len, role_len, accessibility_label_len, text_len, command_len)) return 0;
     if (win->native_view_count >= NATIVE_SDK_MAX_NATIVE_VIEWS) return 0;
 
     char *label_copy = native_sdk_strndup(label, label_len);
@@ -3620,6 +3654,12 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
 }
 
 int native_sdk_gtk_update_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {
+    if (!native_sdk_valid_native_view_strings(label_len,
+            0,
+            has_role ? role_len : 0,
+            has_accessibility_label ? accessibility_label_len : 0,
+            has_text ? text_len : 0,
+            has_command ? command_len : 0)) return 0;
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
     native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);

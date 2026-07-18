@@ -1466,6 +1466,14 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const exe = b.addExecutable(.{
         \\        .name = app_exe_name,
         \\        .root_module = app_mod,
+        \\        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        \\        // miscompiles the SysV C calling convention for the long
+        \\        // mixed-argument signatures the platform hosts use, shifting
+        \\        // stack-passed pointers by one slot (a Debug dev run on
+        \\        // x86_64 Linux crashes creating its first shell view). Force
+        \\        // LLVM there, mirroring the Native SDK build graph; Release
+        \\        // modes already use LLVM, so only Debug changes.
+        \\        .use_llvm = useLlvmWorkaround(target),
         \\    });
         \\    // Windows subsystem posture (mirrors the Native SDK build graph):
         \\    // release-shaped exes are GUI-subsystem so the app never flashes a
@@ -1519,6 +1527,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        const built = b.addExecutable(.{
         \\            .name = app_exe_name,
         \\            .root_module = package_app_mod,
+        \\            // Same self-hosted x86_64 workaround as the dev exe above
+        \\            // (only reachable when -Doptimize pins Debug for both roles).
+        \\            .use_llvm = useLlvmWorkaround(target),
         \\        });
         \\        // Same subsystem posture as the dev exe above, keyed on this
         \\        // exe's own mode: release-shaped Windows exes are GUI-subsystem.
@@ -1570,6 +1581,18 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const tests = b.addTest(.{ .root_module = app_mod });
         \\    const test_step = b.step("test", "Run tests");
         \\    test_step.dependOn(&b.addRunArtifact(tests).step);
+        \\}
+        \\
+        \\// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C
+        \\// calling convention for long mixed int/pointer/double signatures
+        \\// (the platform hosts' view-create calls) and f32-heavy ones (the
+        \\// embed viewport ABI): stack-passed arguments arrive shifted, so a
+        \\// Debug x86_64 build crashes at the first platform call that passes
+        \\// strings on the stack. Force the LLVM backend on x86_64 until the
+        \\// upstream backend is fixed; Release modes already default to LLVM,
+        \\// so this only changes Debug builds.
+        \\fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+        \\    return if (target.result.cpu.arch == .x86_64) true else null;
         \\}
         \\
         \\// Resolve the optimize mode for one exe role (mirrors the Native SDK

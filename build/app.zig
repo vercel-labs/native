@@ -560,6 +560,18 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const exe = b.addExecutable(.{
         .name = app_options.name,
         .root_module = app_mod,
+        // The app executable crosses the platform C seam on every host
+        // call (the GTK host's `native_sdk_gtk_create_view` is a
+        // 22-parameter mix of pointers, sizes, ints, and doubles), and
+        // Zig 0.16.0's self-hosted x86_64 backend miscompiles exactly
+        // that calling-convention shape (see useLlvmWorkaround below):
+        // a Debug `native dev` on x86_64 Linux placed the stack-passed
+        // string arguments one slot off, so the host read a garbage
+        // `role` pointer and crashed in `native_sdk_strndup` while the
+        // register-passed `label` arrived intact. Every other artifact
+        // in this graph already forces LLVM on x86_64; the app exe —
+        // the one binary users actually run — must too.
+        .use_llvm = useLlvmWorkaround(target),
     });
     // Windows subsystem posture: release-shaped exes (`native build`,
     // and therefore everything `native package --target windows` wraps)
@@ -722,6 +734,19 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
 ///   fn take(a: ?*anyopaque, w: f32, h: f32, s: f32, p: ?*anyopaque,
 ///           t: f32, r: f32, bo: f32, l: f32, kt: f32, kr: f32, kb: f32,
 ///           kl: f32) callconv(.c) void { ... }
+///
+/// The same backend also mis-places STACK-passed integer/pointer arguments
+/// in long mixed signatures with interleaved doubles: calling the GTK
+/// host's `native_sdk_gtk_create_view` (22 params: 6 register ints, 4
+/// doubles, 12 stack ints/pointers/sizes) from self-hosted Debug code
+/// hands the clang-compiled callee arguments shifted by one stack slot
+/// from `visible` onward — the callee's `role` pointer reads as the
+/// caller's `enabled` value (a 4-byte 1 under 0xAA undefined fill,
+/// faulting at 0xaaaaaaaa00000001) and `role_len` reads as the role
+/// pointer. Register-passed arguments (`label`) arrive intact, which is
+/// why the crash appears only at the first stack-passed string. Verified
+/// against zig 0.16.0 on x86_64-linux with a standalone caller/callee
+/// pair: self-hosted Debug corrupts, `-fllvm` is correct.
 ///
 /// Force the LLVM backend on x86_64 until the upstream backend is fixed;
 /// Release modes already default to LLVM, so this only changes Debug.
