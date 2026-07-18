@@ -1205,3 +1205,128 @@ test "a recorded quit journals the requesting command before the shutdown that s
     try std.testing.expectEqualDeep(recorded_model, replayed.model);
     try std.testing.expectEqual(recorded_fingerprint, replayed.fingerprint);
 }
+
+/// The quit-from-start boot: the app's `init_fx` returns the quit verb
+/// during the installing canvas frame — the dispatch the macOS hosts
+/// deliver synchronously BEFORE [NSApp run] exists.
+fn sessionQuitOnBoot(model: *SessionModel, fx: *SessionApp.Effects) void {
+    _ = model;
+    fx.quitApp();
+}
+
+fn quitOnBootOptions() SessionApp.Options {
+    var options = sessionOptions();
+    options.init_fx = sessionQuitOnBoot;
+    return options;
+}
+
+test "a quit from the app's boot dispatch journals the start turn before the shutdown that seals it" {
+    // A VALID quit can arrive before the host's run loop exists:
+    // App.start's update — `init_fx`, and a TS core's boot command with
+    // it — runs inside the FIRST canvas frame dispatch, which the macOS
+    // hosts deliver synchronously before [NSApp run]. Pre-run there is
+    // no queue turn to defer to, so a host that falls back to an INLINE
+    // shutdown emit nests the shutdown dispatch inside the very boot
+    // dispatch that requested it — the recorder seals the journal
+    // before the boot turn commits, the start of the session is lost,
+    // and replay refuses the recording. The contract this test pins
+    // through the modeled host's pending-then-drain seam (quitApp only
+    // ARMS quit_pending; takeQueuedQuit hands the deferred shutdown to
+    // dispatch as its own top-level turn — exactly the hosts' pre-run
+    // pendingPreRunStop drain): the requesting boot turn seals nothing,
+    // the journal carries the start event AND the shutdown in that
+    // order, and the session replays fingerprint-identical.
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    var recorded_model: SessionModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        const app_state = try gpa.create(SessionApp);
+        defer gpa.destroy(app_state);
+        // The REAL executor: the boot fx.quitApp() must reach the
+        // platform's quit seam.
+        app_state.* = SessionApp.init(std.heap.page_allocator, .{}, quitOnBootOptions());
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+
+        // The installing canvas frame — the pre-run synchronous
+        // dispatch. init_fx runs inside it and returns the quit verb.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+        } });
+        try std.testing.expectEqual(@as(u32, 1), harness.null_platform.quit_request_count);
+        // The boot dispatch that carried the quit has returned, and the
+        // journal is NOT sealed: the quit is parked, never emitted
+        // inline inside its own requesting dispatch.
+        try std.testing.expect(!recorder.finished);
+
+        // The drain turn — the hosts' post-dispatch top-level
+        // emitShutdown + stop — seals the journal exactly once.
+        const shutdown_event = harness.null_platform.takeQueuedQuit() orelse return error.TestUnexpectedResult;
+        try harness.runtime.dispatchPlatformEvent(app, shutdown_event);
+        try std.testing.expect(harness.null_platform.takeQueuedQuit() == null);
+        try std.testing.expect(recorder.finished);
+        try std.testing.expect(!recorder.failed);
+
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // The journal contains BOTH the start event and the shutdown, in
+    // that order — the assertion an inline (nested) pre-run emit fails:
+    // nesting seals the journal before the boot turn commits, so the
+    // start of the session never lands.
+    {
+        var reader = try journal.Reader.init(buffer.journalBytes());
+        var saw_start = false;
+        var saw_shutdown = false;
+        while (try reader.next()) |record| {
+            if (record != .event) continue;
+            switch (record.event) {
+                .app_start => saw_start = true,
+                .app_shutdown => {
+                    try std.testing.expect(saw_start);
+                    saw_shutdown = true;
+                },
+                else => {},
+            }
+        }
+        try std.testing.expect(saw_start);
+        try std.testing.expect(saw_shutdown);
+    }
+
+    // And the sealed boot-quit session replays fingerprint-identical
+    // into a fresh app whose init_fx quits again on replay.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        const app_state = try gpa.create(SessionApp);
+        defer gpa.destroy(app_state);
+        app_state.* = SessionApp.init(std.heap.page_allocator, .{}, quitOnBootOptions());
+        defer app_state.deinit();
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}

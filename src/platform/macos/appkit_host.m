@@ -789,6 +789,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) void *context;
 @property(nonatomic, assign) void *bridgeContext;
 @property(nonatomic, assign) BOOL didShutdown;
+/* A quit verb that arrived before [NSApp run] (see
+ * native_sdk_appkit_request_stop): parked here, drained at top level
+ * by runWithCallback's drainPendingPreRunStop calls once the pre-run
+ * dispatch that carried it has returned. */
+@property(nonatomic, assign) BOOL pendingPreRunStop;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
@@ -871,6 +876,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
 - (void)stop;
+- (BOOL)drainPendingPreRunStop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
 - (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId;
 - (void)startApplicationActivationObservers;
@@ -6489,6 +6495,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 
     [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle showPolicy:showPolicy makeMain:YES];
     self.didShutdown = NO;
+    self.pendingPreRunStop = NO;
     self.observesApplicationActivation = NO;
 
     return self;
@@ -8377,9 +8384,20 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [self startAppearanceObservers];
 
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_START }];
+    // A VALID quit can arrive during the START dispatch (an update that
+    // returns fx.quitApp() at boot). Pre-run there is no queue turn to
+    // defer it to, so native_sdk_appkit_request_stop parked it — and
+    // THIS is its drain point: emitShutdown + stop run at top level,
+    // after the START dispatch has committed to the session recorder,
+    // never nested inside it (a nested emit seals the journal before
+    // the start record commits and replay refuses the recording).
+    [self drainPendingPreRunStop];
     // A failed START handler requests shutdown synchronously, before the
     // run loop exists — [NSApp stop:] is a no-op there. Honor the request
-    // here instead of stranding a live app behind a blank window.
+    // here instead of stranding a live app behind a blank window. (That
+    // request is the HOST side's native_sdk_appkit_stop, which keeps its
+    // inline pre-run emit — distinct from the quit verb's pending flag
+    // drained above.)
     if (self.didShutdown) return;
     [self emitAppearanceChanged];
     [self emitResize];
@@ -8395,6 +8413,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
             [(NativeSdkMetalSurfaceView *)view flushQueuedFirstCanvasFrameRequestNow];
         }
     }
+
+    // The appearance/resize/window-frame emits and the synchronous
+    // first canvas frame above are pre-run dispatches too — a boot
+    // command's update (a TS core's first-frame command included) can
+    // return the quit verb during any of them. Drain the parked quit
+    // here at top level before the run-loop machinery arms; when it
+    // drains, the app never enters [NSApp run].
+    if ([self drainPendingPreRunStop]) return;
 
     // Terminations that bypass the host's own stop path — cmd+Q's
     // default NSApp terminate, an AppleScript quit — must still deliver
@@ -8456,6 +8482,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                                            data1:0
                                            data2:0];
     [NSApp postEvent:event atStart:NO];
+}
+
+/* Drain the quit verb a pre-run dispatch parked (see
+ * native_sdk_appkit_request_stop): emitShutdown + stop at TOP LEVEL,
+ * strictly after the requesting dispatch returned, so the session
+ * recorder commits the requesting event before the shutdown record
+ * seals the journal. Answers YES only when it drained; a request that
+ * raced an already-emitted shutdown (a failed emit's inline stop) is
+ * consumed without a second emit. */
+- (BOOL)drainPendingPreRunStop {
+    if (!self.pendingPreRunStop) return NO;
+    self.pendingPreRunStop = NO;
+    if (self.didShutdown) return NO;
+    [self emitShutdown];
+    [self stop];
+    return YES;
 }
 
 - (void)emitEvent:(native_sdk_appkit_event_t)event {
@@ -10026,20 +10068,14 @@ void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
 
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    /* Queued, never synchronous, while the run loop is live: this stop
-     * is the quit verb's landing point, and the verb arrives MID
-     * DISPATCH — a tray or menu command's update returned it, so the
-     * runtime is still inside that command's event dispatch. Emitting
-     * SHUTDOWN here would nest the shutdown dispatch inside the
-     * command's: the session recorder commits nested events
-     * innermost-first and seals the journal on shutdown, so the nested
-     * seal makes the OUTER commit a no-op and the journal loses the
-     * very command (and model mutation) that quit the app — replay
-     * diverges. One main-queue hop delivers the identical
-     * emitShutdown + stop on the next loop turn, after the requesting
-     * dispatch has committed; [NSApp run] drains the main queue and
-     * stop's posted wake event unwinds it, so a quit that is the last
-     * thing an app ever does still exits promptly. */
+    /* The HOST side's shutdown request — a failed event emit asks for
+     * the teardown (see RunState.emit's catch in macos/root.zig). Not
+     * the quit verb's landing point: that is
+     * native_sdk_appkit_request_stop below. Queued while the run loop
+     * is live, so the emit lands on the next turn at top level; [NSApp
+     * run] drains the main queue and stop's posted wake event unwinds
+     * it, so a stop that is the last thing an app ever does still
+     * exits promptly. */
     if (!NSApp.running) {
         /* Before [NSApp run] there is no loop to drain the queue — a
          * failed START handler requests shutdown synchronously (see
@@ -10048,6 +10084,36 @@ void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
          * loop that may never start. */
         [object emitShutdown];
         [object stop];
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [object emitShutdown];
+        [object stop];
+    });
+}
+
+void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    /* The quit VERB's landing point (fx.quitApp). The verb arrives MID
+     * DISPATCH — some update returned it, so the runtime is still
+     * inside that event's dispatch. Emitting SHUTDOWN here would nest
+     * the shutdown dispatch inside the requester's: the session
+     * recorder commits nested events innermost-first and seals the
+     * journal on shutdown, so the nested seal makes the OUTER commit a
+     * no-op and the journal loses the very event (and model mutation)
+     * that quit the app — replay diverges. While the run loop is live,
+     * one main-queue hop delivers the identical emitShutdown + stop on
+     * the next loop turn, after the requesting dispatch has committed.
+     * Before [NSApp run] there is no queue turn that would drain in
+     * time — a quit from App.start's update, or from a boot command
+     * during the synchronous first canvas frame, must NOT fall back to
+     * an inline emit (the same nesting bug, just pre-run) — so the
+     * request parks in pendingPreRunStop and runWithCallback drains it
+     * at top level once the pre-run dispatch that carried it returns.
+     * (The inline pre-run emit lives only in native_sdk_appkit_stop
+     * above, for the host-side failed-START request.) */
+    if (!NSApp.running) {
+        object.pendingPreRunStop = YES;
         return;
     }
     dispatch_async(dispatch_get_main_queue(), ^{

@@ -964,8 +964,13 @@ pub const NullPlatform = struct {
     /// shutdown emit past the dispatch that requested it (see
     /// `quit_request_count`); a test models that by dispatching the
     /// returned event only after the quitting dispatch has returned,
-    /// exactly the `userCloseWindow` shape. Answers exactly once per
-    /// armed quit; null while nothing is queued.
+    /// exactly the `userCloseWindow` shape. The PRE-RUN quit rides the
+    /// same model: a quit requested before the hosts' run loop exists
+    /// (App.start's update, a boot command in the synchronous first
+    /// canvas frame) parks on the host and drains at top level after
+    /// the boot dispatch returns — arm here, drain here, identically.
+    /// Answers exactly once per armed quit; null while nothing is
+    /// queued.
     pub fn takeQueuedQuit(self: *NullPlatform) ?Event {
         if (!self.quit_pending) return null;
         self.quit_pending = false;

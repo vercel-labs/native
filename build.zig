@@ -723,6 +723,31 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/runtime/flow.zig", .pattern = "if (event_value == .app_shutdown) recorder.finish();" },
         .{ .path = "src/platform/null_platform.zig", .pattern = "pub fn takeQueuedQuit" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-quit-pre-run-pending", "Verify a PRE-RUN quit verb on the macOS hosts parks as a pending flag drained at top level, never the inline emit (an inline pre-run emit nests the shutdown inside the boot dispatch that requested it — the recorder seals the journal before that dispatch commits, the same bug the running-path queue fixes)", &.{
+        // The quit verb's own landing point: pre-run it PARKS — the
+        // inline emitShutdown+stop stays exclusive to
+        // native_sdk_appkit_stop, the host-side failure request the
+        // failed-START precedent rides (runWithCallback's didShutdown
+        // check).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "object.pendingPreRunStop = YES;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "object.pendingPreRunStop = YES;" },
+        // The drains: after the START dispatch (at the didShutdown
+        // decision point) and after the remaining pre-run dispatches
+        // (appearance/resize/window-frame, and AppKit's synchronous
+        // first canvas frame) — emitShutdown + stop at TOP LEVEL, once.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (BOOL)drainPendingPreRunStop {\n    if (!self.pendingPreRunStop) return NO;\n    self.pendingPreRunStop = NO;\n    if (self.didShutdown) return NO;\n    [self emitShutdown];\n    [self stop];\n    return YES;\n}" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self drainPendingPreRunStop];\n    // A failed START handler requests shutdown synchronously" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([self drainPendingPreRunStop]) return;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "- (BOOL)drainPendingPreRunStop {\n    if (!self.pendingPreRunStop) return NO;\n    self.pendingPreRunStop = NO;\n    if (self.didShutdown) return NO;\n    [self emitShutdown];\n    [self stop];\n    return YES;\n}" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self drainPendingPreRunStop];\n    // A failed START handler requests shutdown synchronously" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([self drainPendingPreRunStop]) {\n        shutdownCefIfNeeded();\n        return;\n    }" },
+        // The Zig split: the quit verb rides request_stop; the failed
+        // emit keeps the byte-for-byte host-side stop.
+        .{ .path = "src/platform/macos/root.zig", .pattern = "native_sdk_appkit_request_stop(self.host);" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "if (self.self) |mac| native_sdk_appkit_stop(mac.host);" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gpu-occluded-frame-heartbeat", "Verify occluded windows throttle frame completions to a heartbeat and restore full cadence on reveal", &.{
         // macOS: occluded surfaces pace logical completions on the ~1 Hz
         // heartbeat (never stopping — on_frame-driven models stay gently

@@ -346,7 +346,20 @@ void native_sdk_appkit_set_dock_icon_rgba(native_sdk_appkit_host_t *host, const 
 // keeping the pre-masking behavior (icon shown unshaped) as the floor.
 void native_sdk_appkit_set_dock_icon_file(native_sdk_appkit_host_t *host, const char *path, size_t path_len);
 void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_event_callback_t callback, void *context);
+// The host-side shutdown request: a failed event emit asks the host to
+// deliver SHUTDOWN and stop. While the run loop is live the delivery is
+// queued to the next turn; before [NSApp run] it happens inline (the
+// failed-START precedent — runWithCallback's didShutdown check honors
+// it before the loop would start).
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host);
+// The quit VERB's landing point (fx.quitApp): always deferred, never
+// inline — the verb arrives mid dispatch, and the shutdown must emit
+// only after the requesting dispatch has committed to the session
+// recorder. While the run loop is live the deferral is a main-queue
+// hop; before [NSApp run] the request parks as a pending flag that
+// runWithCallback drains at top level after the pre-run dispatch that
+// carried it returns.
+void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void native_sdk_appkit_load_window_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback);
 void native_sdk_appkit_set_bridge_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_bridge_callback_t callback, void *context);

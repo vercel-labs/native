@@ -134,6 +134,7 @@ extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]con
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
 extern fn native_sdk_appkit_run(host: *AppKitHost, callback: AppKitCallback, context: ?*anyopaque) void;
 extern fn native_sdk_appkit_stop(host: *AppKitHost) void;
+extern fn native_sdk_appkit_request_stop(host: *AppKitHost) void;
 extern fn native_sdk_appkit_load_webview(host: *AppKitHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn native_sdk_appkit_load_window_webview(host: *AppKitHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn native_sdk_appkit_set_bridge_callback(host: *AppKitHost, callback: AppKitBridgeCallback, context: ?*anyopaque) void;
@@ -1125,15 +1126,20 @@ fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!v
 }
 
 /// The graceful quit: the same emitShutdown + stop the last-window
-/// close runs, queued to the NEXT loop turn — this verb is requested
-/// mid dispatch (the command whose update returned it is still being
-/// dispatched), and `app_shutdown` must emit only after that dispatch
-/// returns, or a recording session seals its journal before the
-/// requesting command commits (the command record is lost and replay
-/// diverges).
+/// close runs, ALWAYS deferred past the dispatch that requested it —
+/// this verb arrives mid dispatch (the command whose update returned
+/// it is still being dispatched), and `app_shutdown` must emit only
+/// after that dispatch returns, or a recording session seals its
+/// journal before the requesting command commits (the command record
+/// is lost and replay diverges). While the run loop is live the host
+/// queues one loop turn; before [NSApp run] (a quit from App.start's
+/// update, or from a boot command during the synchronous first canvas
+/// frame) it parks the request and drains it at top level — never the
+/// inline emit `native_sdk_appkit_stop` keeps for the host-side
+/// failed-START request.
 fn quitApp(context: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_stop(self.host);
+    native_sdk_appkit_request_stop(self.host);
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
