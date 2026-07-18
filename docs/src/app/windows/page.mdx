@@ -80,7 +80,7 @@ await window.zero.windows.close(win.id);
     </tr>
     <tr>
       <td><code>WindowState</code></td>
-      <td>Persisted state: id, label, title, frame, open, focused, hidden, maximized, fullscreen, scale</td>
+      <td>Persisted state: id, label, title, frame, open, focused, maximized, fullscreen, scale (the type also carries <code>hidden</code>, deliberately session-transient — it never persists, so every launch starts shown)</td>
     </tr>
     <tr>
       <td><code>WindowRestorePolicy</code></td>
