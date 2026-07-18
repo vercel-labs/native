@@ -712,6 +712,15 @@ fn requestFrame(context: ?*anyopaque) anyerror!void {
     native_sdk_windows_request_frame(self.host);
 }
 
+/// Headless image codec for session replay: the SAME WIC decode a live
+/// host serves (see `decodeImage` below — a context-free bytes-to-pixels
+/// call, no window, no message loop), so journaled image bytes
+/// re-register the identical pixels under a headless replay on the same
+/// platform.
+pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
+}
+
 /// WIC-backed image decoding (PNG, JPEG, ... — every codec the OS
 /// ships) into straight-alpha RGBA8.
 fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {

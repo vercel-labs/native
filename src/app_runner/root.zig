@@ -786,6 +786,13 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
         null_platform.gpu_surface_scroll_drivers = true;
     }
+    // Replayed image loads decode too: successful `.image` records feed
+    // their journaled blob-store bytes back through decode+register, so
+    // the codec must be the recording host's own or every replayed load
+    // (and every replayed screenshot with an image in it) drops its
+    // pixels. Journaled bytes stay the only input — the codec is a pure
+    // bytes-to-pixels call and the network stays absent.
+    native_sdk.platform.installHeadlessImageCodec(build_options.platform, &null_platform, &replay_platform.services);
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers

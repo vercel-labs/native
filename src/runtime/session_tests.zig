@@ -1538,7 +1538,14 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(gpa);
     harness.null_platform.gpu_surfaces = true;
-    harness.null_platform.image_decode = true;
+    // NO manual decoder enablement here: the replay side installs its
+    // decode seam through the SAME call `runSessionReplay` makes, in
+    // the arm this codec-less test tier reaches (the strict test-PNG
+    // fallback). Replay tests once flipped `image_decode` by hand while
+    // the production runner installed no decoder at all — this test
+    // holds the runner's construction path itself to the re-register
+    // proof below.
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
     const app_state = try gpa.create(ImageSessionApp);
     defer gpa.destroy(app_state);
     app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());

@@ -549,6 +549,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "docs/src/app/media-producers/page.mdx", .pattern = "producer: media.MediaSurfaceProducer" },
         .{ .path = "src/runtime/media_surface_tests.zig", .pattern = "producer: media.MediaSurfaceProducer" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-session-replay-image-codec", "Verify the replay runner installs the host image codec headlessly (the desktop arms cannot link in unit tests; the null-fallback arm is covered in session_tests.zig)", &.{
+        .{ .path = "src/app_runner/root.zig", .pattern = "native_sdk.platform.installHeadlessImageCodec(build_options.platform, &null_platform, &replay_platform.services);" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
+        .{ .path = "src/platform/linux/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
+        .{ .path = "src/platform/windows/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-js-view-helper-contracts", "Verify injected view helpers support label-first updates", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "update:function(options,patch)" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "update:function(options,patch)" },

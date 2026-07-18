@@ -954,6 +954,15 @@ pub fn installHeadlessTextServices(services: *platform_mod.PlatformServices) voi
     services.unregister_gpu_surface_font_fn = unregisterGpuSurfaceFont;
 }
 
+/// Headless image codec for session replay: the SAME CGImageSource
+/// decode a live host serves (see `decodeImage` below — a context-free
+/// bytes-to-pixels call, no window, no run loop), so journaled image
+/// bytes re-register the identical pixels under a headless replay on
+/// the same platform.
+pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
+}
+
 fn measureText(context: ?*anyopaque, font_id: u64, size: f32, text: []const u8) f32 {
     _ = context;
     return @floatCast(native_sdk_appkit_measure_text(font_id, size, text.ptr, text.len));
