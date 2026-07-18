@@ -570,6 +570,17 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "change != NATIVE_SDK_GST_STATE_CHANGE_ASYNC" },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_GST_STATE_CHANGE_ASYNC 2" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-init-close-policy-refusal", "Verify the Linux platform init refuses a .hide main window with the one shared teaching (the pre-created startup window never passes the runtime's create gate, so a silent drop here meant quit-on-close for direct-SDK users)", &.{
+        // The gate itself is unit-tested cross-host (it is extern-free);
+        // this pins its WIRING into initWithOptions, which only a Linux
+        // link can execute.
+        .{ .path = "src/platform/linux/root.zig", .pattern = "try refuseUnsupportedMainWindowClosePolicy(window_options);" },
+        // One message, all seams: the platform-init refusal and the
+        // generated runner's comptime refusal teach with the same text.
+        .{ .path = "src/platform/linux/root.zig", .pattern = "close_policy \\\"hide\\\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \\\"quit\\\" (the default), or scope the .hide declaration to macos/windows builds" },
+        .{ .path = "src/app_runner/root.zig", .pattern = "close_policy \\\"hide\\\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \\\"quit\\\" (the default), or scope the .hide declaration to macos/windows builds" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "close_policy \\\\\\\"hide\\\\\\\" is not supported on linux" },
+    });
     // The embedded-WebView layer must stay real AND declare-to-use: the
     // standard build graph puts the vendored WebView2 SDK header on the
     // include path exactly when app.zon declares web use (`if

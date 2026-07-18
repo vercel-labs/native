@@ -9,6 +9,7 @@ pub const Error = error{
     CreateFailed,
     FocusFailed,
     CloseFailed,
+    UnsupportedWindowClosePolicy,
 };
 
 const GtkHost = opaque {};
@@ -212,6 +213,20 @@ extern fn native_sdk_gtk_show_open_dialog(host: *GtkHost, opts: *const GtkOpenDi
 extern fn native_sdk_gtk_show_save_dialog(host: *GtkHost, opts: *const GtkSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_show_message_dialog(host: *GtkHost, opts: *const GtkMessageDialogOpts) c_int;
 
+/// The startup-window twin of the runtime's create-time `.hide` gate:
+/// GTK reports `window_hide_on_close` false (no status item exists to
+/// bring a hidden window back), and every seam that could accept the
+/// declaration must refuse it loudly with the same teaching — the
+/// generated runner refuses at comptime, the runtime refuses secondary
+/// windows at create, and this refuses the platform-created main
+/// window at init. Pure (no GTK externs), so the refusal is
+/// unit-testable on every host.
+fn refuseUnsupportedMainWindowClosePolicy(window_options: platform_mod.WindowOptions) Error!void {
+    if (window_options.close_policy != .hide) return;
+    std.debug.print("window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds\n", .{});
+    return error.UnsupportedWindowClosePolicy;
+}
+
 pub const LinuxPlatform = struct {
     host: *GtkHost,
     web_engine: platform_mod.WebEngine,
@@ -229,6 +244,14 @@ pub const LinuxPlatform = struct {
 
     pub fn initWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!LinuxPlatform {
         const window_options = app_info.resolvedMainWindow();
+        // The MAIN window is created right here, before any runtime
+        // exists, so the runtime's create-time `.hide` gate
+        // (window_storage's error.UnsupportedWindowClosePolicy) never
+        // sees it — without this twin refusal a direct-SDK or
+        // custom-runner user declaring `.hide` silently got
+        // quit-on-close. Same loud line as the generated runner's
+        // comptime check, at the last seam that can hold it.
+        try refuseUnsupportedMainWindowClosePolicy(window_options);
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
@@ -1542,4 +1565,17 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
 
 test "linux platform module exports type" {
     _ = LinuxPlatform;
+}
+
+test "linux refuses a .hide main window at platform init instead of a silent quit-on-close" {
+    // The pre-created MAIN window never passes through the runtime's
+    // create gate, so the platform's init gate must hold the same
+    // line. The gate sees exactly the options `initWithOptions`
+    // resolves from the caller's AppInfo.
+    const hide_app: platform_mod.AppInfo = .{ .app_name = "player", .main_window = .{ .close_policy = .hide } };
+    try std.testing.expectError(error.UnsupportedWindowClosePolicy, refuseUnsupportedMainWindowClosePolicy(hide_app.resolvedMainWindow()));
+    // The default (.quit) and every other declaration pass untouched —
+    // the refusal is the .hide declaration's, not the init path's.
+    const quit_app: platform_mod.AppInfo = .{ .app_name = "player" };
+    try refuseUnsupportedMainWindowClosePolicy(quit_app.resolvedMainWindow());
 }
