@@ -566,6 +566,76 @@ test "real executor fetches a url source, installs the cache, and hits it offlin
     try std.testing.expectEqual(@as(usize, 3), result.height);
 }
 
+test "cache install temp names are operation-unique" {
+    // Two operations toward the SAME cache path (two ids loading one
+    // URL) must never share a temp: a shared name lets one writer
+    // truncate the other's bytes mid-write, or rename a half-written
+    // file into the cache name. The slot generation is the
+    // operation-unique token.
+    var first_buffer: [512]u8 = undefined;
+    var second_buffer: [512]u8 = undefined;
+    const cache_path = "/tmp/caches/images/abc123.png";
+    const first = try effects_mod.imageCachePartialPath(&first_buffer, cache_path, 7);
+    const second = try effects_mod.imageCachePartialPath(&second_buffer, cache_path, 8);
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    // Both stay recognizable install debris beside their cache path.
+    try std.testing.expect(std.mem.startsWith(u8, first, cache_path));
+    try std.testing.expect(std.mem.endsWith(u8, first, ".partial"));
+    try std.testing.expect(std.mem.startsWith(u8, second, cache_path));
+    try std.testing.expect(std.mem.endsWith(u8, second, ".partial"));
+    try std.testing.expectError(error.InvalidImageOptions, effects_mod.imageCachePartialPath(&first_buffer, "", 7));
+}
+
+test "concurrent loads of one url both complete with an intact cache and no temp debris" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var h = try Harness.create();
+    defer h.destroy();
+    const fixture = try Fixture.start(std.testing.allocator);
+    defer fixture.stop();
+
+    var cache_dir_buffer: [256]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buffer, ".zig-cache/tmp/{s}/caches", .{tmp.sub_path[0..]});
+    var url_buffer: [128]u8 = undefined;
+    var cache_buffer: [512]u8 = undefined;
+    test_url = fixture.url(&url_buffer, "/cover.png");
+    test_cache_path = try effects_mod.imageCachePath(&cache_buffer, cache_dir, test_url);
+    test_expected_bytes = @intCast(fixture.png_len);
+
+    // Two ids over the SAME url, in flight together: each install
+    // writes its own operation-unique temp toward the shared cache
+    // path, so whichever rename lands last publishes a WHOLE file.
+    test_id = 91;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    test_id = 92;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForResult(&h, 2);
+
+    // Both loads decoded and registered — neither terminal was lost or
+    // degraded by the other's install.
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(91) != null);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(92) != null);
+
+    // The cache entry is whole (never a torn write published by an
+    // early rename), and no install temp survives beside it.
+    const cached = try std.Io.Dir.cwd().readFileAlloc(io, test_cache_path, std.testing.allocator, .limited(8192));
+    defer std.testing.allocator.free(cached);
+    try std.testing.expectEqualSlices(u8, fixture.png_storage[0..fixture.png_len], cached);
+
+    var images_dir_buffer: [512]u8 = undefined;
+    const images_dir = try std.fmt.bufPrint(&images_dir_buffer, "{s}/images", .{cache_dir});
+    var dir = try std.Io.Dir.cwd().openDir(io, images_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var file_count: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".partial"));
+        file_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), file_count);
+}
+
 test "real executor reports non-2xx statuses and undecodable bodies honestly" {
     var h = try Harness.create();
     defer h.destroy();

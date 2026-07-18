@@ -659,6 +659,19 @@ pub fn imageCachePath(buffer: []u8, cache_dir: []const u8, url: []const u8) ![]c
     return std.fmt.bufPrint(buffer, "{s}/images/{s}{s}", .{ cache_dir, hex, extension });
 }
 
+/// The temp path one cache install writes before its atomic rename
+/// into `cache_path`. The name must be OPERATION-unique, not merely
+/// url-unique: two concurrent loads of the same URL install toward the
+/// same cache path, and a shared temp would let one writer truncate
+/// the other's bytes mid-write — or rename a half-written file into
+/// place. The slot generation (monotonic across every effect issued on
+/// the channel) is unique per in-flight operation, so each install
+/// owns its temp and the last rename wins whole.
+pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u32) ![]const u8 {
+    if (cache_path.len == 0) return error.InvalidImageOptions;
+    return std.fmt.bufPrint(buffer, "{s}.{d}.partial", .{ cache_path, generation });
+}
+
 /// Longest local path (and cache path) one `loadImage` source may name,
 /// mirroring the file effect's path bound; the URL keeps the fetch
 /// bound (`max_effect_url_bytes`). Longer strings deliver exactly one
@@ -6437,10 +6450,16 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Best-effort cache install behind a successful fetch: write
-        /// beside the cache path and atomically rename into place, and
+        /// an operation-unique temp beside the cache path (see
+        /// `imageCachePartialPath` — concurrent loads of one URL must
+        /// never share a temp) and atomically rename into place, and
         /// only when `expected_bytes` (if declared) verifies — a
         /// partial or wrong-size download never occupies the cache
-        /// name. Failures cost only the next load a re-fetch.
+        /// name. Failures cost only the next load a re-fetch, and a
+        /// failed install deletes its own temp so the cache directory
+        /// never accumulates this process's debris; only a hard crash
+        /// mid-install can leave one behind, in the OS-purgeable
+        /// caches directory.
         fn installImageCache(self: *Self, slot: *Slot, io: std.Io, bytes: []const u8) void {
             _ = self;
             if (slot.image_expected_bytes != 0 and bytes.len != slot.image_expected_bytes) return;
@@ -6449,10 +6468,15 @@ pub fn Effects(comptime Msg: type) type {
             if (std.fs.path.dirname(cache_path)) |parent| {
                 cwd.createDirPath(io, parent) catch return;
             }
-            var partial_buffer: [max_effect_image_path_bytes + 16]u8 = undefined;
-            const partial_path = std.fmt.bufPrint(&partial_buffer, "{s}.partial", .{cache_path}) catch return;
-            cwd.writeFile(io, .{ .sub_path = partial_path, .data = bytes }) catch return;
-            cwd.rename(partial_path, cwd, cache_path, io) catch {};
+            var partial_buffer: [max_effect_image_path_bytes + 32]u8 = undefined;
+            const partial_path = imageCachePartialPath(&partial_buffer, cache_path, slot.generation) catch return;
+            cwd.writeFile(io, .{ .sub_path = partial_path, .data = bytes }) catch {
+                cwd.deleteFile(io, partial_path) catch {};
+                return;
+            };
+            cwd.rename(partial_path, cwd, cache_path, io) catch {
+                cwd.deleteFile(io, partial_path) catch {};
+            };
         }
 
         /// The terminal image entry must never be dropped: retry until
