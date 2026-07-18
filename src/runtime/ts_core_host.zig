@@ -150,9 +150,16 @@
 //!                  2^53 and past — the SDK contract is BELOW 2^53)
 //!                  reject the same way echoing id 0, and so does a
 //!                  17th in-flight load (a full bridge table).
-//!                  Image loads are not cancel's to end (they are keyed
-//!                  by numeric id, not a wire key) — the one terminal
-//!                  always arrives.
+//!                  Image loads are not the string-keyed cancel's to
+//!                  end (they are keyed by numeric id, not a wire key)
+//!                  — `image_cancel` is their cancel.
+//!   image_cancel-> `fx.cancel(id)` on the live load under the id, if
+//!                  any: the engine's `.cancelled` terminal routes the
+//!                  load's own event arm (state "cancelled") and
+//!                  retires the entry, freeing the id for a fresh load
+//!                  — LOUD, the spawn cancel discipline. An id naming
+//!                  no live load (or one the wire cannot carry exactly)
+//!                  is a no-op, audio_ctl's idle rule.
 //!   audio_ctl   -> the engine's control verbs (`fx.pauseAudio`/
 //!                  `resumeAudio`/`stopAudio`/`seekAudio`/
 //!                  `setAudioVolume`), gated by the wire key: a verb
@@ -944,6 +951,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
                         issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, image_rejects);
                     },
+                    // image_cancel [op][id f64 LE]
+                    0x13 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        runImageCancel(fx, id_value);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1288,6 +1301,27 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (!entry.used) return index;
             }
             return null;
+        }
+
+        /// The image_cancel record: end the in-flight load under the
+        /// id, if any, LOUDLY — the engine delivers the load's one
+        /// terminal as `.cancelled`, which routes the entry's own event
+        /// arm through `imageResultMsg` and retires the entry (freeing
+        /// the id for a fresh load), the spawn cancel discipline. An id
+        /// naming no live entry — or one the wire cannot carry exactly,
+        /// which no load could ever park under — is a no-op, the same
+        /// idle no-op audio_ctl keeps: whatever it aimed at is already
+        /// gone. The raw id IS the engine key (image loads never mint a
+        /// bridge namespace), and every bridge key base sits above 2^53,
+        /// so the cancel can never reach another table's slot.
+        fn runImageCancel(fx: *Fx, id_value: f64) void {
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value < 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) return;
+            const id: u64 = @intFromFloat(id_value);
+            if (findImage(id) == null) return;
+            fx.cancel(id);
         }
 
         /// `ImageMsgFn` for image loads: the ONE terminal routes the

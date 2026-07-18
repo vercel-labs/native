@@ -729,8 +729,8 @@ test("streaming ops: wire bytes through the real dispatch cycle", { skip: !hasZi
 
 // Cmd.imageLoad end to end: the numeric-id record against the exact wire
 // layout rt.zig documents, the five-field result arm (the echoed id
-// included) round-tripping as a plain Msg, and the source variants
-// (local path, url with cache).
+// included) round-tripping as a plain Msg, the source variants (local
+// path, url with cache), and the numeric-id image_cancel record.
 const coreImages = `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
@@ -744,6 +744,7 @@ export interface Model { readonly cover: number; readonly w: number; readonly h:
 export type Msg =
   | { readonly kind: "load" }
   | { readonly kind: "load_url" }
+  | { readonly kind: "drop" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): Model {
@@ -754,6 +755,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "load": return [model, Cmd.imageLoad(7, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
     case "load_url": return [model, Cmd.imageLoad(model.cover + 8, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 2048 }, { event: "image_done" })];
+    case "drop": return [model, Cmd.imageCancel(model.cover)];
     case "image_done":
       if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height };
       return { ...model, errs: model.errs + 1 };
@@ -831,6 +833,13 @@ test "image_load wire records match rt.zig's documented layout" {
     // A failure class routes the same arm; the model counts it.
     _ = dispatch(.{ .image_done = .{ .id = 15, .state = .decode_failed, .width = 0, .height = 0, .status = 0 } }, &log);
     try std.testing.expectEqual(@as(@TypeOf(g_model.errs), 1), g_model.errs);
+
+    // image_cancel: [0x13][id f64 LE] — the id is a model expression
+    // (the adopted cover, 7).
+    const drop = dispatch(.drop, &log);
+    try std.testing.expectEqual(@as(u8, 0x13), drop[0]);
+    try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, drop[1..9], .little))));
+    try std.testing.expectEqual(@as(usize, 9), drop.len);
 }
 `;
 

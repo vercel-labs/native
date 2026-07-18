@@ -117,6 +117,11 @@
 //                                width/height, or one failure class. One load
 //                                per id at a time: a duplicate live id
 //                                dispatches state "rejected".
+//   Cmd.imageCancel(id)          end the in-flight load under the id, if any
+//                                — loud, the spawn discipline: the load's
+//                                event arm delivers state "cancelled" and the
+//                                id frees for a fresh load once it lands. An
+//                                id with no live load no-ops.
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -546,6 +551,7 @@ export type Cmd<M extends Msgish> =
       readonly cachePath: Uint8Array;
       readonly expectedBytes: number;
     }
+  | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -815,6 +821,18 @@ export const Cmd = {
       cachePath: source.cachePath ?? new Uint8Array(0),
       expectedBytes: source.expectedBytes ?? 0,
     };
+  },
+
+  /// End the in-flight image load under `id`, if any — LOUDLY: the load's
+  /// one terminal arrives as its own `event` arm with state "cancelled"
+  /// (ending an in-flight load is an observable event, the spawn cancel
+  /// discipline), and the id is free for a fresh load once that terminal
+  /// lands. Aimed at an id with no live load it no-ops (the load it aimed
+  /// at already delivered its terminal). Image loads are keyed by their
+  /// numeric id, so the string-keyed `Cmd.cancel` never touches them —
+  /// this is their cancel, the way `Cmd.audioStop` is audio's.
+  imageCancel(id: number): Cmd<never> {
+    return { op: "image_cancel", id };
   },
 
   /// Several commands from one dispatch, performed in order.

@@ -83,6 +83,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.covertop")) return .load_top;
     if (std.mem.eql(u8, name, "core.coverpast")) return .load_past;
     if (std.mem.eql(u8, name, "core.coverflood")) return .load_flood;
+    if (std.mem.eql(u8, name, "core.covercancel")) return .cancel_cover;
+    if (std.mem.eql(u8, name, "core.cancelmissing")) return .cancel_missing;
     return null;
 }
 
@@ -876,6 +878,62 @@ test "a seventeen-load batch against a full table yields seventeen rejections, n
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .loaded);
     try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
+}
+
+test "Cmd.imageCancel ends the load loudly and frees the id for a same-id retry" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A load parks under id 21; its cancel is NOT the string-keyed
+    // Cmd.cancel (image loads are keyed by numeric id) but the
+    // dedicated imageCancel verb.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+
+    // Cancel is LOUD, the spawn discipline: the load's one terminal
+    // arrives as its own event arm with state "cancelled", echoing the
+    // id — the documented outcome, reachable from TS.
+    try h.menu("core.covercancel");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .cancelled);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+
+    // The cancelled terminal retired the bridge entry: the SAME id
+    // parks a fresh load instead of rejecting — the stale-load pin on
+    // same-id retries is gone.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+
+    // ...and the retried load runs to its loaded terminal normally.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 9;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 41 +% 3;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(21, writer.buffered());
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+
+    // A cancel aimed at an id with no live load is the documented
+    // no-op: no result, no crash.
+    try h.menu("core.cancelmissing");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
 }
 
 test "the image id wire bound is exclusive at 2^53 for dynamic values" {

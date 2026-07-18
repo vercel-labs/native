@@ -93,7 +93,9 @@ Exactly one event arm dispatches per load — a five-field record matched by fie
 
 - **Source classes** — `not_found` (missing local file, no url), `io_failed` (a local read failure), `connect_failed` / `tls_failed` / `protocol_failed` / `timed_out` (the fetch taxonomy, on the fetch machinery's own timeout), `http_status` (a non-2xx answer, with the status carried through — an error page is not an image, so the body is discarded).
 - **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`.
-- **Discipline classes** — `rejected` (an invalid id, no source at all, or a duplicate live id: one load per id at a time, the spawn rule — a load in flight is never replaced implicitly) and `cancelled`.
+- **Discipline classes** — `rejected` (an invalid id, no source at all, or a duplicate live id: one load per id at a time, the spawn rule — a load in flight is never replaced implicitly) and `cancelled` (`Cmd.imageCancel(id)` ended the load).
+
+`Cmd.imageCancel(id)` is the load's cancel — image loads are keyed by their numeric id, so the string-keyed `Cmd.cancel` never touches them. Cancel is **loud**, the spawn discipline: the one terminal still arrives, as the load's own event arm with state `cancelled`, and the id is free for a fresh load once it lands (a slow CDN fetch no longer pins its id against a retry). Aimed at an id with no live load it no-ops — whatever it targeted already delivered its terminal.
 
 ## Limits, honestly
 

@@ -2174,6 +2174,20 @@ export class Emitter {
       if (method === "imageLoad") {
         return this.emitImageLoadCmd(e, ctx);
       }
+      if (method === "imageCancel") {
+        const idArg = e.arguments[0];
+        if (!idArg) this.fail(e, "`Cmd.imageCancel` id (the model-owned numeric ImageId)", "NS1027");
+        // The same literal gate as imageLoad: an id no load could ever
+        // park under has nothing to cancel — stop the build instead of
+        // shipping a certain runtime no-op. Dynamic ids stay the host's
+        // (an unknown id is the documented no-op).
+        const idLiteral = this.numberLiteralValue(idArg);
+        if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+          this.fail(idArg, `\`Cmd.imageCancel\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
+        }
+        const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
+        return `rt.cmdImageCancel(${id})`;
+      }
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
@@ -2201,7 +2215,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");

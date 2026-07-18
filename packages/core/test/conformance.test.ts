@@ -4029,6 +4029,56 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 ${imageTail}
 `,
   },
+  {
+    name: "imageCancel emits: the numeric-id cancel with literal and model-expression ids",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.imageCancel(7)];
+      return [model, Cmd.imageCancel(model.w + 1)];
+${imageTail}
+`,
+  },
+  {
+    // The same literal gate as imageLoad: an id no load could ever park
+    // under has nothing to cancel.
+    name: "an imageCancel id literal the registry must refuse stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageCancel(0)];
+${imageTail}
+`,
+  },
+  {
+    name: "the top imageCancel id literal (2^53 - 1) builds",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageCancel(9007199254740991)];
+${imageTail}
+`,
+  },
+  {
+    name: "an imageCancel id literal of 2^53 stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageCancel(9007199254740992)];
+${imageTail}
+`,
+  },
 ];
 
 // The multi-file round: a core may split into modules under src/ (relative

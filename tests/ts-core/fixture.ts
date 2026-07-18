@@ -88,6 +88,8 @@ export type Msg =
   | { readonly kind: "load_top" }
   | { readonly kind: "load_past" }
   | { readonly kind: "load_flood" }
+  | { readonly kind: "cancel_cover" }
+  | { readonly kind: "cancel_missing" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -255,6 +257,15 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
         Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
       ])];
+    case "cancel_cover":
+      // The numeric-id cancel: ends the in-flight load under id 21
+      // loudly (its own event arm delivers state "cancelled") and
+      // frees the id for a same-id retry.
+      return [model, Cmd.imageCancel(21)];
+    case "cancel_missing":
+      // An id with no live load: the documented no-op — no result, no
+      // crash, nothing to report on.
+      return [model, Cmd.imageCancel(555)];
     case "image_done":
       // The echoed id IS the adopted id — the store-the-id-on-success
       // discipline reads it off the result instead of hardcoding it.
