@@ -748,6 +748,15 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = "native_sdk_appkit_request_stop(self.host);" },
         .{ .path = "src/platform/macos/root.zig", .pattern = "if (self.self) |mac| native_sdk_appkit_stop(mac.host);" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gtk-stop-idle-tracked", "Verify the GTK quit-stop idle source is tracked on the host, coalesced while pending, skipped after shutdown, and removed at destroy (an untracked second g_idle_add leaves a source holding a freed host after the loop quits)", &.{
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "guint stop_idle_source;" },
+        // The idle retires its own tracking before it emits.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "host->stop_idle_source = 0;\n    if (!host->did_shutdown) {" },
+        // Coalesce + post-shutdown skip, then the tracked add.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "if (host->did_shutdown || host->stop_idle_source) return;\n    host->stop_idle_source = g_idle_add(native_sdk_stop_idle, host);" },
+        // Destroy removes a still-pending stop turn.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "if (host->stop_idle_source) {\n        g_source_remove(host->stop_idle_source);\n        host->stop_idle_source = 0;\n    }" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gpu-occluded-frame-heartbeat", "Verify occluded windows throttle frame completions to a heartbeat and restore full cadence on reveal", &.{
         // macOS: occluded surfaces pace logical completions on the ~1 Hz
         // heartbeat (never stopping — on_frame-driven models stay gently
