@@ -3163,7 +3163,7 @@ export interface Model {
 export type Msg =
   | { readonly kind: "load" }
   | { readonly kind: "load_url" }
-  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 export function initialModel(): Model {
   return { cover: 0, w: 0, h: 0, errs: 0, lastStatus: 0, state: "rejected" };
 }
@@ -3172,7 +3172,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "load": return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
     case "load_url": return [model, Cmd.imageLoad(model.cover + 1, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 4096 }, { event: "image_done" })];
     case "image_done":
-      if (msg.state === "loaded") return { ...model, cover: 21, w: msg.width, h: msg.height, state: msg.state, lastStatus: msg.status };
+      if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height, state: msg.state, lastStatus: msg.status };
       return { ...model, errs: model.errs + 1, state: msg.state, lastStatus: msg.status };
   }
 }
@@ -3201,8 +3201,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   [model, cmd] = step(model, { kind: "load" });
   line("i0", cmd);
   const evTag = imageTag(cmd);
-  const done = (state, width, height, status) => ({ kind: kinds[evTag], state, width, height, status });
-  [model, cmd] = step(model, done("loaded", 640, 480, 0));
+  const done = (id, state, width, height, status) => ({ kind: kinds[evTag], id, state, width, height, status });
+  [model, cmd] = step(model, done(21, "loaded", 640, 480, 0));
   line("i1", model.w);
   line("i2", model.h);
   line("i3", model.state);
@@ -3211,12 +3211,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   // and the status carried through.
   [model, cmd] = step(model, { kind: "load_url" });
   line("i4", cmd);
-  [model, cmd] = step(model, done("http_status", 0, 0, 404));
+  [model, cmd] = step(model, done(22, "http_status", 0, 0, 404));
   line("i5", model.errs);
   line("i6", model.lastStatus);
   line("i7", model.state);
   [model, cmd] = step(model, { kind: "load_url" });
-  [model, cmd] = step(model, done("decode_failed", 0, 0, 200));
+  [model, cmd] = step(model, done(22, "decode_failed", 0, 0, 200));
   line("i8", model.errs);
   line("i9", model.state);
 }
@@ -3235,7 +3235,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         model = r.model;
         row("i0", r.cmd);
         const ev_tag = Host.imageTag(r.cmd);
-        r = m.update(model, if (ev_tag == image_tag) m.Msg{ .image_done = .{ .state = .loaded, .width = 640, .height = 480, .status = 0 } } else m.Msg{ .image_done = .{ .state = .rejected, .width = 0, .height = 0, .status = 0 } });
+        r = m.update(model, if (ev_tag == image_tag) m.Msg{ .image_done = .{ .id = 21, .state = .loaded, .width = 640, .height = 480, .status = 0 } } else m.Msg{ .image_done = .{ .id = 0, .state = .rejected, .width = 0, .height = 0, .status = 0 } });
         model = r.model;
         row("i1", model.w);
         row("i2", model.h);
@@ -3244,14 +3244,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         r = m.update(model, .load_url);
         model = r.model;
         row("i4", r.cmd);
-        r = m.update(model, .{ .image_done = .{ .state = .http_status, .width = 0, .height = 0, .status = 404 } });
+        r = m.update(model, .{ .image_done = .{ .id = 22, .state = .http_status, .width = 0, .height = 0, .status = 404 } });
         model = r.model;
         row("i5", model.errs);
         row("i6", model.lastStatus);
         row("i7", model.state);
         r = m.update(model, .load_url);
         model = r.model;
-        r = m.update(model, .{ .image_done = .{ .state = .decode_failed, .width = 0, .height = 0, .status = 200 } });
+        r = m.update(model, .{ .image_done = .{ .id = 22, .state = .decode_failed, .width = 0, .height = 0, .status = 200 } });
         model = r.model;
         row("i8", model.errs);
         row("i9", model.state);

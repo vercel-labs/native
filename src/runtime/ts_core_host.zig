@@ -131,9 +131,11 @@
 //!                  ImageId (the engine registers the pixels under it,
 //!                  so the bridge holds a small id->tag table rather
 //!                  than minting an engine key). One terminal per load
-//!                  routes the event arm — a four-field record built by
-//!                  field NAME (state/width/height/status; `state`'s
-//!                  enum members are matched by member name) — and the
+//!                  routes the event arm — a five-field record built by
+//!                  field NAME (id/state/width/height/status; `state`'s
+//!                  enum members are matched by member name, and `id`
+//!                  echoes the requested ImageId so concurrent loads
+//!                  sharing one arm stay distinguishable) — and the
 //!                  entry retires on it. A URL record carrying no cache
 //!                  path loads under the engine's conventional
 //!                  content-addressed image cache path when the wiring
@@ -143,10 +145,11 @@
 //!                  duplicate LIVE id rejects the new load (the spawn
 //!                  discipline: one load per id, never replaced
 //!                  implicitly), dispatching state "rejected" at the
-//!                  post-cycle boundary; ids the wire cannot carry
-//!                  exactly (0, non-integers, 2^53 and past — the SDK
-//!                  contract is BELOW 2^53) reject the same way, and so
-//!                  does a 17th in-flight load (a full bridge table).
+//!                  post-cycle boundary with the refused id echoed; ids
+//!                  the wire cannot carry exactly (0, non-integers,
+//!                  2^53 and past — the SDK contract is BELOW 2^53)
+//!                  reject the same way echoing id 0, and so does a
+//!                  17th in-flight load (a full bridge table).
 //!                  Image loads are not cancel's to end (they are keyed
 //!                  by numeric id, not a wire key) — the one terminal
 //!                  always arrives.
@@ -447,6 +450,15 @@ pub fn TsCoreHost(comptime core: type) type {
         /// dispatches use.
         const max_rejects_per_cmd: usize = runtime_effects.max_effects;
 
+        /// An image load the bridge itself refused (duplicate live id,
+        /// an unrepresentable id, a full image table), dispatched as the
+        /// load's event arm with state "rejected" at the same post-cycle
+        /// boundary. `id` echoes the requested ImageId so concurrent
+        /// rejections stay distinguishable — 0 when the wire value is
+        /// not an exactly-carried positive integer, because there is no
+        /// honest integer to echo for one.
+        const ImageReject = struct { tag: u8, id: u64 };
+
         /// Install the core: reset the kernel and the bridge tables
         /// (deterministic re-init — the seam session replay relies on),
         /// run the core's `initialModel`, commit it, and perform the
@@ -610,7 +622,7 @@ pub fn TsCoreHost(comptime core: type) type {
             var now_count: usize = 0;
             var rejects: [max_rejects_per_cmd]u8 = undefined;
             var reject_count: usize = 0;
-            var image_rejects: [max_rejects_per_cmd]u8 = undefined;
+            var image_rejects: [max_rejects_per_cmd]ImageReject = undefined;
             var image_reject_count: usize = 0;
             runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count, &image_rejects, &image_reject_count);
             reconcileTimers(fx);
@@ -623,10 +635,11 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             // Bridge-refused image loads (duplicate live id, an
             // unrepresentable id, a full image table): the event arm's
-            // "rejected" state, regenerated deterministically under
-            // replay like the spawn rejections above.
-            for (image_rejects[0..image_reject_count]) |event_tag| {
-                dispatchDepth(fx, msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }), depth + 1);
+            // "rejected" state echoing the refused id, regenerated
+            // deterministically under replay like the spawn rejections
+            // above.
+            for (image_rejects[0..image_reject_count]) |reject| {
+                dispatchDepth(fx, msgFromTagImage(reject.tag, .{ .id = reject.id, .outcome = .rejected }), depth + 1);
             }
         }
 
@@ -641,7 +654,7 @@ pub fn TsCoreHost(comptime core: type) type {
             now_count: *usize,
             rejects: *[max_rejects_per_cmd]u8,
             reject_count: *usize,
-            image_rejects: *[max_rejects_per_cmd]u8,
+            image_rejects: *[max_rejects_per_cmd]ImageReject,
             image_reject_count: *usize,
         ) void {
             var at: usize = 0;
@@ -1144,7 +1157,7 @@ pub fn TsCoreHost(comptime core: type) type {
             url: []const u8,
             cache_path: []const u8,
             expected: f64,
-            image_rejects: *[max_rejects_per_cmd]u8,
+            image_rejects: *[max_rejects_per_cmd]ImageReject,
             image_reject_count: *usize,
         ) void {
             // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
@@ -1156,12 +1169,12 @@ pub fn TsCoreHost(comptime core: type) type {
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
             if (!representable) {
-                pushImageReject(image_rejects, image_reject_count, event_tag);
+                pushImageReject(image_rejects, image_reject_count, event_tag, 0);
                 return;
             }
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) != null) {
-                pushImageReject(image_rejects, image_reject_count, event_tag);
+                pushImageReject(image_rejects, image_reject_count, event_tag, id);
                 return;
             }
             const index = freeImageIndex() orelse {
@@ -1172,7 +1185,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 // in-place replace; a full bridge table speaks the same
                 // vocabulary: exactly one rejected result through the
                 // event arm, never a crash.
-                pushImageReject(image_rejects, image_reject_count, event_tag);
+                pushImageReject(image_rejects, image_reject_count, event_tag, id);
                 return;
             };
             const entry = &images[index];
@@ -1195,11 +1208,11 @@ pub fn TsCoreHost(comptime core: type) type {
             });
         }
 
-        fn pushImageReject(image_rejects: *[max_rejects_per_cmd]u8, image_reject_count: *usize, event_tag: u8) void {
+        fn pushImageReject(image_rejects: *[max_rejects_per_cmd]ImageReject, image_reject_count: *usize, event_tag: u8, id: u64) void {
             if (image_reject_count.* >= max_rejects_per_cmd) {
                 @panic("ts core host: one command value carries more rejected image loads than the effect table holds");
             }
-            image_rejects[image_reject_count.*] = event_tag;
+            image_rejects[image_reject_count.*] = .{ .tag = event_tag, .id = id };
             image_reject_count.* += 1;
         }
 
@@ -1667,18 +1680,18 @@ pub fn TsCoreHost(comptime core: type) type {
             @panic("ts core host: an audio event names a Msg tag outside the union");
         }
 
-        /// The four-field image result record, matched by field name —
+        /// The five-field image result record, matched by field name —
         /// `audioArmShape`'s twin.
         fn imageArmShape(comptime T: type) bool {
             const info = @typeInfo(T);
             if (info != .@"struct") return false;
             const fields = info.@"struct".fields;
-            if (fields.len != 4) return false;
+            if (fields.len != 5) return false;
             var ok = true;
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, "state")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
-                } else if (std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
+                } else if (std.mem.eql(u8, f.name, "id") or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
                     if (f.type != i64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
@@ -1697,8 +1710,10 @@ pub fn TsCoreHost(comptime core: type) type {
             @panic("ts core host: an image outcome has no member in the result arm's state union - the transpiler's own shape check should have stopped this build");
         }
 
-        /// Build the four-field image result arm at index `tag` from an
-        /// engine result, by field name.
+        /// Build the five-field image result arm at index `tag` from an
+        /// engine result, by field name. `id` is the requested ImageId
+        /// echoed verbatim (always below 2^53 — the bridge refused
+        /// anything wider — so both number classes carry it exactly).
         fn msgFromTagImage(tag: u8, result: runtime_effects.EffectImageResult) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
@@ -1708,6 +1723,8 @@ pub fn TsCoreHost(comptime core: type) type {
                         inline for (fields) |f| {
                             if (comptime std.mem.eql(u8, f.name, "state")) {
                                 @field(payload, f.name) = imageStateValue(f.type, result.outcome);
+                            } else if (comptime std.mem.eql(u8, f.name, "id")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.id) else @intCast(result.id);
                             } else if (comptime std.mem.eql(u8, f.name, "width")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.width) else @intCast(result.width);
                             } else if (comptime std.mem.eql(u8, f.name, "height")) {
@@ -1718,7 +1735,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                         return @unionInit(Msg, arm.name, payload);
                     }
-                    @panic("ts core host: an image result targets Msg arm '" ++ arm.name ++ "', which is not the four-field image result record");
+                    @panic("ts core host: an image result targets Msg arm '" ++ arm.name ++ "', which is not the five-field image result record");
                 }
             }
             @panic("ts core host: an image result names a Msg tag outside the union");

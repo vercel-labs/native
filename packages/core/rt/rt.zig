@@ -1185,15 +1185,18 @@ pub fn Kernel(comptime opts: Options) type {
         //               audio_play's resolution order; `expected_bytes` is the
         //               cache integrity gate, 0 = unknown), decode through the
         //               platform codec, register the pixels under the id, and
-        //               dispatch exactly ONE `event_tag` arm — a four-field
-        //               record built by name: `state` (an enum whose members
-        //               are exactly the fourteen image outcome names, matched
-        //               by member NAME), width and height (numbers, the
-        //               decoded dimensions on "loaded"), and status (number,
-        //               the HTTP status for url sources). One load per id at
-        //               a time: a duplicate live id dispatches "rejected"
-        //               (the spawn discipline — a load in flight is never
-        //               replaced implicitly).
+        //               dispatch exactly ONE `event_tag` arm — a five-field
+        //               record built by name: `id` (a number, the requested
+        //               ImageId echoed verbatim so concurrent loads sharing
+        //               one arm stay distinguishable; an id the wire cannot
+        //               carry exactly echoes 0), `state` (an enum whose
+        //               members are exactly the fourteen image outcome names,
+        //               matched by member NAME), width and height (numbers,
+        //               the decoded dimensions on "loaded"), and status
+        //               (number, the HTTP status for url sources). One load
+        //               per id at a time: a duplicate live id dispatches
+        //               "rejected" (the spawn discipline — a load in flight
+        //               is never replaced implicitly).
         //   audio_ctl   drive the open stream's playback in place, by verb
         //               (`CmdAudioVerb` declaration order): pause 0, resume
         //               1, stop 2, seek 3 (`value` = position ms), volume 4

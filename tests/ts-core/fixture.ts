@@ -43,6 +43,9 @@ export interface Model {
   readonly imageState: ImageState;
   readonly imageStatus: number;
   readonly imageResults: number;
+  // The echoed ImageId of the last image result — how concurrent loads
+  // sharing the one event arm stay distinguishable in update.
+  readonly lastImageId: number;
   // Model-owned dynamic ImageIds: the bridge validates these at
   // runtime (the emitter's NS1030 gate covers literals only).
   readonly nextCover: number;
@@ -84,7 +87,7 @@ export type Msg =
   | { readonly kind: "load_next" }
   | { readonly kind: "load_top" }
   | { readonly kind: "load_past" }
-  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -114,6 +117,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       imageState: "rejected",
       imageStatus: -1,
       imageResults: 0,
+      lastImageId: -1,
       nextCover: 100,
       topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
     },
@@ -228,9 +232,11 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // runtime twin of the emitter's compile-time literal gate.
       return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
     case "image_done":
+      // The echoed id IS the adopted id — the store-the-id-on-success
+      // discipline reads it off the result instead of hardcoding it.
       if (msg.state === "loaded")
-        return { ...model, cover: 21, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };
-      return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };
+        return { ...model, cover: msg.id, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
+      return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
   }
 }
 

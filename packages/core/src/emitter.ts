@@ -2481,7 +2481,7 @@ export class Emitter {
   /// `Cmd.imageLoad(id, source, route)`: the app's numeric ImageId (any
   /// number expression — ids are model data), an inline
   /// `{ path?, url?, cachePath?, expectedBytes? }` source (at least one of
-  /// path/url), and the `{ event }` routing whose arm carries the four
+  /// path/url), and the `{ event }` routing whose arm carries the five
   /// SDK-fixed image result fields.
   private emitImageLoadCmd(e: ts.CallExpression, ctx: Ctx): string {
     const idArg = e.arguments[0];
@@ -2564,9 +2564,10 @@ export class Emitter {
     return `rt.cmdImageLoad(${id}, ${tag}, ${image_path}, ${url}, ${cache_path}, ${expected})`;
   }
 
-  /// Resolve the image result arm: exactly the four SDK-fixed fields,
-  /// matched by NAME — state (a named literal-union alias carrying exactly
-  /// the fourteen image states, any order), width/height/status (numbers).
+  /// Resolve the image result arm: exactly the five SDK-fixed fields,
+  /// matched by NAME — id (a number: the requested ImageId echoed
+  /// verbatim), state (a named literal-union alias carrying exactly the
+  /// fourteen image states, any order), width/height/status (numbers).
   private imageEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
     const unionName = ctx.cmdReturn!.msgUnion;
     const info = this.table.unions.get(unionName);
@@ -2576,11 +2577,12 @@ export class Emitter {
       this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
     }
     const shape =
-      "the four image result fields — state (a named alias of exactly " +
+      "the five image result fields — id: number (the echoed ImageId), state (a named alias of exactly " +
       IMAGE_STATES.map((s) => `"${s}"`).join(" | ") +
       "), width: number, height: number, status: number";
     const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
     const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const id = fieldsByName.get("id");
     const state = fieldsByName.get("state");
     const width = fieldsByName.get("width");
     const height = fieldsByName.get("height");
@@ -2591,8 +2593,10 @@ export class Emitter {
       state.type.members.length === IMAGE_STATES.length &&
       IMAGE_STATES.every((s) => state.type.k === "enum" && state.type.members.includes(s));
     const matches =
-      arm.fields.length === 4 &&
+      arm.fields.length === 5 &&
       stateOk &&
+      id !== undefined &&
+      isNumber(id.type.k) &&
       width !== undefined &&
       isNumber(width.type.k) &&
       height !== undefined &&

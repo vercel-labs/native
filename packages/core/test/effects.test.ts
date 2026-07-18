@@ -728,8 +728,9 @@ test("streaming ops: wire bytes through the real dispatch cycle", { skip: !hasZi
 // ------------------------------------------------------------------- images
 
 // Cmd.imageLoad end to end: the numeric-id record against the exact wire
-// layout rt.zig documents, the four-field result arm round-tripping as a
-// plain Msg, and the source variants (local path, url with cache).
+// layout rt.zig documents, the five-field result arm (the echoed id
+// included) round-tripping as a plain Msg, and the source variants
+// (local path, url with cache).
 const coreImages = `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
@@ -743,7 +744,7 @@ export interface Model { readonly cover: number; readonly w: number; readonly h:
 export type Msg =
   | { readonly kind: "load" }
   | { readonly kind: "load_url" }
-  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): Model {
   return { cover: 0, w: 0, h: 0, errs: 0 };
@@ -754,7 +755,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "load": return [model, Cmd.imageLoad(7, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
     case "load_url": return [model, Cmd.imageLoad(model.cover + 8, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 2048 }, { event: "image_done" })];
     case "image_done":
-      if (msg.state === "loaded") return { ...model, cover: 7, w: msg.width, h: msg.height };
+      if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height };
       return { ...model, errs: model.errs + 1 };
   }
 }
@@ -808,9 +809,10 @@ test "image_load wire records match rt.zig's documented layout" {
     try std.testing.expectEqual(@as(f64, 0), @as(f64, @bitCast(std.mem.readInt(u64, load[at..][0..8], .little))));
     try std.testing.expectEqual(load.len, at + 8);
 
-    // The result arm round-trips as a plain Msg (the four-field record,
-    // state matched by member name).
-    _ = dispatch(.{ .image_done = .{ .state = .loaded, .width = 640, .height = 480, .status = 200 } }, &log);
+    // The result arm round-trips as a plain Msg (the five-field record,
+    // state matched by member name; the echoed id is what the model
+    // adopts on "loaded").
+    _ = dispatch(.{ .image_done = .{ .id = 7, .state = .loaded, .width = 640, .height = 480, .status = 200 } }, &log);
     try std.testing.expectEqual(@as(@TypeOf(g_model.w), 640), g_model.w);
     try std.testing.expectEqual(@as(@TypeOf(g_model.h), 480), g_model.h);
     try std.testing.expectEqual(@as(@TypeOf(g_model.cover), 7), g_model.cover);
@@ -827,7 +829,7 @@ test "image_load wire records match rt.zig's documented layout" {
     try std.testing.expectEqual(@as(f64, 2048), @as(f64, @bitCast(std.mem.readInt(u64, stream[at..][0..8], .little))));
 
     // A failure class routes the same arm; the model counts it.
-    _ = dispatch(.{ .image_done = .{ .state = .decode_failed, .width = 0, .height = 0, .status = 0 } }, &log);
+    _ = dispatch(.{ .image_done = .{ .id = 15, .state = .decode_failed, .width = 0, .height = 0, .status = 0 } }, &log);
     try std.testing.expectEqual(@as(@TypeOf(g_model.errs), 1), g_model.errs);
 }
 `;

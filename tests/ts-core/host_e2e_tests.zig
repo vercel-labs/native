@@ -692,15 +692,16 @@ test "image loads route their one terminal into the transpiled core through the 
     try std.testing.expectEqualStrings("https://cdn.test/cover.png", request.url);
 
     // A duplicate LIVE id rejects the new load (the spawn discipline):
-    // the event arm carries state "rejected" and the in-flight load
-    // stays parked.
+    // the event arm carries state "rejected" — echoing the refused id —
+    // and the in-flight load stays parked.
     try h.menu("core.coveragain");
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
 
     // Feeding encoded bytes runs the REAL decode+register path: the
-    // four-field arm carries the decoded dimensions, the model adopts
+    // five-field arm carries the decoded dimensions, the model adopts
     // the id, and the pixels are live in the runtime registry.
     var pixels: [4 * 3 * 4]u8 = undefined;
     var seed: u8 = 11;
@@ -715,6 +716,8 @@ test "image loads route their one terminal into the transpiled core through the 
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .loaded);
+    // The model adopted the ECHOED id — store-on-success reads it off
+    // the result record rather than hardcoding the issue-site id.
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverW), 4), Bridge.model().coverW);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverH), 3), Bridge.model().coverH);
@@ -730,6 +733,50 @@ test "image loads route their one terminal into the transpiled core through the 
     try std.testing.expect(Bridge.model().imageState == .decode_failed);
     // The model kept the previously adopted id (store-on-success).
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+}
+
+test "concurrent image loads distinguish their completions by the echoed id" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Two loads in flight at once, sharing the ONE image_done arm:
+    // id 21 (core.cover) and id 100 (the first core.covernext).
+    try h.menu("core.cover");
+    try h.menu("core.covernext");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+
+    // The SECOND load completes first: the arm's echoed id names the
+    // completion, so update adopts 100 — never the other in-flight id.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 7;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 31 +% 13;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(100, writer.buffered());
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 100), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 100), Bridge.model().cover);
+
+    // The first load's failure then names ITSELF — not the load that
+    // happened to finish before it.
+    try fx.feedImageResult(21, .decode_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .decode_failed);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 100), Bridge.model().cover);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
 }
 
 test "a seventeenth in-flight image load rejects instead of crashing" {
@@ -754,10 +801,12 @@ test "a seventeenth in-flight image load rejects instead of crashing" {
 
     // The 17th finds no free entry: the exactly-one-result contract
     // answers state "rejected" through the event arm — the engine's own
-    // slot-exhaustion vocabulary, never a crash.
+    // slot-exhaustion vocabulary, never a crash — echoing the refused id
+    // (the 17th dynamic id, 100 + 16).
     try h.menu("core.covernext");
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 116), Bridge.model().lastImageId);
 
     // The sixteen live loads are untouched by the refusal...
     try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
@@ -802,6 +851,9 @@ test "the image id wire bound is exclusive at 2^53 for dynamic values" {
     try h.menu("core.coverpast");
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
+    // An id the wire cannot carry exactly has no honest integer to
+    // echo: the rejection carries 0, the no-image sentinel.
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 0), Bridge.model().lastImageId);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
 }
 

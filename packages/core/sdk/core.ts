@@ -112,10 +112,11 @@
 //                                network), decodes through the platform codec,
 //                                registers the pixels under the id, and
 //                                dispatches exactly ONE `event` arm (the
-//                                four-field record below) — state "loaded"
-//                                with the decoded width/height, or one failure
-//                                class. One load per id at a time: a duplicate
-//                                live id dispatches state "rejected".
+//                                five-field record below, the requested id
+//                                echoed) — state "loaded" with the decoded
+//                                width/height, or one failure class. One load
+//                                per id at a time: a duplicate live id
+//                                dispatches state "rejected".
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -312,13 +313,18 @@ export type ImageState =
   | "decode_failed"
   | "registry_full";
 
-/// The payload shape of an image result arm — four fields, matched by NAME
-/// (the AudioEventArm convention). `state` must be a named string-literal-
-/// union alias carrying exactly the fourteen ImageState members (any
-/// declaration order — the host matches members by name); `width`/`height`
-/// are the decoded pixel dimensions ("loaded" only, 0 otherwise); `status`
-/// is the HTTP status for url sources (0 otherwise).
+/// The payload shape of an image result arm — five fields, matched by NAME
+/// (the AudioEventArm convention). `id` is the requested ImageId echoed
+/// verbatim, so two concurrent loads sharing one event arm stay
+/// distinguishable in `update` (an id the wire cannot carry exactly — 0,
+/// negatives, fractions, 2^53 and past — echoes 0, the no-image sentinel:
+/// there is no honest integer to echo); `state` must be a named
+/// string-literal-union alias carrying exactly the fourteen ImageState
+/// members (any declaration order — the host matches members by name);
+/// `width`/`height` are the decoded pixel dimensions ("loaded" only, 0
+/// otherwise); `status` is the HTTP status for url sources (0 otherwise).
 export type ImageEventArm = {
+  readonly id: number;
   readonly state: ImageState;
   readonly width: number;
   readonly height: number;
@@ -326,7 +332,7 @@ export type ImageEventArm = {
 };
 
 /// The Msg arms an image load result may target: arms whose payload is
-/// exactly the four ImageEventArm fields.
+/// exactly the five ImageEventArm fields.
 export type ImageEventKind<M extends Msgish> = M extends Msgish
   ? [Exclude<keyof M, "kind">] extends [keyof ImageEventArm]
     ? [keyof ImageEventArm] extends [Exclude<keyof M, "kind">]
@@ -428,7 +434,7 @@ export interface ImageSource {
 }
 
 /// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
-/// arm (the four-field ImageEventArm record, matched by field name).
+/// arm (the five-field ImageEventArm record, matched by field name).
 export interface ImageRoute<M extends Msgish> {
   readonly event: ImageEventKind<M>;
 }
@@ -791,8 +797,10 @@ export const Cmd = {
   /// resolve the source cascade (local path first, then a verified cache
   /// entry, then the network), decode through the platform codec, register
   /// the pixels under `id`, and dispatch exactly ONE `event` arm — state
-  /// "loaded" with the decoded width/height, or one failure class. Failure
-  /// is never silent, and views referencing the id repaint on the next
+  /// "loaded" with the decoded width/height, or one failure class, always
+  /// echoing the requested id so concurrent loads sharing the arm stay
+  /// distinguishable. Failure is never silent, and views referencing the
+  /// id repaint on the next
   /// frame. One load per id at a time: a duplicate live id dispatches state
   /// "rejected" (finish or re-key instead — ids are model data). Ids are
   /// positive integers below 2^53 outside the reserved bit-63 namespace;

@@ -3476,8 +3476,8 @@ const streamTail = `
 }
 `;
 
-// The image-load fixture: the fourteen-state union and the four-field
-// result arm imageLoad routes.
+// The image-load fixture: the fourteen-state union and the five-field
+// result arm imageLoad routes (id echoes the requested ImageId).
 const imageMsg = `
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
@@ -3486,7 +3486,7 @@ export type ImageState =
 export interface Model { readonly w: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 export function initialModel(): Model { return { w: 0, errs: 0 }; }
 `;
 
@@ -3956,7 +3956,7 @@ export type NarrowState = "loaded" | "rejected" | "decode_failed";
 export interface Model { readonly w: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "image_done"; readonly state: NarrowState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: NarrowState; readonly width: number; readonly height: number; readonly status: number };
 export function initialModel(): Model { return { w: 0, errs: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {

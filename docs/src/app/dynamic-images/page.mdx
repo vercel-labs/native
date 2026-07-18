@@ -29,7 +29,7 @@ export interface Model {
 
 export type Msg =
   | { readonly kind: "show" }
-  | { readonly kind: "cover_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "cover_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): Model {
   return { cover: 0, coverState: "rejected" };
@@ -43,7 +43,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         url: asciiBytes("https://cdn.example.com/art/cover.png"),
       }, { event: "cover_done" })];
     case "cover_done":
-      if (msg.state === "loaded") return { ...model, cover: 21, coverState: msg.state };
+      if (msg.state === "loaded") return { ...model, cover: msg.id, coverState: msg.state };
       return { ...model, coverState: msg.state };
   }
 }
@@ -89,7 +89,7 @@ Prefer **omitting** `cachePath` for URL sources: when the app wiring configures 
 
 ## One result, honest classes
 
-Exactly one event arm dispatches per load — a four-field record matched by field name: `state`, `width`, `height`, `status`. `loaded` means the pixels are registered and drawable; everything else names what actually happened:
+Exactly one event arm dispatches per load — a five-field record matched by field name: `id`, `state`, `width`, `height`, `status`. `id` echoes the requested ImageId, so two loads in flight at once share one arm and still tell their results apart (that is what the example's `cover: msg.id` reads); `loaded` means the pixels are registered and drawable; everything else names what actually happened:
 
 - **Source classes** — `not_found` (missing local file, no url), `io_failed` (a local read failure), `connect_failed` / `tls_failed` / `protocol_failed` / `timed_out` (the fetch taxonomy, on the fetch machinery's own timeout), `http_status` (a non-2xx answer, with the status carried through — an error page is not an image, so the body is discarded).
 - **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`.
