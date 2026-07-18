@@ -213,6 +213,38 @@ jobs:
       # all live in the script.
       - name: Build and drive ui-inbox headless
         run: .github/scripts/linux-canvas-smoke.sh
+      # Durable receipt for the GLib 2.72 fallback (the pre-2.74
+      # G_APPLICATION_DEFAULT_FLAGS shim in gtk_host.c): no stock image
+      # pairs an old glib with GTK >= 4.10 (only backport distros do),
+      # and ubuntu 22.04 ships GTK 4.6 — so a clean compile is
+      # impossible here by design. This pins the error SET instead:
+      # compiling against glib 2.72 must fail only on GTK-age symbols
+      # (gtk_*), never on a glib/gio symbol (g_*/G_*) — if a future
+      # edit leans on a 2.74+ glib symbol without a version-checked
+      # fallback, its undeclared-identifier error appears and this step
+      # fails. If this compile ever succeeds outright, the premise
+      # changed (newer GTK in the image) and the receipt must be
+      # re-verified rather than trusted.
+      - name: GTK host GLib 2.72 fallback holds (error-set receipt)
+        run: |
+          docker run --rm -v "$PWD:/src" -v "$(dirname "$(which zig)"):/zig" ubuntu:22.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -q >/dev/null && apt-get install -y -q libgtk-4-dev pkg-config >/dev/null
+            export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d) ZIG_LOCAL_CACHE_DIR=$(mktemp -d)
+            status=0
+            out=$(/zig/zig cc -c /src/src/platform/linux/gtk_host.c -DNATIVE_SDK_ALLOW_WEBKITGTK_STUB $(pkg-config --cflags gtk4) -ferror-limit=0 -o /tmp/gtk_host_2272.o 2>&1) || status=$?
+            glib_errors=$(echo "$out" | grep -E "undeclared (identifier|function) .[gG]_" || true)
+            if [ -n "$glib_errors" ]; then
+              echo "glib symbol error against GLib 2.72 - the pre-2.74 fallback regressed:"
+              echo "$glib_errors"
+              exit 1
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo "unexpected clean compile on ubuntu 22.04 - this receipt assumes GTK-age errors; re-verify what it proves now"
+              exit 1
+            fi
+            echo "fallback receipt ok: only GTK-age errors on GLib 2.72 (exit $status), zero glib symbol errors"
+          '
 
   windows-canvas-smoke:
     name: Windows Canvas Smoke (Wine)
