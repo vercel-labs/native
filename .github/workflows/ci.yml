@@ -218,11 +218,12 @@ jobs:
       # pairs an old glib with GTK >= 4.10 (only backport distros do),
       # and ubuntu 22.04 ships GTK 4.6 — so a clean compile is
       # impossible here by design. This pins the error SET instead:
-      # every diagnostic must match a GTK-age shape (the whitelist
-      # script holds the shapes and why cascades are allowed) — a
-      # 2.74+ glib symbol, type, or member used without a
-      # version-checked fallback surfaces as a non-whitelisted
-      # diagnostic and fails this step. If this compile ever succeeds outright, the premise
+      # every diagnostic must match a GTK-age shape (the allowlist
+      # script holds the shapes, why cascades are allowed, and the
+      # positive-evidence floor) — a 2.74+ glib symbol, type, or
+      # member used without a version-checked fallback surfaces as a
+      # rejected diagnostic and fails this step, and so does a compile
+      # that produced no classifiable error set at all. If this compile ever succeeds outright, the premise
       # changed (newer GTK in the image) and the receipt must be
       # re-verified rather than trusted.
       - name: GTK host GLib 2.72 fallback holds (error-set receipt)
@@ -237,7 +238,7 @@ jobs:
               echo "unexpected clean compile on ubuntu 22.04 - this receipt assumes GTK-age errors; re-verify what it proves now"
               exit 1
             fi
-            echo "$out" | python3 /src/.github/scripts/glib272_error_whitelist.py
+            echo "$out" | python3 /src/.github/scripts/glib272_error_allowlist.py
           '
 
   windows-canvas-smoke:
