@@ -4002,6 +4002,33 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 ${imageTail}
 `,
   },
+  {
+    // The id bound is exclusive at 2^53: 2^53 - 1 is the last integer
+    // every tier carries exactly, so it builds.
+    name: "the top image id literal (2^53 - 1) builds",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(9007199254740991, { path: asciiBytes("a.png") }, { event: "image_done" })];
+${imageTail}
+`,
+  },
+  {
+    // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot carry
+    // exactly, so the literal stops the build.
+    name: "an image id literal of 2^53 stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(9007199254740992, { path: asciiBytes("a.png") }, { event: "image_done" })];
+${imageTail}
+`,
+  },
 ];
 
 // The multi-file round: a core may split into modules under src/ (relative

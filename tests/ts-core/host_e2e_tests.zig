@@ -80,6 +80,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.cover")) return .show_cover;
     if (std.mem.eql(u8, name, "core.coveragain")) return .show_cover_again;
     if (std.mem.eql(u8, name, "core.covernext")) return .load_next;
+    if (std.mem.eql(u8, name, "core.covertop")) return .load_top;
+    if (std.mem.eql(u8, name, "core.coverpast")) return .load_past;
     return null;
 }
 
@@ -777,6 +779,30 @@ test "a seventeenth in-flight image load rejects instead of crashing" {
     try std.testing.expect(Bridge.model().imageState == .loaded);
     try std.testing.expect(h.harness.runtime.registeredCanvasImage(first.id) != null);
     try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
+}
+
+test "the image id wire bound is exclusive at 2^53 for dynamic values" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // 2^53 - 1 (the model-owned top id) is the last integer every tier
+    // carries exactly: the load parks with the id intact.
+    try h.menu("core.covertop");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(u64, 9007199254740991), fx.pendingImageLoadAt(0).?.id);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot carry
+    // exactly. The bridge answers "rejected" (the runtime twin of the
+    // emitter's NS1030 literal gate) and the parked load stays live.
+    try h.menu("core.coverpast");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
 }
 
 // -------------------------------------------------------- record / replay

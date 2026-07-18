@@ -2488,10 +2488,13 @@ export class Emitter {
     if (!idArg) this.fail(e, "`Cmd.imageLoad` id (the model-owned numeric ImageId)", "NS1027");
     // A compile-time-known id the engine is certain to refuse stops the
     // build; dynamic ids stay the host's to validate through the
-    // "rejected" result state.
+    // "rejected" result state. The bound is strictly BELOW 2^53
+    // (Number.isSafeInteger for a positive value): 2^53 itself is the
+    // first f64 that aliases a neighbor (2^53 + 1), so the host rejects
+    // it too rather than guess which integer the app meant.
     const idLiteral = this.numberLiteralValue(idArg);
-    if (idLiteral !== null && !(Number.isInteger(idLiteral) && idLiteral >= 1 && idLiteral <= 2 ** 53)) {
-      this.fail(idArg, `\`Cmd.imageLoad\` id ${idLiteral} is not a positive integer ImageId`, "NS1030");
+    if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+      this.fail(idArg, `\`Cmd.imageLoad\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
     }
     const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
 

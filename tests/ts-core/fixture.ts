@@ -43,9 +43,10 @@ export interface Model {
   readonly imageState: ImageState;
   readonly imageStatus: number;
   readonly imageResults: number;
-  // A model-owned dynamic ImageId: the bridge validates these at
+  // Model-owned dynamic ImageIds: the bridge validates these at
   // runtime (the emitter's NS1030 gate covers literals only).
   readonly nextCover: number;
+  readonly topId: number;
 }
 
 export type Msg =
@@ -81,6 +82,8 @@ export type Msg =
   | { readonly kind: "show_cover" }
   | { readonly kind: "show_cover_again" }
   | { readonly kind: "load_next" }
+  | { readonly kind: "load_top" }
+  | { readonly kind: "load_past" }
   | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -112,6 +115,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       imageStatus: -1,
       imageResults: 0,
       nextCover: 100,
+      topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -213,6 +217,16 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // 16-entry image table and prove the 17th answers "rejected"
       // (never a crash) while the 16 live loads stay healthy.
       return [{ ...model, nextCover: model.nextCover + 1 }, Cmd.imageLoad(model.nextCover, { path: asciiBytes("art/flood.png") }, { event: "image_done" })];
+    case "load_top":
+      // 2^53 - 1 reaching the bridge as a DYNAMIC value the emitter's
+      // literal gate never sees: the last id every tier carries
+      // exactly, so it must park a live load.
+      return [model, Cmd.imageLoad(model.topId, { path: asciiBytes("art/top.png") }, { event: "image_done" })];
+    case "load_past":
+      // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot
+      // carry exactly. Dynamic values answer "rejected" at runtime, the
+      // runtime twin of the emitter's compile-time literal gate.
+      return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
     case "image_done":
       if (msg.state === "loaded")
         return { ...model, cover: 21, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };

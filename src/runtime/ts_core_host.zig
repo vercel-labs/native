@@ -143,10 +143,10 @@
 //!                  duplicate LIVE id rejects the new load (the spawn
 //!                  discipline: one load per id, never replaced
 //!                  implicitly), dispatching state "rejected" at the
-//!                  post-cycle boundary; ids the wire cannot represent
-//!                  (0, non-integers, past 2^53) reject the same way,
-//!                  and so does a 17th in-flight load (a full bridge
-//!                  table).
+//!                  post-cycle boundary; ids the wire cannot carry
+//!                  exactly (0, non-integers, 2^53 and past — the SDK
+//!                  contract is BELOW 2^53) reject the same way, and so
+//!                  does a 17th in-flight load (a full bridge table).
 //!                  Image loads are not cancel's to end (they are keyed
 //!                  by numeric id, not a wire key) — the one terminal
 //!                  always arrives.
@@ -1131,7 +1131,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// rejects the new load (event arm, state "rejected", at the
         /// post-cycle boundary), and so do an id the f64 wire cannot
         /// honestly carry into the u64 registry (0, negatives,
-        /// fractions, past 2^53) and a 17th in-flight load (the table
+        /// fractions, 2^53 and past) and a 17th in-flight load (the table
         /// mirrors the engine's max_effects slots, whose own exhaustion
         /// answer is the same rejected result). Everything else the
         /// engine refuses dynamically (a full registry, a bad source)
@@ -1147,8 +1147,13 @@ pub fn TsCoreHost(comptime core: type) type {
             image_rejects: *[max_rejects_per_cmd]u8,
             image_reject_count: *usize,
         ) void {
+            // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
+            // grid steps by 2, so 2^53 is the first value that aliases
+            // a neighbor (2^53 + 1) on the wire — the bridge rejects it
+            // rather than guess which integer the app meant. 2^53 - 1
+            // is the last id every tier carries exactly.
             const representable = std.math.isFinite(id_value) and
-                id_value >= 1 and id_value <= 9007199254740992.0 and
+                id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
             if (!representable) {
                 pushImageReject(image_rejects, image_reject_count, event_tag);
