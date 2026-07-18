@@ -1,0 +1,37 @@
+.{
+    .id = "dev.native_sdk.menu_bar",
+    .name = "menu-bar",
+    .display_name = "Menu Bar",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Menu Bar Player",
+                .width = 420,
+                .height = 260,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                // The menu-bar-app shape: the red close button HIDES the
+                // window and the app keeps running behind its status
+                // item; the tray "Open Player" row (fx.showWindow) and
+                // the Dock reopen bring it back, and only the tray
+                // "Quit" row (fx.quitApp) or cmd+Q actually quits.
+                .close_policy = "hide",
+                .views = .{
+                    .{ .label = "player-canvas", .kind = "gpu_surface", .fill = true, .role = "Menu bar player", .accessibility_label = "Menu bar player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}
