@@ -459,6 +459,75 @@ pub fn TsCoreHost(comptime core: type) type {
         /// honest integer to echo for one.
         const ImageReject = struct { tag: u8, id: u64 };
 
+        /// One cycle's staging for bridge-refused image loads. Unlike
+        /// the spawn-reject buffer, the count here is the APP's to
+        /// choose — a `Cmd.batch` of N loads against a full table must
+        /// yield N rejected results, never a crash — so the stage never
+        /// caps at the table size: the inline buffer covers everyday
+        /// command values without touching an allocator, and the first
+        /// overflow spills once into an engine-allocator block sized by
+        /// the wire's own arithmetic bound. Staging exists because the
+        /// command walk cannot dispatch (the wire bytes are frame-arena
+        /// resident, and a nested cycle's frame reset would free them
+        /// mid-walk): rejects are captured during the walk and
+        /// delivered after the issuing cycle's frame reset, at the same
+        /// boundary `now` dispatches use — stack and heap storage both
+        /// survive the nested delivery cycles that boundary runs.
+        const ImageRejectStage = struct {
+            /// Every image_load record occupies at least this many wire
+            /// bytes ([op][id f64][event_tag], three empty long-bytes
+            /// fields, [expected f64]), so a command value of L bytes
+            /// carries at most L / 30 of them — the spill bound needs
+            /// no second record parser to stay in sync with.
+            const min_image_load_record_bytes: usize = 1 + 8 + 1 + 3 * 4 + 8;
+
+            inline_buf: [max_rejects_per_cmd]ImageReject = undefined,
+            spill: []ImageReject = &.{},
+            count: usize = 0,
+            /// The arithmetic ceiling on this cycle's image_load record
+            /// count (and therefore on its rejects).
+            bound: usize,
+            allocator: std.mem.Allocator,
+
+            fn open(fx: *Fx, cmd_len: usize) ImageRejectStage {
+                return .{
+                    .bound = cmd_len / min_image_load_record_bytes,
+                    .allocator = fx.allocator,
+                };
+            }
+
+            fn push(self: *ImageRejectStage, tag: u8, id: u64) void {
+                if (self.count < self.inline_buf.len) {
+                    self.inline_buf[self.count] = .{ .tag = tag, .id = id };
+                    self.count += 1;
+                    return;
+                }
+                if (self.spill.len == 0) {
+                    // First overflow: size by the wire bound once and
+                    // move the inline prefix over — one allocation for
+                    // the whole cycle, and only on cycles that earn it.
+                    self.spill = self.allocator.alloc(ImageReject, self.bound) catch
+                        @panic("ts core host: out of memory staging rejected image loads");
+                    @memcpy(self.spill[0..self.count], &self.inline_buf);
+                }
+                // The wire arithmetic sized the spill: rejects <= loads
+                // <= bound, so the store below can never run past it.
+                std.debug.assert(self.count < self.spill.len);
+                self.spill[self.count] = .{ .tag = tag, .id = id };
+                self.count += 1;
+            }
+
+            fn staged(self: *const ImageRejectStage) []const ImageReject {
+                if (self.spill.len > 0) return self.spill[0..self.count];
+                return self.inline_buf[0..self.count];
+            }
+
+            fn close(self: *ImageRejectStage) void {
+                if (self.spill.len > 0) self.allocator.free(self.spill);
+                self.spill = &.{};
+            }
+        };
+
         /// Install the core: reset the kernel and the bridge tables
         /// (deterministic re-init — the seam session replay relies on),
         /// run the core's `initialModel`, commit it, and perform the
@@ -622,9 +691,9 @@ pub fn TsCoreHost(comptime core: type) type {
             var now_count: usize = 0;
             var rejects: [max_rejects_per_cmd]u8 = undefined;
             var reject_count: usize = 0;
-            var image_rejects: [max_rejects_per_cmd]ImageReject = undefined;
-            var image_reject_count: usize = 0;
-            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count, &image_rejects, &image_reject_count);
+            var image_rejects = ImageRejectStage.open(fx, cmd.len);
+            defer image_rejects.close();
+            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count, &image_rejects);
             reconcileTimers(fx);
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
@@ -638,7 +707,7 @@ pub fn TsCoreHost(comptime core: type) type {
             // "rejected" state echoing the refused id, regenerated
             // deterministically under replay like the spawn rejections
             // above.
-            for (image_rejects[0..image_reject_count]) |reject| {
+            for (image_rejects.staged()) |reject| {
                 dispatchDepth(fx, msgFromTagImage(reject.tag, .{ .id = reject.id, .outcome = .rejected }), depth + 1);
             }
         }
@@ -654,8 +723,7 @@ pub fn TsCoreHost(comptime core: type) type {
             now_count: *usize,
             rejects: *[max_rejects_per_cmd]u8,
             reject_count: *usize,
-            image_rejects: *[max_rejects_per_cmd]ImageReject,
-            image_reject_count: *usize,
+            image_rejects: *ImageRejectStage,
         ) void {
             var at: usize = 0;
             while (at < cmd.len) {
@@ -874,7 +942,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const cache_path = takeLongBytes(cmd, &at);
                         const expected_bits = takeBytes(cmd, &at, 8);
                         const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
-                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, image_rejects, image_reject_count);
+                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, image_rejects);
                     },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
@@ -1157,8 +1225,7 @@ pub fn TsCoreHost(comptime core: type) type {
             url: []const u8,
             cache_path: []const u8,
             expected: f64,
-            image_rejects: *[max_rejects_per_cmd]ImageReject,
-            image_reject_count: *usize,
+            image_rejects: *ImageRejectStage,
         ) void {
             // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
             // grid steps by 2, so 2^53 is the first value that aliases
@@ -1169,12 +1236,12 @@ pub fn TsCoreHost(comptime core: type) type {
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
             if (!representable) {
-                pushImageReject(image_rejects, image_reject_count, event_tag, 0);
+                image_rejects.push(event_tag, 0);
                 return;
             }
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) != null) {
-                pushImageReject(image_rejects, image_reject_count, event_tag, id);
+                image_rejects.push(event_tag, id);
                 return;
             }
             const index = freeImageIndex() orelse {
@@ -1184,8 +1251,9 @@ pub fn TsCoreHost(comptime core: type) type {
                 // the audio channel's exhaustion story is a quiet
                 // in-place replace; a full bridge table speaks the same
                 // vocabulary: exactly one rejected result through the
-                // event arm, never a crash.
-                pushImageReject(image_rejects, image_reject_count, event_tag, id);
+                // event arm, never a crash — however many loads one
+                // batch stages against it.
+                image_rejects.push(event_tag, id);
                 return;
             };
             const entry = &images[index];
@@ -1206,14 +1274,6 @@ pub fn TsCoreHost(comptime core: type) type {
                     0,
                 .on_result = imageResultMsg,
             });
-        }
-
-        fn pushImageReject(image_rejects: *[max_rejects_per_cmd]ImageReject, image_reject_count: *usize, event_tag: u8, id: u64) void {
-            if (image_reject_count.* >= max_rejects_per_cmd) {
-                @panic("ts core host: one command value carries more rejected image loads than the effect table holds");
-            }
-            image_rejects[image_reject_count.*] = .{ .tag = event_tag, .id = id };
-            image_reject_count.* += 1;
         }
 
         fn findImage(id: u64) ?usize {

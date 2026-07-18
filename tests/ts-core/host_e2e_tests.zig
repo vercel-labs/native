@@ -82,6 +82,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.covernext")) return .load_next;
     if (std.mem.eql(u8, name, "core.covertop")) return .load_top;
     if (std.mem.eql(u8, name, "core.coverpast")) return .load_past;
+    if (std.mem.eql(u8, name, "core.coverflood")) return .load_flood;
     return null;
 }
 
@@ -827,6 +828,53 @@ test "a seventeenth in-flight image load rejects instead of crashing" {
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .loaded);
     try std.testing.expect(h.harness.runtime.registeredCanvasImage(first.id) != null);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
+}
+
+test "a seventeen-load batch against a full table yields seventeen rejections, never a crash" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen live loads fill the bridge's image table.
+    var issued: usize = 0;
+    while (issued < 16) : (issued += 1) {
+        try h.menu("core.covernext");
+    }
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+
+    // ONE command value carrying seventeen more loads: the reject
+    // staging outgrows the table-sized inline buffer, and every load
+    // still gets its one "rejected" result at the post-cycle boundary
+    // in record order — the last echo is the batch's last id.
+    try h.menu("core.coverflood");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 216), Bridge.model().lastImageId);
+
+    // The sixteen live loads are untouched by the flood: the first
+    // still runs the real decode+register path to its loaded terminal.
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    const first = fx.pendingImageLoadAt(0).?;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 5;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 23 +% 7;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(first.id, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
     try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
 }
 

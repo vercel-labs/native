@@ -87,6 +87,7 @@ export type Msg =
   | { readonly kind: "load_next" }
   | { readonly kind: "load_top" }
   | { readonly kind: "load_past" }
+  | { readonly kind: "load_flood" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -231,6 +232,29 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // carry exactly. Dynamic values answer "rejected" at runtime, the
       // runtime twin of the emitter's compile-time literal gate.
       return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
+    case "load_flood":
+      // Seventeen loads in ONE command value: against a full image
+      // table every one must answer "rejected" at the post-cycle
+      // boundary — one result per load, however many one batch stages.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(200, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(201, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(202, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(203, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(204, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(205, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(206, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(207, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(208, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(209, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(210, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(211, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(212, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(213, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(214, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+      ])];
     case "image_done":
       // The echoed id IS the adopted id — the store-the-id-on-success
       // discipline reads it off the result instead of hardcoding it.
