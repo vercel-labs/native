@@ -510,8 +510,8 @@ test "a registered face renders pixel-identically on the present path and the re
 
 // ------------------------------------------------ UiApp Options.fonts
 
-const FontAppModel = struct { presses: u32 = 0 };
-const FontAppMsg = union(enum) { press: void };
+const FontAppModel = struct { presses: u32 = 0, show_uncovered_cjk: bool = false };
+const FontAppMsg = union(enum) { press: void, show_uncovered_cjk: void };
 const FontApp = ui_app_model.UiApp(FontAppModel, FontAppMsg);
 
 const font_app_canvas_label = "canvas";
@@ -519,6 +519,7 @@ const font_app_canvas_label = "canvas";
 fn fontAppUpdate(model: *FontAppModel, msg: FontAppMsg) void {
     switch (msg) {
         .press => model.presses += 1,
+        .show_uncovered_cjk => model.show_uncovered_cjk = true,
     }
 }
 
@@ -659,10 +660,17 @@ const cjk_receipt_bytes = @embedFile("testdata/fonts/NotoSansSC-Receipt.ttf");
 /// 你好世界 — "Hello, world".
 const cjk_receipt_text = "\u{4F60}\u{597D}\u{4E16}\u{754C}";
 
+/// 中文字体 — "Chinese font": four ideographs the subsetted fixture
+/// face deliberately does NOT map (the subset carries exactly the
+/// receipt string's four glyphs plus notdef; the test pins the gap
+/// with glyphIndex() == 0 before relying on it). Rendered with the
+/// SAME registered face, this string can only draw four notdef boxes
+/// — the self-calibrating tofu baseline the receipt compares against.
+const cjk_uncovered_text = "\u{4E2D}\u{6587}\u{5B57}\u{4F53}";
+
 fn cjkAppView(ui: *FontApp.Ui, model: *const FontAppModel) FontApp.Ui.Node {
-    _ = model;
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
-        ui.text(.{}, cjk_receipt_text),
+        ui.text(.{}, if (model.show_uncovered_cjk) cjk_uncovered_text else cjk_receipt_text),
     });
 }
 
@@ -773,6 +781,32 @@ test "the Chinese receipt: a scaffold-shaped app registers a CJK face and render
     }
     try std.testing.expect(nonblank);
     try std.testing.expect(!std.mem.eql(u8, registered_shot, tofu_shot));
+
+    // Self-calibrating tofu control: the bundled-face comparison above
+    // proves the pixels changed with the face, not that they are real
+    // ideographs — a renderer that wrongly resolved every ideograph to
+    // the REGISTERED face's notdef glyph and inked that glyph's own
+    // outline would still differ from the bundled shot (a different
+    // face's fallback pixels) and still pass nonblank. Render the same
+    // view with the same registered face showing a string the fixture
+    // face genuinely does not cover — first pinning that gap per
+    // codepoint — so the control shot IS this face's
+    // everything-uncovered rendering through the identical pipeline.
+    // Had the receipt string resolved to notdef, the two shots would
+    // match: same face, same per-glyph fallback, same advances.
+    // Differing proves the receipt pixels are real ideograph outlines,
+    // not any face's fallback.
+    var uncovered_index: usize = 0;
+    while (uncovered_index < cjk_uncovered_text.len) {
+        const len = try std.unicode.utf8ByteSequenceLength(cjk_uncovered_text[uncovered_index]);
+        const codepoint = try std.unicode.utf8Decode(cjk_uncovered_text[uncovered_index .. uncovered_index + len]);
+        uncovered_index += len;
+        try std.testing.expectEqual(@as(u16, 0), face.glyphIndex(codepoint));
+    }
+    try app_state.dispatch(&harness.runtime, 1, .show_uncovered_cjk);
+    const uncovered_shot = try fontFixtureScreenshot(harness, std.testing.allocator, registered_font_id);
+    defer std.testing.allocator.free(uncovered_shot);
+    try std.testing.expect(!std.mem.eql(u8, registered_shot, uncovered_shot));
 }
 
 test "ui app fonts option surfaces the glyph-budget refusal as a teaching error" {
