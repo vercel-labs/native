@@ -84,6 +84,14 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
+        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        // miscompiles the SysV C calling convention for the long
+        // mixed-argument signatures the platform hosts use, shifting
+        // stack-passed pointers by one slot (a Debug run on x86_64 Linux
+        // crashes creating its first shell view). Force LLVM there,
+        // mirroring the Native SDK build graph; Release modes already
+        // use LLVM, so only Debug changes.
+        .use_llvm = useLlvmWorkaround(target),
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
@@ -447,4 +455,15 @@ fn boolField(source: []const u8, field: []const u8) ?bool {
     if (std.mem.startsWith(u8, source[index..], "true")) return true;
     if (std.mem.startsWith(u8, source[index..], "false")) return false;
     return null;
+}
+
+// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
+// convention for long mixed int/pointer/double signatures (the platform
+// hosts' view-create calls) and f32-heavy ones (the embed viewport ABI):
+// stack-passed arguments arrive shifted, so a Debug x86_64 build crashes
+// at the first platform call that passes strings on the stack. Force the
+// LLVM backend on x86_64 until the upstream backend is fixed; Release
+// modes already default to LLVM, so this only changes Debug builds.
+fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
 }
