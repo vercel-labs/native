@@ -26,6 +26,20 @@ produced no classifiable error set (wrong file, broken include path,
 invocation failure) proves nothing and must fail loudly - the clean
 run produces ~21 roots, so the floor sits far below real variance
 while catching "nothing actually compiled".
+
+Why the cascade allowances are sound despite looking broad: this
+receipt is one lane in a lattice, not the sole guard on gtk_host.c.
+Every full-GTK lane (linux-webkitgtk, the canvas smokes, macOS)
+compiles the same file cleanly, so a typo'd local or an independent
+conversion bug is a red build elsewhere before it ever reaches this
+filter - the only errors unique to this lane are the old-glib delta.
+And within that delta, regressions always announce themselves through
+a REJECTED root before their cascades matter: a missing glib function
+is "call to undeclared function 'g_...'" (only gtk_/GTK_ roots are
+allowed), a missing glib type/macro is an unknown-type-name or
+undeclared-G_-identifier line - all rejected. The cascades allowed
+below can only follow roots this filter already failed the step for,
+or GTK-age roots it exists to permit.
 """
 import re
 import sys
@@ -48,7 +62,10 @@ for line in sys.stdin:
         continue
     if re.match(r"use of undeclared identifier '(?!g_|G_|G[A-Z])", msg):
         continue
-    if "incompatible integer to pointer conversion" in msg:
+    if "incompatible integer to pointer conversion" in msg and "from 'int'" in msg:
+        # Only the cascade signature: an undeclared function defaults to
+        # returning int, so its assignment lines convert FROM 'int'.
+        # Conversions from any other type are not that cascade - reject.
         continue
     rejected.append(line.rstrip())
 
