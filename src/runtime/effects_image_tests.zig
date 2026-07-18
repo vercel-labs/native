@@ -604,3 +604,47 @@ test "imageCachePath keys by url hash under images/ and keeps the extension" {
     try std.testing.expect(!std.mem.eql(u8, clean, other));
     try std.testing.expectError(error.InvalidImageOptions, effects_mod.imageCachePath(&buffer, "", "https://x.example/a.png"));
 }
+
+// -------------------------------------------------- export surface pin
+
+/// The public SDK root, exactly as an external Zig app imports it: an
+/// app writing an `Effects.imageMsg` Msg arm (and reasoning about the
+/// image bounds) needs these names on the public root, not
+/// module-internal paths — the media-surface export pin's convention.
+const sdk = @import("../root.zig");
+
+test "the image effect surface is exported through the public root" {
+    // The payload/outcome types on the SDK root and the runtime root
+    // ARE the effects module's, so an external Msg arm and an internal
+    // drain speak one type.
+    comptime std.debug.assert(sdk.EffectImageResult == effects_mod.EffectImageResult);
+    comptime std.debug.assert(sdk.EffectImageOutcome == effects_mod.EffectImageOutcome);
+    comptime std.debug.assert(sdk.runtime.EffectImageResult == sdk.EffectImageResult);
+    comptime std.debug.assert(sdk.runtime.EffectImageOutcome == sdk.EffectImageOutcome);
+    // The bounds an app sizes buffers and teaching against, exported on
+    // both roots beside the audio limits they mirror.
+    comptime std.debug.assert(sdk.max_effect_image_path_bytes == effects_mod.max_effect_image_path_bytes);
+    comptime std.debug.assert(sdk.max_effect_image_bytes == effects_mod.max_effect_image_bytes);
+    comptime std.debug.assert(sdk.effect_image_blob_hash_len == effects_mod.effect_image_blob_hash_len);
+    comptime std.debug.assert(sdk.runtime.max_effect_image_path_bytes == effects_mod.max_effect_image_path_bytes);
+    comptime std.debug.assert(sdk.runtime.max_effect_image_bytes == effects_mod.max_effect_image_bytes);
+    comptime std.debug.assert(sdk.runtime.effect_image_blob_hash_len == effects_mod.effect_image_blob_hash_len);
+
+    // Compile-shaped and driven: the exact Msg arm an external app
+    // writes over the public constructor and payload type.
+    const AppMsg = union(enum) { cover_loaded: sdk.EffectImageResult };
+    const make = sdk.Effects(AppMsg).imageMsg(.cover_loaded);
+    const msg = make(.{ .id = 7, .outcome = .loaded, .width = 2, .height = 3, .status = 200 });
+    try std.testing.expectEqual(@as(u64, 7), msg.cover_loaded.id);
+    try std.testing.expectEqual(sdk.EffectImageOutcome.loaded, msg.cover_loaded.outcome);
+
+    // The cache-path convention is callable through the public root
+    // (and both roots resolve to one function), sized by the exported
+    // path bound.
+    var buffer: [sdk.max_effect_image_path_bytes]u8 = undefined;
+    const path = try sdk.imageCachePath(&buffer, "/tmp/caches", "https://cdn.example.com/art/cover.png");
+    var runtime_buffer: [sdk.runtime.max_effect_image_path_bytes]u8 = undefined;
+    const runtime_path = try sdk.runtime.imageCachePath(&runtime_buffer, "/tmp/caches", "https://cdn.example.com/art/cover.png");
+    try std.testing.expectEqualStrings(path, runtime_path);
+    try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/caches/images/"));
+}
