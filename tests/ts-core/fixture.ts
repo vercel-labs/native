@@ -43,6 +43,9 @@ export interface Model {
   readonly imageState: ImageState;
   readonly imageStatus: number;
   readonly imageResults: number;
+  // A model-owned dynamic ImageId: the bridge validates these at
+  // runtime (the emitter's NS1030 gate covers literals only).
+  readonly nextCover: number;
 }
 
 export type Msg =
@@ -77,6 +80,7 @@ export type Msg =
   | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
   | { readonly kind: "show_cover" }
   | { readonly kind: "show_cover_again" }
+  | { readonly kind: "load_next" }
   | { readonly kind: "image_done"; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -107,6 +111,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       imageState: "rejected",
       imageStatus: -1,
       imageResults: 0,
+      nextCover: 100,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -202,6 +207,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // A duplicate live id: the bridge rejects it (state "rejected")
       // — one load per id at a time, the spawn discipline.
       return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_next":
+      // Dynamic ids straight off the model: each dispatch parks one
+      // more in-flight load, so the e2e suite can fill the bridge's
+      // 16-entry image table and prove the 17th answers "rejected"
+      // (never a crash) while the 16 live loads stay healthy.
+      return [{ ...model, nextCover: model.nextCover + 1 }, Cmd.imageLoad(model.nextCover, { path: asciiBytes("art/flood.png") }, { event: "image_done" })];
     case "image_done":
       if (msg.state === "loaded")
         return { ...model, cover: 21, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1 };

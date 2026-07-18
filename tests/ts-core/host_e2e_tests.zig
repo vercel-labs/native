@@ -79,6 +79,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.stopmusic")) return .stop_music;
     if (std.mem.eql(u8, name, "core.cover")) return .show_cover;
     if (std.mem.eql(u8, name, "core.coveragain")) return .show_cover_again;
+    if (std.mem.eql(u8, name, "core.covernext")) return .load_next;
     return null;
 }
 
@@ -727,6 +728,55 @@ test "image loads route their one terminal into the transpiled core through the 
     try std.testing.expect(Bridge.model().imageState == .decode_failed);
     // The model kept the previously adopted id (store-on-success).
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+}
+
+test "a seventeenth in-flight image load rejects instead of crashing" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen dynamic model-owned ids fill the bridge's image table
+    // (and the engine's matching slot budget) without a single result.
+    var issued: usize = 0;
+    while (issued < 16) : (issued += 1) {
+        try h.menu("core.covernext");
+    }
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // The 17th finds no free entry: the exactly-one-result contract
+    // answers state "rejected" through the event arm — the engine's own
+    // slot-exhaustion vocabulary, never a crash.
+    try h.menu("core.covernext");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+
+    // The sixteen live loads are untouched by the refusal...
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    // ...and still healthy: the first runs the real decode+register
+    // path to its loaded terminal, retiring only its own entry.
+    const first = fx.pendingImageLoadAt(0).?;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 3;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 29 +% 11;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(first.id, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(first.id) != null);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
 }
 
 // -------------------------------------------------------- record / replay

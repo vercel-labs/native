@@ -144,7 +144,9 @@
 //!                  discipline: one load per id, never replaced
 //!                  implicitly), dispatching state "rejected" at the
 //!                  post-cycle boundary; ids the wire cannot represent
-//!                  (0, non-integers, past 2^53) reject the same way.
+//!                  (0, non-integers, past 2^53) reject the same way,
+//!                  and so does a 17th in-flight load (a full bridge
+//!                  table).
 //!                  Image loads are not cancel's to end (they are keyed
 //!                  by numeric id, not a wire key) — the one terminal
 //!                  always arrives.
@@ -620,9 +622,9 @@ pub fn TsCoreHost(comptime core: type) type {
                 dispatchDepth(fx, msgFromTagBytes(err_tag, "rejected"), depth + 1);
             }
             // Bridge-refused image loads (duplicate live id, an
-            // unrepresentable id): the event arm's "rejected" state,
-            // regenerated deterministically under replay like the spawn
-            // rejections above.
+            // unrepresentable id, a full image table): the event arm's
+            // "rejected" state, regenerated deterministically under
+            // replay like the spawn rejections above.
             for (image_rejects[0..image_reject_count]) |event_tag| {
                 dispatchDepth(fx, msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }), depth + 1);
             }
@@ -1127,11 +1129,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the SPAWN exception, by the same reasoning: one load per id
         /// at a time, never replaced implicitly — a duplicate LIVE id
         /// rejects the new load (event arm, state "rejected", at the
-        /// post-cycle boundary), and so does an id the f64 wire cannot
+        /// post-cycle boundary), and so do an id the f64 wire cannot
         /// honestly carry into the u64 registry (0, negatives,
-        /// fractions, past 2^53). Everything else the engine refuses
-        /// dynamically (a full registry, a bad source) comes back
-        /// through the entry's own event arm — never silent.
+        /// fractions, past 2^53) and a 17th in-flight load (the table
+        /// mirrors the engine's max_effects slots, whose own exhaustion
+        /// answer is the same rejected result). Everything else the
+        /// engine refuses dynamically (a full registry, a bad source)
+        /// comes back through the entry's own event arm — never silent.
         fn issueImageLoad(
             fx: *Fx,
             id_value: f64,
@@ -1155,8 +1159,17 @@ pub fn TsCoreHost(comptime core: type) type {
                 pushImageReject(image_rejects, image_reject_count, event_tag);
                 return;
             }
-            const index = freeImageIndex() orelse
-                @panic("ts core host: more than 16 image loads in flight - the image table mirrors the engine's max_effects slots");
+            const index = freeImageIndex() orelse {
+                // All 16 entries hold live loads — one gallery screen's
+                // Cmd.batch reaches this. The engine answers its own
+                // slot exhaustion with a dynamic `.rejected` result, and
+                // the audio channel's exhaustion story is a quiet
+                // in-place replace; a full bridge table speaks the same
+                // vocabulary: exactly one rejected result through the
+                // event arm, never a crash.
+                pushImageReject(image_rejects, image_reject_count, event_tag);
+                return;
+            };
             const entry = &images[index];
             entry.used = true;
             entry.id = id;
