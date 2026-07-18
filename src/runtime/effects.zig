@@ -209,13 +209,18 @@ pub const RegisteredImage = struct {
 /// Type-erased handle to the runtime's window verbs, bound onto the
 /// effects channel (`bindWindowActions`) so `update` can drive REAL OS
 /// window actions — the seam behind app-drawn close/minimize controls
-/// on chromeless windows. Label-addressed because labels are what apps
-/// declare (`ShellWindow.label`, `WindowDescriptor.label`); the runtime
-/// side resolves them to live window ids. Constructed by `UiApp`.
+/// on chromeless windows and the menu-bar-app lifecycle (tray "Open"
+/// shows the hidden window, tray "Quit" quits for real). Label-addressed
+/// because labels are what apps declare (`ShellWindow.label`,
+/// `WindowDescriptor.label`); the runtime side resolves them to live
+/// window ids. `quit_fn` alone is app-scoped, not window-scoped.
+/// Constructed by `UiApp`.
 pub const WindowActionBinding = struct {
     context: *anyopaque,
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    quit_fn: *const fn (context: *anyopaque) bool,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -241,17 +246,20 @@ pub const HostCallBinding = struct {
     cancel_fn: ?*const fn (context: *anyopaque, key: u64) void = null,
 };
 
-/// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`):
-/// the mirror copies the last requested label so tests can pin it.
+/// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`/
+/// `showWindow`): the mirror copies the last requested label so tests
+/// can pin it.
 pub const max_window_action_label = 64;
 
-/// The window-action mirror: observable state for every close/minimize
-/// request made through the channel, recorded before the runtime call
-/// (and INSTEAD of it under the fake executor — hermetic tests pin the
-/// counts, live runs also perform the verb).
+/// The window-action mirror: observable state for every close/minimize/
+/// show/quit request made through the channel, recorded before the
+/// runtime call (and INSTEAD of it under the fake executor — hermetic
+/// tests pin the counts, live runs also perform the verb).
 pub const WindowActionState = struct {
     close_count: u32 = 0,
     minimize_count: u32 = 0,
+    show_count: u32 = 0,
+    quit_count: u32 = 0,
     last_label_buffer: [max_window_action_label]u8 = @splat(0),
     last_label_len: usize = 0,
 
@@ -3332,8 +3340,42 @@ pub fn Effects(comptime Msg: type) type {
             _ = binding.minimize_fn(binding.context, window_label);
         }
 
-        /// The window-action mirror, for tests: how many close/minimize
-        /// requests rode the channel and the last label requested.
+        /// Show a window by its declared label: unhide + activate — the
+        /// counterpart to a `close_policy = .hide` hide, and the tray
+        /// "Open" consequence of the menu-bar-app loop (macOS
+        /// deminiaturizes and orders front, Windows SW_RESTORE/SW_SHOW +
+        /// foreground, GTK presents). Also brings back a minimized or
+        /// merely backgrounded window. Fire-and-forget, same contract
+        /// as `closeWindow`: no event echoes beyond the window's own
+        /// frame event, an unknown label is a no-op, and the fake
+        /// executor only records the request in the mirror.
+        pub fn showWindow(self: *Self, window_label: []const u8) void {
+            self.window_action_state.show_count += 1;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.show_fn(binding.context, window_label);
+        }
+
+        /// Quit the app for real — the graceful terminate, and the tray
+        /// "Quit" consequence of the menu-bar-app loop. Rides the same
+        /// shutdown event path as today's last-window close (the host
+        /// emits `app_shutdown`, `app.stop` runs exactly once, a
+        /// recording session seals its journal), so replay sees the
+        /// identical journaled event. Like the window verbs it does not
+        /// journal itself — the journaled `app_shutdown` it causes is
+        /// the record — and under the fake executor only the mirror
+        /// count moves.
+        pub fn quitApp(self: *Self) void {
+            self.window_action_state.quit_count += 1;
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.quit_fn(binding.context);
+        }
+
+        /// The window-action mirror, for tests: how many close/minimize/
+        /// show/quit requests rode the channel and the last label
+        /// requested.
         pub fn windowActionState(self: *const Self) WindowActionState {
             return self.window_action_state;
         }

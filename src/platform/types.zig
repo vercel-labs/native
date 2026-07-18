@@ -2093,6 +2093,19 @@ pub const PlatformServices = struct {
     /// controls — chromeless windows have no system button to click.
     /// Platforms without the concept leave this null.
     minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The real OS show verb: unhide + activate (macOS deminiaturize +
+    /// makeKeyAndOrderFront + activate, Windows SW_RESTORE/SW_SHOW +
+    /// foreground, GTK `gtk_window_present`) — the counterpart to a
+    /// `close_policy = .hide` hide, and the tray "Open" consequence.
+    /// Platforms without the concept leave this null.
+    show_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The graceful app quit: terminate through the SAME shutdown path
+    /// a last-window close takes — the host emits `app_shutdown`
+    /// synchronously (journaled like any platform event) and stops its
+    /// run loop, so `app.stop` runs exactly once and a recording
+    /// session seals its journal. Platforms without the concept leave
+    /// this null.
+    quit_app_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     /// Hand the ACTIVE pointer-down to the platform as a window-drag
     /// gesture (the hidden-titlebar drag-region channel): the window
     /// moves once the pointer actually moves — a plain click moves
@@ -2370,6 +2383,16 @@ pub const PlatformServices = struct {
     pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const minimize_fn = self.minimize_window_fn orelse return error.UnsupportedService;
         return minimize_fn(self.context, window_id);
+    }
+
+    pub fn showWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
+        const show_fn = self.show_window_fn orelse return error.UnsupportedService;
+        return show_fn(self.context, window_id);
+    }
+
+    pub fn quitApp(self: PlatformServices) anyerror!void {
+        const quit_fn = self.quit_app_fn orelse return error.UnsupportedService;
+        return quit_fn(self.context);
     }
 
     pub fn startWindowDrag(self: PlatformServices, window_id: WindowId) anyerror!void {

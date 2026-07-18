@@ -999,3 +999,107 @@ test "cross-platform journals are refused at the v1 bar" {
     });
     try std.testing.expectError(error.ReplayPlatformMismatch, result);
 }
+
+test "a menu-bar lifecycle session (policy hide, Dock reopen, quit) records and replays its window states" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    // Record: the host reports a .hide-policy window's whole lifecycle
+    // as ordinary frame events — the hide (open stays true, hidden
+    // flips), the Dock reopen's re-show, a second hide, and the tray
+    // Quit's app_shutdown. The verbs themselves never journal; these
+    // journaled platform events ARE the record.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        const app_state = try gpa.create(SessionApp);
+        defer gpa.destroy(app_state);
+        app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+        defer app_state.deinit();
+        app_state.effects.executor = .fake;
+        const app = app_state.app();
+        try harness.start(app);
+
+        const player_frame = geometry.RectF.init(0, 0, 400, 300);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+            .id = 2,
+            .label = "player",
+            .title = "Player",
+            .frame = player_frame,
+            .open = true,
+            .focused = true,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+            .id = 2,
+            .label = "player",
+            .title = "Player",
+            .frame = player_frame,
+            .open = true,
+            .focused = false,
+            .hidden = true,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+            .id = 2,
+            .label = "player",
+            .title = "Player",
+            .frame = player_frame,
+            .open = true,
+            .focused = true,
+            .hidden = false,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+            .id = 2,
+            .label = "player",
+            .title = "Player",
+            .frame = player_frame,
+            .open = true,
+            .focused = false,
+            .hidden = true,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        var recording_windows: [platform.max_windows]platform.WindowInfo = undefined;
+        for (harness.runtime.listWindows(&recording_windows)) |info| {
+            if (info.id == 2) try std.testing.expect(info.hidden);
+        }
+        // The quit verb's consequence: the host emits app_shutdown —
+        // dispatching it runs the exactly-once stop hook AND seals the
+        // recording's journal, exactly like a real quit.
+        try harness.runtime.dispatchPlatformEvent(app, .app_shutdown);
+        try std.testing.expect(recorder.finished);
+        try std.testing.expect(!recorder.failed);
+    }
+
+    // Replay into a fresh app: every window state lands identically —
+    // ending hidden, exactly as recorded — and the sealed journal
+    // replays clean through the shutdown.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(SessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+    defer app_state.deinit();
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    var replayed_windows: [platform.max_windows]platform.WindowInfo = undefined;
+    var found = false;
+    for (harness.runtime.listWindows(&replayed_windows)) |info| {
+        if (info.id != 2) continue;
+        found = true;
+        try std.testing.expect(info.open);
+        try std.testing.expect(info.hidden);
+    }
+    try std.testing.expect(found);
+}

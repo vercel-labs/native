@@ -133,6 +133,34 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             try self.options.platform.services.minimizeWindow(window_id);
         }
 
+        /// The real OS show verb: unhide + activate — the counterpart
+        /// to a `close_policy = .hide` hide, and what a tray "Open"
+        /// action resolves to. Like `closeWindow`, the runtime flag
+        /// flips BEFORE the platform call (hosts that emit the frame
+        /// event synchronously would echo the same state) and rolls
+        /// back on platform failure. A window that was never hidden
+        /// just comes to the front.
+        pub fn showWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            const was_hidden = self.windows[index].info.hidden;
+            self.windows[index].info.hidden = false;
+            self.options.platform.services.showWindow(window_id) catch |err| {
+                self.windows[index].info.hidden = was_hidden;
+                return err;
+            };
+            self.invalidated = true;
+        }
+
+        /// The graceful app quit: ask the platform to terminate through
+        /// the SAME shutdown path a last-window close takes — the host
+        /// emits `app_shutdown` (journaled like any platform event),
+        /// `app.stop` runs exactly once, and a recording session seals
+        /// its journal. No runtime bookkeeping here: the shutdown event
+        /// owns the teardown.
+        pub fn quitApp(self: *Runtime) anyerror!void {
+            try self.options.platform.services.quitApp();
+        }
+
         pub fn updateWindowState(self: *Runtime, state: platform.WindowState) !void {
             try WindowStorageMethods.updateWindowState(self, state);
             if (!state.open) Self.removeWindowRuntimeViews(self, state.id);

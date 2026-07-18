@@ -265,6 +265,14 @@ pub const NullPlatform = struct {
     /// the null platform has no Dock to genie into, so the count IS the
     /// behavior tests pin.
     window_minimize_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Show calls per window (`show_window_fn`), indexed like `windows`
+    /// — the counterpart seam (tray "Open", the un-hide verb).
+    window_show_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Graceful-quit requests (`quit_app_fn`). The real hosts emit
+    /// `app_shutdown` synchronously from this verb; the modeled host
+    /// records the request and tests dispatch the shutdown event as
+    /// the host echo (`TestHarness.stop` is that dispatch).
+    quit_request_count: u32 = 0,
     /// Modeled occlusion per window, indexed like `windows`: true while
     /// the modeled window does not reach the glass (minimized, or a
     /// test covered it via `setWindowOccluded`). Drives the
@@ -578,6 +586,8 @@ pub const NullPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .show_window_fn = showWindow,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .set_window_drag_regions_fn = setWindowDragRegions,
@@ -912,6 +922,31 @@ pub const NullPlatform = struct {
         self.windows[index].focused = false;
         self.window_minimize_count[index] += 1;
         self.window_occluded[index] = true;
+    }
+
+    fn showWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        // The un-hide verb: back on the glass with focus, exactly the
+        // real hosts' deminiaturize + order-front + activate. Clears a
+        // policy-hide, a minimize's occlusion, and a still-deferred
+        // present-before-show alike.
+        self.windows[index].hidden = false;
+        self.window_occluded[index] = false;
+        for (self.windows[0..self.window_count], 0..) |*window, cursor| {
+            window.focused = cursor == index;
+        }
+        if (!self.window_visible[index]) {
+            self.window_visible[index] = true;
+            self.show_op_seq += 1;
+            self.window_shown_seq[index] = self.show_op_seq;
+        }
+        self.window_show_count[index] += 1;
+    }
+
+    fn quitApp(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.quit_request_count += 1;
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
@@ -1955,6 +1990,13 @@ pub const NullPlatform = struct {
         return self.window_minimize_count[index];
     }
 
+    /// Test seam: show calls observed for a window (the un-hide verb's
+    /// pinned observable, like `minimizeCountForWindow`).
+    pub fn showCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_show_count[index];
+    }
+
     /// Test seam: model a window leaving or returning to the glass
     /// without a minimize verb (fully covered by another app, revealed
     /// again) — the occlusion fact the real hosts' spectrum gating
@@ -1987,6 +2029,7 @@ pub const NullPlatform = struct {
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
             self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
+            self.window_show_count[cursor] = self.window_show_count[cursor + 1];
             self.window_occluded[cursor] = self.window_occluded[cursor + 1];
             self.window_close_policy[cursor] = self.window_close_policy[cursor + 1];
         }

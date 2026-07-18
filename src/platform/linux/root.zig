@@ -270,6 +270,8 @@ pub const LinuxPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .show_window_fn = showWindow,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .window_chrome_fn = windowChrome,
@@ -733,6 +735,21 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_gtk_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// GTK has no hide-on-close (see `window_hide_on_close`), so show is
+/// honestly the present verb: bring the window to the front and give
+/// it focus — the same call the focus service makes.
+fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_gtk_focus_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// The graceful quit: the same emitShutdown + g_application_quit the
+/// last window's close-request runs.
+fn quitApp(context: ?*anyopaque) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_gtk_stop(self.host);
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

@@ -592,6 +592,8 @@ pub const MacPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .show_window_fn = showWindow,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .create_view_fn = createView,
@@ -1115,6 +1117,19 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_show_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+/// The graceful quit: the same emitShutdown + stop the last-window
+/// close runs, so `app_shutdown` is delivered synchronously and the
+/// run loop unwinds.
+fn quitApp(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_appkit_stop(self.host);
 }
 
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

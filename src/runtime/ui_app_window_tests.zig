@@ -594,6 +594,8 @@ const VerbMsg = union(enum) {
     minimize_settings,
     minimize_main,
     close_settings,
+    show_settings,
+    quit,
     settings_closed,
 };
 
@@ -606,6 +608,8 @@ fn verbUpdate(model: *VerbModel, msg: VerbMsg, fx: *VerbApp.Effects) void {
         // The imperative close, for the seam test — a real app's
         // model-declared window usually closes declaratively instead.
         .close_settings => fx.closeWindow(settings_window_label),
+        .show_settings => fx.showWindow(settings_window_label),
+        .quit => fx.quitApp(),
         .settings_closed => model.settings_open = false,
     }
 }
@@ -692,6 +696,14 @@ test "window-action effects resolve labels to live windows and drive the real ve
         if (info.id == settings_id) try std.testing.expect(info.open);
     }
 
+    // Show by label is the counterpart verb: it reaches the platform's
+    // show (the minimized window comes back with focus) and the mirror
+    // counts it.
+    try app_state.dispatch(&harness.runtime, 1, .show_settings);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(settings_id));
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().show_count);
+    try std.testing.expectEqualStrings(settings_window_label, app_state.effects.windowActionState().lastLabel());
+
     // The main window resolves by label too (the runtime adopted the
     // host-reported startup window above). The fake host never created
     // a native window for it — live hosts own the startup window — so
@@ -714,6 +726,76 @@ test "window-action effects resolve labels to live windows and drive the real ve
     // main window still answers after the secondary's churn.
     try app_state.dispatch(&harness.runtime, 1, .minimize_main);
     try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
+
+    // quitApp asks the platform for the graceful terminate (the modeled
+    // host records the request; a real host emits app_shutdown
+    // synchronously) and the mirror counts it.
+    try app_state.dispatch(&harness.runtime, 1, .quit);
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().quit_count);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.quit_request_count);
+    // The host's shutdown echo delivers the exactly-once stop hook —
+    // the same path a last-window close takes (TestHarness.stop
+    // dispatches the app_shutdown event a real host would emit).
+    try harness.stop(app);
+}
+
+test "the .hide close then showWindow round-trip: tray Open brings the hidden window back" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-hide-show-loop",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+    }
+    try std.testing.expect(settings_id != 0);
+
+    // Give the live window the .hide policy at the platform (the seam a
+    // manifest declaration rides) and close it as the user: hidden, not
+    // gone.
+    for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id == settings_id) harness.null_platform.window_close_policy[index] = .hide;
+    }
+    const hide_event = harness.null_platform.userCloseWindow(settings_id).?;
+    try harness.runtime.dispatchPlatformEvent(app, hide_event);
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (info.id == settings_id) try std.testing.expect(info.hidden);
+    }
+
+    // The tray "Open" consequence: the model returns the show verb, the
+    // label resolves against the still-open hidden window, and the
+    // platform + runtime state both flip back.
+    try app_state.dispatch(&harness.runtime, 1, .show_settings);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(settings_id));
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (info.id == settings_id) try std.testing.expect(!info.hidden);
+    }
+    for (harness.null_platform.windows[0..harness.null_platform.window_count]) |window| {
+        if (window.id == settings_id) {
+            try std.testing.expect(!window.hidden);
+            try std.testing.expect(window.focused);
+        }
+    }
 }
 
 // ------------------------------------- close_policy (.quit | .hide)

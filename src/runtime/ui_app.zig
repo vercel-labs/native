@@ -1053,6 +1053,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
+                .show_fn = effectsShowWindowByLabel,
+                .quit_fn = effectsQuitApp,
             });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
@@ -3568,5 +3570,20 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.minimizeWindow(window_id) catch return false;
+    return true;
+}
+
+fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    // A policy-hidden window keeps `open` true, so the same live-window
+    // resolution close/minimize use finds it.
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.showWindow(window_id) catch return false;
+    return true;
+}
+
+fn effectsQuitApp(context: *anyopaque) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    runtime.quitApp() catch return false;
     return true;
 }
