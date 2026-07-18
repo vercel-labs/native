@@ -693,6 +693,25 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)scheduleFrameEventEmission" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitScheduledFrameEvent" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-quit-stop-queued", "Verify the quit verb's stop is queued to the next loop turn on every synchronous-emit host (a synchronous emitShutdown nests the shutdown dispatch inside the requesting command's dispatch, seals the session journal before the command commits, and replay diverges)", &.{
+        // macOS (AppKit and CEF hosts): the main-queue hop, with the
+        // pre-run-loop inline fallback the failed-START precedent needs.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!NSApp.running) {" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (!NSApp.running) {" },
+        // Linux: the idle hop — the same seam the wake and
+        // frame-request paths ride.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static gboolean native_sdk_stop_idle(gpointer data)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "g_idle_add(native_sdk_stop_idle, host);" },
+        // Windows was queued from the start: stop posts, the loop
+        // exits, and the shutdown emits after the loop at top level.
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "void native_sdk_windows_stop(Host *host) {" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "PostQuitMessage(0);" },
+        // The runtime ordering the queue protects: the recorder seals
+        // on the shutdown dispatch's exit, and the modeled host's
+        // queued seam keeps the runtime suites honest about it.
+        .{ .path = "src/runtime/flow.zig", .pattern = "if (event_value == .app_shutdown) recorder.finish();" },
+        .{ .path = "src/platform/null_platform.zig", .pattern = "pub fn takeQueuedQuit" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gpu-occluded-frame-heartbeat", "Verify occluded windows throttle frame completions to a heartbeat and restore full cadence on reveal", &.{
         // macOS: occluded surfaces pace logical completions on the ~1 Hz
         // heartbeat (never stopping — on_frame-driven models stay gently

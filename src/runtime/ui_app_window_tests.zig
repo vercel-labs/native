@@ -728,15 +728,18 @@ test "window-action effects resolve labels to live windows and drive the real ve
     try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
 
     // quitApp asks the platform for the graceful terminate (the modeled
-    // host records the request; a real host emits app_shutdown
-    // synchronously) and the mirror counts it.
+    // host records the request; a real host QUEUES the stop so
+    // app_shutdown emits on the next loop turn, after this dispatch
+    // has returned) and the mirror counts it.
     try app_state.dispatch(&harness.runtime, 1, .quit);
     try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().quit_count);
     try std.testing.expectEqual(@as(u32, 1), harness.null_platform.quit_request_count);
-    // The host's shutdown echo delivers the exactly-once stop hook —
-    // the same path a last-window close takes (TestHarness.stop
-    // dispatches the app_shutdown event a real host would emit).
-    try harness.stop(app);
+    // The host's queued shutdown echo delivers the exactly-once stop
+    // hook — the same path a last-window close takes. Draining it here
+    // IS the next loop turn, and it drains exactly once.
+    const shutdown_event = harness.null_platform.takeQueuedQuit() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(harness.null_platform.takeQueuedQuit() == null);
+    try harness.runtime.dispatchPlatformEvent(app, shutdown_event);
 }
 
 test "the .hide close then showWindow round-trip: tray Open brings the hidden window back" {

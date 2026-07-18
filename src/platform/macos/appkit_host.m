@@ -10026,8 +10026,34 @@ void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {
 
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    [object emitShutdown];
-    [object stop];
+    /* Queued, never synchronous, while the run loop is live: this stop
+     * is the quit verb's landing point, and the verb arrives MID
+     * DISPATCH — a tray or menu command's update returned it, so the
+     * runtime is still inside that command's event dispatch. Emitting
+     * SHUTDOWN here would nest the shutdown dispatch inside the
+     * command's: the session recorder commits nested events
+     * innermost-first and seals the journal on shutdown, so the nested
+     * seal makes the OUTER commit a no-op and the journal loses the
+     * very command (and model mutation) that quit the app — replay
+     * diverges. One main-queue hop delivers the identical
+     * emitShutdown + stop on the next loop turn, after the requesting
+     * dispatch has committed; [NSApp run] drains the main queue and
+     * stop's posted wake event unwinds it, so a quit that is the last
+     * thing an app ever does still exits promptly. */
+    if (!NSApp.running) {
+        /* Before [NSApp run] there is no loop to drain the queue — a
+         * failed START handler requests shutdown synchronously (see
+         * runWithCallback's didShutdown check) and must keep getting
+         * the inline emit, or the request would strand until a run
+         * loop that may never start. */
+        [object emitShutdown];
+        [object stop];
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [object emitShutdown];
+        [object stop];
+    });
 }
 
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {

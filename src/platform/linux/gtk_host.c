@@ -2819,7 +2819,11 @@ void native_sdk_gtk_run(native_sdk_gtk_host_t *host, native_sdk_gtk_event_callba
     g_application_run(G_APPLICATION(host->app), 0, NULL);
 }
 
-void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
+/* Runs on the GLib main loop: the quit verb's deferred stop turn. The
+ * same emitShutdown-then-quit the last window's close-request runs,
+ * just one loop turn later (see native_sdk_gtk_stop). */
+static gboolean native_sdk_stop_idle(gpointer data) {
+    native_sdk_gtk_host_t *host = data;
     if (!host->did_shutdown) {
         host->did_shutdown = 1;
         native_sdk_emit(host, (native_sdk_gtk_event_t){ .kind = NATIVE_SDK_GTK_EVENT_SHUTDOWN });
@@ -2829,6 +2833,23 @@ void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
         host->frame_timer = 0;
     }
     g_application_quit(G_APPLICATION(host->app));
+    return G_SOURCE_REMOVE;
+}
+
+void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {
+    /* Queued, never synchronous: this stop is the quit verb's landing
+     * point, and the verb arrives MID DISPATCH (a menu command's
+     * update returned it), so a synchronous SHUTDOWN emit would nest
+     * the shutdown dispatch inside the requesting command's — the
+     * session recorder commits nested events innermost-first and seals
+     * the journal on shutdown, so the nested seal drops the command
+     * record and replay diverges. The idle hop (the same seam the wake
+     * and frame-request paths ride) emits the identical
+     * emitShutdown + quit on the next loop turn, after the requesting
+     * dispatch has committed; g_application_run keeps pumping until
+     * the queued g_application_quit lands, so a quit that is the last
+     * thing an app ever does still exits promptly. */
+    g_idle_add(native_sdk_stop_idle, host);
 }
 
 /* Runs on the GLib main loop: emit the wake event there, so the runtime

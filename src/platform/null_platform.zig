@@ -268,11 +268,20 @@ pub const NullPlatform = struct {
     /// Show calls per window (`show_window_fn`), indexed like `windows`
     /// — the counterpart seam (tray "Open", the un-hide verb).
     window_show_count: [max_windows]u32 = [_]u32{0} ** max_windows,
-    /// Graceful-quit requests (`quit_app_fn`). The real hosts emit
-    /// `app_shutdown` synchronously from this verb; the modeled host
-    /// records the request and tests dispatch the shutdown event as
-    /// the host echo (`TestHarness.stop` is that dispatch).
+    /// Graceful-quit requests (`quit_app_fn`). The real hosts QUEUE
+    /// the stop onto their run loop (macOS dispatch_async, GTK
+    /// g_idle_add, Windows PostQuitMessage) so `app_shutdown` emits
+    /// only on the NEXT loop turn, after the dispatch that requested
+    /// the quit has returned — a recorded command that quits commits
+    /// to the session journal before the shutdown record seals it.
+    /// The modeled host mirrors that shape: `quitApp` only records the
+    /// request, and `takeQueuedQuit` hands the test the deferred
+    /// shutdown event to dispatch as its own loop turn.
     quit_request_count: u32 = 0,
+    /// The queued stop `quitApp` armed and `takeQueuedQuit` has not
+    /// yet drained — the modeled twin of the hosts' pending idle/queue
+    /// entry (exactly-once, like their did-shutdown latches).
+    quit_pending: bool = false,
     /// Modeled occlusion per window, indexed like `windows`: true while
     /// the modeled window does not reach the glass (minimized, or a
     /// test covered it via `setWindowOccluded`). Drives the
@@ -947,6 +956,20 @@ pub const NullPlatform = struct {
     fn quitApp(context: ?*anyopaque) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.quit_request_count += 1;
+        self.quit_pending = true;
+    }
+
+    /// Test seam: drain the stop the quit verb queued — the modeled
+    /// host echo, and the modeled NEXT LOOP TURN. Real hosts defer the
+    /// shutdown emit past the dispatch that requested it (see
+    /// `quit_request_count`); a test models that by dispatching the
+    /// returned event only after the quitting dispatch has returned,
+    /// exactly the `userCloseWindow` shape. Answers exactly once per
+    /// armed quit; null while nothing is queued.
+    pub fn takeQueuedQuit(self: *NullPlatform) ?Event {
+        if (!self.quit_pending) return null;
+        self.quit_pending = false;
+        return .app_shutdown;
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {

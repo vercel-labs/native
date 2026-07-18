@@ -2007,8 +2007,26 @@ void native_sdk_appkit_run(native_sdk_appkit_host_t *host, native_sdk_appkit_eve
 
 void native_sdk_appkit_stop(native_sdk_appkit_host_t *host) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
-    [object emitShutdown];
-    [object stop];
+    /* Queued while the run loop is live, same as the AppKit host's
+     * stop: the quit verb lands mid dispatch, and a synchronous
+     * SHUTDOWN emit would nest the shutdown dispatch inside the
+     * requesting command's — the session recorder seals the journal on
+     * the nested commit and loses the command record (replay
+     * diverges). The main-queue hop delivers the identical
+     * emitShutdown + stop on the next loop turn; [NSApp run] drains
+     * the queue and stop's posted wake event unwinds it. Before the
+     * run loop exists (a failed START handler requests shutdown
+     * synchronously — runWithCallback's didShutdown check) the inline
+     * emit stays, or the request would strand. */
+    if (!NSApp.running) {
+        [object emitShutdown];
+        [object stop];
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [object emitShutdown];
+        [object stop];
+    });
 }
 
 void native_sdk_appkit_load_webview(native_sdk_appkit_host_t *host, const char *source, size_t source_len, int source_kind, const char *asset_root, size_t asset_root_len, const char *asset_entry, size_t asset_entry_len, const char *asset_origin, size_t asset_origin_len, int spa_fallback) {

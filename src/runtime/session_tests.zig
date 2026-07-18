@@ -75,6 +75,7 @@ const SessionModel = struct {
 const SessionMsg = union(enum) {
     increment,
     stamp,
+    quit,
     start_fetch,
     start_spawn,
     start_audio,
@@ -94,6 +95,7 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
     switch (msg) {
         .increment => model.count += 1,
         .stamp => model.stamp_ms = fx.wallMs(),
+        .quit => fx.quitApp(),
         .start_fetch => fx.fetch(.{
             .key = 1,
             .url = "http://journal.invalid/data",
@@ -189,6 +191,7 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
 fn sessionCommand(name: []const u8) ?SessionMsg {
     if (std.mem.eql(u8, name, "session.increment")) return .increment;
     if (std.mem.eql(u8, name, "session.stamp")) return .stamp;
+    if (std.mem.eql(u8, name, "session.quit")) return .quit;
     if (std.mem.eql(u8, name, "session.fetch")) return .start_fetch;
     if (std.mem.eql(u8, name, "session.spawn")) return .start_spawn;
     if (std.mem.eql(u8, name, "session.audio")) return .start_audio;
@@ -1102,4 +1105,103 @@ test "a menu-bar lifecycle session (policy hide, Dock reopen, quit) records and 
         try std.testing.expect(info.hidden);
     }
     try std.testing.expect(found);
+}
+
+test "a recorded quit journals the requesting command before the shutdown that seals it" {
+    // The quit verb is requested MID DISPATCH: the command's update
+    // returns fx.quitApp() while the command event still sits on the
+    // recorder's staging stack. Hosts must therefore QUEUE the stop so
+    // app_shutdown emits on the NEXT loop turn — a synchronous emit
+    // nests the shutdown dispatch inside the command's, the nested
+    // commit + finish() seals the journal, the outer commit no-ops,
+    // and the journal loses the very command (and model mutation) that
+    // quit the app. This test drives the whole verb chain through the
+    // modeled host's queued seam and pins the contract: BOTH records
+    // land, command first, and the session replays
+    // fingerprint-identical.
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "session-demo", .window_width = 400, .window_height = 300 });
+
+    var recorded_model: SessionModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        const app_state = try gpa.create(SessionApp);
+        defer gpa.destroy(app_state);
+        // The REAL executor: fx.quitApp() must reach the platform's
+        // quit seam (the fake executor stops at the mirror count).
+        app_state.* = SessionApp.init(std.heap.page_allocator, .{}, sessionOptions());
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.increment", .window_id = 1 } });
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        // The tray-Quit shape: the command's update returns the quit
+        // verb, which reaches the modeled host DURING this dispatch.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "session.quit", .window_id = 1 } });
+        try std.testing.expectEqual(@as(u32, 1), harness.null_platform.quit_request_count);
+        // The quit dispatch alone must NOT have sealed the journal:
+        // the host queued the stop instead of emitting synchronously.
+        try std.testing.expect(!recorder.finished);
+
+        // The queued stop's loop turn: drain the deferred shutdown and
+        // dispatch it — exactly once — which seals the journal.
+        const shutdown_event = harness.null_platform.takeQueuedQuit() orelse return error.TestUnexpectedResult;
+        try harness.runtime.dispatchPlatformEvent(app, shutdown_event);
+        try std.testing.expect(harness.null_platform.takeQueuedQuit() == null);
+        try std.testing.expect(recorder.finished);
+        try std.testing.expect(!recorder.failed);
+
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+        try std.testing.expectEqual(@as(u32, 1), recorded_model.count);
+    }
+
+    // The journal contains BOTH the quitting command and the shutdown,
+    // in that order — the assertion a synchronous (nested) emit fails.
+    {
+        var reader = try journal.Reader.init(buffer.journalBytes());
+        var saw_quit_command = false;
+        var saw_shutdown = false;
+        while (try reader.next()) |record| {
+            if (record != .event) continue;
+            switch (record.event) {
+                .menu_command => |command| {
+                    if (std.mem.eql(u8, command.name, "session.quit")) saw_quit_command = true;
+                },
+                .app_shutdown => {
+                    try std.testing.expect(saw_quit_command);
+                    saw_shutdown = true;
+                },
+                else => {},
+            }
+        }
+        try std.testing.expect(saw_quit_command);
+        try std.testing.expect(saw_shutdown);
+    }
+
+    // And the sealed session replays fingerprint-identical into a
+    // fresh app — the quitting command's model mutation included.
+    const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
+    try std.testing.expect(replayed.report.ok());
+    try std.testing.expectEqual(@as(u32, 1), replayed.model.count);
+    try std.testing.expectEqualDeep(recorded_model, replayed.model);
+    try std.testing.expectEqual(recorded_fingerprint, replayed.fingerprint);
 }

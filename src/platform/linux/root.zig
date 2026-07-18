@@ -746,7 +746,12 @@ fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!v
 }
 
 /// The graceful quit: the same emitShutdown + g_application_quit the
-/// last window's close-request runs.
+/// last window's close-request runs, queued to the NEXT loop turn —
+/// this verb is requested mid dispatch (the command whose update
+/// returned it is still being dispatched), and `app_shutdown` must
+/// emit only after that dispatch returns, or a recording session
+/// seals its journal before the requesting command commits (the
+/// command record is lost and replay diverges).
 fn quitApp(context: ?*anyopaque) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_gtk_stop(self.host);

@@ -1125,8 +1125,12 @@ fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!v
 }
 
 /// The graceful quit: the same emitShutdown + stop the last-window
-/// close runs, so `app_shutdown` is delivered synchronously and the
-/// run loop unwinds.
+/// close runs, queued to the NEXT loop turn — this verb is requested
+/// mid dispatch (the command whose update returned it is still being
+/// dispatched), and `app_shutdown` must emit only after that dispatch
+/// returns, or a recording session seals its journal before the
+/// requesting command commits (the command record is lost and replay
+/// diverges).
 fn quitApp(context: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_appkit_stop(self.host);
