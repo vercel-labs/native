@@ -553,7 +553,7 @@ pub fn TsCoreHost(comptime core: type) type {
 
         // ------------------------------------------------- command walk
 
-        /// Walk one command value (v2 wire format; batch is plain
+        /// Walk one command value (v3 wire format; batch is plain
         /// concatenation, the empty slice is `Cmd.none`).
         fn runCmd(
             fx: *Fx,

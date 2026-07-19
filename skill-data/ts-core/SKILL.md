@@ -121,7 +121,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 ```
 
-The command set (Cmd wire format v2):
+The command set (Cmd wire format v3):
 
 - `Cmd.none` — no effects; returning a bare `Model` is sugar for `[model, Cmd.none]`.
 - `Cmd.persist()` — ask the host to persist the committed model.
@@ -154,6 +154,13 @@ Two effect families deliver MANY results from one command — a keyed stream the
 - `Cmd.audioPlay(key, { path?, url?, cachePath?, expectedBytes? }, { event })` — open the audio event stream. One player is the whole surface, so a new `audioPlay` always REPLACES the current playback (the one key-reuse exception besides `Cmd.request`). The source cascade is the engine's: the local `path` is tried first, a missing file falls through to `url` (streamed progressively, cached at `cachePath` when given, integrity-gated by `expectedBytes` — omitted/0 means unknown size). At least one of `path`/`url` is required (NS1029); each is bytes, at most 1 KiB (NS1030). Prefer OMITTING `cachePath` for URL sources: when the app wiring configures a caches directory (`TsUiApp`'s `audio_cache_dir`), the host derives the conventional content-addressed cache path from the URL itself — your update never builds filesystem paths, and replay re-derives the same path by construction. Pass `cachePath` only to override that convention.
 - The `event` arm is the one SDK-fixed record shape, six fields matched by NAME: `state` (the `AudioState` string-literal union — import it from `@native-sdk/core/events`, or declare an alias with exactly the members `"loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum"` in any order; the runtime matches members by name), `positionMs: number`, `durationMs: number` (milliseconds; the duration is the player's estimate), `playing: boolean`, `buffering: boolean` (true while a streamed url is stalled waiting for bytes), and `bands: Uint8Array` (the 32 spectrum band magnitudes, 0–255 each, all zeros outside `"spectrum"` events). Every playback event dispatches this arm — `"failed"` (unplayable source, decode/device failure) and `"rejected"` (an empty or over-long source) included, so failure is never silence — until `Cmd.audioStop` closes the stream. `"completed"` fires once at the natural end and does NOT close the stream: starting the next track from it is the idiom.
 - `Cmd.audioPause(key)` / `Cmd.audioResume(key)` / `Cmd.audioStop(key)` / `Cmd.audioSeek(key, ms)` / `Cmd.audioSetVolume(key, volume)` — fire-and-forget control verbs: no result of their own; their consequences arrive on the event stream (`audioResume` on a dead player reports one `"failed"` event, never silence). A verb whose key names no open stream is a no-op. `audioStop` is the audio stream's close — no events for the key after it (`Cmd.cancel` does not apply to audio). Volume is clamped 0..1 and remembered across tracks; a literal outside 0..1 (or a negative seek literal) stops the build (NS1030).
+
+### The window verbs
+
+The menu-bar lifecycle pair — fire-and-forget, no routing and no result Msg (the window's own frame event carries the resulting state):
+
+- `Cmd.showWindow(label)` — un-hide + activate the window with the declared label (a string literal — window labels are declarations, in `app.zon` or a `windows_fn` descriptor): the counterpart to a `close_policy = "hide"` close and the tray "Open" consequence; also restores a minimized window. An unknown label is a no-op.
+- `Cmd.quitApp()` — the graceful terminate, and the tray "Quit" consequence: the host quits through the SAME shutdown path a last-window close takes, so the stop hook runs exactly once and a recording session seals its journal.
 
 Commands are constructed inline in the return path and nowhere else (NS1017): never in the Model or a Msg, never in a local, never in a helper. This is what keeps effects inside the dispatch cycle and replay honest.
 

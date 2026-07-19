@@ -1015,7 +1015,7 @@ pub fn Kernel(comptime opts: Options) type {
 
         // -------------------------------------------------------- commands
         //
-        // Cmd wire format v2 — the byte encoding of the command value an effectful
+        // Cmd wire format v3 — the byte encoding of the command value an effectful
         // `update` (or a pair-returning `initialModel`) returns alongside the next
         // model (`UpdateResult.cmd` / `InitResult.cmd` in emitted cores). A command
         // value is a flat sequence of op records; the empty slice means "no

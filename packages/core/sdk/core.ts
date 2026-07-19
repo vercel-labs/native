@@ -10,7 +10,7 @@
 // return path (NS1017) — they never live in the Model, in a Msg, in a local,
 // or in a helper.
 //
-// The v2 command set:
+// The v3 command set:
 //
 //   Cmd.none                     no effects (what a bare `return model` means)
 //   Cmd.persist()                ask the host to persist the committed model
@@ -103,6 +103,21 @@
 //                                forget control verbs whose consequences arrive
 //                                on the event stream; aimed at a key with no
 //                                open stream they no-op.
+//
+// The window verbs (fire-and-forget, no result Msg — the window's own
+// frame event carries the state):
+//
+//   Cmd.showWindow(label)        un-hide + activate the window with the
+//                                declared label — the counterpart to a
+//                                `close_policy = "hide"` hide and the tray
+//                                "Open" consequence; also restores a
+//                                minimized window. An unknown label is a
+//                                no-op.
+//   Cmd.quitApp()                graceful terminate, the tray "Quit"
+//                                consequence: the host quits through the
+//                                SAME shutdown path a last-window close
+//                                takes, so the stop hook runs exactly once
+//                                and a recording session seals its journal.
 //
 // The keyed-effect discipline is ONE rule: a keyed effect REPLACES its live
 // predecessor (the superseded effect's result is dropped — no message), and
