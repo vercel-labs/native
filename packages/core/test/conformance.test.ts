@@ -5485,6 +5485,26 @@ export function drainDo(model: Model): number {
 `,
   },
   {
+    name: "a reassigned let with an adjacent continue guard stays assignable (no const fusion)",
+    src: `
+export interface P { readonly v: number; readonly tag: number; }
+export function next(i: number): P | null {
+  if (i % 2 === 0) return null;
+  return { v: i, tag: i };
+}
+export function total(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    let p = next(i);
+    if (p === null) continue;
+    p = { ...p, v: 10 };
+    sum += p.v;
+  }
+  return sum;
+}
+`,
+  },
+  {
     name: "an early break out of a switch clause is gated (Zig break binds loops, not switches)",
     gate: "NS9001",
     src: `

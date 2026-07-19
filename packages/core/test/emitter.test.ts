@@ -239,6 +239,55 @@ export function label(model: Model): number {
   assert.doesNotMatch(zig, /const now = model\.now orelse/);
 });
 
+test("R7 a reassigned let never fuses to a const; the guard keeps the live variable", () => {
+  const zig = emit(`
+export interface P { readonly v: number; readonly tag: number; }
+export function next(i: number): P | null {
+  if (i % 2 === 0) return null;
+  return { v: i, tag: i };
+}
+export function total(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    let p = next(i);
+    if (p === null) continue;
+    p = { ...p, v: 10 };
+    sum += p.v;
+  }
+  return sum;
+}
+`);
+  // Fusing would emit \`const p = next(i) orelse continue;\` and the later
+  // \`p = ...\` would be an assignment to a Zig const. The reassigned binding
+  // stays a var; the guard keeps the plain null test and reads unwrap the
+  // live variable.
+  assert.match(zig, /var p = next\(i\);/);
+  assert.match(zig, /if \(p == null\) continue;/);
+  assert.match(zig, /sum \+= p\.\?\.v;/);
+  assert.doesNotMatch(zig, /const p = next\(i\) orelse/);
+});
+
+test("R7 a non-reassigned declaration adjacent to its exit guard still fuses to a const orelse", () => {
+  const zig = emit(`
+export interface P { readonly v: number; }
+export function next(i: number): P | null {
+  if (i % 2 === 0) return null;
+  return { v: i };
+}
+export function total(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const p = next(i);
+    if (p === null) continue;
+    sum += p.v;
+  }
+  return sum;
+}
+`);
+  assert.match(zig, /const p = next\(i\) orelse continue;/);
+  assert.match(zig, /sum \+= p\.v;/);
+});
+
 test("R7c the global undefined VALUE emits the optional empty, never Zig undefined", () => {
   const zig = emit(`
 export interface Task { readonly id: number; }

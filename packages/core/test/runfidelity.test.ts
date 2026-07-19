@@ -4802,6 +4802,31 @@ export function drain(count: number, selVal: number, hasSel: boolean): number {
       { fn: "drain", args: [i(0), i(5), { t: "b", v: true }] },
     ],
   },
+  {
+    name: "a reassigned let behind a continue guard lands its spread reassignment",
+    src: `
+export interface P { readonly v: number; readonly tag: number; }
+export function next(i: number): P | null {
+  if (i % 2 === 0) return null;
+  return { v: i, tag: i * 7 };
+}
+export function total(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    let p = next(i);
+    if (p === null) continue;
+    p = { ...p, v: 10 };
+    sum += p.v + p.tag;
+  }
+  return sum;
+}
+`,
+    calls: [
+      { fn: "total", args: [i(6)] },
+      { fn: "total", args: [i(1)] },
+      { fn: "total", args: [i(0)] },
+    ],
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling

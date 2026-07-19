@@ -3015,7 +3015,12 @@ export class Emitter {
           test !== null &&
           ts.isIdentifier(test.target) &&
           test.target.text === decl.name.text &&
-          this.alwaysExits(next.thenStatement)
+          this.alwaysExits(next.thenStatement) &&
+          // A reassigned `let` cannot fuse: the fusion emits `const` typed by
+          // the non-optional payload, so a later `p = ...` (or a legal
+          // `p = null`) has no binding to land in. The plain path already
+          // types it `var p: ?T` and guards with a real `if`.
+          !this.isReassigned(decl, ctx)
         ) {
           const initType = this.zTypeOfExpr(decl.initializer, ctx);
           if (initType.k === "optional") {
@@ -3916,6 +3921,25 @@ export class Emitter {
         } else {
           this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
           const prop = this.emitExpr(exitTest.target, ctx).code;
+          // A reassigned target cannot narrow through a capture (the capture
+          // goes stale at the assignment): keep the plain null test and
+          // install the `.?` spelling, whose reads see the live variable and
+          // which the assignment path keeps alive across provably non-null
+          // writes.
+          if (this.assignsTarget([...this.followingStatementsOf(stmt)], exitTest.target)) {
+            if (exit !== null) {
+              this.push(ctx, `if (${prop} == null) ${exit}`);
+            } else {
+              this.push(ctx, `if (${prop} == null) {`);
+              const sub = this.nestedCtx(ctx);
+              const exitStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
+              this.emitBlockStatements(exitStmts, sub);
+              ctx.lines.push(...sub.lines);
+              this.push(ctx, `}`);
+            }
+            ctx.memberSubst.set(normalize(exitTest.target), `${prop}.?`);
+            return;
+          }
           const name = this.freshName(ctx, this.narrowHint(exitTest.target));
           if (exit !== null) {
             this.push(ctx, `const ${name} = ${prop} orelse ${exit}`);
@@ -4133,13 +4157,7 @@ export class Emitter {
   /// text match is boundary-aware so `model.now` never matches inside
   /// `model.nowDurationMs`.
   private followingReadsTarget(stmt: ts.IfStatement, target: ts.Expression): boolean {
-    const parent = stmt.parent;
-    let following: readonly ts.Statement[] = [];
-    if (ts.isBlock(parent) || ts.isSourceFile(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) {
-      const statements = parent.statements;
-      const at = statements.indexOf(stmt);
-      if (at >= 0) following = statements.slice(at + 1);
-    }
+    const following = this.followingStatementsOf(stmt);
     if (following.length === 0) return false;
     if (ts.isIdentifier(target)) {
       const decl = this.tast.declarationOf(target);
@@ -4148,6 +4166,18 @@ export class Emitter {
     const escaped = target.getText().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const read = new RegExp(`${escaped}(?![A-Za-z0-9_$])`);
     return following.some((s) => read.test(s.getText()));
+  }
+
+  /// The statements after `stmt` in its own list — the scope an early-exit
+  /// guard's narrowing serves.
+  private followingStatementsOf(stmt: ts.Statement): readonly ts.Statement[] {
+    const parent = stmt.parent;
+    if (ts.isBlock(parent) || ts.isSourceFile(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) {
+      const statements = parent.statements;
+      const at = statements.indexOf(stmt);
+      if (at >= 0) return statements.slice(at + 1);
+    }
+    return [];
   }
 
   private emitElseIf(stmt: ts.IfStatement, ctx: Ctx): void {
