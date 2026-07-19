@@ -4394,6 +4394,21 @@ pub fn Effects(comptime Msg: type) type {
                         if (self.drain_fetch_body) |old| self.allocator.free(old);
                         self.drain_fetch_body = slot.fetch_buffer;
                         slot.fetch_buffer = null;
+                        // Retire the slot BEFORE the terminal reaches any
+                        // handler. The real worker stores `.draining`
+                        // only AFTER posting this entry, so a drain can
+                        // race ahead of that store and dispatch the
+                        // result while the slot still reads `.running` —
+                        // and an update that reacts to the terminal by
+                        // loading the same id again (reload-after-
+                        // terminal is allowed) would reject as a
+                        // duplicate active key. Storing here makes the
+                        // slot reclaimable by the time any update code
+                        // runs; the worker's own store stays as the
+                        // pre-drain transition (cancel targeting and
+                        // early thread reclaim still key off it), and
+                        // re-storing `.draining` is idempotent.
+                        slot.state.store(.draining, .release);
                         const image_fn = entry.image_fn;
                         const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[0..entry.line_len]

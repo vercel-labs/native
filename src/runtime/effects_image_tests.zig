@@ -88,6 +88,10 @@ var test_url: []const u8 = "";
 var test_cache_path: []const u8 = "";
 var test_expected_bytes: u64 = 0;
 var test_timeout_ms: u32 = effects_mod.default_effect_fetch_timeout_ms;
+/// The gallery-refresh idiom: when set, the update reacts to an image
+/// terminal by immediately reloading the same id (one-shot, so the
+/// reload's own terminal does not cascade).
+var test_reload_on_result: bool = false;
 
 fn imageUpdate(model: *ImageModel, msg: ImageMsg, fx: *ImageEffects) void {
     switch (msg) {
@@ -113,7 +117,21 @@ fn imageUpdate(model: *ImageModel, msg: ImageMsg, fx: *ImageEffects) void {
             fx.spawn(.{ .key = interleave_marker, .argv = &.{}, .on_exit = ImageEffects.exitMsg(.spawn_exit) });
             while (id <= burst_load_count) : (id += 1) burstLoad(fx, id);
         },
-        .result => |result| model.record(result),
+        .result => |result| {
+            model.record(result);
+            if (test_reload_on_result) {
+                test_reload_on_result = false;
+                fx.loadImage(.{
+                    .id = test_id,
+                    .path = test_path,
+                    .url = test_url,
+                    .cache_path = test_cache_path,
+                    .expected_bytes = test_expected_bytes,
+                    .timeout_ms = test_timeout_ms,
+                    .on_result = ImageEffects.imageMsg(.result),
+                });
+            }
+        },
         .spawn_exit => model.logOrder(interleave_marker),
     }
 }
@@ -178,6 +196,7 @@ const Harness = struct {
         test_cache_path = "";
         test_expected_bytes = 0;
         test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+        test_reload_on_result = false;
         return .{ .harness = harness, .app_state = app_state, .app = app };
     }
 
@@ -461,6 +480,54 @@ test "cancelling a fake image load delivers one cancelled terminal" {
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingImageLoadCount());
     // Terminal means terminal: a straggler feed reports EffectNotFound.
     try std.testing.expectError(error.EffectNotFound, h.app_state.effects.feedImageBytes(image_id, "late"));
+}
+
+test "an update that reloads the same id from its own terminal parks instead of rejecting" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+
+    test_path = "assets/cover.png";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+
+    // Queue the terminal, then reconstruct the real worker's race
+    // window: `imageWorkerMain` posts its entry FIRST and stores
+    // `.draining` on the next line, so a preemption between the two
+    // lets the drain dispatch the result while the slot still reads
+    // `.running`. The test cannot force that OS preemption; it CAN
+    // produce the exact state the preempted worker leaves behind —
+    // terminal in the queue, slot `.running` — by rewinding the fed
+    // slot's state before draining. What the drain does from that
+    // state is precisely the ordering under test: it must retire the
+    // slot before the result reaches update, so the reload below
+    // parks as a fresh load instead of rejecting as a duplicate.
+    var encoded_buffer: [2048]u8 = undefined;
+    const encoded = encodePngFixture(&encoded_buffer, 1, 1);
+    try h.app_state.effects.feedImageBytes(image_id, encoded);
+    for (&h.app_state.effects.slots) |*slot| {
+        if (slot.kind == .image and slot.key == image_id) slot.state.store(.running, .release);
+    }
+
+    // The gallery-refresh idiom: update answers the terminal with a
+    // reload of the same id.
+    test_reload_on_result = true;
+    try h.drainWakes();
+    try h.drainWakes();
+
+    // Exactly one terminal (the loaded one) — a rejected duplicate
+    // would have delivered a second, `.rejected`, result.
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, h.app_state.model.last.?.outcome);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
+
+    // The reload parked as a live request: feeding it completes the
+    // second load. (A rejected reload leaves no active occupancy with
+    // a feedable buffer — this feed would report EffectNotFound.)
+    try h.app_state.effects.feedImageBytes(image_id, encoded);
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, h.app_state.model.last.?.outcome);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
 }
 
 // ------------------------------------------------------------ real executor
