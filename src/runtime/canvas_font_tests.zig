@@ -949,6 +949,136 @@ test "a face registered after install re-measures every installed surface's layo
     try std.testing.expect(main_after > main_before);
 }
 
+// ------------------------ late registration adopts only on success
+
+/// Model for the failed-rebuild retry test below: `row_count` extra rows
+/// join the measured text, so the test can push one rebuild past the
+/// per-view widget budget and then heal it.
+const RetryFontModel = struct {
+    row_count: usize = 0,
+
+    pub fn rows(model: *const RetryFontModel, arena: std.mem.Allocator) []const usize {
+        const out = arena.alloc(usize, model.row_count) catch return &.{};
+        for (out, 0..) |*slot, index| slot.* = index;
+        return out;
+    }
+};
+const RetryFontMsg = union(enum) { noop };
+const RetryFontApp = ui_app_model.UiApp(RetryFontModel, RetryFontMsg);
+
+fn retryFontUpdate(model: *RetryFontModel, msg: RetryFontMsg) void {
+    _ = model;
+    _ = msg;
+}
+
+fn retryFontTokens(model: *const RetryFontModel) canvas.DesignTokens {
+    _ = model;
+    var tokens = canvas.DesignTokens{};
+    tokens.typography.font_id = registered_font_id;
+    return tokens;
+}
+
+fn retryRowKey(index: *const usize) canvas.UiKey {
+    return canvas.uiKey(@as(u64, index.*));
+}
+
+fn retryRow(ui: *RetryFontApp.Ui, index: *const usize) RetryFontApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Row {d}", .{index.*}));
+}
+
+fn retryFontView(ui: *RetryFontApp.Ui, model: *const RetryFontModel) RetryFontApp.Ui.Node {
+    // The measured text rides in a row (intrinsic width, like
+    // lateFontAppView above) so its frame moves when the registered
+    // face's advances replace the estimator's.
+    return ui.column(.{ .gap = 2 }, .{
+        ui.row(.{ .gap = 8, .padding = 12 }, .{ ui.text(.{}, late_mixed_text) }),
+        ui.each(model.rows(ui.arena), retryRowKey, retryRow),
+    });
+}
+
+test "a failed late-font rebuild leaves the count unadopted so the next healthy frame retries" {
+    // The failing rebuild teaches through std.log; without lowering the
+    // level the warning would fail the build runner's stderr check.
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 200) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(RetryFontApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = RetryFontApp.init(std.testing.allocator, .{}, .{
+        .name = "ui-app-font-retry",
+        .scene = font_app_scene,
+        .canvas_label = font_app_canvas_label,
+        .tokens_fn = retryFontTokens,
+        .update = retryFontUpdate,
+        .view = retryFontView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = font_app_canvas_label,
+        .size = geometry.SizeF.init(240, 200),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    const width_before = try lateTextFrameWidth(&harness.runtime, 1, font_app_canvas_label);
+
+    // Production policy: dispatch degrades errors instead of dying —
+    // the policy under which a rebuild that adopted the font count
+    // BEFORE succeeding would strand stale layouts marked font-current,
+    // never retried.
+    harness.runtime.dispatch_error_policy = .degrade;
+
+    // Grow the model past the per-view widget budget (mutated directly
+    // — no dispatch, so no rebuild yet), then register a face late so
+    // the next frame's late-registration rebuild is the failing one.
+    app_state.model.row_count = core.max_canvas_widget_nodes_per_view + 40;
+    try harness.runtime.registerCanvasFont(registered_font_id, cjk_receipt_bytes);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = font_app_canvas_label,
+        .size = geometry.SizeF.init(240, 200),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
+    // The failed rebuild must NOT adopt the count: the mismatch it
+    // leaves behind is exactly what the next presented frame reads as
+    // its retry trigger.
+    try std.testing.expect(app_state.fonts_built_count != harness.runtime.registeredCanvasFontCount());
+
+    // Heal the model; the next presented frame observes the mismatch,
+    // rebuilds every surface, and only then adopts.
+    app_state.model.row_count = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = font_app_canvas_label,
+        .size = geometry.SizeF.init(240, 200),
+        .scale_factor = 1,
+        .frame_index = 3,
+        .timestamp_ns = 3_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
+    try std.testing.expectEqual(harness.runtime.registeredCanvasFontCount(), app_state.fonts_built_count);
+
+    // The retried rebuild re-measured with the registered face, not
+    // merely repainted: the face answers the mixed string wider than
+    // the estimator did (1.0 em notdef per ASCII codepoint), so the
+    // text widget's frame grew.
+    const width_after = try lateTextFrameWidth(&harness.runtime, 1, font_app_canvas_label);
+    try std.testing.expect(width_after > width_before);
+}
+
 test "ui app fonts option surfaces the glyph-budget refusal as a teaching error" {
     const harness = try TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(240, 200) });
     defer harness.destroy(std.testing.allocator);

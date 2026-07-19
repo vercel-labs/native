@@ -3086,8 +3086,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// requested draws re-measured geometry, not re-inked stale
         /// frames.
         fn rebuildForRegisteredFonts(self: *Self, runtime: *Runtime) anyerror!void {
-            self.fonts_built_count = runtime.registeredCanvasFontCount();
             try self.rebuildAllViews(runtime);
+            // Adopt the count only AFTER the rebuild succeeded:
+            // production dispatch degrades errors, so a failed rebuild
+            // (widget budget, allocator pressure, a secondary window's
+            // emit) that had already adopted the count would mark stale
+            // layouts as font-current and never retry. Left unadopted,
+            // the error leaves the count mismatched and the next
+            // presented frame retries the rebuild.
+            self.fonts_built_count = runtime.registeredCanvasFontCount();
         }
 
         /// Present the planned canvas frame: GPU packet when the platform
