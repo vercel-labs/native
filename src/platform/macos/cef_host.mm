@@ -576,6 +576,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (void)hideWindowWithId:(uint64_t)windowId;
 - (void)showWindowWithId:(uint64_t)windowId;
+- (void)miniaturizeWindowWithId:(uint64_t)windowId;
 - (BOOL)reopenPolicyHiddenWindows;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
 - (void)stop;
@@ -983,14 +984,52 @@ static const char *NativeSdkCefBridgeScript() {
 }
 
 // The counterpart show verb: back to the glass, app activated.
+// SYNCHRONOUS on the main thread, exactly closeWindowWithId:'s
+// discipline (direct on main, dispatch_sync hop otherwise) — never a
+// queued dispatch_async. A show that returns success while its block
+// is still queued leaves the window in policyHiddenWindows during the
+// runtime's post-success bookkeeping, so frame emits in that gap carry
+// {focused:true, hidden:true}; and a show-then-close in one dispatch
+// re-orders — the queued show lands AFTER the synchronous close and
+// puts a retained (ordered-out) closed window back on the glass. The
+// window lookup lives INSIDE the block: for an off-main caller the
+// main thread may close the window before the hop lands, and the show
+// of a window that just left the table must be a no-op, not a
+// resurrection.
 - (void)showWindowWithId:(uint64_t)windowId {
-    NSWindow *window = self.windows[@(windowId)];
-    if (!window) return;
-    [self.policyHiddenWindows removeObject:@(windowId)];
-    if (window.miniaturized) [window deminiaturize:nil];
-    [window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-    [self emitWindowFrameForWindowId:windowId open:YES];
+    void (^showBlock)(void) = ^{
+        NSWindow *window = self.windows[@(windowId)];
+        if (!window) return;
+        [self.policyHiddenWindows removeObject:@(windowId)];
+        if (window.miniaturized) [window deminiaturize:nil];
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        [self emitWindowFrameForWindowId:windowId open:YES];
+    };
+    if ([NSThread isMainThread]) {
+        showBlock();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), showBlock);
+    }
+}
+
+// The real OS minimize verb, same synchronous main-thread discipline
+// as showWindowWithId: above (and for the same reason: a queued
+// miniaturize captured past a synchronous close genies an app-closed,
+// ordered-out window into the Dock). No frame emit — minimize moves no
+// runtime-mirrored window state; the host's occlusion reporting
+// follows from the OS state itself.
+- (void)miniaturizeWindowWithId:(uint64_t)windowId {
+    void (^miniaturizeBlock)(void) = ^{
+        NSWindow *window = self.windows[@(windowId)];
+        if (!window) return;
+        [window miniaturize:nil];
+    };
+    if ([NSThread isMainThread]) {
+        miniaturizeBlock();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), miniaturizeBlock);
+    }
 }
 
 // Dock reopen consequence: re-show every policy-hidden window.
@@ -2318,20 +2357,19 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
-    NSWindow *window = object.windows[@(window_id)];
-    if (!window) return 0;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [window miniaturize:nil];
-    });
+    if (!object.windows[@(window_id)]) return 0;
+    [object miniaturizeWindowWithId:window_id];
     return 1;
 }
 
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     if (!object.windows[@(window_id)]) return 0;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [object showWindowWithId:window_id];
-    });
+    // Synchronous by the time it returns 1: the method owns the
+    // on-main/off-main split (closeWindowWithId:'s shape), so the
+    // runtime's post-success focus bookkeeping never runs against a
+    // still-queued show.
+    [object showWindowWithId:window_id];
     return 1;
 }
 

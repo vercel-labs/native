@@ -601,6 +601,24 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self.host.policyHiddenWindows removeObject:@(self.windowId)];\n    [self.host emitWindowFrameForWindowId:self.windowId open:NO];" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self.policyHiddenWindows removeObject:@(windowId)];\n                [window orderOut:nil];\n                [self emitWindowFrameForWindowId:windowId open:NO];" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-cef-window-verbs-synchronous", "Verify the CEF host's show and minimize verbs run synchronously on the main thread, the close verb's discipline (a dispatch_async show returns success while the window is still in policyHiddenWindows — the runtime's post-success focus flip then emits {focused:true, hidden:true} until the queued block lands — and a show-then-close in one dispatch re-orders: the queued show lands AFTER the synchronous close and puts a retained ordered-out closed window back on the glass)", &.{
+        // The show verb: direct on main, dispatch_sync hop otherwise,
+        // with the window lookup INSIDE the block so a window closed
+        // before an off-main hop lands is a no-op, not a resurrection.
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([NSThread isMainThread]) {\n        showBlock();\n    } else {\n        dispatch_sync(dispatch_get_main_queue(), showBlock);\n    }" },
+        // The minimize twin (a queued miniaturize captured past a
+        // synchronous close genies an app-closed window into the Dock).
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([NSThread isMainThread]) {\n        miniaturizeBlock();\n    } else {\n        dispatch_sync(dispatch_get_main_queue(), miniaturizeBlock);\n    }" },
+        // The C shims return success only after the synchronous verb —
+        // no dispatch_async between the lookup and the method call.
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (!object.windows[@(window_id)]) return 0;\n    [object miniaturizeWindowWithId:window_id];\n    return 1;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[object showWindowWithId:window_id];\n    return 1;" },
+        // The AppKit host's twins are already synchronous direct calls
+        // (its runtime callbacks arrive on the main thread); these pins
+        // hold that symmetry.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[object showWindowWithId:window_id];\n    return 1;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[object miniaturizeWindowWithId:window_id];\n    return 1;" },
+    });
     // The embedded-WebView layer must stay real AND declare-to-use: the
     // standard build graph puts the vendored WebView2 SDK header on the
     // include path exactly when app.zon declares web use (`if
