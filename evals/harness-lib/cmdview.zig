@@ -28,6 +28,9 @@ pub const Op = union(enum) {
     audio_ctl: struct { key: []const u8, verb: u8, value: f64 },
     window_show: struct { label: []const u8 },
     quit_app,
+    image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
+    image_cancel: struct { id: f64 },
+    image_unregister: struct { id: f64 },
 
     pub const Host = struct {
         name: []const u8,
@@ -221,6 +224,34 @@ pub const CmdIter = struct {
             // quit_app [op] — a bare op byte, no payload (ts_core_host.zig,
             // 0x11).
             0x11 => .quit_app,
+            // image_load [op][id f64 LE][event_tag u8][path_len u32 LE][path]
+            // [url_len u32 LE][url][cache_len u32 LE][cache][expected f64 LE]
+            // — audio_play's source-cascade record shape keyed by the numeric
+            // ImageId instead of a string key (ts_core_host.zig, 0x12).
+            0x12 => blk: {
+                const id: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const event_tag = b[off];
+                off += 1;
+                const path = longBytes(b, &off);
+                const url = longBytes(b, &off);
+                const cache = longBytes(b, &off);
+                const expected: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .image_load = .{ .id = id, .event_tag = event_tag, .path = path, .url = url, .cache_path = cache, .expected_bytes = expected } };
+            },
+            // image_cancel [op][id f64 LE] (ts_core_host.zig, 0x13).
+            0x13 => blk: {
+                const id: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .image_cancel = .{ .id = id } };
+            },
+            // image_unregister [op][id f64 LE] (ts_core_host.zig, 0x14).
+            0x14 => blk: {
+                const id: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .image_unregister = .{ .id = id } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -338,5 +369,43 @@ test "window_show and quit_app decode, alone and inside a batch" {
     try std.testing.expect(second == .quit_app);
     const third = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "the image records decode, alone and inside a batch" {
+    // image_load: [op 0x12][id f64 LE][event_tag][path][url][cache]
+    // [expected f64 LE] — the bytes rt.zig's cmdImageLoad pins (the same
+    // layout packages/core/test/effects.test.ts asserts).
+    var load_bytes: std.ArrayList(u8) = .empty;
+    defer load_bytes.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    try load_bytes.append(a, 0x12);
+    try load_bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 7))));
+    try load_bytes.append(a, 3); // event_tag
+    try load_bytes.appendSlice(a, &.{ 13, 0, 0, 0 });
+    try load_bytes.appendSlice(a, "art/cover.png");
+    try load_bytes.appendSlice(a, &.{ 0, 0, 0, 0 }); // url: empty
+    try load_bytes.appendSlice(a, &.{ 0, 0, 0, 0 }); // cache: empty
+    try load_bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 2048))));
+    const load = findOp(load_bytes.items, .image_load) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 7), load.id);
+    try std.testing.expectEqual(@as(u8, 3), load.event_tag);
+    try std.testing.expectEqualStrings("art/cover.png", load.path);
+    try std.testing.expectEqualStrings("", load.url);
+    try std.testing.expectEqual(@as(f64, 2048), load.expected_bytes);
+
+    // image_cancel [op 0x13][id f64 LE] and image_unregister
+    // [op 0x14][id f64 LE] concatenated: both one-field records must
+    // advance exactly nine bytes each for the second to decode.
+    var batch: [18]u8 = undefined;
+    batch[0] = 0x13;
+    batch[1..9].* = @bitCast(@as(f64, 7));
+    batch[9] = 0x14;
+    batch[10..18].* = @bitCast(@as(f64, 15));
+    var iter = CmdIter.init(&batch);
+    const cancelled = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 7), cancelled.image_cancel.id);
+    const evicted = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 15), evicted.image_unregister.id);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
