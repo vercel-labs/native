@@ -52,6 +52,14 @@ pub const ReplayError = error{
     /// its bytes fail their content hash — the journal directory was
     /// moved without its `blobs/`, or the store was damaged.
     ReplayMissingBlob,
+    /// A record's fields contradict each other in a way the recorder
+    /// can never produce (an image record claiming `.loaded` with a
+    /// zero-length blob: the recorder journals `.loaded` only after the
+    /// bytes decoded and registered, and empty bytes cannot decode) —
+    /// the journal is damaged or hand-edited. `JournalCorrupt` is the
+    /// structural sibling (payloads that fail to decode at all); this
+    /// class is for records that decode fine but lie.
+    ReplayDamagedRecord,
 };
 
 /// Bounded mismatch detail (first N are kept; the count keeps counting).
@@ -165,6 +173,24 @@ pub fn replaySession(
             },
             .effect => |effect_record| {
                 var effect = effect_record;
+                // A `.loaded` image record ALWAYS names source bytes:
+                // the recorder journals `.loaded` only after those
+                // exact bytes decoded and registered (a failed decode
+                // rewrites the outcome before it journals, and empty
+                // bytes cannot decode), so a zero-length blob here is
+                // journal damage, not a session shape. Refuse before
+                // any skip/feed decision — resolving blobs only for
+                // records that claim bytes would otherwise let the
+                // damaged record sail past the blob-integrity gate and
+                // deliver a pixel-less "loaded" the recording never
+                // produced.
+                if (effect.kind == .image and effect.image_outcome == .loaded and effect.image_blob_len == 0) {
+                    std.debug.print(
+                        "replay refused after event {d}: image record for id {d} claims .loaded with a zero-length blob - a recorded .loaded always carries its source bytes, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;

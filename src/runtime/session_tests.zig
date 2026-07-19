@@ -1939,6 +1939,62 @@ test "a journal referencing blobs refuses to replay without its blob store" {
     try std.testing.expectError(error.ReplayMissingBlob, result);
 }
 
+/// Zero the `image_blob_len` field — the LAST eight bytes of the effect
+/// payload, see `journal.encodeEffect` — of the first journaled
+/// `.loaded` image record, in place. Framing and every other field stay
+/// valid, so the journal reader decodes the record fine: only replay's
+/// record-consistency gate can catch the damage. Returns whether a
+/// record was damaged.
+fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .image or record.image_outcome != .loaded or record.image_blob_len == 0) continue;
+        @memset(payload[payload.len - 8 ..], 0);
+        return true;
+    }
+    return false;
+}
+
+test "an image record claiming .loaded with a zero-length blob refuses replay as damage" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+    _ = try recordImageSession(gpa, buffer, &store);
+
+    // Hand-damage the journal: a `.loaded` image record now claims a
+    // zero-length blob. A recorder can never produce this (it journals
+    // `.loaded` only after the bytes decoded and registered), so replay
+    // must refuse the record as damage — with the blob store PRESENT
+    // and intact, proving the refusal is the record-consistency gate,
+    // not `ReplayMissingBlob`, and never a silent pixel-less "loaded".
+    try std.testing.expect(zeroFirstLoadedImageBlobLen(buffer.bytes[0..buffer.len]));
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
 test "recording an image result without a blob store fails the journal loudly" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

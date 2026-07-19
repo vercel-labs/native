@@ -4438,7 +4438,16 @@ pub fn Effects(comptime Msg: type) type {
                         // The journal carries the source bytes whenever
                         // the cascade delivered them — even when the
                         // decode below fails, the bytes ARE the effect
-                        // result the boundary produced.
+                        // result the boundary produced. RECORD-TIME
+                        // INVARIANT: a journaled `.loaded` always
+                        // carries non-empty bytes, because `.loaded`
+                        // reaches the journal only after
+                        // `register_bytes_fn` decoded and registered
+                        // these exact bytes (a failure rewrites the
+                        // outcome below, and empty bytes cannot decode).
+                        // Session replay refuses `.loaded` records with
+                        // a zero-length blob on this invariant
+                        // (`error.ReplayDamagedRecord`).
                         var journal_bytes: []const u8 = "";
                         if (cancelled) {
                             result = .{ .id = entry.key, .outcome = .cancelled };
