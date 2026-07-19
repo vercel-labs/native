@@ -213,12 +213,28 @@ test "runtime handles built-in JavaScript window bridge commands" {
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"label\":\"palette\",\"title\":\"Palette\",\"open\":true,\"focused\":true,\"hidden\":false") != null);
 
+    // Closing a POLICY-HIDDEN window through the bridge answers with
+    // the post-close table state: hidden clears with open (a closed
+    // window is gone, not "hidden"), so JS must never receive
+    // {open:false, hidden:true} — the shape a pre-close snapshot with
+    // hand-cleared fields would serialize.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"4\",\"command\":\"native-sdk.window.close\",\"payload\":{\"label\":\"palette\"}}",
         .origin = "zero://inline",
         .window_id = 1,
     } });
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"open\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
 }
 
 test "runtime handles built-in JavaScript command bridge commands" {

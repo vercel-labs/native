@@ -530,11 +530,16 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(output);
             const window_id = try Self.resolveWindowSelector(self, payload, &storage);
             const index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
-            var info = self.windows[index].info;
-            info.open = false;
-            info.focused = false;
             try self.closeWindow(window_id);
-            return writeWindowJson(info, output);
+            // The response serializes the TABLE state after the close,
+            // never a hand-cleared copy: closeWindow owns which flags a
+            // close clears (open, focused, AND hidden — a closed
+            // policy-hidden window is gone, not "hidden"), and a copy
+            // maintained here field-by-field silently drifts every time
+            // that set grows. The index stays valid: a closed window
+            // keeps its table slot — slots only compact inside window
+            // create, when a dead slot's id or label is re-used.
+            return writeWindowJson(self.windows[index].info, output);
         }
 
         pub fn resolveWindowSelector(self: *Runtime, payload: []const u8, storage: *json.StringStorage) !platform.WindowId {
