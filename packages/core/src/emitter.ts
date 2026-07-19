@@ -4099,6 +4099,11 @@ export class Emitter {
         // Rewrite: emit as `} else if (...) {` by recursing with a marker.
         ctx.lines.pop();
         this.emitElseIf(stmt.elseStatement, ctx);
+        // This exit path narrows like the common tail below: an exiting
+        // empty-test arm at the HEAD of a chain still narrows everything
+        // after the whole statement (the else-if arms ride the non-empty
+        // path), and skipping it here left fall-through reads optional.
+        this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx);
         return;
       }
       this.push(ctx, `} else {`);
@@ -4108,11 +4113,22 @@ export class Emitter {
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);
-    // tsc narrows AFTER an if whose empty-testing arm always exits — only
-    // the non-empty path falls through. The tailored R7 paths above return
-    // for the shapes where an arm READS the target; these are the generic
-    // leftovers (the miss arm has an else, or no arm reads the target), so
-    // fall-through reads unwrap via the safety-checked `.?`.
+    this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx);
+  }
+
+  /// tsc narrows AFTER an if whose empty-testing arm always exits — only
+  /// the non-empty path falls through. The tailored R7 paths in emitIf
+  /// return for the shapes where an arm READS the target; these are the
+  /// generic leftovers (the miss arm has an else — possibly a whole
+  /// else-if chain — or no arm reads the target), so fall-through reads
+  /// unwrap via the safety-checked `.?`. Every exit path from emitIf that
+  /// finished emitting the statement must apply this.
+  private applyPostIfNarrow(
+    stmt: ts.IfStatement,
+    exitTest: { target: ts.Expression; flavor: "null" | "undefined" } | null,
+    presentTest: { target: ts.Expression; flavor: "null" | "undefined" } | null,
+    ctx: Ctx,
+  ): void {
     const postNarrow =
       (exitTest && this.alwaysExits(stmt.thenStatement) ? exitTest : null) ??
       (presentTest && stmt.elseStatement && this.alwaysExits(stmt.elseStatement) ? presentTest : null);

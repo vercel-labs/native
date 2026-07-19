@@ -298,6 +298,26 @@ export function score(e: Ev): number {
   assert.match(zig, /return value \+ bonus;/);
 });
 
+test("R7 an exiting null guard heading an else-if chain still narrows the fall-through reads", () => {
+  const zig = emit(`
+export interface P { readonly v: number; }
+export function pick(x: P | null, flag: boolean): number {
+  let n = 1;
+  if (x === null) {
+    return -1;
+  } else if (flag) {
+    n = 2;
+  }
+  return x.v + n;
+}
+`);
+  // The else-if exit path from the if emission must apply the same post-if
+  // narrowing as the common tail; without it the read after the chain
+  // lands on the still-optional value (Zig: optional does not support
+  // field access).
+  assert.match(zig, /return x\.\?\.v \+ n;/);
+});
+
 test("R7 a non-reassigned declaration adjacent to its exit guard still fuses to a const orelse", () => {
   const zig = emit(`
 export interface P { readonly v: number; }

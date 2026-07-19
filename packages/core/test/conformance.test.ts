@@ -5485,6 +5485,75 @@ export function drainDo(model: Model): number {
 `,
   },
   {
+    // Post-if narrowing must survive every exit path from the if emission:
+    // the else-if chain path returned before applying it, leaving the
+    // fall-through read on the still-optional value.
+    name: "an exiting null guard heading an else-if chain narrows after the statement",
+    src: `
+export interface P { readonly v: number; }
+export function pick(x: P | null, flag: boolean): number {
+  let n = 1;
+  if (x === null) {
+    return -1;
+  } else if (flag) {
+    n = 2;
+  }
+  return x.v + n;
+}
+`,
+  },
+  {
+    name: "an exiting null guard heading an else-if-else chain narrows after the statement",
+    src: `
+export interface P { readonly v: number; }
+export function pick(x: P | null, flag: boolean): number {
+  let n = 1;
+  if (x === null) {
+    return -1;
+  } else if (flag) {
+    n = 2;
+  } else {
+    n = 3;
+  }
+  return x.v + n;
+}
+`,
+  },
+  {
+    name: "an exiting null guard heading a chained else-if-else-if narrows after the statement",
+    src: `
+export interface P { readonly v: number; }
+export function pick(x: P | null, a: boolean, b: boolean): number {
+  let n = 1;
+  if (x === null) {
+    return -1;
+  } else if (a) {
+    n = 2;
+  } else if (b) {
+    n = 3;
+  }
+  return x.v + n;
+}
+`,
+  },
+  {
+    name: "a present test whose else-if chain always exits narrows after the statement (other polarity)",
+    src: `
+export interface P { readonly v: number; }
+export function pick(x: P | null, flag: boolean): number {
+  let n = 1;
+  if (x !== null) {
+    n = 2;
+  } else if (flag) {
+    return -1;
+  } else {
+    return -2;
+  }
+  return x.v + n;
+}
+`,
+  },
+  {
     name: "a reassigned let with an adjacent continue guard stays assignable (no const fusion)",
     src: `
 export interface P { readonly v: number; readonly tag: number; }
