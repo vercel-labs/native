@@ -8556,9 +8556,26 @@ export class Emitter {
         const t = this.zTypeOfExpr(trueNull ? expr.whenFalse : expr.whenTrue, ctx);
         return t.k === "optional" || t.k === "void" ? t : { k: "optional", inner: t };
       }
+      // The condition's own null test narrows the arm that reuses the
+      // tested value, exactly as tsc types it: `q === null ? {...f} : q`
+      // and `q !== null ? q : {...f}` both VALUE as the non-optional Quote,
+      // never `?Quote` — keeping the raw optional here types an inferred
+      // local `?Quote` and its first non-optional use fails to compile.
+      // The unwrap only holds when the OTHER arm cannot contribute null:
+      // a known-optional other arm keeps the optional (its null flows
+      // through), and the null-literal arms were handled above.
+      const missTest = this.emptyTestOf(expr.condition);
+      const hitTest = this.emptyTestOf(expr.condition, ts.SyntaxKind.ExclamationEqualsEqualsToken);
+      const narrowedByCond = (arm: ts.Expression, t: ZType, other: ts.Expression): ZType => {
+        const test = arm === expr.whenFalse ? missTest : hitTest;
+        if (test === null || t.k !== "optional" || normalize(arm) !== normalize(test.target)) return t;
+        const otherT = this.zTypeOfExpr(other, ctx);
+        return otherT.k === "optional" ? t : t.inner;
+      };
       const t = this.zTypeOfExpr(expr.whenTrue, ctx);
-      if (t.k !== "void") return t;
-      return this.zTypeOfExpr(expr.whenFalse, ctx);
+      if (t.k !== "void") return narrowedByCond(expr.whenTrue, t, expr.whenFalse);
+      const f = this.zTypeOfExpr(expr.whenFalse, ctx);
+      return narrowedByCond(expr.whenFalse, f, expr.whenTrue);
     }
     if (ts.isBinaryExpression(expr)) {
       const op = expr.operatorToken.kind;

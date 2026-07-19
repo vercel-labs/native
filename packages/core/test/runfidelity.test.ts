@@ -4669,6 +4669,70 @@ export function pick(q: Quote | null, fallback: Quote): Quote {
 `,
   },
   {
+    // The INFERRED-local spelling of the spread-arm ternary (no `: Quote`
+    // annotation, so the local's type comes from the ternary itself). Both
+    // polarities and both branches are driven: the hit branch must hand back
+    // the quote untouched, the miss branch must build the fallback copy with
+    // its overwrite applied.
+    name: "inferred-local spread-arm ternaries: both polarities and both branches match node",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pickMiss(q: Quote | null, fallback: Quote): Quote {
+  const picked = q === null ? { ...fallback, price: 0 } : q;
+  return picked;
+}
+export function pickHit(q: Quote | null, fallback: Quote): Quote {
+  const picked = q !== null ? q : { ...fallback, price: 0 };
+  return picked;
+}
+`,
+    node: `
+{
+  const base = { id: 7, state: "ok", price: 12 };
+  const fallback = { id: 9, state: "failed", price: 3 };
+  const a = mod.pickMiss(base, fallback);
+  line("p0", a.id);
+  line("p1", a.state);
+  line("p2", a.price);
+  const b = mod.pickMiss(null, fallback);
+  line("p3", b.id);
+  line("p4", b.state);
+  line("p5", b.price);
+  const c = mod.pickHit(base, fallback);
+  line("p6", c.id);
+  line("p7", c.state);
+  line("p8", c.price);
+  const d = mod.pickHit(null, fallback);
+  line("p9", d.id);
+  line("p10", d.state);
+  line("p11", d.price);
+}
+`,
+    zig: `
+    {
+        const base = m.Quote{ .id = 7, .state = .ok, .price = 12 };
+        const fallback = m.Quote{ .id = 9, .state = .failed, .price = 3 };
+        const a = m.pickMiss(base, fallback);
+        row("p0", a.id);
+        row("p1", a.state);
+        row("p2", a.price);
+        const b = m.pickMiss(null, fallback);
+        row("p3", b.id);
+        row("p4", b.state);
+        row("p5", b.price);
+        const c = m.pickHit(base, fallback);
+        row("p6", c.id);
+        row("p7", c.state);
+        row("p8", c.price);
+        const d = m.pickHit(null, fallback);
+        row("p9", d.id);
+        row("p10", d.state);
+        row("p11", d.price);
+    }
+`,
+  },
+  {
     name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
     src: `
 export interface NumResult { readonly value: number; readonly next: number; }

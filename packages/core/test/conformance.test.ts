@@ -5125,6 +5125,35 @@ export function pick(q: Quote | null, fallback: Quote): Quote {
 `,
   },
   {
+    // The annotated declaration above supplies an expected type that masks
+    // the inference path: with NO annotation the ternary's own computed type
+    // is the local's type, and computing it from the raw optional arm types
+    // the local `?Quote` — its first non-optional use then fails Zig
+    // compilation ("expected type 'Quote', found '?Quote'"). The condition's
+    // null test narrows the arm that reuses the tested value, so the local
+    // must value as the non-optional Quote, exactly as tsc types it.
+    name: "INFERRED local from a miss-test spread-arm ternary values non-optional",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): Quote {
+  const picked = q === null ? { ...fallback, price: 0 } : q;
+  return picked;
+}
+`,
+  },
+  {
+    name: "INFERRED local, hit-test polarity (q !== null ? q : spread) values non-optional",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): Quote {
+  const picked = q !== null ? q : { ...fallback, price: 0 };
+  return picked;
+}
+`,
+  },
+  {
     name: "TEA reducer: spread-arm ternary reads a switch payload through a local",
     src: `
 export type QuoteState = "idle" | "ok" | "failed";
