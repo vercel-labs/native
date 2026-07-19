@@ -2648,6 +2648,25 @@ test "image leaf misuse fails the build with the teaching messages" {
             .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>",
             .message = canvas.ui_markup.image_children_message,
         },
+        .{
+            // Markup that skipped validation (hot reload) can reach the
+            // engine without the binding: the leaf could only ever
+            // render nothing, so the build refuses it exactly like the
+            // validator (the compiled engine rejects the same construct
+            // as a compile error).
+            .source = "<row>\n  <image label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_missing_image_message,
+        },
+        .{
+            // The children check reads the ORIGINAL node: a context-menu
+            // child is extracted as host metadata before the content
+            // rules, but the validator rejects it on the raw node - the
+            // build agrees instead of quietly accepting a menu-bearing
+            // leaf the validator refuses (the compiled engine rejects
+            // the same construct as a compile error).
+            .source = "<row>\n  <image image=\"{cover}\" label=\"Art\" on-press=\"refresh\"><context-menu><menu-item on-press=\"refresh\">Reload</menu-item></context-menu></image>\n</row>",
+            .message = canvas.ui_markup.image_children_message,
+        },
     };
     for (cases) |case| {
         var view = try ImageMarkup.init(arena, case.source);

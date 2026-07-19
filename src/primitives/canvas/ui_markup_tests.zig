@@ -704,6 +704,11 @@ test "the image attribute validates as one binding on avatar and image" {
         // gives an image no child slots, so a nested caption would
         // silently vanish instead of rendering.
         .{ .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>", .message = markup.image_children_message },
+        // ...and the rejection reads the RAW node: an extracted
+        // context-menu (host metadata on a pressable host) still counts
+        // as a child - the leaf takes no children at all, and both
+        // engines check the original node the same way.
+        .{ .source = "<row>\n  <image image=\"{cover}\" label=\"Art\" on-press=\"refresh\"><context-menu><menu-item on-press=\"refresh\">Reload</menu-item></context-menu></image>\n</row>", .message = markup.image_children_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena, case.source);

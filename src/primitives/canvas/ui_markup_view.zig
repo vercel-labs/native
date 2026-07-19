@@ -398,12 +398,22 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (pane_count != 2) return self.failNode(node, markup.split_children_message);
             }
-            // The image leaf takes no children - widget layout gives it
-            // no child slots, so nested content would silently vanish.
-            // Mirrors the validator and the compiled engine's compile
-            // error (icon's leaf policy exactly).
-            if (kind == .image and inner.children.len > 0) {
-                return self.failNode(node, markup.image_children_message);
+            // The image leaf's static shape, mirroring the validator and
+            // the compiled engine's compile error. Without its id binding
+            // the leaf can never draw - statically dead markup, refused
+            // here too so markup that skipped validation (hot reload)
+            // fails the build instead of silently rendering nothing. And
+            // it takes no children at all (icon's leaf policy): checked
+            // on the ORIGINAL node, so an extracted context-menu still
+            // counts as a child exactly like the validator's raw-node
+            // check.
+            if (kind == .image) {
+                if (node.attr("image") == null) {
+                    return self.failNode(node, markup.image_missing_image_message);
+                }
+                if (node.children.len > 0) {
+                    return self.failNode(node, markup.image_children_message);
+                }
             }
             // The a11y lint's error half: an unnamed interactive control
             // or a misused role ships a view a screen reader user cannot

@@ -405,12 +405,20 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     }
                     if (pane_count != 2) fail(node, markup.split_children_message);
                 }
-                // Interpreter parity: the image leaf takes no children —
-                // widget layout gives it no child slots, so nested
-                // content would silently vanish. A compile error here
-                // (icon's leaf policy exactly).
-                if (kind == .image and inner.children.len > 0) {
-                    fail(node, markup.image_children_message);
+                // Interpreter parity: the image leaf's static shape.
+                // Without its id binding the leaf can never draw —
+                // statically dead markup, a compile error here too. And
+                // it takes no children at all (icon's leaf policy): the
+                // check reads the ORIGINAL node, so an extracted
+                // context-menu still counts as a child exactly like the
+                // validator's raw-node check.
+                if (kind == .image) {
+                    if (node.attr("image") == null) {
+                        fail(node, markup.image_missing_image_message);
+                    }
+                    if (node.children.len > 0) {
+                        fail(node, markup.image_children_message);
+                    }
                 }
                 // Interpreter parity: the a11y lint's error half — an
                 // unnamed interactive control or a misused role ships a
