@@ -4575,6 +4575,99 @@ export function atMiss(s: Uint8Array, i: number): boolean { return s.at(i) === u
       { fn: "atMiss", args: [{ t: "bytes", v: [65] }, i(0)] },
     ],
   },
+  {
+    // Ternaries whose arms are spread literals lower to per-branch statement
+    // blocks; both arms of every conditional are driven here so the reducer's
+    // values pin that exactly the taken arm's copy runs (the model after a
+    // kept-`q` arm must be the untouched quote, never a fresh copy with a
+    // stale overwrite).
+    name: "spread-arm ternaries: nested and single-level reducer arms match node on both branches",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export interface Model { readonly quote: Quote; }
+export type Msg = { readonly kind: "got"; readonly parsed: number | null } | { readonly kind: "noop" };
+export function initialModel(): Model {
+  return { quote: { id: 1, state: "idle", price: 0.5 } };
+}
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "got": {
+      const parsed = msg.parsed;
+      const q = model.quote;
+      const updated: Quote = parsed === null
+        ? (q.state === "ok" ? q : { ...q, state: "failed" })
+        : { ...q, state: "ok", price: parsed };
+      return { ...model, quote: updated };
+    }
+    case "noop": {
+      const q = model.quote;
+      const updated: Quote = q.state === "ok" ? q : { ...q, state: "failed" };
+      return { ...model, quote: updated };
+    }
+  }
+}
+export function pick(q: Quote | null, fallback: Quote): Quote {
+  return q === null ? { ...fallback, state: "idle" } : q;
+}
+`,
+    node: `
+{
+  let model = mod.initialModel();
+  // noop on a non-ok quote: single-level ternary takes the spread arm.
+  model = mod.update(model, { kind: "noop" });
+  line("s0", model.quote.state);
+  line("s1", model.quote.price);
+  // got with a value: nested ternary's narrowed arm (spread + capture read).
+  model = mod.update(model, { kind: "got", parsed: 42.5 });
+  line("s2", model.quote.state);
+  line("s3", model.quote.price);
+  // noop on an ok quote: single-level ternary keeps q untouched.
+  model = mod.update(model, { kind: "noop" });
+  line("s4", model.quote.state);
+  line("s5", model.quote.price);
+  // got(null) on an ok quote: inner ternary keeps q untouched.
+  model = mod.update(model, { kind: "got", parsed: null });
+  line("s6", model.quote.state);
+  line("s7", model.quote.price);
+  // got(null) after a failure path: inner ternary takes its spread arm.
+  const failed = mod.update(mod.initialModel(), { kind: "got", parsed: null });
+  line("s8", failed.quote.state);
+  line("s9", failed.quote.price);
+  // orelse-fusion shape with a spread miss arm, both branches.
+  const chosen = mod.pick(model.quote, failed.quote);
+  line("s10", chosen.state);
+  const fallen = mod.pick(null, failed.quote);
+  line("s11", fallen.state);
+  line("s12", fallen.id);
+}
+`,
+    zig: `
+    {
+        var model = m.initialModel();
+        model = m.update(model, .noop);
+        row("s0", model.quote.state);
+        row("s1", model.quote.price);
+        model = m.update(model, .{ .got = 42.5 });
+        row("s2", model.quote.state);
+        row("s3", model.quote.price);
+        model = m.update(model, .noop);
+        row("s4", model.quote.state);
+        row("s5", model.quote.price);
+        model = m.update(model, .{ .got = null });
+        row("s6", model.quote.state);
+        row("s7", model.quote.price);
+        const failed = m.update(m.initialModel(), .{ .got = null });
+        row("s8", failed.quote.state);
+        row("s9", failed.quote.price);
+        const chosen = m.pick(model.quote, failed.quote);
+        row("s10", chosen.state);
+        const fallen = m.pick(null, failed.quote);
+        row("s11", fallen.state);
+        row("s12", fallen.id);
+    }
+`,
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling

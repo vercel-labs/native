@@ -209,6 +209,22 @@ export function findOrZero(xs: Uint8Array, want: number): number {
   assert.match(zig, /const hit = find\(xs, want\) orelse return 0;/);
 });
 
+test("R7 narrowed ternaries with pure arms keep the tight if-expression and orelse forms", () => {
+  const zig = emit(`
+export function bump(parsed: number | null): number {
+  return parsed === null ? 0 : parsed + 1;
+}
+export function orZero(parsed: number | null): number {
+  return parsed === null ? 0 : parsed;
+}
+`);
+  // Statement-free arms must NOT take the R17b temp lowering — the common
+  // case (numbers, tags, field reads) keeps its expression emission.
+  assert.match(zig, /return if \(parsed\) \|parsed_2\| parsed_2 \+ 1 else 0;/);
+  assert.match(zig, /return parsed orelse 0;/);
+  assert.doesNotMatch(zig, /: f64 = undefined;/);
+});
+
 test("R7 an early-exit guard whose narrowed value goes unread stays a plain null test", () => {
   const zig = emit(`
 export interface Model { readonly now: number | null; readonly nowLen: number; }

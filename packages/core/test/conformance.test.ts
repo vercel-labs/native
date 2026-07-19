@@ -5038,6 +5038,158 @@ export function f(row: Uint8Array, sink: Uint8Array[][]): number {
   },
 ];
 
+// Ternaries whose arms lower STATEMENTS (spread object literals build their
+// arena copy line by line). Those statements must scope to the branch that
+// actually runs: hoisting them above the conditional both evaluates the
+// untaken arm and reads a null-narrowing capture before it binds ("use of
+// undeclared identifier"), and a skipped narrow path leaves optional reads
+// un-unwrapped in the arm ("expected type 'f64', found '?f64'"). Every
+// position a value ternary can sit in is pinned: declaration initializer,
+// return, argument, object field, plus the orelse fusion and the
+// switch-payload shapes that route the same lowering.
+const ternarySpreadArmCases: Case[] = [
+  {
+    name: "null-narrowed ternary with a spread arm in return position",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function apply(q: Quote, parsed: number | null): Quote {
+  return parsed === null ? q : { ...q, state: "ok", price: parsed };
+}
+`,
+  },
+  {
+    name: "null-narrowed ternary with a spread arm as a declaration initializer",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function apply(q: Quote, parsed: number | null): Quote {
+  const updated: Quote = parsed === null ? q : { ...q, state: "ok", price: parsed };
+  return updated;
+}
+`,
+  },
+  {
+    name: "hit-test polarity (!== null) with spread arms on BOTH branches",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function apply(q: Quote, parsed: number | null): Quote {
+  return parsed !== null ? { ...q, state: "ok", price: parsed } : { ...q, state: "failed" };
+}
+`,
+  },
+  {
+    name: "nested ternary with spread arms (arm-within-arm) as an annotated declaration",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function apply(q: Quote, parsed: number | null): Quote {
+  const updated: Quote = parsed === null
+    ? (q.state === "ok" ? q : { ...q, state: "failed" })
+    : { ...q, state: "ok", price: parsed };
+  return updated;
+}
+`,
+  },
+  {
+    name: "spread-arm ternary in argument position",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function cost(q: Quote): number { return q.price; }
+export function probe(q: Quote, parsed: number | null): number {
+  return cost(parsed === null ? q : { ...q, state: "ok", price: parsed });
+}
+`,
+  },
+  {
+    name: "spread-arm ternary as an object-literal field value",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export interface Model { readonly quote: Quote; readonly n: number; }
+export function apply(model: Model, parsed: number | null): Model {
+  return { ...model, quote: parsed === null ? model.quote : { ...model.quote, state: "ok", price: parsed } };
+}
+`,
+  },
+  {
+    name: "orelse-fusion shape whose miss arm is a spread literal",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): Quote {
+  return q === null ? { ...fallback, state: "idle" } : q;
+}
+`,
+  },
+  {
+    name: "TEA reducer: spread-arm ternary reads a switch payload through a local",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export interface Model { readonly quote: Quote; }
+export type Msg = { readonly kind: "got"; readonly parsed: number | null } | { readonly kind: "noop" };
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "got": {
+      const parsed = msg.parsed;
+      const q = model.quote;
+      const updated: Quote = parsed === null
+        ? (q.state === "ok" ? q : { ...q, state: "failed" })
+        : { ...q, state: "ok", price: parsed };
+      return { ...model, quote: updated };
+    }
+    case "noop": {
+      const q = model.quote;
+      const updated: Quote = q.state === "ok" ? q : { ...q, state: "failed" };
+      return { ...model, quote: updated };
+    }
+  }
+}
+`,
+  },
+  {
+    name: "TEA reducer: spread-arm ternary reads the optional switch payload directly",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export interface Model { readonly quote: Quote; }
+export type Msg = { readonly kind: "got"; readonly parsed: number | null } | { readonly kind: "noop" };
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "got":
+      return { ...model, quote: msg.parsed === null ? model.quote : { ...model.quote, state: "ok", price: msg.parsed } };
+    case "noop":
+      return model;
+  }
+}
+`,
+  },
+  {
+    name: "optional switch payload stays optional through its capture (guarded use compiles)",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export interface Model { readonly quote: Quote; }
+export type Msg = { readonly kind: "got"; readonly parsed: number | null } | { readonly kind: "noop" };
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "got": {
+      const parsed = msg.parsed;
+      if (parsed !== null) {
+        return { ...model, quote: { ...model.quote, state: "ok", price: parsed } };
+      }
+      return model;
+    }
+    case "noop": return model;
+  }
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...textMethodCases,
   ...releaseModeCases,
@@ -5061,6 +5213,7 @@ const corpus: Case[] = [
   ...modelTierCases,
   ...streamingCases,
   ...grammarCases,
+  ...ternarySpreadArmCases,
 ];
 
 test("corpus: gated cases teach at check time, emit cases transpile clean", () => {

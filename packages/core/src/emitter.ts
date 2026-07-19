@@ -76,6 +76,14 @@ interface Ctx {
   /// normalized source text of an expression -> replacement zig expr
   /// (optional-narrowing captures, union payload captures)
   readonly memberSubst: Map<string, string>;
+  /// The subset of memberSubst entries that RENAME without narrowing: a
+  /// union payload capture of an optional-typed field holds the payload
+  /// as-is (`.got => |parsed|` with `got: ?f64` binds `parsed: ?f64`), so
+  /// type queries must keep the optional. Maps key -> that replacement;
+  /// zTypeOfExpr only unwraps when the ACTIVE replacement differs (a
+  /// null-guard capture overwriting the key installs a fresh name, so the
+  /// identity check stays correct through save/restore cycles).
+  readonly stillOptionalSubst: Map<string, string>;
   /// source text of a union-typed expr -> active arm tag (kind guards)
   readonly narrowedUnion: Map<string, string>;
   /// declared/inferred types of locals
@@ -972,6 +980,7 @@ export class Emitter {
       names: new Map(),
       used: this.moduleScopeNames(),
       memberSubst: new Map(),
+      stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       localTypes: new Map(),
       builders: new Map(),
@@ -1349,6 +1358,7 @@ export class Emitter {
       names: new Map(),
       used: new Set(),
       memberSubst: new Map(),
+      stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       localTypes: new Map(),
       builders: new Map(),
@@ -1605,6 +1615,7 @@ export class Emitter {
       names: new Map(),
       used: this.moduleScopeNames(),
       memberSubst: new Map(),
+      stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       localTypes: new Map(),
       builders: new Map(),
@@ -1829,6 +1840,7 @@ export class Emitter {
       names: new Map(),
       used: this.moduleScopeNames(),
       memberSubst: new Map(),
+      stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       localTypes: new Map(),
       builders: new Map(),
@@ -4096,6 +4108,9 @@ export class Emitter {
       const access =
         arm.fields.length === 1 ? `${baseText}.${zigId(tag)}` : `${baseText}.${zigId(tag)}.${fieldName(f)}`;
       ctx.memberSubst.set(`${key}.${f.tsName}`, access);
+      // Kind-narrowing selects the arm; it proves nothing about a field
+      // that is itself optional — the payload access keeps the optional.
+      if (this.fieldZType(f).k === "optional") ctx.stillOptionalSubst.set(`${key}.${f.tsName}`, access);
     }
   }
 
@@ -4762,10 +4777,20 @@ export class Emitter {
         const cap = this.freshName(sub, zigLocalName(arm.fields[0].tsName));
         capture = `|${cap}| `;
         sub.memberSubst.set(`${baseKey}.${arm.fields[0].tsName}`, cap);
+        // The capture holds the payload AS-IS: an optional field stays
+        // optional through it (this is a rename, not a null-narrowing).
+        if (this.fieldZType(arm.fields[0]).k === "optional") {
+          sub.stillOptionalSubst.set(`${baseKey}.${arm.fields[0].tsName}`, cap);
+        }
       } else if (arm.fields.length > 1 && payloadUsed) {
         const cap = this.freshName(sub, zigId(arm.tag));
         capture = `|${cap}| `;
-        for (const f of arm.fields) sub.memberSubst.set(`${baseKey}.${f.tsName}`, `${cap}.${fieldName(f)}`);
+        for (const f of arm.fields) {
+          sub.memberSubst.set(`${baseKey}.${f.tsName}`, `${cap}.${fieldName(f)}`);
+          if (this.fieldZType(f).k === "optional") {
+            sub.stillOptionalSubst.set(`${baseKey}.${f.tsName}`, `${cap}.${fieldName(f)}`);
+          }
+        }
       }
       this.emitBlockStatements(stmts, sub);
       // Restore: captures are arm-scoped.
@@ -6482,9 +6507,25 @@ export class Emitter {
     const missTest = this.emptyTestOf(cond);
     if (missTest && normalize(expr.whenFalse) === normalize(missTest.target)) {
       this.requireFaithfulEmptyTest(missTest.target, missTest.flavor, cond);
-      const target = this.emitExpr(missTest.target, ctx).code;
-      const alt = this.emitExpr(expr.whenTrue, ctx).code;
-      return { code: `${target} orelse ${alt}` };
+      // Probe both sides in throwaway child ctxs: the fusion only holds
+      // when the miss arm is statement-free. An arm that lowers statements
+      // (a spread literal builds its copy line by line) must not ride the
+      // orelse — those lines would land ABOVE it and run even on the
+      // non-empty path — so it falls through to the narrowed-ternary
+      // lowering below, which scopes them to the branch that runs.
+      const tT = this.zTypeOfExpr(missTest.target, ctx);
+      const armWant =
+        expected ? unwrapOptional(expected) : tT.k === "optional" ? tT.inner : undefined;
+      const targetSub = this.childCtx(ctx);
+      const target = this.emitExpr(missTest.target, targetSub).code;
+      const altSub = this.childCtx(ctx);
+      const alt = this.emitExpr(expr.whenTrue, altSub, armWant).code;
+      if (altSub.lines.length === 0) {
+        // The target is evaluated exactly once; its lowered lines (if any)
+        // ride ahead of the orelse like any condition's.
+        ctx.lines.push(...targetSub.lines);
+        return { code: `${target} orelse ${alt}` };
+      }
     }
     // `x === null ? A : <uses x>` (and the `=== undefined` find-miss
     // spelling) — the narrowing dual of the `!==` case below: TS narrows
@@ -6501,16 +6542,7 @@ export class Emitter {
       const t = this.zTypeOfExpr(missTest.target, ctx);
       if (t.k === "optional") {
         this.requireFaithfulEmptyTest(missTest.target, missTest.flavor, cond);
-        const key = normalize(missTest.target);
-        const target = this.emitExpr(missTest.target, ctx).code;
-        const cap = this.freshName(ctx, this.narrowHint(missTest.target));
-        const saved = ctx.memberSubst.get(key);
-        ctx.memberSubst.set(key, cap);
-        const hitV = this.emitExpr(expr.whenFalse, ctx, expected ? unwrapOptional(expected) : undefined).code;
-        ctx.memberSubst.delete(key);
-        if (saved !== undefined) ctx.memberSubst.set(key, saved);
-        const missV = this.emitExpr(expr.whenTrue, ctx, expected).code;
-        return { code: `if (${target}) |${cap}| ${hitV} else ${missV}` };
+        return this.emitNarrowedTernary(expr, missTest.target, expr.whenFalse, expr.whenTrue, ctx, expected, nameHint);
       }
     }
     // `x !== null ? <uses x> : B` -> `if (x) |v| ... else B`.
@@ -6525,16 +6557,7 @@ export class Emitter {
       const t = this.zTypeOfExpr(hitTest.target, ctx);
       if (t.k === "optional") {
         this.requireFaithfulEmptyTest(hitTest.target, hitTest.flavor, cond);
-        const key = normalize(hitTest.target);
-        const target = this.emitExpr(hitTest.target, ctx).code;
-        const cap = this.freshName(ctx, this.narrowHint(hitTest.target));
-        const saved = ctx.memberSubst.get(key);
-        ctx.memberSubst.set(key, cap);
-        const thenV = this.emitExpr(expr.whenTrue, ctx, expected ? unwrapOptional(expected) : undefined).code;
-        ctx.memberSubst.delete(key);
-        if (saved !== undefined) ctx.memberSubst.set(key, saved);
-        const elseV = this.emitExpr(expr.whenFalse, ctx, expected).code;
-        return { code: `if (${target}) |${cap}| ${thenV} else ${elseV}` };
+        return this.emitNarrowedTernary(expr, hitTest.target, expr.whenTrue, expr.whenFalse, ctx, expected, nameHint);
       }
     }
     // R7d: a null-guarded chain condition — `x !== null && x.a > 0 ? x.a :
@@ -6632,6 +6655,65 @@ export class Emitter {
     const ts2 = this.nestedCtx(ctx);
     const v2 = this.withKindNarrow(negGuard, ctx, () => this.emitExpr(expr.whenFalse, ts2, expected));
     ts2.lines.push("    ".repeat(ts2.indent) + `${name} = ${v2.code};`);
+    ctx.lines.push(...ts2.lines);
+    this.push(ctx, `}`);
+    return { code: name };
+  }
+
+  /// R7-narrowed ternary: `if (target) |cap| <narrowed> else <other>`, with
+  /// the capture substitution active over the arm TS narrows. Arms whose
+  /// emission lowers statements (a spread literal builds its arena copy
+  /// line by line; a nested lowered ternary needs its temp) cannot ride an
+  /// if-EXPRESSION arm — the pushed lines would land above the conditional,
+  /// running BOTH arms unconditionally and reading the capture before it
+  /// binds. Those take the R17b statement lowering instead: a typed temp
+  /// assigned under a statement if/else, so exactly the taken arm's
+  /// statements run, once.
+  private emitNarrowedTernary(
+    expr: ts.ConditionalExpression,
+    targetExpr: ts.Expression,
+    narrowedArm: ts.Expression,
+    otherArm: ts.Expression,
+    ctx: Ctx,
+    expected: ZType | undefined,
+    nameHint: string | undefined,
+  ): Emitted {
+    const key = normalize(targetExpr);
+    const target = this.emitExpr(targetExpr, ctx).code;
+    const cap = this.freshName(ctx, this.narrowHint(targetExpr));
+    const emitNarrowedArm = (sub: Ctx): string => {
+      const saved = ctx.memberSubst.get(key);
+      ctx.memberSubst.set(key, cap);
+      const code = this.emitExpr(narrowedArm, sub, expected ? unwrapOptional(expected) : undefined).code;
+      ctx.memberSubst.delete(key);
+      if (saved !== undefined) ctx.memberSubst.set(key, saved);
+      return code;
+    };
+    // Probe both arms in throwaway child ctxs: statement-free arms keep
+    // the tight expression form (the common case — numbers, tags, field
+    // reads — stays exactly as before).
+    const narrowedSub = this.childCtx(ctx);
+    const narrowedV = emitNarrowedArm(narrowedSub);
+    const otherSub = this.childCtx(ctx);
+    const otherV = this.emitExpr(otherArm, otherSub, expected).code;
+    if (narrowedSub.lines.length === 0 && otherSub.lines.length === 0) {
+      return { code: `if (${target}) |${cap}| ${narrowedV} else ${otherV}` };
+    }
+    // R17b-style lowering: re-emit each arm into its own scoped block
+    // feeding the temp (the probe lines are discarded — they were never
+    // pushed to ctx).
+    const t = expected ?? this.zTypeOfExpr(expr, ctx);
+    const name = this.freshName(ctx, nameHint ?? "value");
+    this.push(ctx, `var ${name}: ${this.table.zigTypeRef(t)} = undefined;`);
+    this.push(ctx, `if (${target}) |${cap}| {`);
+    const ts1 = this.nestedCtx(ctx);
+    const v1 = emitNarrowedArm(ts1);
+    ts1.lines.push("    ".repeat(ts1.indent) + `${name} = ${v1};`);
+    ctx.lines.push(...ts1.lines);
+    this.push(ctx, `} else {`);
+    const ts2 = this.nestedCtx(ctx);
+    const v2 = this.emitExpr(otherArm, ts2, expected).code;
+    ts2.lines.push("    ".repeat(ts2.indent) + `${name} = ${v2};`);
     ctx.lines.push(...ts2.lines);
     this.push(ctx, `}`);
     return { code: name };
@@ -8111,8 +8193,15 @@ export class Emitter {
     const t = this.zTypeOfExprRaw(expr, ctx);
     // A narrowing substitution (null-guard capture or `.?` unwrap) proves
     // the value non-null for every use it rewrites, so the expression's
-    // effective type is the inner one.
-    if (t.k === "optional" && ctx.memberSubst.has(normalize(expr))) return t.inner;
+    // effective type is the inner one. A RENAMING substitution — a union
+    // payload capture whose field is itself optional — holds the payload
+    // as-is and must keep the optional (stillOptionalSubst records those
+    // by their exact replacement).
+    if (t.k === "optional") {
+      const key = normalize(expr);
+      const rep = ctx.memberSubst.get(key);
+      if (rep !== undefined && rep !== ctx.stillOptionalSubst.get(key)) return t.inner;
+    }
     return t;
   }
 
