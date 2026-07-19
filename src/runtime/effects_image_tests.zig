@@ -649,24 +649,33 @@ test "real executor fetches a url source, installs the cache, and hits it offlin
     try std.testing.expectEqual(@as(usize, 3), result.height);
 }
 
-test "cache install temp names are operation-unique" {
+test "cache install temp names are writer-unique" {
     // Two operations toward the SAME cache path (two ids loading one
     // URL) must never share a temp: a shared name lets one writer
     // truncate the other's bytes mid-write, or rename a half-written
-    // file into the cache name. The slot generation is the
-    // operation-unique token.
+    // file into the cache name.
     var first_buffer: [512]u8 = undefined;
     var second_buffer: [512]u8 = undefined;
     const cache_path = "/tmp/caches/images/abc123.png";
-    const first = try effects_mod.imageCachePartialPath(&first_buffer, cache_path, 7);
-    const second = try effects_mod.imageCachePartialPath(&second_buffer, cache_path, 8);
+    const first = try effects_mod.imageCachePartialPath(&first_buffer, cache_path, 7, 0xaaaa);
+    const second = try effects_mod.imageCachePartialPath(&second_buffer, cache_path, 8, 0xaaaa);
     try std.testing.expect(!std.mem.eql(u8, first, second));
     // Both stay recognizable install debris beside their cache path.
     try std.testing.expect(std.mem.startsWith(u8, first, cache_path));
     try std.testing.expect(std.mem.endsWith(u8, first, ".partial"));
     try std.testing.expect(std.mem.startsWith(u8, second, cache_path));
     try std.testing.expect(std.mem.endsWith(u8, second, ".partial"));
-    try std.testing.expectError(error.InvalidImageOptions, effects_mod.imageCachePartialPath(&first_buffer, "", 7));
+
+    // The generation alone is only channel-local: two channels in one
+    // process (or two processes sharing the platform cache directory)
+    // can install at the SAME generation concurrently. The random
+    // writer token keeps their temps distinct — a name built from the
+    // generation alone would collide here and recreate the
+    // truncate/rename race.
+    const third = try effects_mod.imageCachePartialPath(&second_buffer, cache_path, 7, 0xbbbb);
+    try std.testing.expect(!std.mem.eql(u8, first, third));
+
+    try std.testing.expectError(error.InvalidImageOptions, effects_mod.imageCachePartialPath(&first_buffer, "", 7, 0xaaaa));
 }
 
 test "concurrent loads of one url both complete with an intact cache and no temp debris" {

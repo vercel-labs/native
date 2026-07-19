@@ -667,16 +667,25 @@ pub fn imageCachePath(buffer: []u8, cache_dir: []const u8, url: []const u8) ![]c
 }
 
 /// The temp path one cache install writes before its atomic rename
-/// into `cache_path`. The name must be OPERATION-unique, not merely
-/// url-unique: two concurrent loads of the same URL install toward the
-/// same cache path, and a shared temp would let one writer truncate
-/// the other's bytes mid-write — or rename a half-written file into
-/// place. The slot generation (monotonic across every effect issued on
-/// the channel) is unique per in-flight operation, so each install
-/// owns its temp and the last rename wins whole.
-pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u32) ![]const u8 {
+/// into `cache_path`. The name must be WRITER-unique, not merely
+/// url-unique or channel-unique: two concurrent loads of the same URL
+/// install toward the same cache path, and a shared temp would let one
+/// writer truncate the other's bytes mid-write — or rename a
+/// half-written file into place. The slot generation alone cannot
+/// carry that uniqueness: it is channel-local, so two Effects channels
+/// in one process — or two app processes sharing the platform cache
+/// directory — can reach the same generation concurrently and collide.
+/// `token` is the install's own random draw (`installImageCache` takes
+/// it from the operation's executor io), unique across channels and
+/// processes alike; the generation stays in the name purely as debris
+/// provenance — a leftover `.partial` names which in-flight operation
+/// a hard crash interrupted. This function stays a pure formatter on
+/// every compile target: the entropy lives with the caller, and no
+/// freestanding build can ever run an install (there is no executor io
+/// and no cache directory there), so no target gate is needed here.
+pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u32, token: u64) ![]const u8 {
     if (cache_path.len == 0) return error.InvalidImageOptions;
-    return std.fmt.bufPrint(buffer, "{s}.{d}.partial", .{ cache_path, generation });
+    return std.fmt.bufPrint(buffer, "{s}.{d}-{x:0>16}.partial", .{ cache_path, generation, token });
 }
 
 /// Longest local path (and cache path) one `loadImage` source may name,
@@ -6599,9 +6608,10 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Best-effort cache install behind a successful fetch: write
-        /// an operation-unique temp beside the cache path (see
-        /// `imageCachePartialPath` — concurrent loads of one URL must
-        /// never share a temp) and atomically rename into place, and
+        /// a writer-unique temp beside the cache path (see
+        /// `imageCachePartialPath` — concurrent installs toward one
+        /// cache path must never share a temp, across channels and
+        /// processes included) and atomically rename into place, and
         /// only when `expected_bytes` (if declared) verifies — a
         /// partial or wrong-size download never occupies the cache
         /// name. Failures cost only the next load a re-fetch, and a
@@ -6617,8 +6627,18 @@ pub fn Effects(comptime Msg: type) type {
             if (std.fs.path.dirname(cache_path)) |parent| {
                 cwd.createDirPath(io, parent) catch return;
             }
-            var partial_buffer: [max_effect_image_path_bytes + 32]u8 = undefined;
-            const partial_path = imageCachePartialPath(&partial_buffer, cache_path, slot.generation) catch return;
+            // The uniqueness token comes from the operation's own
+            // executor io — the CSPRNG seam every worker already
+            // carries — so the name is unique across channels and
+            // processes, not merely within this channel's generation
+            // counter. Freestanding builds never reach this function
+            // (no executor io exists there to run a worker), so the
+            // entropy source needs no target gate.
+            var token_bytes: [8]u8 = undefined;
+            io.random(&token_bytes);
+            const token = std.mem.readInt(u64, &token_bytes, .little);
+            var partial_buffer: [max_effect_image_path_bytes + 48]u8 = undefined;
+            const partial_path = imageCachePartialPath(&partial_buffer, cache_path, slot.generation, token) catch return;
             cwd.writeFile(io, .{ .sub_path = partial_path, .data = bytes }) catch {
                 cwd.deleteFile(io, partial_path) catch {};
                 return;
