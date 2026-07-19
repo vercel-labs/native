@@ -774,8 +774,12 @@ pub const EffectImageResult = struct {
     /// Decoded dimensions for `.loaded`; 0 otherwise.
     width: usize = 0,
     height: usize = 0,
-    /// The HTTP status for `.http_status` (and for url-sourced
-    /// `.loaded` results); 0 otherwise.
+    /// The HTTP status for url loads that performed an exchange
+    /// (`.http_status`, and `.loaded` from the network); 0 when none
+    /// occurred — local paths and cache hits. 0 is signal, not a
+    /// missing value: a cache hit is a real `.loaded` with no exchange
+    /// behind it, so apps can distinguish a network load from a cached
+    /// one, and fabricating the origin's status for it would lie.
     status: u16 = 0,
 };
 
@@ -889,7 +893,8 @@ pub const EffectResultRecord = struct {
     audio_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
     /// `.image` records: the delivered terminal outcome and the decoded
     /// dimensions (0 unless `.loaded`); the HTTP status rides the
-    /// shared `status` field.
+    /// shared `status` field (0 when no exchange occurred — local
+    /// paths, cache hits — see `EffectImageResult.status`).
     image_outcome: EffectImageOutcome = .loaded,
     image_width: u64 = 0,
     image_height: u64 = 0,
@@ -6642,6 +6647,10 @@ pub fn Effects(comptime Msg: type) type {
             if (len == 0 or len > max_effect_image_bytes) return false;
             if (slot.image_expected_bytes != 0 and len != slot.image_expected_bytes) return false;
             slot.body_len = len;
+            // `fetch_status` stays 0 on a cache hit: no HTTP exchange
+            // occurred, and 0 says so honestly (the documented
+            // `EffectImageResult.status` contract) — fabricating the
+            // origin's 200 would claim an exchange that never happened.
             slot.image_outcome = .loaded;
             return true;
         }

@@ -1196,7 +1196,10 @@ pub fn Kernel(comptime opts: Options) type {
         //               members are exactly the fourteen image outcome names,
         //               matched by member NAME), width and height (numbers,
         //               the decoded dimensions on "loaded"), and status
-        //               (number, the HTTP status for url sources). One load
+        //               (number, the HTTP status for url loads that
+        //               performed an exchange; 0 when none occurred —
+        //               local paths, cache hits — so a cached "loaded"
+        //               is distinguishable from a network one). One load
         //               per id at a time: a duplicate live id dispatches
         //               "rejected" (the spawn discipline — a load in flight
         //               is never replaced implicitly).

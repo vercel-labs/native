@@ -337,7 +337,10 @@ export type ImageState =
 /// string-literal-union alias carrying exactly the fourteen ImageState
 /// members (any declaration order — the host matches members by name);
 /// `width`/`height` are the decoded pixel dimensions ("loaded" only, 0
-/// otherwise); `status` is the HTTP status for url sources (0 otherwise).
+/// otherwise); `status` is the HTTP status for url loads that performed an
+/// exchange, 0 when none occurred (local paths, cache hits) — 0 is signal,
+/// not a missing value: a cache hit is a real "loaded" with no exchange
+/// behind it, so apps can distinguish a network load from a cached one.
 export type ImageEventArm = {
   readonly id: number;
   readonly state: ImageState;

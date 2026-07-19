@@ -754,7 +754,7 @@ test "real executor fetches a url source, installs the cache, and hits it offlin
     try std.testing.expectEqualSlices(u8, fixture.png_storage[0..fixture.png_len], cached);
 
     // Stop the server: the second load must resolve from the cache —
-    // no network, same result.
+    // no network, same pixels.
     fixture.stop();
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
     try waitForResult(&h, 2);
@@ -762,6 +762,13 @@ test "real executor fetches a url source, installs the cache, and hits it offlin
     try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, result.outcome);
     try std.testing.expectEqual(@as(usize, 4), result.width);
     try std.testing.expectEqual(@as(usize, 3), result.height);
+    // The cache hit reports status 0, the documented contract: status
+    // is the HTTP status only for loads that performed an exchange, and
+    // this one never touched the network (the server is gone) — a
+    // fabricated 200 would claim an exchange that never happened, and
+    // the 0 lets apps tell a cached .loaded from a network one (the
+    // first load's real 200 above).
+    try std.testing.expectEqual(@as(u16, 0), result.status);
 }
 
 test "cache install temp names are writer-unique" {
