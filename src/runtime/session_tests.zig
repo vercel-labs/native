@@ -1346,6 +1346,12 @@ const ImageSessionModel = struct {
     last_height: usize = 0,
     last_outcome_name: [24]u8 = @splat(' '),
     last_outcome_len: usize = 0,
+    /// Chatty-subprocess line counter, plus its value at the moment
+    /// each image terminal lands: the pair makes delivery ORDER a
+    /// model fact — a replay that reorders an image terminal around
+    /// the recorded lines diverges here, not just in pixel state.
+    lines_seen: u32 = 0,
+    lines_before_image: u32 = 0,
 
     fn outcomeName(self: *const ImageSessionModel) []const u8 {
         return self.last_outcome_name[0..self.last_outcome_len];
@@ -1358,6 +1364,8 @@ const ImageSessionMsg = union(enum) {
     load_broken,
     load_invalid,
     load_hostless,
+    start_chatty,
+    line: effects_mod.EffectLine,
     image: effects_mod.EffectImageResult,
 };
 
@@ -1380,7 +1388,16 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
         // worker truth, so its journaled record must FEED under replay
         // rather than be mistaken for regenerable validation.
         .load_hostless => fx.loadImage(.{ .id = 24, .url = "http:hostless", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // The chatty subprocess whose line results share the
+        // completion queue with the image terminal.
+        .start_chatty => fx.spawn(.{
+            .key = 31,
+            .argv = &.{ "chatty", "--emit" },
+            .on_line = ImageSessionApp.Effects.lineMsg(.line),
+        }),
+        .line => model.lines_seen += 1,
         .image => |result| {
+            model.lines_before_image = model.lines_seen;
             model.results += 1;
             switch (result.outcome) {
                 .loaded => model.loaded += 1,
@@ -1404,6 +1421,7 @@ fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) Im
     return ui.column(.{ .gap = 4, .padding = 8 }, .{
         ui.text(.{}, ui.fmt("{d} results, {d} loaded, {d} failed, {d} rejected", .{ model.results, model.loaded, model.failed, model.rejected })),
         ui.text(.{}, ui.fmt("last {s} {d}x{d}", .{ model.outcomeName(), model.last_width, model.last_height })),
+        ui.text(.{}, ui.fmt("{d} lines, {d} before image", .{ model.lines_seen, model.lines_before_image })),
     });
 }
 
@@ -1413,6 +1431,7 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.broken")) return .load_broken;
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
     if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
+    if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
     return null;
 }
 
@@ -1581,6 +1600,127 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
     try std.testing.expect(harness.runtime.registeredCanvasImage(22) != null);
     try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
+}
+
+/// Record the queue-saturation reference session: a chatty spawn and
+/// an image load whose results journal as ONE unbroken run — 64 line
+/// records (the completion queue's whole capacity) followed by the
+/// loaded image terminal. Results journal in delivery order, so a
+/// LIVE recording reaches this shape whenever workers refill the
+/// queue while the loop drains one pass. The fake executor feeds from
+/// the loop thread and cannot overfill a single pass, so the first 32
+/// lines drain through a wake whose EVENT record is withheld (the
+/// runtime's recorder hook is cleared for exactly that dispatch; the
+/// drained results still journal through the channel's bound journal)
+/// — splicing two drain passes into the one run a live recorder
+/// writes. Replay must then fit 65 consecutive feeds through the
+/// 64-entry queue without losing the image bytes or reordering the
+/// image terminal around the lines.
+fn recordSaturatedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.chatty", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+
+    var line_buffer: [16]u8 = undefined;
+    var index: u32 = 0;
+    while (index < 32) : (index += 1) {
+        try app_state.effects.feedLine(31, try std.fmt.bufPrint(&line_buffer, "line-{d}", .{index}));
+    }
+    // The spliced drain: results journal, the wake event does not.
+    harness.runtime.options.session_recorder = null;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    harness.runtime.options.session_recorder = recorder;
+
+    while (index < 64) : (index += 1) {
+        try app_state.effects.feedLine(31, try std.fmt.bufPrint(&line_buffer, "line-{d}", .{index}));
+    }
+    var png_buffer: [4096]u8 = undefined;
+    try app_state.effects.feedImageBytes(21, imageSessionPng(&png_buffer));
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // The recording itself saw every line BEFORE the image terminal,
+    // with the decoded pixels registered.
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_seen);
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_before_image);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a drain pass larger than the completion queue replays in order with the image bytes intact" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordSaturatedImageSession(gpa, buffer, &store);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // Every one of the run's 65 records fed — 64 lines plus the image
+    // terminal — with nothing skipped and nothing dropped.
+    try std.testing.expectEqual(@as(u64, 65), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    // Delivery ORDER survived saturation: the image terminal applied
+    // after all 64 recorded lines, exactly as recorded.
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_before_image);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // The recorded bytes survived saturation: the replayed runtime
+    // re-registered the journaled pixels, drawable offline.
+    const replay_registered = harness.runtime.registeredCanvasImage(21) orelse return error.TestExpectedRegisteredImage;
+    try std.testing.expectEqual(@as(usize, 6), replay_registered.width);
+    try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
 }
 
 /// Record a session whose single image load passes every loop-side

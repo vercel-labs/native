@@ -188,23 +188,44 @@ pub fn replaySession(
                     };
                     effect.payload = bytes;
                 }
-                app.replayControl(.{ .feed = effect }) catch |err| switch (err) {
-                    error.EffectNotFound => {
-                        std.debug.print(
-                            "replay diverged after event {d}: journaled {s} result for effect key {d} has no matching pending request - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
-                            .{ report.events_replayed, @tagName(effect.kind), effect.key },
-                        );
-                        return error.ReplayEffectDivergence;
-                    },
-                    error.ReplayUnsupported => {
-                        std.debug.print(
-                            "replay refused: the journal carries effect results but this app registered no replay hook (App.replay_fn - UiApp wires it automatically)\n",
-                            .{},
-                        );
-                        return error.ReplayUnsupportedApp;
-                    },
-                    else => return err,
-                };
+                // Feed with back-pressure: results journal in delivery
+                // order, so one recorded drain pass can carry more
+                // results than the completion queue holds (a live
+                // recording's workers keep refilling the queue while
+                // the loop drains it). A feed that reports the queue
+                // full drains the loop through the same `.wake`
+                // dispatch the platform delivers live — the parked
+                // request keeps its bytes, and delivery stays
+                // queue-ordered — then feeds once more. That one drain
+                // empties the whole queue, so a second refusal is a
+                // real fault and propagates.
+                var drained_for_room = false;
+                feed: while (true) {
+                    app.replayControl(.{ .feed = effect }) catch |err| switch (err) {
+                        error.EffectQueueFull => {
+                            if (drained_for_room) return err;
+                            drained_for_room = true;
+                            try runtime.dispatchPlatformEvent(app, .wake);
+                            continue :feed;
+                        },
+                        error.EffectNotFound => {
+                            std.debug.print(
+                                "replay diverged after event {d}: journaled {s} result for effect key {d} has no matching pending request - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
+                                .{ report.events_replayed, @tagName(effect.kind), effect.key },
+                            );
+                            return error.ReplayEffectDivergence;
+                        },
+                        error.ReplayUnsupported => {
+                            std.debug.print(
+                                "replay refused: the journal carries effect results but this app registered no replay hook (App.replay_fn - UiApp wires it automatically)\n",
+                                .{},
+                            );
+                            return error.ReplayUnsupportedApp;
+                        },
+                        else => return err,
+                    };
+                    break :feed;
+                }
                 report.effects_fed += 1;
             },
             .checkpoint => |checkpoint| {

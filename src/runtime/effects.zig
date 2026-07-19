@@ -4883,7 +4883,7 @@ pub fn Effects(comptime Msg: type) type {
         /// executor, so tests exercise the full decode→register→Msg
         /// path. Bytes over `max_effect_image_bytes` deliver `.too_large`
         /// without decoding, mirroring the real bound.
-        pub fn feedImageBytes(self: *Self, id: u64, bytes: []const u8) error{EffectNotFound}!void {
+        pub fn feedImageBytes(self: *Self, id: u64, bytes: []const u8) error{ EffectNotFound, EffectQueueFull }!void {
             const slot_index = self.findActiveFakeSlot(id, .image) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
@@ -4896,7 +4896,7 @@ pub fn Effects(comptime Msg: type) type {
                 staged_len = bytes.len;
             }
             slot.body_len = staged_len;
-            self.finishFedImage(slot, .{
+            try self.finishFedImage(slot, .{
                 .kind = .image,
                 .slot_index = @intCast(slot_index),
                 .generation = slot.generation,
@@ -4913,15 +4913,18 @@ pub fn Effects(comptime Msg: type) type {
         /// verbatim (the Msg stream must replay byte-identical even on
         /// a host whose codec differs), and a `.loaded` record's bytes
         /// re-register best-effort so views repaint the recorded
-        /// pixels. Also the failure-class feed for tests.
-        pub fn feedImageResult(self: *Self, id: u64, outcome: EffectImageOutcome, width: u64, height: u64, status: u16, bytes: []const u8) error{EffectNotFound}!void {
+        /// pixels. Also the failure-class feed for tests. Under replay
+        /// a full completion queue reports `error.EffectQueueFull`
+        /// with the request still parked — feed again after a drain
+        /// (see `finishFedImage`).
+        pub fn feedImageResult(self: *Self, id: u64, outcome: EffectImageOutcome, width: u64, height: u64, status: u16, bytes: []const u8) error{ EffectNotFound, EffectQueueFull }!void {
             const slot_index = self.findActiveFakeSlot(id, .image) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
             const staged_len = @min(bytes.len, max_effect_image_bytes);
             @memcpy(buffer[0..staged_len], bytes[0..staged_len]);
             slot.body_len = staged_len;
-            self.finishFedImage(slot, .{
+            try self.finishFedImage(slot, .{
                 .kind = .image,
                 .slot_index = @intCast(slot_index),
                 .generation = slot.generation,
@@ -4936,18 +4939,31 @@ pub fn Effects(comptime Msg: type) type {
             });
         }
 
-        /// Queue a fed image terminal, with the pending-ring fallback
-        /// every feed carries: if the completion queue is somehow full,
-        /// the terminal lands byte-free through the ring. A DERIVED
-        /// `.loaded` (a bytes feed) is rewritten `.rejected` there —
-        /// nothing decoded, nothing registered; a success it cannot
-        /// back would lie. A RECORDED terminal stands verbatim (the
-        /// replayed Msg stream stays identical; only the best-effort
-        /// re-registration is lost).
-        fn finishFedImage(self: *Self, slot: *Slot, entry_value: Entry) void {
+        /// Queue a fed image terminal. Under session replay the queue
+        /// is the ONLY path: a full queue back-pressures with
+        /// `error.EffectQueueFull` — the slot returns to `.running`
+        /// exactly as before the feed, bytes still in its buffer — so
+        /// the replay pump can drain the loop and feed again. That is
+        /// the loop-thread mirror of the real worker's `postImage`
+        /// retry: everything goes THROUGH the queue, so the recorded
+        /// bytes and the recorded delivery order both survive a
+        /// recording whose drain pass carried more results than the
+        /// queue holds.
+        ///
+        /// Outside replay (test feeds) a full queue keeps the
+        /// pending-ring fallback: the terminal lands byte-free, and a
+        /// DERIVED `.loaded` (a bytes feed) is rewritten `.rejected`
+        /// there — nothing decoded, nothing registered; a success it
+        /// cannot back would lie. A RECORDED terminal stands verbatim
+        /// (only the best-effort re-registration is lost).
+        fn finishFedImage(self: *Self, slot: *Slot, entry_value: Entry) error{EffectQueueFull}!void {
             var entry = entry_value;
             slot.state.store(.draining, .release);
             if (!self.enqueue(&entry)) {
+                if (self.replay) {
+                    slot.state.store(.running, .release);
+                    return error.EffectQueueFull;
+                }
                 const image_fn = slot.on_image;
                 var outcome = entry.image_outcome;
                 if (outcome == .loaded and !entry.image_fed) outcome = .rejected;
