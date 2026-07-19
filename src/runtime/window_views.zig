@@ -137,7 +137,11 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// bookkeeping moves: a minimized window stays open and keeps
         /// its views — it comes back from the Dock/taskbar.
         pub fn minimizeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
-            if (Self.findWindowIndexById(self, window_id) == null) return error.WindowNotFound;
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // The same liveness gate as showWindow below: a retained
+            // closed slot must not reach the platform (the CEF host
+            // would genie the retained closed window into the Dock).
+            if (!self.windows[index].info.open) return error.WindowNotFound;
             try self.options.platform.services.minimizeWindow(window_id);
         }
 
@@ -150,6 +154,15 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// just comes to the front.
         pub fn showWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // A closed window keeps its table slot (the id and label
+            // release lazily, at the next create), so resolving the id
+            // is not liveness: a dead slot must answer WindowNotFound —
+            // the same answer every not-open gate in the runtime gives —
+            // BEFORE the platform call. The null platform would accept
+            // the show and report {open:false, focused:true}; the CEF
+            // host retains browser-bearing windows past their close and
+            // would visibly re-order one onto the glass.
+            if (!self.windows[index].info.open) return error.WindowNotFound;
             const was_hidden = self.windows[index].info.hidden;
             self.windows[index].info.hidden = false;
             self.options.platform.services.showWindow(window_id) catch |err| {

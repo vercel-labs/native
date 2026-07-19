@@ -37,6 +37,15 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
 
         pub fn focusWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // Liveness before the platform call, like showWindow: a
+            // closed window keeps its table slot until the id or label
+            // is re-created, and close clears `hidden` with `open`, so
+            // a dead slot would skip the hidden-routing below and reach
+            // the platform's focus verb directly — the CEF host retains
+            // browser-bearing windows past their close and would order
+            // the closed window back front. Dead slots answer
+            // WindowNotFound, the runtime's one answer for them.
+            if (!self.windows[index].info.open) return error.WindowNotFound;
             // Focus implies visibility: a window hidden by its .hide
             // close policy must leave the hidden state through the REAL
             // show verb before it takes key. The hosts' focus paths

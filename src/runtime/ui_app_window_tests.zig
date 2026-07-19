@@ -950,6 +950,60 @@ test "showWindow activates: the shown window takes key in the runtime table, and
     }
 }
 
+test "the window verbs refuse a retained closed slot: show, focus, and minimize answer WindowNotFound with no platform call" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A closed window keeps its table slot (the id and label release
+    // lazily, at the next create), so resolving the id is not liveness.
+    // Without the open gate the null platform accepts the verbs and
+    // reports {open:false, focused:true}, and the CEF host — which
+    // retains browser-bearing windows past their close — would visibly
+    // re-order the closed window onto the glass. The runtime gate holds
+    // independent of host timing.
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    try fixture.harness.runtime.closeWindow(info.id);
+
+    // show: the dead-slot answer, and the platform recorder never moves.
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.showWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.showCountForWindow(info.id));
+
+    // focus resolves by id too, and close cleared `hidden` with `open`,
+    // so without its own gate it skips the hidden-routing and reaches
+    // the platform's focus verb directly.
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.focusWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.showCountForWindow(info.id));
+
+    // The minimize twin (the CEF host would genie the retained closed
+    // window into the Dock).
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.minimizeWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.minimizeCountForWindow(info.id));
+
+    // Nothing resurrected: the runtime table and the platform mirror
+    // both still read the window closed, unfocused, un-hidden.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.focused);
+        try std.testing.expect(!window.hidden);
+    }
+    try std.testing.expect(found);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.focused);
+    }
+}
+
 test "the modeled host mirrors the app close of a hidden window, and the reopen never resurrects a closed one" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
