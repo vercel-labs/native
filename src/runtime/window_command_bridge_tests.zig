@@ -191,6 +191,28 @@ test "runtime handles built-in JavaScript window bridge commands" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"hidden\":false") != null);
     try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(2));
 
+    // The runtime's show verb (a tray "Open", Cmd.showWindow) is show
+    // AND activate: after showing a policy-hidden window, the bridge's
+    // window JSON — served from the same runtime table — reports it
+    // focused, not merely un-hidden.
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .window_frame_changed = .{
+        .id = 2,
+        .label = "palette",
+        .title = "Palette",
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .scale_factor = 1,
+        .open = true,
+        .focused = false,
+        .hidden = true,
+    } });
+    try harness.runtime.showWindow(2);
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
+        .bytes = "{\"id\":\"shown\",\"command\":\"native-sdk.window.list\",\"payload\":null}",
+        .origin = "zero://inline",
+        .window_id = 1,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"label\":\"palette\",\"title\":\"Palette\",\"open\":true,\"focused\":true,\"hidden\":false") != null);
+
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"4\",\"command\":\"native-sdk.window.close\",\"payload\":{\"label\":\"palette\"}}",
         .origin = "zero://inline",

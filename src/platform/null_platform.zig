@@ -306,6 +306,11 @@ pub const NullPlatform = struct {
     /// `closeWindow` restores every flag it flipped optimistically
     /// (open, focused, hidden).
     fail_next_close_window: bool = false,
+    /// Test seam: make the NEXT `show_window_fn` call fail with
+    /// `error.ShowFailed`, consuming the flag — the injection the
+    /// runtime's `showWindow` rollback test uses to assert a refused
+    /// show restores hidden and moves no focus.
+    fail_next_show_window: bool = false,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -951,6 +956,10 @@ pub const NullPlatform = struct {
 
     fn showWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_show_window) {
+            self.fail_next_show_window = false;
+            return error.ShowFailed;
+        }
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         // The un-hide verb: back on the glass with focus, exactly the
         // real hosts' deminiaturize + order-front + activate. Clears a

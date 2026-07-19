@@ -156,6 +156,16 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 self.windows[index].info.hidden = was_hidden;
                 return err;
             };
+            // The contract is show AND activate: every host's show verb
+            // makes the window key (makeKeyAndOrderFront / activate), so
+            // the runtime table must move focus with it or listWindows
+            // and the JS bridge report the shown window unfocused while
+            // it stands frontmost on the glass. Same post-success flow
+            // as focusWindow — through the setFocusedIndex seam, so the
+            // dethroned window's key-loss consequence fires — and only
+            // AFTER the platform accepted: a refused show rolls back
+            // hidden above and moves no focus.
+            try Self.setFocusedIndex(self, index);
             self.invalidated = true;
         }
 

@@ -902,6 +902,54 @@ test "an app-driven close of a policy-hidden window clears hidden with open, and
     try std.testing.expect(found);
 }
 
+test "showWindow activates: the shown window takes key in the runtime table, and a refused show moves nothing" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A policy-hidden window (the user's close under .hide).
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+
+    // The show verb's contract is show AND activate — every host's show
+    // path makes the window key. After a successful platform show, the
+    // runtime table (what listWindows and the JS bridge serve) must
+    // read the shown window focused and every other window unfocused,
+    // not a frontmost window still reported keyless.
+    try fixture.harness.runtime.showWindow(info.id);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id == info.id) {
+            found = true;
+            try std.testing.expect(!window.hidden);
+            try std.testing.expect(window.focused);
+        } else {
+            try std.testing.expect(!window.focused);
+        }
+    }
+    try std.testing.expect(found);
+
+    // Hide again, then refuse the show at the platform: hidden rolls
+    // back and focus does not move — a refused show must never report
+    // a focused window that never came back to the glass.
+    const rehide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, rehide_event);
+    fixture.harness.null_platform.fail_next_show_window = true;
+    try std.testing.expectError(error.ShowFailed, fixture.harness.runtime.showWindow(info.id));
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+}
+
 test "the modeled host mirrors the app close of a hidden window, and the reopen never resurrects a closed one" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
