@@ -56,6 +56,19 @@ pub fn hexName(hash: BlobHash) [hash_len * 2]u8 {
     return std.fmt.bytesToHex(hash, .lower);
 }
 
+/// The temp path one blob write stages before its atomic rename into
+/// the addressed name. `token` is the write's own random draw, and it
+/// carries the WHOLE writer-uniqueness: the directory is shared between
+/// recorders and the name is the content hash, so every other component
+/// is identical when two recorders write the same blob — a temp built
+/// without the token is one file both writers fight over. The name
+/// stays recognizable install debris (`<hash>.<token>.partial` beside
+/// its blob) for a hard crash to leave behind. A pure formatter: the
+/// entropy lives with the caller.
+fn blobPartialPath(buffer: []u8, dir_path: []const u8, name: []const u8, token: u64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s}/{s}.{x:0>16}.partial", .{ dir_path, name, token });
+}
+
 pub const BlobError = error{
     /// The store has no blob under this address — the journal names
     /// bytes the store never received (a moved journal without its
@@ -95,6 +108,17 @@ pub const SessionBlobSource = struct {
 /// by a VERIFYING probe — an existing file under the address is read
 /// back and must hold exactly the incoming bytes, or the write repairs
 /// it in place; reads re-hash and refuse mismatches.
+///
+/// The directory is a SHARED medium: two recorders (two app processes,
+/// or two stores in one process) may write the same blob into one
+/// blobs/ directory concurrently. Two disciplines keep that safe:
+/// every write stages through a WRITER-unique temp (a random token in
+/// the name — a temp named by the hash alone would be one file both
+/// writers truncate and rename out from under each other), and a
+/// rename that still fails gets the content-addressed grace — when the
+/// addressed name already holds exactly the bytes being written, some
+/// writer won with THIS content, so the write succeeded (only a
+/// verified mismatch or absence stays `BlobIoFailed`).
 pub const DirBlobStore = struct {
     io: std.Io,
     dir_storage: [max_dir_bytes]u8 = undefined,
@@ -144,10 +168,46 @@ pub const DirBlobStore = struct {
             .mismatch => blob_log.debug("blob {s} does not hold its addressed bytes; repairing in place", .{name}),
         }
         cwd.createDirPath(self.io, self.dir()) catch return error.BlobIoFailed;
-        var partial_buffer: [max_dir_bytes + hash_len * 2 + 16]u8 = undefined;
-        const partial_path = std.fmt.bufPrint(&partial_buffer, "{s}/{s}.partial", .{ self.dir(), name }) catch return error.BlobIoFailed;
-        cwd.writeFile(self.io, .{ .sub_path = partial_path, .data = bytes }) catch return error.BlobIoFailed;
-        cwd.rename(partial_path, cwd, blob_path, self.io) catch return error.BlobIoFailed;
+        // The temp name must be WRITER-unique, not merely blob-unique:
+        // two recorders sharing one blobs/ directory write the same
+        // blob under the same hash, and a temp named by the hash alone
+        // is ONE file both writers truncate mid-write and rename out
+        // from under each other (the loser's rename then fails a
+        // correct recording). The token is the write's own random draw
+        // from the store's io (the CSPRNG seam the executor's cache
+        // installs already use), unique across stores and processes
+        // alike.
+        var token_bytes: [8]u8 = undefined;
+        self.io.random(&token_bytes);
+        const token = std.mem.readInt(u64, &token_bytes, .little);
+        var partial_buffer: [max_dir_bytes + hash_len * 2 + 48]u8 = undefined;
+        const partial_path = blobPartialPath(&partial_buffer, self.dir(), &name, token) catch return error.BlobIoFailed;
+        cwd.writeFile(self.io, .{ .sub_path = partial_path, .data = bytes }) catch {
+            cwd.deleteFile(self.io, partial_path) catch {};
+            return error.BlobIoFailed;
+        };
+        return self.installPartial(partial_path, blob_path, bytes);
+    }
+
+    /// The atomic tail of `write`: rename the writer-unique temp into
+    /// the blob's addressed name. A failed rename is not yet a failed
+    /// WRITE — the store is content-addressed, so if the addressed name
+    /// already holds exactly these bytes, a concurrent writer won the
+    /// install with the same content and this write SUCCEEDED (its
+    /// bytes are durable under their address; only who renamed them
+    /// there differs). Re-running the verifying probe decides: a match
+    /// returns cleanly, a verified mismatch or absence is the honest
+    /// `BlobIoFailed`. The loser's temp is deleted on every failure
+    /// path so no `.partial` debris outlives the write.
+    fn installPartial(self: *DirBlobStore, partial_path: []const u8, blob_path: []const u8, bytes: []const u8) BlobError!void {
+        const cwd = std.Io.Dir.cwd();
+        cwd.rename(partial_path, cwd, blob_path, self.io) catch {
+            defer cwd.deleteFile(self.io, partial_path) catch {};
+            switch (self.probeExisting(blob_path, bytes)) {
+                .matches => return,
+                .absent, .mismatch => return error.BlobIoFailed,
+            }
+        };
     }
 
     const ProbeResult = enum { absent, matches, mismatch };
@@ -204,7 +264,12 @@ pub const DirBlobStore = struct {
 /// store's verifying probe (an entry that no longer holds its
 /// addressed bytes is repaired in place); read verifies the hash like
 /// the directory store, so a test store misbehaves exactly as loudly
-/// as the real one.
+/// as the real one. The directory store's two-writer race has no
+/// analogue here: this store's medium is its own `entries` array, not
+/// a shared directory — two recorders can never address one
+/// MemoryBlobStore from two processes, and within one process each
+/// recorder's sink drives its own store instance on its own thread —
+/// so there is no shared temp to fight over and no rename to lose.
 pub const MemoryBlobStore = struct {
     allocator: std.mem.Allocator,
     entries: [max_entries]Entry = undefined,
@@ -383,6 +448,121 @@ test "dir store writes atomically, dedups by existence, and verifies on read" {
     const rel = try std.fmt.bufPrint(&path_buffer, "blobs/{s}", .{name});
     try tmp.dir.writeFile(io, .{ .sub_path = rel, .data = damaged[0..bytes.len] });
     try testing.expectError(error.BlobCorrupt, store.read(hash, &read_buffer));
+}
+
+test "two recorders sharing one blobs directory both record the same blob successfully" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    var dir_buffer: [256]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/blobs", .{tmp.sub_path[0..]});
+
+    // Two DirBlobStore INSTANCES over one directory — the designed
+    // shared layout when two recorders journal into one session
+    // directory. Both write the same bytes (the same image loaded in
+    // both recordings addresses the same blob) and BOTH writes must
+    // succeed: a failure here invalidates a correct recording.
+    var first_recorder = try DirBlobStore.init(io, dir_path);
+    var second_recorder = try DirBlobStore.init(io, dir_path);
+
+    const bytes = "encoded image bytes both sessions loaded";
+    const hash = hashBytes(bytes);
+    try first_recorder.write(hash, bytes);
+    try second_recorder.write(hash, bytes);
+
+    // One intact blob, readable through either store, zero temp debris.
+    var read_buffer: [4096]u8 = undefined;
+    try testing.expectEqualStrings(bytes, try first_recorder.read(hash, &read_buffer));
+    try testing.expectEqualStrings(bytes, try second_recorder.read(hash, &read_buffer));
+    var blob_dir = try tmp.dir.openDir(io, "blobs", .{ .iterate = true });
+    defer blob_dir.close(io);
+    var iterator = blob_dir.iterate();
+    var file_count: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        try testing.expect(!std.mem.endsWith(u8, entry.name, ".partial"));
+        file_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), file_count);
+}
+
+test "blob write temps are writer-unique, so concurrent recorders never share one" {
+    // Two writes of the same blob into the same directory agree on
+    // every name component except the token: dir (shared layout), name
+    // (the content hash). A temp built without the token would be ONE
+    // file both writers truncate mid-write and rename out from under
+    // each other — the loser's rename fails and a correct recording is
+    // refused. The token carries the whole uniqueness, so this pin
+    // fails if it ever leaves the name.
+    var first_buffer: [256]u8 = undefined;
+    var second_buffer: [256]u8 = undefined;
+    const name = "aabbccddeeff00112233445566778899";
+    const first = try blobPartialPath(&first_buffer, "session/blobs", name, 0x1111);
+    const second = try blobPartialPath(&second_buffer, "session/blobs", name, 0x2222);
+    try testing.expect(!std.mem.eql(u8, first, second));
+    // Both stay recognizable install debris beside their blob.
+    try testing.expect(std.mem.startsWith(u8, first, "session/blobs/aabbccddeeff00112233445566778899."));
+    try testing.expect(std.mem.endsWith(u8, first, ".partial"));
+    try testing.expect(std.mem.endsWith(u8, second, ".partial"));
+}
+
+test "a losing writer's failed rename succeeds through the content-addressed grace" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    var dir_buffer: [256]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/blobs", .{tmp.sub_path[0..]});
+    var winner = try DirBlobStore.init(io, dir_path);
+    var loser = try DirBlobStore.init(io, dir_path);
+
+    const bytes = "encoded image bytes";
+    const hash = hashBytes(bytes);
+    const name = hexName(hash);
+    var blob_path_buffer: [512]u8 = undefined;
+    const blob_path = try std.fmt.bufPrint(&blob_path_buffer, "{s}/{s}", .{ dir_path, name });
+    var partial_buffer: [512]u8 = undefined;
+    const partial_path = try blobPartialPath(&partial_buffer, dir_path, &name, 0xdead);
+
+    // The loser's exact state at the rename boundary, staged directly
+    // (one `write` call cannot be paused mid-window, so the window is
+    // pinned at the install seam): its probe saw the address ABSENT,
+    // the winner then installed the addressed bytes, and the loser's
+    // rename fails (here: the temp is gone — the shared-name theft this
+    // fix's unique tokens prevent, and the one rename failure POSIX
+    // makes deterministic). The bytes ARE durable under their address,
+    // so the write must report success, not refuse a correct recording.
+    try winner.write(hash, bytes);
+    try loser.installPartial(partial_path, blob_path, bytes);
+    var read_buffer: [4096]u8 = undefined;
+    try testing.expectEqualStrings(bytes, try loser.read(hash, &read_buffer));
+
+    // The grace VERIFIES: an address occupied by different bytes means
+    // the write's bytes are NOT durable — that stays BlobIoFailed
+    // (write's earlier repair path handles mismatches while the rename
+    // can still deliver; here it cannot).
+    const other = "different bytes at the same staged path";
+    try testing.expectError(error.BlobIoFailed, loser.installPartial(partial_path, blob_path, other));
+
+    // ...and an absent address after a failed rename is a plain failed
+    // write.
+    var absent_path_buffer: [512]u8 = undefined;
+    const absent_name = hexName(hashBytes(other));
+    const absent_path = try std.fmt.bufPrint(&absent_path_buffer, "{s}/{s}", .{ dir_path, absent_name });
+    var absent_partial_buffer: [512]u8 = undefined;
+    const absent_partial = try blobPartialPath(&absent_partial_buffer, dir_path, &absent_name, 0xbeef);
+    try testing.expectError(error.BlobIoFailed, loser.installPartial(absent_partial, absent_path, other));
+
+    // No temp debris outlives any of it.
+    var blob_dir = try tmp.dir.openDir(io, "blobs", .{ .iterate = true });
+    defer blob_dir.close(io);
+    var iterator = blob_dir.iterate();
+    var file_count: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        try testing.expect(!std.mem.endsWith(u8, entry.name, ".partial"));
+        file_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), file_count);
 }
 
 test "dir store verifies the dedup probe and repairs a damaged blob in place" {
