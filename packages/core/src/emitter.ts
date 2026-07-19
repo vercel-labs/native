@@ -2540,9 +2540,16 @@ export class Emitter {
       } else if (name === "cachePath") {
         cache_path = this.effectBytesArg(e, p.initializer, "Cmd.imageLoad cachePath", MAX_IMAGE_PATH_BYTES, ctx);
       } else if (name === "expectedBytes") {
+        // A byte count is a whole number: file sizes have no fractional
+        // bytes, and a fractional value would truncate on the host into
+        // a size the app never declared — cache verification against
+        // the wrong size re-downloads on every launch. The bound is the
+        // id gate's (Number.isSafeInteger): past 2^53 the f64 wire
+        // cannot carry the count exactly. Dynamic values stay the
+        // host's, which maps unrepresentable counts to "unknown size".
         const literal = this.numberLiteralValue(p.initializer);
-        if (literal !== null && !(literal >= 0 && Number.isFinite(literal))) {
-          this.fail(p.initializer, `\`Cmd.imageLoad\` expectedBytes ${literal} is not a byte count`, "NS1030");
+        if (literal !== null && !(Number.isSafeInteger(literal) && literal >= 0)) {
+          this.fail(p.initializer, `\`Cmd.imageLoad\` expectedBytes ${literal} is not a whole-number byte count below 2^53`, "NS1030");
         }
         expected = this.emitExpr(p.initializer, ctx, { k: "f64" }).code;
       } else {

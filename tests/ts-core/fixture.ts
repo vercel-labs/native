@@ -50,6 +50,12 @@ export interface Model {
   // runtime (the emitter's NS1030 gate covers literals only).
   readonly nextCover: number;
   readonly topId: number;
+  // Model-owned expectedBytes values the emitter's literal gate never
+  // sees: a fractional count the bridge must map to "unknown size"
+  // (never truncate into a wrong verification size), and a whole one
+  // it must carry through exactly.
+  readonly fracBytes: number;
+  readonly wholeBytes: number;
 }
 
 export type Msg =
@@ -88,6 +94,8 @@ export type Msg =
   | { readonly kind: "load_top" }
   | { readonly kind: "load_past" }
   | { readonly kind: "load_flood" }
+  | { readonly kind: "load_frac" }
+  | { readonly kind: "load_sized" }
   | { readonly kind: "cancel_cover" }
   | { readonly kind: "cancel_missing" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
@@ -123,6 +131,8 @@ export function initialModel(): [Model, Cmd<Msg>] {
       lastImageId: -1,
       nextCover: 100,
       topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
+      fracBytes: 1.5,
+      wholeBytes: 4096,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -257,6 +267,17 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
         Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
       ])];
+    case "load_frac":
+      // A fractional expectedBytes reaching the bridge as a DYNAMIC
+      // value the emitter's literal gate never sees: not a
+      // representable whole byte count, so the bridge hands the engine
+      // "unknown size" (0) — truncating to 1 would make the cache
+      // verify against a size the app never declared.
+      return [model, Cmd.imageLoad(61, { url: asciiBytes("https://cdn.test/frac.png"), cachePath: asciiBytes("cache/frac.png"), expectedBytes: model.fracBytes }, { event: "image_done" })];
+    case "load_sized":
+      // The whole-number control: a dynamic representable count rides
+      // the wire into the engine exactly.
+      return [model, Cmd.imageLoad(62, { url: asciiBytes("https://cdn.test/sized.png"), cachePath: asciiBytes("cache/sized.png"), expectedBytes: model.wholeBytes }, { event: "image_done" })];
     case "cancel_cover":
       // The numeric-id cancel: ends the in-flight load under id 21
       // loudly (its own event arm delivers state "cancelled") and

@@ -4030,6 +4030,33 @@ ${imageTail}
 `,
   },
   {
+    // Byte counts are whole numbers: a fractional literal would
+    // truncate on the host into a size the app never declared, so the
+    // cache would verify every download against the wrong size and
+    // re-fetch on every launch. The literal stops the build.
+    name: "a fractional image expectedBytes literal stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { url: asciiBytes("https://cdn.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 1.5 }, { event: "image_done" })];
+${imageTail}
+`,
+  },
+  {
+    name: "a whole-number image expectedBytes literal builds",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { url: asciiBytes("https://cdn.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 4096 }, { event: "image_done" })];
+${imageTail}
+`,
+  },
+  {
     name: "imageCancel emits: the numeric-id cancel with literal and model-expression ids",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";

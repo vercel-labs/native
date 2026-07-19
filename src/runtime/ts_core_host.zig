@@ -1279,9 +1279,15 @@ pub fn TsCoreHost(comptime core: type) type {
                 .url = url,
                 .cache_path = effectiveImageCachePath(cache_path, url),
                 // The wire carries the app's number; anything that is
-                // not a representable byte count means "unknown size"
-                // (0), the engine's own default.
-                .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0)
+                // not a representable WHOLE byte count — fractional,
+                // out of range, NaN — means "unknown size" (0), the
+                // engine's own default. The integer clause matters:
+                // @intFromFloat would truncate 1.5 to 1, and the cache
+                // would then verify downloads against a size the app
+                // never declared — re-fetching on every launch. 0 is
+                // the honest mapping; the emitter already stops the
+                // literal spellings (NS1030).
+                .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0 and @floor(expected) == expected)
                     @intFromFloat(expected)
                 else
                     0,

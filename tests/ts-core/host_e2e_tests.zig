@@ -83,6 +83,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.covertop")) return .load_top;
     if (std.mem.eql(u8, name, "core.coverpast")) return .load_past;
     if (std.mem.eql(u8, name, "core.coverflood")) return .load_flood;
+    if (std.mem.eql(u8, name, "core.coverfrac")) return .load_frac;
+    if (std.mem.eql(u8, name, "core.coversized")) return .load_sized;
     if (std.mem.eql(u8, name, "core.covercancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "core.cancelmissing")) return .cancel_missing;
     return null;
@@ -961,6 +963,55 @@ test "the image id wire bound is exclusive at 2^53 for dynamic values" {
     // echo: the rejection carries 0, the no-image sentinel.
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 0), Bridge.model().lastImageId);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+}
+
+test "a fractional dynamic expectedBytes reaches the engine as unknown size, a whole one exactly" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A model-owned 1.5 the emitter's literal gate never sees: not a
+    // whole byte count, so the bridge hands the engine "unknown size"
+    // (0) — @intFromFloat truncation to 1 would make every cache
+    // install verify against a size the app never declared and
+    // re-download on every launch. The load itself parks healthy: an
+    // unknown size skips verification, it never fails the load.
+    try h.menu("core.coverfrac");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    const frac_request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 61), frac_request.id);
+    try std.testing.expectEqual(@as(u64, 0), frac_request.expected_bytes);
+
+    // The whole-number control rides the wire into the engine exactly.
+    try h.menu("core.coversized");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+    const sized_request = fx.pendingImageLoadAt(1).?;
+    try std.testing.expectEqual(@as(u64, 62), sized_request.id);
+    try std.testing.expectEqual(@as(u64, 4096), sized_request.expected_bytes);
+
+    // Both loads complete: the fractional declaration degraded to
+    // unverified caching, never to a failed or silently-wrong load.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 3;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 41 +% 7;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(61, writer.buffered());
+    try fx.feedImageBytes(62, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
 }
 
 // -------------------------------------------------------- record / replay
