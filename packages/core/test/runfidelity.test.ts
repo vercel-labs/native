@@ -152,6 +152,31 @@ export function apply(sel: number, v: number, prev: number | null): number {
     ],
   },
   {
+    // A branch that reassigns a narrowed optional to null widens it back;
+    // the post-merge null check must test the LIVE value. If the branch
+    // exit resurrected the dead narrow, the null path here would read the
+    // pre-branch payload (returning v + 1) instead of taking the re-check
+    // (returning 0) — the transcripts would diverge on the flag=true rows.
+    name: "a branch reassigning a narrowed optional to null drives the post-merge re-check",
+    src: `
+export function merge(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+    calls: [
+      { fn: "merge", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "merge", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "merge", args: [f(4), { t: "b", v: true }] },
+      { fn: "merge", args: [f(4), { t: "b", v: false }] },
+    ],
+  },
+  {
     name: "orelse fusion over a ternary initializer keeps both arms (parenthesized conditional)",
     src: `
 export function low(bytes: Uint8Array): number | null {

@@ -86,6 +86,16 @@ interface Ctx {
   readonly stillOptionalSubst: Map<string, string>;
   /// source text of a union-typed expr -> active arm tag (kind guards)
   readonly narrowedUnion: Map<string, string>;
+  /// Invalidation frames, innermost last: every scope that snapshots and
+  /// restores the narrowing maps pushes a Set here, and the assignment path
+  /// records into the innermost frame each memberSubst key whose narrowing
+  /// it permanently deleted (the assigned value may be null again). The
+  /// snapshot restore at scope exit gives CONTAINMENT — narrowings added
+  /// inside the scope die there — but restoring alone would also resurrect
+  /// narrowings an assignment inside the scope killed; re-applying the
+  /// frame's deletions after the restore keeps those dead. Frames merge
+  /// outward on pop so an inner branch's kill reaches every enclosing exit.
+  readonly narrowKilled: Set<string>[];
   /// declared/inferred types of locals
   readonly localTypes: Map<ts.Node, ZType>;
   /// Locally-owned arrays with length-changing mutations (the push-builder
@@ -982,6 +992,7 @@ export class Emitter {
       memberSubst: new Map(),
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
+      narrowKilled: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1360,6 +1371,7 @@ export class Emitter {
       memberSubst: new Map(),
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
+      narrowKilled: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1617,6 +1629,7 @@ export class Emitter {
       memberSubst: new Map(),
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
+      narrowKilled: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1842,6 +1855,7 @@ export class Emitter {
       memberSubst: new Map(),
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
+      narrowKilled: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -2976,6 +2990,30 @@ export class Emitter {
     return this.uniqueName(ctx, hint);
   }
 
+  /// Open an invalidation frame: every scope that snapshots/restores the
+  /// narrowing maps brackets its emission with this pair, so assignment
+  /// kills recorded during the scope survive the restore (see Ctx.narrowKilled).
+  private pushNarrowKillFrame(ctx: Ctx): void {
+    ctx.narrowKilled.push(new Set());
+  }
+
+  /// Close the innermost invalidation frame: re-apply its recorded kills to
+  /// the just-restored narrowing maps and merge them one frame outward (an
+  /// inner branch's kill must reach every enclosing exit). Deliberately
+  /// conservative: a kill on ANY path inside the scope deletes the narrow at
+  /// the merge point, so a path that kept the value non-null pays a re-check
+  /// — never wrong code. Only memberSubst is touched, mirroring the
+  /// assignment-invalidation path (a stillOptionalSubst entry is inert once
+  /// its memberSubst entry is gone, and narrowedUnion is not what `.?`
+  /// substitutions live in).
+  private popNarrowKillFrame(ctx: Ctx): Set<string> {
+    const killed = ctx.narrowKilled.pop() ?? new Set<string>();
+    for (const key of killed) ctx.memberSubst.delete(key);
+    const parent = ctx.narrowKilled[ctx.narrowKilled.length - 1];
+    if (parent) for (const key of killed) parent.add(key);
+    return killed;
+  }
+
   private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx): void {
     // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
     // narrows the statements after it in ITS list, and whatever those
@@ -2987,6 +3025,7 @@ export class Emitter {
     const savedSubst = new Map(ctx.memberSubst);
     const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrowed = new Map(ctx.narrowedUnion);
+    this.pushNarrowKillFrame(ctx);
     this.emitStatementList(stmts, ctx);
     ctx.memberSubst.clear();
     for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
@@ -2994,6 +3033,11 @@ export class Emitter {
     for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
     ctx.narrowedUnion.clear();
     for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
+    // Containment restored; now keep invalidation: an assignment inside the
+    // block that killed a narrowing (assigned a possibly-null value) must
+    // stay dead past the merge — the snapshot restore above would otherwise
+    // resurrect its `.?` spelling on a value that may be null again.
+    this.popNarrowKillFrame(ctx);
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -4306,6 +4350,7 @@ export class Emitter {
     // the arm, routing reads around the null-narrowing lowerings.
     const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrow = new Map(ctx.narrowedUnion);
+    this.pushNarrowKillFrame(ctx);
     this.narrowUnion(guard.base, t.name, guard.tag, ctx);
     try {
       return emitBranch();
@@ -4316,6 +4361,9 @@ export class Emitter {
       for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
       ctx.narrowedUnion.clear();
       for (const [k, v] of savedNarrow) ctx.narrowedUnion.set(k, v);
+      // Assignment kills inside the branch stay dead past this restore
+      // (the snapshot would resurrect them; see popNarrowKillFrame).
+      this.popNarrowKillFrame(ctx);
     }
   }
 
@@ -5016,6 +5064,7 @@ export class Emitter {
           }
         }
       }
+      this.pushNarrowKillFrame(ctx);
       this.emitBlockStatements(stmts, sub);
       // Restore: captures are arm-scoped, and the still-optional markers
       // stay paired with the substitutions they annotate. Repopulate from
@@ -5027,6 +5076,9 @@ export class Emitter {
       for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
       ctx.stillOptionalSubst.clear();
       for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
+      // Assignment kills inside the arm stay dead past this restore
+      // (the snapshot would resurrect them; see popNarrowKillFrame).
+      this.popNarrowKillFrame(ctx);
 
       const labels = [...pending, tag].map((t) => `.${zigId(t)}`).join(", ");
       pending = [];
@@ -5410,6 +5462,12 @@ export class Emitter {
           // would read the stale capture — those stay dropped.
           const empties = this.tast.emptiesOf(expr.right);
           if (!empties.null && !empties.undefined) ctx.memberSubst.set(key, hadSubst);
+        }
+        if (hadSubst !== undefined && !ctx.memberSubst.has(key)) {
+          // The narrowing died with this assignment (the value may be null
+          // again). Record the kill so scope exits, whose snapshot restores
+          // give containment, do not resurrect it past the merge.
+          ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
         }
         this.push(ctx, `${target} = ${this.byteStoreNarrowed(expr, v.code, ctx)};`);
         return;

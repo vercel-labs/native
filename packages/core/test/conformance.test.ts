@@ -5739,9 +5739,155 @@ export function score(e: Ev): number {
   },
 ];
 
+// Narrowing INVALIDATION must survive the merge: a branch that assigns a
+// possibly-null value to a narrowed local kills its `.?` substitution at the
+// assignment, and the block-exit snapshot restore (which exists for
+// CONTAINMENT — narrowings added inside a branch must not leak out) must not
+// resurrect the dead narrow. A resurrected narrow makes the post-merge
+// re-check emit `p.? == null` — "comparison of 'f64' with null" in Zig. The
+// merge is deliberately conservative: a kill on ANY path deletes the narrow
+// at the merge point, so the author's post-merge re-check (which tsc demands
+// anyway — the branch widened the type back) always compiles.
+const narrowInvalidationMergeCases: Case[] = [
+  {
+    name: "a branch reassigning a narrowed local to null kills the narrow past the merge",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a branch reassigning from an optional-returning call kills the narrow past the merge",
+    src: `
+export function pick(xs: readonly number[], i: number): number | null {
+  return i >= 0 && i < xs.length ? xs[i] : null;
+}
+export function f(q: number | null, xs: readonly number[], i: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (i > 0) {
+    p = pick(xs, i);
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    name: "an ELSE branch reassigning to null kills the narrow past the merge",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    // this path keeps the narrow; the merge must still drop it
+  } else {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a nested inner branch's kill propagates through BOTH block exits to the merge",
+    src: `
+export function f(q: number | null, a: boolean, b: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (a) {
+    if (b) {
+      p = null;
+    }
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a branch that reads the narrow and then kills it still drops it at the merge",
+    src: `
+export function f(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let acc: number = 0;
+  if (p > 2) {
+    acc = p;
+    p = null;
+  }
+  if (p === null) { return acc; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a switch arm reassigning to null kills the narrow past the switch",
+    src: `
+export type Msg = { readonly kind: "set"; readonly value: number } | { readonly kind: "clear" };
+export function f(q: number | null, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  switch (msg.kind) {
+    case "set": {
+      p = p + msg.value;
+      break;
+    }
+    case "clear": {
+      p = null;
+      break;
+    }
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a kind-guarded branch reassigning to null kills the narrow past the merge",
+    src: `
+export type Msg = { readonly kind: "set"; readonly flag: boolean } | { readonly kind: "clear" };
+export function g(q: number | null, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (msg.kind === "set" && msg.flag) {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // The containment half must stay intact: a narrowing ESTABLISHED inside
+    // a branch still dies at the branch exit. If it leaked, the post-merge
+    // null test would read the narrowed spelling and emit the same
+    // comparison-with-null error the kill cases pin.
+    name: "containment pin: a narrow established inside a branch still does not leak out",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let acc: number = 0;
+  if (flag) {
+    if (q === null) { return -1; }
+    acc = q;
+  }
+  return acc + (q === null ? 0 : q);
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
+  ...narrowInvalidationMergeCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,
