@@ -29,10 +29,25 @@ const image_windows = [_]app_manifest.ShellWindow{.{
 }};
 const image_scene: app_manifest.ShellConfig = .{ .windows = &image_windows };
 
+/// The burst test's stand-in entry for a non-image terminal in the
+/// delivery-order log — outside the burst's 1..=burst_load_count id
+/// range, so it can never shadow an image terminal.
+const interleave_marker: u64 = 500;
+
+/// Loads issued by the `.burst` arm: past both the pending ring's 32
+/// entries and the image stage's inline capacity, so a single dispatch
+/// proves the stage spills instead of evicting.
+const burst_load_count = 33;
+
 const ImageModel = struct {
     result_count: usize = 0,
     last: ?effects_mod.EffectImageResult = null,
     rejected_count: usize = 0,
+    /// Delivery-order log for the burst test: each image terminal
+    /// records its echoed id, the interleaved spawn rejection records
+    /// `interleave_marker`.
+    order: [40]u64 = @splat(0),
+    order_len: usize = 0,
 
     /// `EffectImageResult` is all plain data — storing it whole is the
     /// documented contract (no borrowed slices to copy).
@@ -40,13 +55,23 @@ const ImageModel = struct {
         model.result_count += 1;
         model.last = result;
         if (result.outcome == .rejected) model.rejected_count += 1;
+        model.logOrder(result.id);
+    }
+
+    fn logOrder(model: *ImageModel, value: u64) void {
+        if (model.order_len < model.order.len) {
+            model.order[model.order_len] = value;
+            model.order_len += 1;
+        }
     }
 };
 
 const ImageMsg = union(enum) {
     start,
     stop,
+    burst,
     result: effects_mod.EffectImageResult,
+    spawn_exit: effects_mod.EffectExit,
 };
 
 const ImageApp = ui_app_model.UiApp(ImageModel, ImageMsg);
@@ -75,8 +100,34 @@ fn imageUpdate(model: *ImageModel, msg: ImageMsg, fx: *ImageEffects) void {
             .on_result = ImageEffects.imageMsg(.result),
         }),
         .stop => fx.cancel(test_id),
+        .burst => {
+            // One dispatch, no drain in between: every load below is
+            // refused loop-side (no source at all), each staging its
+            // one terminal before any can deliver. A rejected spawn
+            // (empty argv) lands between load 5 and load 6 so the
+            // delivery order across BOTH pending structures stays
+            // pinned, not just the order within the image stage.
+            var id: u64 = 1;
+            while (id <= 5) : (id += 1) burstLoad(fx, id);
+            fx.spawn(.{ .key = interleave_marker, .argv = &.{}, .on_exit = ImageEffects.exitMsg(.spawn_exit) });
+            while (id <= burst_load_count) : (id += 1) burstLoad(fx, id);
+        },
         .result => |result| model.record(result),
+        .spawn_exit => model.logOrder(interleave_marker),
     }
+}
+
+/// A load with no source at all: refused before any I/O, delivering
+/// exactly one `.rejected` terminal that echoes `id`.
+fn burstLoad(fx: *ImageEffects, id: u64) void {
+    fx.loadImage(.{
+        .id = id,
+        .path = "",
+        .url = "",
+        .cache_path = "",
+        .expected_bytes = 0,
+        .on_result = ImageEffects.imageMsg(.result),
+    });
 }
 
 fn imageView(ui: *ImageApp.Ui, model: *const ImageModel) ImageApp.Ui.Node {
@@ -361,6 +412,38 @@ test "load requests that cannot run are rejected loudly, never silently" {
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 6), h.app_state.model.rejected_count);
     try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingImageLoadCount());
+}
+
+test "a burst of validation rejections past the pending ring delivers every terminal, in order" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+
+    // 33 sourceless loads plus one rejected spawn in ONE dispatch:
+    // more loop-side terminals than the 32-entry pending ring holds.
+    // Image results carry no drop counter, so ring overflow would have
+    // to evict one silently — breaking the exactly-one-terminal-per-
+    // load contract — which is why image terminals stage in the
+    // non-lossy side stage instead of the ring.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .burst);
+    try h.drainWakes();
+
+    // Every load's terminal arrived: exactly one each, all rejected.
+    try std.testing.expectEqual(@as(usize, burst_load_count), h.app_state.model.result_count);
+    try std.testing.expectEqual(@as(usize, burst_load_count), h.app_state.model.rejected_count);
+
+    // Delivery preserved enqueue order across BOTH pending structures:
+    // loads 1..5, the spawn rejection, then loads 6..33.
+    try std.testing.expectEqual(@as(usize, burst_load_count + 1), h.app_state.model.order_len);
+    var expected_id: u64 = 1;
+    for (h.app_state.model.order[0..h.app_state.model.order_len], 0..) |value, position| {
+        if (position == 5) {
+            try std.testing.expectEqual(interleave_marker, value);
+            continue;
+        }
+        try std.testing.expectEqual(expected_id, value);
+        expected_id += 1;
+    }
 }
 
 test "cancelling a fake image load delivers one cancelled terminal" {

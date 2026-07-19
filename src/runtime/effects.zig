@@ -122,6 +122,13 @@ pub const max_effect_queue_entries: usize = 64;
 /// that found the queue full). Sized above the slot count so a burst of
 /// rejected spawns in one update still surfaces individually.
 pub const max_effect_pending_exits: usize = 32;
+/// Inline capacity of the loop-side image-terminal stage — the
+/// allocation-free everyday case. Unlike the pending ring the stage
+/// never evicts: a burst past this spills to a heap ring sized by the
+/// burst itself (each staged entry is one `loadImage` call's only
+/// terminal, so storage is bounded by the caller's own call count
+/// between drains).
+pub const max_effect_pending_images_inline: usize = max_effect_pending_exits;
 
 /// Maximum bytes of one fetch's URL.
 pub const max_effect_url_bytes: usize = 2048;
@@ -1721,10 +1728,13 @@ pub fn Effects(comptime Msg: type) type {
             /// validation refusals: the same deterministic checks in
             /// `loadImage` refuse again under session replay, so their
             /// journaled records are skipped rather than fed. Every
-            /// other terminal through this ring — fake cancels, feed
-            /// fallbacks, an executor that could not start the load —
-            /// is executor truth the replayed request cannot reproduce
-            /// and must be fed from the journal.
+            /// other loop-side terminal — fake cancels, feed fallbacks,
+            /// an executor that could not start the load — is executor
+            /// truth the replayed request cannot reproduce and must be
+            /// fed from the journal. Image terminals never occupy the
+            /// lossy ring itself: they stage in `pending_images` (see
+            /// there for why they must be non-lossy) and take this
+            /// union shape only at drain time, in `takePendingMsg`.
             image: struct { result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
@@ -1742,9 +1752,13 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectHostResult carries none: its terminals are
                     // one-per-request by construction.
                     .host => {},
-                    // EffectImageResult carries none: one terminal per
-                    // load by construction.
-                    .image => {},
+                    // Image terminals never enter the ring (they stage
+                    // in the non-lossy `pending_images`), so neither
+                    // overflow arm can ever see one. EffectImageResult
+                    // carries no drop counter to fold a loss into —
+                    // eviction here would silently break the
+                    // exactly-one-terminal-per-load contract.
+                    .image => unreachable,
                 }
             }
 
@@ -1757,9 +1771,30 @@ pub fn Effects(comptime Msg: type) type {
                     .timer => 0,
                     .audio => 0,
                     .host => 0,
-                    .image => 0,
+                    // Never in the ring; see `addDropped`.
+                    .image => unreachable,
                 };
             }
+        };
+
+        /// One loop-side image terminal awaiting drain, staged outside
+        /// the shared pending ring. The stage is NON-LOSSY, unlike the
+        /// ring: an image load's contract is exactly one terminal per
+        /// load, `EffectImageResult` carries no drop counter to make a
+        /// loss visible, and loop-side validation rejections are
+        /// unbounded per dispatch — every refused `loadImage` stages
+        /// one entry here before the next drain runs, so ring eviction
+        /// would leave the issuing model waiting forever on a terminal
+        /// that silently vanished. Worker-origin image terminals are
+        /// bounded by the effect slots and ride the completion queue,
+        /// never this stage. `seq` orders staged entries against ring
+        /// entries so the drain preserves enqueue order across both
+        /// structures (`takePendingMsg` merges by it).
+        const PendingImage = struct {
+            seq: u64,
+            result: EffectImageResult,
+            image_fn: ?ImageMsgFn,
+            regenerates: bool,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -2181,8 +2216,23 @@ pub fn Effects(comptime Msg: type) type {
         /// Loop-thread-only ring: spawn/fetch rejections and fake-executor
         /// terminals that found the queue full. Drained before the queue.
         pending_exits: [max_effect_pending_exits]PendingMsg = undefined,
+        /// Enqueue-order stamps for the ring entries (parallel to
+        /// `pending_exits`), so the drain can merge ring entries with
+        /// the separately staged image terminals in original order.
+        pending_exit_seqs: [max_effect_pending_exits]u64 = undefined,
         pending_exit_head: usize = 0,
         pending_exit_len: usize = 0,
+        /// Monotonic enqueue stamp shared by the pending ring and the
+        /// image stage — the drain's merge key.
+        pending_seq: u64 = 0,
+        /// Loop-thread-only image-terminal stage (see `PendingImage`
+        /// for the non-lossy contract). FIFO over `pending_images`
+        /// until a burst outgrows it, then over `pending_image_spill`
+        /// (freed when the stage drains empty, and at `deinit`).
+        pending_images: [max_effect_pending_images_inline]PendingImage = undefined,
+        pending_image_spill: []PendingImage = &.{},
+        pending_image_head: usize = 0,
+        pending_image_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -2490,6 +2540,14 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 self.drain_heap_line = null;
             }
+            // Undrained staged image terminals are plain data — only a
+            // burst's spill ring owns heap.
+            if (self.pending_image_spill.len > 0) {
+                self.allocator.free(self.pending_image_spill);
+                self.pending_image_spill = &.{};
+            }
+            self.pending_image_head = 0;
+            self.pending_image_len = 0;
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -3944,7 +4002,9 @@ pub fn Effects(comptime Msg: type) type {
 
         /// True when a drain would dispatch at least one Msg.
         pub fn hasPending(self: *const Self) bool {
-            return self.pending_exit_len > 0 or self.queue_count.load(.acquire) > 0;
+            return self.pending_exit_len > 0 or
+                self.pending_image_len > 0 or
+                self.queue_count.load(.acquire) > 0;
         }
 
         /// Pop the next completion as a Msg. Loop-thread only. The
@@ -5096,10 +5156,17 @@ pub fn Effects(comptime Msg: type) type {
         /// Queue a terminal image result produced on the loop thread
         /// (rejections, fake cancels, feed fallbacks) for the next
         /// drain. No bytes ride here — nothing decodes, nothing
-        /// registers.
+        /// registers. Staged outside the lossy pending ring: image
+        /// terminals must never evict or be evicted (see
+        /// `PendingImage`).
         fn deliverLoopImage(self: *Self, result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool) void {
             if (image_fn == null) return;
-            self.deliverPending(.{ .image = .{ .result = result, .image_fn = image_fn, .regenerates = regenerates } });
+            self.stagePendingImage(.{
+                .seq = self.nextPendingSeq(),
+                .result = result,
+                .image_fn = image_fn,
+                .regenerates = regenerates,
+            });
         }
 
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {
@@ -5262,8 +5329,12 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Push onto the loop-side pending ring. When the ring is full
         /// the oldest entry is replaced and the replacement carries the
-        /// loss in its drop counter — overflow stays visible.
+        /// loss in its drop counter — overflow stays visible. Image
+        /// terminals never come through here: they carry no drop
+        /// counter to keep an eviction visible, so they stage in the
+        /// non-lossy `pending_images` instead (`stagePendingImage`).
         fn deliverPending(self: *Self, pending: PendingMsg) void {
+            const seq = self.nextPendingSeq();
             if (self.pending_exit_len == max_effect_pending_exits) {
                 const oldest = &self.pending_exits[self.pending_exit_head];
                 self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
@@ -5272,17 +5343,95 @@ pub fn Effects(comptime Msg: type) type {
                 replacement.addDropped(oldest.droppedCount() +| 1);
                 const tail = (self.pending_exit_head + self.pending_exit_len) % max_effect_pending_exits;
                 self.pending_exits[tail] = replacement;
+                self.pending_exit_seqs[tail] = seq;
                 self.pending_exit_len += 1;
             } else {
                 const tail = (self.pending_exit_head + self.pending_exit_len) % max_effect_pending_exits;
                 self.pending_exits[tail] = pending;
+                self.pending_exit_seqs[tail] = seq;
                 self.pending_exit_len += 1;
             }
             self.wakeHost();
         }
 
+        fn nextPendingSeq(self: *Self) u64 {
+            const seq = self.pending_seq;
+            self.pending_seq += 1;
+            return seq;
+        }
+
+        /// The image stage's current backing storage: the inline buffer
+        /// until a burst outgrows it, the heap ring after.
+        fn pendingImageStorage(self: *Self) []PendingImage {
+            if (self.pending_image_spill.len > 0) return self.pending_image_spill;
+            return &self.pending_images;
+        }
+
+        /// Stage one loop-side image terminal for the next drain —
+        /// never dropping one (the `PendingImage` contract). Growth is
+        /// geometric and earned only by bursts that outgrow the inline
+        /// buffer; each staged entry answers exactly one `loadImage`
+        /// call, so the stage can never grow past the caller's own
+        /// call count between drains. An allocation failure refuses
+        /// LOUDLY: with no counter to fold a loss into and no error
+        /// channel back to the void-returning `loadImage`, dropping
+        /// the entry would strand its issuer forever — a crash names
+        /// the problem, silence never would.
+        fn stagePendingImage(self: *Self, entry: PendingImage) void {
+            const storage = self.pendingImageStorage();
+            if (self.pending_image_len == storage.len) {
+                const grown = self.allocator.alloc(PendingImage, storage.len * 2) catch
+                    @panic("effects: out of memory staging an image terminal - each staged entry is one loadImage call's only terminal and must never be dropped");
+                for (grown[0..self.pending_image_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_image_head + index) % storage.len];
+                }
+                if (self.pending_image_spill.len > 0) self.allocator.free(self.pending_image_spill);
+                self.pending_image_spill = grown;
+                self.pending_image_head = 0;
+            }
+            const active = self.pendingImageStorage();
+            active[(self.pending_image_head + self.pending_image_len) % active.len] = entry;
+            self.pending_image_len += 1;
+            self.wakeHost();
+        }
+
+        /// Pop the image stage's head. Draining empty releases the
+        /// spill: the burst that earned it is over, and the inline
+        /// buffer covers the everyday case again.
+        fn takePendingImage(self: *Self) PendingImage {
+            const storage = self.pendingImageStorage();
+            const entry = storage[self.pending_image_head];
+            self.pending_image_head = (self.pending_image_head + 1) % storage.len;
+            self.pending_image_len -= 1;
+            if (self.pending_image_len == 0) {
+                self.pending_image_head = 0;
+                if (self.pending_image_spill.len > 0) {
+                    self.allocator.free(self.pending_image_spill);
+                    self.pending_image_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
+        /// Take the next loop-side pending terminal in enqueue order,
+        /// merging the ring and the image stage by their shared stamp
+        /// so splitting the storage never reordered delivery.
         fn takePendingMsg(self: *Self) ?PendingMsg {
-            if (self.pending_exit_len == 0) return null;
+            const ring_has = self.pending_exit_len > 0;
+            const image_has = self.pending_image_len > 0;
+            if (!ring_has and !image_has) return null;
+            const take_image = if (ring_has and image_has)
+                self.pendingImageStorage()[self.pending_image_head].seq < self.pending_exit_seqs[self.pending_exit_head]
+            else
+                image_has;
+            if (take_image) {
+                const staged = self.takePendingImage();
+                return .{ .image = .{
+                    .result = staged.result,
+                    .image_fn = staged.image_fn,
+                    .regenerates = staged.regenerates,
+                } };
+            }
             const pending = self.pending_exits[self.pending_exit_head];
             self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
             self.pending_exit_len -= 1;
