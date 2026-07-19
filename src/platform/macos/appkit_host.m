@@ -1771,8 +1771,8 @@ static NSMutableDictionary<NSNumber *, id> *NativeSdkRegisteredFontDescriptors(v
 // valid id in a new runtime is inside the documented lifecycle. Entries
 // therefore go stale exactly when an id's descriptor is (re)installed,
 // so `native_sdk_appkit_register_font` evicts the id's cached sizes
-// before installing the new descriptor. The measured-width NSCache in
-// `native_sdk_appkit_measure_text` goes stale at the same moment but
+// before installing the new descriptor. The measured-width NSCache
+// (`NativeSdkMeasuredWidthCache`) goes stale at the same moment but
 // cannot be prefix-evicted (NSCache does not enumerate keys), so it is
 // invalidated by registration token instead — see
 // NativeSdkRegisteredFontTokens below. Accessed only under the
@@ -1787,16 +1787,18 @@ static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCac
 }
 
 // Per-id registration tokens, the invalidation handle for the
-// measured-width NSCache in `native_sdk_appkit_measure_text`. That
+// measured-width NSCache (`NativeSdkMeasuredWidthCache`). That
 // cache has the same lifetime hazard as the size cache above (per-
 // process cache, per-runtime id permanence) but no way to evict an
 // id's entries — NSCache cannot enumerate keys — so every registration
 // stamps its id with the next value of ONE process-global monotonic
 // counter and the width-cache key includes the stamp. Tokens never
 // repeat, so no registration can ever reach widths a previous life of
-// its id cached (those entries become unreachable and age out under
-// the cache's own count limit) — which is exactly what makes an id's
-// record REMOVABLE at unregister, retaining zero state per retired id.
+// its id cached (re-registration leaves those unreachable entries to
+// age out under the cache's count limit; unregistration clears the
+// cache outright — see `native_sdk_appkit_unregister_font`) — which is
+// exactly what makes an id's record REMOVABLE at unregister, retaining
+// zero state per retired id.
 // A per-id bump counter could not offer that: deleting a per-id count
 // would let a future registration of the id restart at 1 and collide
 // with the retired life's still-cached widths, so retired ids would
@@ -1819,6 +1821,28 @@ static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontToken
 // "no registered face" value. Mutated only under the descriptor
 // table's @synchronized guard, like every table here.
 static unsigned long long NativeSdkRegisteredFontTokenCounter = 0;
+
+// The measured-width NSCache `native_sdk_appkit_measure_text` memoizes
+// shaped widths in, hoisted out of that function (exactly the shared-
+// accessor shape the NSFont size cache above took) so
+// `native_sdk_appkit_unregister_font` can reach it at teardown: a
+// retiring token's entries can never be SERVED again (tokens never
+// repeat) but a function-local static left them RESIDENT — up to the
+// full count limit of keys, each carrying the measured text itself —
+// until memory pressure. NSCache is thread-safe, so unlike the
+// dictionaries above this cache is deliberately NOT confined to the
+// descriptor table's @synchronized guard: measure_text shapes and
+// caches outside the critical section on purpose (see the snapshot
+// comment there).
+static NSCache<NSString *, NSNumber *> *NativeSdkMeasuredWidthCache(void) {
+    static NSCache<NSString *, NSNumber *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 16384;
+    });
+    return cache;
+}
 
 // The id's current registration token AND the registered face that
 // token resolves to, snapshotted under ONE acquisition of the
@@ -1927,13 +1951,15 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
 // caches) for the process lifetime. Removal drops EVERYTHING the
 // registration installed: the id's cached NSFonts (the same prefix
 // eviction re-registration runs), the id's registration token record,
-// and the descriptor itself — zero retained state per retired id, so
+// the descriptor itself, and — by clearing the measured-width NSCache
+// wholesale, the only eviction NSCache permits — the widths measured
+// under the retiring token. Zero retained state per retired id, so
 // runtime cycles truly do not accumulate host entries. Deleting the
 // token record (rather than bumping it) is safe precisely because
 // tokens come from one process-global monotonic counter: a future
-// registration of this id takes a fresh, never-repeated token, so the
-// widths this life cached in the measured-width NSCache stay
-// unreachable without any per-id record surviving to say so. An id
+// registration of this id takes a fresh, never-repeated token, so no
+// per-id record has to survive to keep this life's width-cache keys
+// unreachable. An id
 // with no installed descriptor (never registered host-side, or already
 // returned) is a no-op accept.
 //
@@ -1963,6 +1989,17 @@ int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token) {
             }
             [NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];
             [table removeObjectForKey:@(font_id)];
+            // The retiring token's measured widths can never be served
+            // again (tokens never repeat) but would otherwise stay
+            // resident until memory pressure. NSCache cannot enumerate
+            // keys, so a per-id eviction is impossible and clearing the
+            // WHOLE cache is the only honest release. The collateral is
+            // cheap where it lands: unregistration is a teardown-
+            // frequency event, and every other live id re-warms each
+            // width it still needs in one measure call. The clear runs
+            // only on this token-matched path — a stale-token no-op
+            // above must not cost live registrations their warm cache.
+            [NativeSdkMeasuredWidthCache() removeAllObjects];
         }
         return 1;
     }
@@ -2053,12 +2090,7 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
     @autoreleasepool {
         NSString *value = [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding];
         if (!value) return -1;
-        static NSCache<NSString *, NSNumber *> *widthCache = nil;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            widthCache = [[NSCache alloc] init];
-            widthCache.countLimit = 16384;
-        });
+        NSCache<NSString *, NSNumber *> *widthCache = NativeSdkMeasuredWidthCache();
         // The key carries the id's registration token so a face
         // re-registered under the same id (a new runtime in this
         // process) never serves a previous face's widths — see

@@ -869,6 +869,20 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!current || current.unsignedLongLongValue != token) return 1;" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[table removeObjectForKey:@(font_id)];" },
+        // Teardown must also CLEAR the measured-width NSCache: a
+        // retiring token's entries can never be served again (tokens
+        // never repeat) but they stay resident until memory pressure,
+        // and NSCache cannot enumerate keys, so the whole-cache clear on
+        // the token-matched path is the only release. Pinned textually
+        // because no behavioral tier can observe it — only managed app
+        // builds compile appkit_host.m, so no SDK test can watch the
+        // ObjC cache empty. The shared accessor and its measure_text
+        // call site are pinned with the clear so the cache cannot
+        // quietly retreat to a function-local static the unregister
+        // path has no way to reach.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSCache<NSString *, NSNumber *> *NativeSdkMeasuredWidthCache(void)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NativeSdkMeasuredWidthCache() removeAllObjects];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSCache<NSString *, NSNumber *> *widthCache = NativeSdkMeasuredWidthCache();" },
         .{ .path = "src/runtime/canvas_fonts.zig", .pattern = ".host_unregister_fn = services.unregister_gpu_surface_font_fn," },
         .{ .path = "src/runtime/canvas_fonts.zig", .pattern = ".host_registration_token = host_token," },
         .{ .path = "src/runtime/core.zig", .pattern = "host_unregister_fn(entry.host_unregister_context, entry.id, entry.host_registration_token) catch {};" },
