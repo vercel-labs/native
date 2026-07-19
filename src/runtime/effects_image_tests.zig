@@ -7,6 +7,7 @@
 //! cache install and the offline cache hit behind it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const canvas = @import("canvas");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
@@ -726,6 +727,61 @@ test "concurrent loads of one url both complete with an intact cache and no temp
         file_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), file_count);
+}
+
+/// Create a FIFO at `path` (POSIX-only; callers gate on the platform) —
+/// the file-effect tests' convention. The cache probe opens it
+/// read-only, which blocks inside `open` while no writer exists: the
+/// deterministic way to park a load INSIDE the cache probe so a cancel
+/// lands there.
+fn makeFifo(path: []const u8) !void {
+    var command_buffer: [512]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buffer, "mkfifo '{s}'", .{path});
+    const result = try std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", command },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expect(result.term == .exited and result.term.exited == 0);
+}
+
+test "a cancel landing inside the cache probe terminates cancelled and never fetches" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Harness.create();
+    defer h.destroy();
+    const fixture = try Fixture.start(std.testing.allocator);
+    defer fixture.stop();
+
+    // The cache "entry" is a reader-less FIFO: the probe's open blocks
+    // until the cancel interrupts it. Cancel delivery is one-shot — the
+    // Canceled return IS the delivery — so a probe that swallowed it
+    // into a cache miss would fall through to the network with nothing
+    // left to interrupt the fetch.
+    var cache_buffer: [256]u8 = undefined;
+    const cache_path = try std.fmt.bufPrint(&cache_buffer, ".zig-cache/tmp/{s}/probe.fifo", .{tmp.sub_path[0..]});
+    try makeFifo(cache_path);
+
+    var url_buffer: [128]u8 = undefined;
+    test_url = fixture.url(&url_buffer, "/cover.png");
+    test_cache_path = cache_path;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    // Let the worker reach the blocking open (a cancel that lands even
+    // earlier still terminates the load before the probe — either way
+    // the network must stay untouched).
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
+    try waitForResult(&h, 1);
+
+    // Exactly one terminal, `.cancelled` — and the spent cancel never
+    // leaked the load into a network fetch: the fixture saw ZERO
+    // requests, and nothing was registered.
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.cancelled, h.app_state.model.last.?.outcome);
+    try std.testing.expectEqual(@as(u32, 0), fixture.request_count.load(.acquire));
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(image_id) == null);
 }
 
 test "real executor reports non-2xx statuses and undecodable bodies honestly" {

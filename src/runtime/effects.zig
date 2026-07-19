@@ -6526,7 +6526,18 @@ pub fn Effects(comptime Msg: type) type {
                     // Missing local file with a url: fall through.
                 }
             }
-            if (slot.image_cache_len > 0 and self.readImageCache(slot, io, buffer)) return;
+            if (slot.image_cache_len > 0) {
+                // The probe's only error is a spent cancel: terminate
+                // `.cancelled` like the local-probe arm above — never
+                // fall through to a network fetch the cancel can no
+                // longer reach.
+                const cached = self.readImageCache(slot, io, buffer) catch {
+                    slot.image_outcome = .cancelled;
+                    slot.body_len = 0;
+                    return;
+                };
+                if (cached) return;
+            }
             try self.fetchImageBytes(slot, io, buffer);
             if (slot.image_outcome == .loaded and slot.image_cache_len > 0) {
                 self.installImageCache(slot, io, buffer[0..slot.body_len]);
@@ -6537,13 +6548,19 @@ pub fn Effects(comptime Msg: type) type {
         /// when readable, within the source bound, and — when the
         /// caller declared `expected_bytes` — exactly that size (the
         /// integrity gate). Anything else falls through to the network,
-        /// which refreshes the entry.
-        fn readImageCache(self: *Self, slot: *Slot, io: std.Io, buffer: []u8) bool {
+        /// which refreshes the entry — except a cancel interruption,
+        /// which propagates: cancel delivery is ONE-SHOT (the Canceled
+        /// error return IS the delivery), so treating it as a cache
+        /// miss would consume it and send a cancelled load into the
+        /// network fetch with nothing left to interrupt it.
+        fn readImageCache(self: *Self, slot: *Slot, io: std.Io, buffer: []u8) error{Canceled}!bool {
             _ = self;
             const cwd = std.Io.Dir.cwd();
-            var file = cwd.openFile(io, slot.imageCache(), .{}) catch return false;
+            var file = cwd.openFile(io, slot.imageCache(), .{}) catch |err|
+                return if (err == error.Canceled) error.Canceled else false;
             defer file.close(io);
-            const len = file.readPositionalAll(io, buffer, 0) catch return false;
+            const len = file.readPositionalAll(io, buffer, 0) catch |err|
+                return if (err == error.Canceled) error.Canceled else false;
             if (len == 0 or len > max_effect_image_bytes) return false;
             if (slot.image_expected_bytes != 0 and len != slot.image_expected_bytes) return false;
             slot.body_len = len;
@@ -6720,6 +6737,66 @@ test "effect payload types have documented defaults" {
 test "fx timer platform ids stay inside the reserved range and clear of the markup watch id" {
     try std.testing.expect(effect_timer_platform_id_base >= platform.reserved_timer_id_base);
     try std.testing.expect(effect_timer_platform_id_base + max_effect_timers - 1 < 0xffff_ffff_2e70_a11c);
+}
+
+test "image cache probe propagates a cancel interruption and reads every other failure as a miss" {
+    const TestMsg = union(enum) { result: EffectImageResult };
+    const Channel = Effects(TestMsg);
+    const Fakes = struct {
+        fn openCanceled(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            _ = userdata;
+            _ = dir;
+            _ = sub_path;
+            _ = options;
+            return error.Canceled;
+        }
+        fn openOk(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            _ = userdata;
+            _ = dir;
+            _ = sub_path;
+            _ = options;
+            return .{ .handle = 0, .flags = .{ .nonblocking = false } };
+        }
+        fn readCanceled(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            _ = userdata;
+            _ = file;
+            _ = data;
+            _ = offset;
+            return error.Canceled;
+        }
+        fn closeNoop(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            _ = userdata;
+            _ = files;
+        }
+    };
+
+    var slot: Channel.Slot = .{};
+    const cache_path = "caches/images/probe.png";
+    @memcpy(slot.image_cache_storage[0..cache_path.len], cache_path);
+    slot.image_cache_len = cache_path.len;
+    var buffer: [32]u8 = undefined;
+
+    // Cancel delivery is one-shot: a cancel that interrupts the probe's
+    // open IS the delivery, so the probe must surface it — reading it
+    // as a miss would send the cancelled load into the network fetch
+    // with nothing left to interrupt.
+    var open_cancel_vtable = std.Io.failing.vtable.*;
+    open_cancel_vtable.dirOpenFile = Fakes.openCanceled;
+    const open_cancel_io: std.Io = .{ .userdata = null, .vtable = &open_cancel_vtable };
+    try std.testing.expectError(error.Canceled, Channel.readImageCache(undefined, &slot, open_cancel_io, &buffer));
+
+    // A cancel landing in the positional read, same contract.
+    var read_cancel_vtable = std.Io.failing.vtable.*;
+    read_cancel_vtable.dirOpenFile = Fakes.openOk;
+    read_cancel_vtable.fileReadPositional = Fakes.readCanceled;
+    read_cancel_vtable.fileClose = Fakes.closeNoop;
+    const read_cancel_io: std.Io = .{ .userdata = null, .vtable = &read_cancel_vtable };
+    try std.testing.expectError(error.Canceled, Channel.readImageCache(undefined, &slot, read_cancel_io, &buffer));
+
+    // Every other failure stays an honest miss that falls through to
+    // the network (`std.Io.failing`'s empty filesystem opens report
+    // FileNotFound).
+    try std.testing.expectEqual(false, try Channel.readImageCache(undefined, &slot, std.Io.failing, &buffer));
 }
 
 test "fetch errors map onto the documented taxonomy" {
