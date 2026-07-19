@@ -122,6 +122,16 @@
 //                                event arm delivers state "cancelled" and the
 //                                id frees for a fresh load once it lands. An
 //                                id with no live load no-ops.
+//   Cmd.imageUnregister(id)      free the registry slot under the id: the
+//                                pixels are released, views referencing the
+//                                id draw their fallback, and the slot is
+//                                open for another load. Synchronous registry
+//                                surgery like registration itself — not an
+//                                effect, no Msg follows; an id with no
+//                                registration no-ops. A load IN FLIGHT under
+//                                the id is untouched: its terminal still
+//                                registers — cancel the load first to keep
+//                                the slot free.
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -552,6 +562,7 @@ export type Cmd<M extends Msgish> =
       readonly expectedBytes: number;
     }
   | { readonly op: "image_cancel"; readonly id: number }
+  | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -833,6 +844,21 @@ export const Cmd = {
   /// this is their cancel, the way `Cmd.audioStop` is audio's.
   imageCancel(id: number): Cmd<never> {
     return { op: "image_cancel", id };
+  },
+
+  /// Free the registry slot under `id`: the pixels are released, views
+  /// referencing the id draw their fallback (avatar initials) on the next
+  /// frame, and the slot — one of the registry's 16 — is open for another
+  /// load (the gallery eviction move: unregister the evictee, load the
+  /// newcomer under a fresh id). Like registration itself this is
+  /// synchronous registry surgery, not an effect: no Msg follows, and an
+  /// id with no registration no-ops (whatever it aimed at is already
+  /// gone, `Cmd.imageCancel`'s idle rule). It frees only the CURRENT
+  /// registration — a load IN FLIGHT under the id is untouched and its
+  /// terminal still registers the pixels; to keep the slot free, end the
+  /// load with `Cmd.imageCancel(id)` first.
+  imageUnregister(id: number): Cmd<never> {
+    return { op: "image_unregister", id };
   },
 
   /// Several commands from one dispatch, performed in order.

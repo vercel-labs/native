@@ -2188,6 +2188,20 @@ export class Emitter {
         const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
         return `rt.cmdImageCancel(${id})`;
       }
+      if (method === "imageUnregister") {
+        const idArg = e.arguments[0];
+        if (!idArg) this.fail(e, "`Cmd.imageUnregister` id (the model-owned numeric ImageId)", "NS1027");
+        // The same literal gate as imageLoad/imageCancel: an id no load
+        // could ever register under has nothing to unregister — stop the
+        // build instead of shipping a certain runtime no-op. Dynamic ids
+        // stay the host's (an unregistered id is the documented no-op).
+        const idLiteral = this.numberLiteralValue(idArg);
+        if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+          this.fail(idArg, `\`Cmd.imageUnregister\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
+        }
+        const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
+        return `rt.cmdImageUnregister(${id})`;
+      }
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
@@ -2215,7 +2229,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");

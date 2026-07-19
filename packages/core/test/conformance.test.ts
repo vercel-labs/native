@@ -4106,6 +4106,56 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 ${imageTail}
 `,
   },
+  {
+    name: "imageUnregister emits: the numeric-id registry release with literal and model-expression ids",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.imageUnregister(7)];
+      return [model, Cmd.imageUnregister(model.w + 1)];
+${imageTail}
+`,
+  },
+  {
+    // The same literal gate as imageLoad/imageCancel: an id no load
+    // could ever register under has nothing to unregister.
+    name: "an imageUnregister id literal the registry must refuse stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageUnregister(0)];
+${imageTail}
+`,
+  },
+  {
+    name: "the top imageUnregister id literal (2^53 - 1) builds",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageUnregister(9007199254740991)];
+${imageTail}
+`,
+  },
+  {
+    name: "an imageUnregister id literal of 2^53 stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageUnregister(9007199254740992)];
+${imageTail}
+`,
+  },
 ];
 
 // The multi-file round: a core may split into modules under src/ (relative

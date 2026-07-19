@@ -87,6 +87,9 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.coversized")) return .load_sized;
     if (std.mem.eql(u8, name, "core.covercancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "core.cancelmissing")) return .cancel_missing;
+    if (std.mem.eql(u8, name, "core.evictfirst")) return .evict_first;
+    if (std.mem.eql(u8, name, "core.evictcover")) return .evict_cover;
+    if (std.mem.eql(u8, name, "core.evictmissing")) return .evict_missing;
     return null;
 }
 
@@ -936,6 +939,129 @@ test "Cmd.imageCancel ends the load loudly and frees the id for a same-id retry"
     try h.menu("core.cancelmissing");
     try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+}
+
+/// Feed one tiny decodable PNG (2x2, pixels varied by `seed`) as the
+/// pending load's encoded bytes — the real decode+register path, the
+/// step the gallery tests below repeat per id.
+fn feedTinyPng(fx: anytype, id: u64, seed: u8) !void {
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var byte_seed: u8 = seed;
+    for (&pixels) |*byte| {
+        byte.* = byte_seed;
+        byte_seed = byte_seed *% 41 +% 3;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(id, writer.buffered());
+}
+
+test "Cmd.imageUnregister frees a full registry's slot for a new image: the gallery eviction" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen distinct dynamic ids (100..115) load to their `loaded`
+    // terminal one after another: every registry slot is occupied.
+    const slots = runtime_ns.max_registered_canvas_images;
+    var loaded: usize = 0;
+    while (loaded < slots) : (loaded += 1) {
+        try h.menu("core.covernext");
+        try feedTinyPng(fx, 100 + loaded, @intCast(loaded + 1));
+        try h.wake();
+        try std.testing.expect(Bridge.model().imageState == .loaded);
+    }
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 16), Bridge.model().imageResults);
+
+    // The 17th distinct id decodes fine but finds no slot: the load's
+    // own terminal answers "registry_full" through the event arm — the
+    // gallery's dead end without an unregister verb.
+    try h.menu("core.covernext");
+    try feedTinyPng(fx, 116, 33);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .registry_full);
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+
+    // Cmd.imageUnregister(100) is the recourse: the evictee's slot
+    // frees NOW (synchronous registry surgery — no result Msg, so the
+    // result count is untouched), and views bound to 100 fall back.
+    try h.menu("core.evictfirst");
+    try h.wake();
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(100) == null);
+    try std.testing.expectEqual(slots - 1, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
+
+    // ...and the freed slot accepts the next image: a 17th distinct id
+    // registers where id 116 was refused.
+    try h.menu("core.covernext");
+    try feedTinyPng(fx, 117, 47);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 117), Bridge.model().cover);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(117) != null);
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+
+    // Unregister aimed at an id with no registration is the documented
+    // no-op: no result, no crash, the registry untouched.
+    try h.menu("core.evictmissing");
+    try h.wake();
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
+}
+
+test "Cmd.imageUnregister never touches a load in flight: its terminal still registers" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A load parks under id 21; unregister aimed at it is a registry
+    // MISS (nothing is registered yet — a load in flight is not a
+    // registry occupant), so it no-ops: the load stays parked and no
+    // result dispatches.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try h.menu("core.evictcover");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // The unregister did not steer the load: its terminal registers
+    // the pixels as if the unregister never happened.
+    try feedTinyPng(fx, 21, 9);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
+
+    // The sharper interaction, pinned as the engine behaves today: id
+    // 21 is REGISTERED and a reload is in flight under it. Unregister
+    // frees the slot now — but registration happens at the load's
+    // terminal, so the reload's completion RE-REGISTERS the id. An app
+    // that wants the slot to stay free cancels the load first
+    // (Cmd.imageCancel), then unregisters.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try h.menu("core.evictcover");
+    try h.wake();
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) == null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try feedTinyPng(fx, 21, 13);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
 }
 
 test "the image id wire bound is exclusive at 2^53 for dynamic values" {

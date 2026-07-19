@@ -730,7 +730,8 @@ test("streaming ops: wire bytes through the real dispatch cycle", { skip: !hasZi
 // Cmd.imageLoad end to end: the numeric-id record against the exact wire
 // layout rt.zig documents, the five-field result arm (the echoed id
 // included) round-tripping as a plain Msg, the source variants (local
-// path, url with cache), and the numeric-id image_cancel record.
+// path, url with cache), and the numeric-id image_cancel and
+// image_unregister records.
 const coreImages = `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
@@ -745,6 +746,7 @@ export type Msg =
   | { readonly kind: "load" }
   | { readonly kind: "load_url" }
   | { readonly kind: "drop" }
+  | { readonly kind: "evict" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): Model {
@@ -756,6 +758,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "load": return [model, Cmd.imageLoad(7, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
     case "load_url": return [model, Cmd.imageLoad(model.cover + 8, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 2048 }, { event: "image_done" })];
     case "drop": return [model, Cmd.imageCancel(model.cover)];
+    case "evict": return [model, Cmd.imageUnregister(model.cover)];
     case "image_done":
       if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height };
       return { ...model, errs: model.errs + 1 };
@@ -840,6 +843,13 @@ test "image_load wire records match rt.zig's documented layout" {
     try std.testing.expectEqual(@as(u8, 0x13), drop[0]);
     try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, drop[1..9], .little))));
     try std.testing.expectEqual(@as(usize, 9), drop.len);
+
+    // image_unregister: [0x14][id f64 LE] — same one-field body, its own
+    // opcode (registry surgery, not a load verb).
+    const evict = dispatch(.evict, &log);
+    try std.testing.expectEqual(@as(u8, 0x14), evict[0]);
+    try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, evict[1..9], .little))));
+    try std.testing.expectEqual(@as(usize, 9), evict.len);
 }
 `;
 

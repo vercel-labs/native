@@ -1058,13 +1058,14 @@ pub fn Kernel(comptime opts: Options) type {
         //              [path_len u32 LE][path][url_len u32 LE][url]
         //              [cache_len u32 LE][cache_path][expected_bytes f64 LE]
         //   image_cancel [op 0x13][id f64 LE]
+        //   image_unregister [op 0x14][id f64 LE]
         //
         // v2 is additive over v1: the 0x01-0x03 records are byte-identical to v1,
         // so a v1 effect log replays under a v2 reader unchanged. The named-op
         // records 0x07-0x0C are additive within v2 the same way, and so are the
         // streaming records 0x0D-0x0F: no existing record's bytes change, new
         // opcodes only. v3 appends the window-verb records 0x10-0x11 under the
-        // same rule, and the image records 0x12-0x13 are additive within v3
+        // same rule, and the image records 0x12-0x14 are additive within v3
         // the same way: every existing record is byte-identical, new opcodes
         // only (a host predating an opcode refuses it loudly, naming this
         // version).
@@ -1210,6 +1211,19 @@ pub fn Kernel(comptime opts: Options) type {
         //               already gone. Image loads are keyed by their numeric
         //               id, so the string-keyed `cancel` record never
         //               touches them.
+        //   image_unregister
+        //               free the registry slot under `id`: the pixels are
+        //               released, views referencing the id draw their
+        //               fallback on the next frame, and the slot is open
+        //               for another load. Registration's own discipline in
+        //               reverse — synchronous registry surgery, NOT an
+        //               effect: no Msg follows, and an id with no
+        //               registration (or one the wire cannot carry
+        //               exactly) is a no-op, image_cancel's idle rule. It
+        //               frees only the CURRENT registration: a load in
+        //               flight under the id is untouched and its terminal
+        //               still registers — cancel the load first to keep
+        //               the slot free.
         //   audio_ctl   drive the open stream's playback in place, by verb
         //               (`CmdAudioVerb` declaration order): pause 0, resume
         //               1, stop 2, seek 3 (`value` = position ms), volume 4
@@ -1289,6 +1303,7 @@ pub fn Kernel(comptime opts: Options) type {
             quit_app = 0x11,
             image_load = 0x12,
             image_cancel = 0x13,
+            image_unregister = 0x14,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1617,6 +1632,13 @@ pub fn Kernel(comptime opts: Options) type {
         pub fn cmdImageCancel(id: f64) Cmd {
             const out = frameAlloc(u8, 1 + 8);
             out[0] = @intFromEnum(CmdOp.image_cancel);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
+            return out;
+        }
+
+        pub fn cmdImageUnregister(id: f64) Cmd {
+            const out = frameAlloc(u8, 1 + 8);
+            out[0] = @intFromEnum(CmdOp.image_unregister);
             std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
             return out;
         }

@@ -98,6 +98,9 @@ export type Msg =
   | { readonly kind: "load_sized" }
   | { readonly kind: "cancel_cover" }
   | { readonly kind: "cancel_missing" }
+  | { readonly kind: "evict_first" }
+  | { readonly kind: "evict_cover" }
+  | { readonly kind: "evict_missing" }
   | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
@@ -287,6 +290,22 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // An id with no live load: the documented no-op — no result, no
       // crash, nothing to report on.
       return [model, Cmd.imageCancel(555)];
+    case "evict_first":
+      // The gallery eviction move: free the registry slot under the
+      // first dynamic id, so a full 16-slot registry accepts one more
+      // image. Synchronous registry surgery — no result Msg.
+      return [model, Cmd.imageUnregister(100)];
+    case "evict_cover":
+      // Unregister aimed at the cover id — in the e2e it lands both
+      // while a load is IN FLIGHT (a registry miss: no-op, and the
+      // load's terminal still registers) and while the id is
+      // registered under a live reload (the slot frees now, and the
+      // reload's terminal re-registers it).
+      return [model, Cmd.imageUnregister(21)];
+    case "evict_missing":
+      // An id with no registration: the documented no-op — no result,
+      // no crash, nothing to report on.
+      return [model, Cmd.imageUnregister(888)];
     case "image_done":
       // The echoed id IS the adopted id — the store-the-id-on-success
       // discipline reads it off the result instead of hardcoding it.

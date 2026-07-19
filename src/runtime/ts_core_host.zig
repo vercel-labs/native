@@ -160,6 +160,17 @@
 //!                  — LOUD, the spawn cancel discipline. An id naming
 //!                  no live load (or one the wire cannot carry exactly)
 //!                  is a no-op, audio_ctl's idle rule.
+//!   image_unregister
+//!               -> `fx.unregisterImage(id)`: free the registry slot
+//!                  under the id — registration's synchronous
+//!                  discipline in reverse, direct registry surgery
+//!                  with no terminal and no Msg. An id with no
+//!                  registration (or one the wire cannot carry
+//!                  exactly) is a no-op, image_cancel's idle rule. It
+//!                  never touches the load table: a load in flight
+//!                  under the id keeps running and its terminal still
+//!                  registers the pixels — cancel the load first to
+//!                  keep the slot free.
 //!   audio_ctl   -> the engine's control verbs (`fx.pauseAudio`/
 //!                  `resumeAudio`/`stopAudio`/`seekAudio`/
 //!                  `setAudioVolume`), gated by the wire key: a verb
@@ -957,6 +968,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
                         runImageCancel(fx, id_value);
                     },
+                    // image_unregister [op][id f64 LE]
+                    0x14 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        runImageUnregister(fx, id_value);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1328,6 +1345,27 @@ pub fn TsCoreHost(comptime core: type) type {
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) == null) return;
             fx.cancel(id);
+        }
+
+        /// The image_unregister record: free the registry slot under
+        /// the id — direct registry surgery, registration's synchronous
+        /// discipline in reverse (no terminal, no Msg; the engine call
+        /// answers a bool the wire has no channel to carry, and a miss
+        /// means whatever it aimed at is already gone — image_cancel's
+        /// idle no-op). The bridge's load table is deliberately NOT
+        /// consulted: unregister targets the REGISTRY, and a load in
+        /// flight under the id is not a registry occupant — its
+        /// terminal registers as usual, re-occupying the id, so an app
+        /// that wants the slot to STAY free cancels the load first. An
+        /// id the wire cannot carry exactly could never have been
+        /// registered through this bridge, so it no-ops the same way.
+        fn runImageUnregister(fx: *Fx, id_value: f64) void {
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value < 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) return;
+            const id: u64 = @intFromFloat(id_value);
+            _ = fx.unregisterImage(id);
         }
 
         /// `ImageMsgFn` for image loads: the ONE terminal routes the
