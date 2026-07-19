@@ -28,6 +28,7 @@ export type Msg =
   | { readonly kind: "tick"; readonly at: number }
   | { readonly kind: "ship" }
   | { readonly kind: "open_player" }
+  | { readonly kind: "open_cjk" }
   | { readonly kind: "quit" };
 
 export function initialModel(): Model {
@@ -42,6 +43,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "tick": return { ...model, count: msg.at };
     case "ship": return [model, Cmd.batch([Cmd.persist(), Cmd.host("beep", model.count, 2)])];
     case "open_player": return [model, Cmd.showWindow("player")];
+    case "open_cjk": return [model, Cmd.showWindow("播放器")];
     case "quit": return [model, Cmd.quitApp()];
   }
 }
@@ -115,12 +117,17 @@ test "cmd bytes flow through update -> commit -> effect log" {
     const open_player = dispatch(.open_player);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 6, 'p', 'l', 'a', 'y', 'e', 'r' }, open_player);
 
+    // A multibyte label's length prefix counts UTF-8 BYTES, not
+    // characters: three CJK characters are nine bytes on the wire.
+    const open_cjk = dispatch(.open_cjk);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 9 } ++ "\\xe6\\x92\\xad\\xe6\\x94\\xbe\\xe5\\x99\\xa8", open_cjk);
+
     // quit_app: [op 0x11], no payload.
     const quit = dispatch(.quit);
     try std.testing.expectEqualSlices(u8, &.{0x11}, quit);
 
     // The accumulated host-side log is every dispatch's bytes in order.
-    try std.testing.expectEqual(@as(usize, 1 + 2 + 24 + 8 + 1), g_effects_len);
+    try std.testing.expectEqual(@as(usize, 1 + 2 + 24 + 8 + 11 + 1), g_effects_len);
 }
 `;
 

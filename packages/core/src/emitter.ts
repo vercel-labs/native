@@ -2054,7 +2054,7 @@ export class Emitter {
       if (method === "host") {
         const nameArg = e.arguments[0];
         if (!nameArg || !ts.isStringLiteral(nameArg)) this.fail(e, "Cmd.host name (a string literal)");
-        if (nameArg.text.length > 255) this.fail(nameArg, "Cmd.host name over 255 bytes");
+        if (utf8ByteLength(nameArg.text) > 255) this.fail(nameArg, "Cmd.host name over 255 bytes");
         const rest = e.arguments.slice(1);
         // One bytes/record argument is the v2 payload form (host_bytes on
         // the wire); a payload with anything alongside it has no encoding.
@@ -2083,7 +2083,7 @@ export class Emitter {
       if (method === "request") {
         const nameArg = e.arguments[0];
         if (!nameArg || !ts.isStringLiteral(nameArg)) this.fail(e, "Cmd.request name (a string literal)");
-        if (nameArg.text.length > 255) this.fail(nameArg, "Cmd.request name over 255 bytes");
+        if (utf8ByteLength(nameArg.text) > 255) this.fail(nameArg, "Cmd.request name over 255 bytes");
         const payloadArg = e.arguments[1];
         if (!payloadArg) this.fail(e, "Cmd.request payload (bytes or a flat record)");
         if (!this.isHostPayloadArg(payloadArg, ctx)) {
@@ -2102,7 +2102,7 @@ export class Emitter {
         if (!keyArg || !ts.isStringLiteral(keyArg)) {
           this.fail(e, `\`Cmd.cancel\` takes the effect key as a string literal`, "NS1027");
         }
-        if (keyArg.text.length > 255) this.fail(keyArg, "Cmd.cancel key over 255 bytes");
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.cancel key over 255 bytes");
         return `rt.cmdCancel("${escapeZigString(keyArg.text)}")`;
       }
       if (method === "readFile") {
@@ -2137,7 +2137,7 @@ export class Emitter {
         if (!keyArg || !ts.isStringLiteral(keyArg)) {
           this.fail(e, `\`Cmd.delay\` takes its key as a string literal`, "NS1027");
         }
-        if (keyArg.text.length > 255) this.fail(keyArg, "Cmd.delay key over 255 bytes");
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.delay key over 255 bytes");
         const msArg = e.arguments[1];
         if (!msArg) this.fail(e, "Cmd.delay interval (milliseconds)");
         // The engine bound is 1ms..one year; a compile-time-known interval
@@ -2172,7 +2172,7 @@ export class Emitter {
         if (!labelArg || !ts.isStringLiteral(labelArg)) {
           this.fail(e, `\`Cmd.showWindow\` takes the declared window label as a string literal`, "NS1027");
         }
-        if (labelArg.text.length > 255) this.fail(labelArg, "Cmd.showWindow label over 255 bytes");
+        if (utf8ByteLength(labelArg.text) > 255) this.fail(labelArg, "Cmd.showWindow label over 255 bytes");
         return `rt.cmdWindowShow("${escapeZigString(labelArg.text)}")`;
       }
       if (method === "quitApp") {
@@ -2230,7 +2230,7 @@ export class Emitter {
         );
       }
       if (p.name.text === "key") {
-        if (v.text.length > 255) this.fail(v, "Cmd.request key over 255 bytes");
+        if (utf8ByteLength(v.text) > 255) this.fail(v, "Cmd.request key over 255 bytes");
         key = v.text;
       } else if (p.name.text === "ok") ok = v;
       else if (p.name.text === "err") err = v;
@@ -2362,7 +2362,7 @@ export class Emitter {
         );
       }
       if (name === "key") {
-        if (v.text.length > 255) this.fail(v, "Cmd.spawn key over 255 bytes");
+        if (utf8ByteLength(v.text) > 255) this.fail(v, "Cmd.spawn key over 255 bytes");
         key = v.text;
       } else if (name === "line") line = v;
       else if (name === "exit") exit = v;
@@ -2397,7 +2397,7 @@ export class Emitter {
     if (!keyArg || !ts.isStringLiteral(keyArg)) {
       this.fail(e, `\`Cmd.audioPlay\` takes its key as a string literal`, "NS1027");
     }
-    if (keyArg.text.length > 255) this.fail(keyArg, "Cmd.audioPlay key over 255 bytes");
+    if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.audioPlay key over 255 bytes");
 
     let source = e.arguments[1];
     while (source && (ts.isParenthesizedExpression(source) || ts.isAsExpression(source) || ts.isSatisfiesExpression(source))) source = source.expression;
@@ -2521,7 +2521,7 @@ export class Emitter {
     if (!keyArg || !ts.isStringLiteral(keyArg)) {
       this.fail(e, `\`Cmd.${method}\` takes its key as a string literal`, "NS1027");
     }
-    if (keyArg.text.length > 255) this.fail(keyArg, `Cmd.${method} key over 255 bytes`);
+    if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, `Cmd.${method} key over 255 bytes`);
     let value = "0";
     if (method === "audioSeek") {
       const msArg = e.arguments[1];
@@ -2590,7 +2590,10 @@ export class Emitter {
   }
 
   /// The byte length of a compile-time `asciiBytes("...")` literal; null
-  /// for everything dynamic.
+  /// for everything dynamic. Counted as UTF-8 bytes: for the ASCII text
+  /// the intrinsic is contracted to carry the two counts agree, and for
+  /// text that violates the contract the emitted Zig literal holds the
+  /// UTF-8 bytes, so this is the length the engine bound actually sees.
   private literalBytesLength(arg: ts.Expression): number | null {
     let e = arg;
     while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression;
@@ -2598,7 +2601,7 @@ export class Emitter {
     const decl = this.tast.declarationOf(e.expression);
     if (!decl || !this.isSdkIntrinsic(decl, "asciiBytes")) return null;
     const inner = e.arguments[0];
-    return inner && ts.isStringLiteral(inner) ? inner.text.length : null;
+    return inner && ts.isStringLiteral(inner) ? utf8ByteLength(inner.text) : null;
   }
 
   /// The numeric value of a compile-time number literal (unary minus
@@ -2869,7 +2872,7 @@ export class Emitter {
         if (!keyArg || !ts.isStringLiteral(keyArg)) {
           this.fail(e, `\`Sub.timer\` takes its key as a string literal`, "NS1027");
         }
-        if (keyArg.text.length > 255) this.fail(keyArg, "Sub.timer key over 255 bytes");
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Sub.timer key over 255 bytes");
         const everyArg = e.arguments[1];
         if (!everyArg) this.fail(e, "Sub.timer interval (milliseconds)");
         const every = this.emitExpr(everyArg, ctx, { k: "f64" }).code;
@@ -8760,6 +8763,16 @@ function f64Literal(v: number): string {
   if (Object.is(v, -0)) return "-0.0";
   const s = String(v);
   return /[.eE]/.test(s) ? s : `${s}.0`;
+}
+
+/// The UTF-8 byte length of literal text. The wire's length prefixes
+/// count BYTES, and the emitted Zig string literal carries the text as
+/// UTF-8, so every gate on a literal must count bytes too: `.length`
+/// counts UTF-16 code units and would pass a 200-character CJK name
+/// that arrives as 600 bytes, straight past the teaching and into the
+/// runtime's 255-byte length prefix.
+function utf8ByteLength(s: string): number {
+  return Buffer.byteLength(s, "utf8");
 }
 
 function escapeZigString(s: string): string {

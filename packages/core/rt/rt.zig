@@ -1530,7 +1530,13 @@ pub fn Kernel(comptime opts: Options) type {
         }
 
         pub fn cmdWindowShow(label: []const u8) Cmd {
-            std.debug.assert(label.len <= 255);
+            // The emitter's byte gate on the literal label is the
+            // build-time teaching; this is the loud runtime backstop.
+            // A std.debug.assert compiles out of ReleaseFast, where the
+            // @intCast below would then truncate the length byte and
+            // corrupt the wire record silently — panic in every build
+            // mode instead.
+            if (label.len > 255) @panic("Cmd.showWindow label over 255 bytes");
             const out = frameAlloc(u8, 2 + label.len);
             out[0] = @intFromEnum(CmdOp.window_show);
             out[1] = @intCast(label.len);
