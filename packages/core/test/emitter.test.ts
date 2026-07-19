@@ -267,6 +267,37 @@ export function total(n: number): number {
   assert.doesNotMatch(zig, /const p = next\(i\) orelse/);
 });
 
+test("R13 a redundant nested switch on the same subject hands back the outer capture", () => {
+  const zig = emit(`
+export type Ev =
+  | { readonly kind: "hit"; readonly value: number }
+  | { readonly kind: "miss" };
+export function score(e: Ev): number {
+  switch (e.kind) {
+    case "hit": {
+      let bonus = 0;
+      switch (e.kind) {
+        case "hit": {
+          bonus = e.value * 2;
+          break;
+        }
+        default:
+          break;
+      }
+      return e.value + bonus;
+    }
+    case "miss":
+      return 0;
+  }
+}
+`);
+  // The inner arm's capture (value_2) overwrites the outer arm's map entry;
+  // the arm cleanup must repopulate from its snapshot, or the continuation
+  // reads the inner capture after its block closed (undeclared identifier).
+  assert.match(zig, /bonus = value_2 \* 2;/);
+  assert.match(zig, /return value \+ bonus;/);
+});
+
 test("R7 a non-reassigned declaration adjacent to its exit guard still fuses to a const orelse", () => {
   const zig = emit(`
 export interface P { readonly v: number; }

@@ -5002,11 +5002,15 @@ export class Emitter {
       }
       this.emitBlockStatements(stmts, sub);
       // Restore: captures are arm-scoped, and the still-optional markers
-      // stay paired with the substitutions they annotate.
-      for (const k of [...ctx.memberSubst.keys()]) if (!savedSubst.has(k)) ctx.memberSubst.delete(k);
-      for (const k of [...ctx.stillOptionalSubst.keys()]) {
-        if (!savedStillOptional.has(k)) ctx.stillOptionalSubst.delete(k);
-      }
+      // stay paired with the substitutions they annotate. Repopulate from
+      // the snapshot rather than deleting the arm's additions — a nested
+      // switch on the same subject OVERWRITES entries the snapshot already
+      // held (its capture shadows the outer one), and a delete-only sweep
+      // would leave the inner capture name active after its block closed.
+      ctx.memberSubst.clear();
+      for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
+      ctx.stillOptionalSubst.clear();
+      for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
 
       const labels = [...pending, tag].map((t) => `.${zigId(t)}`).join(", ");
       pending = [];

@@ -5638,6 +5638,36 @@ export function tally(e: Entry, other: Entry): number {
 }
 `,
   },
+  {
+    // A redundant nested SWITCH on the same subject inside an already-
+    // narrowed arm overwrites the arm's capture entries with the inner
+    // capture name; the continuation after the inner switch must read the
+    // OUTER capture again (the inner one's block has closed in Zig).
+    name: "a redundant nested switch on the same subject hands back the outer capture",
+    src: `
+export type Ev =
+  | { readonly kind: "hit"; readonly value: number }
+  | { readonly kind: "miss" };
+export function score(e: Ev): number {
+  switch (e.kind) {
+    case "hit": {
+      let bonus = 0;
+      switch (e.kind) {
+        case "hit": {
+          bonus = e.value * 2;
+          break;
+        }
+        default:
+          break;
+      }
+      return e.value + bonus;
+    }
+    case "miss":
+      return 0;
+  }
+}
+`,
+  },
 ];
 
 const corpus: Case[] = [
