@@ -186,6 +186,8 @@ pub const Server = struct {
         try js.beginObject();
         try js.objectField("capabilities");
         try js.beginObject();
+        try js.objectField("positionEncoding");
+        try js.write("utf-16");
         try js.objectField("textDocumentSync");
         try js.write(1); // full-document sync
         try js.objectField("completionProvider");
@@ -268,11 +270,11 @@ pub const Server = struct {
 
     fn writeDiagnostic(js: *std.json.Stringify, text: []const u8, info: ui_markup.MarkupErrorInfo, severity: u8) !void {
         const line = if (info.line > 0) info.line - 1 else 0;
-        const character = if (info.column > 0) info.column - 1 else 0;
-        const end_character = diagnosticEndCharacter(text, line, character);
+        const byte_character = if (info.column > 0) info.column - 1 else 0;
+        const characters = diagnosticCharacters(text, line, byte_character);
         try js.beginObject();
         try js.objectField("range");
-        try writeRange(js, line, character, line, end_character);
+        try writeRange(js, line, characters.start, line, characters.end);
         try js.objectField("severity");
         try js.write(severity);
         try js.objectField("source");
@@ -493,32 +495,100 @@ pub fn analyzeWarnings(arena: std.mem.Allocator, source: []const u8, storage: []
     return ui_markup.collectA11yWarnings(document, storage);
 }
 
-/// Byte offset for a 0-based LSP position, clamped to the line's end.
-/// Positions are treated as byte columns; `.native` markup is ASCII in
-/// practice (UTF-16 column mapping is documented future work).
-pub fn offsetForPosition(text: []const u8, line: usize, character: usize) usize {
+const LineBounds = struct {
+    start: usize,
+    end: usize,
+};
+
+fn lineBounds(text: []const u8, line: usize) ?LineBounds {
     var current_line: usize = 0;
-    var index: usize = 0;
+    var start: usize = 0;
     while (current_line < line) {
-        const newline = std.mem.indexOfScalarPos(u8, text, index, '\n') orelse return text.len;
-        index = newline + 1;
+        const newline = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse return null;
+        start = newline + 1;
         current_line += 1;
     }
-    const line_end = std.mem.indexOfScalarPos(u8, text, index, '\n') orelse text.len;
-    return @min(index + character, line_end);
+    const newline = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+    const end = if (newline > start and text[newline - 1] == '\r') newline - 1 else newline;
+    return .{ .start = start, .end = end };
 }
 
-/// End of the diagnostic range: extend across the name under the position
-/// (element findings point at the `<`, attribute findings at the name) so
-/// editors underline the whole identifier, not one character.
-fn diagnosticEndCharacter(text: []const u8, line: usize, character: usize) usize {
-    const offset = offsetForPosition(text, line, character);
-    var end = offset;
-    if (end < text.len and text[end] == '<') end += 1;
-    if (end < text.len and text[end] == '/') end += 1;
-    while (end < text.len and isNameChar(text[end])) end += 1;
-    if (end == offset) return character + 1;
-    return character + (end - offset);
+const Utf8Scalar = struct {
+    byte_len: usize,
+    utf16_len: usize,
+};
+
+/// Decode one scalar without trusting the document to be valid UTF-8.
+/// Invalid or truncated bytes still advance as one UTF-16 code unit so a
+/// malformed document cannot trap or stall the protocol server.
+fn utf8ScalarAt(text: []const u8, offset: usize, end: usize) Utf8Scalar {
+    const byte_len: usize = std.unicode.utf8ByteSequenceLength(text[offset]) catch return .{ .byte_len = 1, .utf16_len = 1 };
+    if (byte_len > end - offset) return .{ .byte_len = 1, .utf16_len = 1 };
+    const codepoint = std.unicode.utf8Decode(text[offset..][0..byte_len]) catch return .{ .byte_len = 1, .utf16_len = 1 };
+    return .{ .byte_len = byte_len, .utf16_len = if (codepoint > 0xffff) 2 else 1 };
+}
+
+/// Byte offset for a 0-based LSP position. LSP characters are UTF-16 code
+/// units; positions beyond the line clamp to its logical end (before CRLF).
+/// A position between a surrogate pair's halves floors to the codepoint start.
+pub fn offsetForPosition(text: []const u8, line: usize, character: usize) usize {
+    const bounds = lineBounds(text, line) orelse return text.len;
+    var offset = bounds.start;
+    var utf16_character: usize = 0;
+    while (offset < bounds.end) {
+        const scalar = utf8ScalarAt(text, offset, bounds.end);
+        if (character < utf16_character + scalar.utf16_len) return offset;
+        offset += scalar.byte_len;
+        utf16_character += scalar.utf16_len;
+        if (character == utf16_character) return offset;
+    }
+    return bounds.end;
+}
+
+fn offsetForByteColumn(text: []const u8, line: usize, character: usize) usize {
+    const bounds = lineBounds(text, line) orelse return text.len;
+    return bounds.start + @min(character, bounds.end - bounds.start);
+}
+
+fn utf16CharacterForOffset(text: []const u8, line: usize, target_offset: usize) usize {
+    const bounds = lineBounds(text, line) orelse return 0;
+    const target = @min(target_offset, bounds.end);
+    var offset = bounds.start;
+    var character: usize = 0;
+    while (offset < target) {
+        const scalar = utf8ScalarAt(text, offset, bounds.end);
+        if (offset + scalar.byte_len > target) break;
+        offset += scalar.byte_len;
+        character += scalar.utf16_len;
+    }
+    return character;
+}
+
+const DiagnosticCharacters = struct { start: usize, end: usize };
+
+/// Convert the parser's byte column to an LSP UTF-16 range, extending across
+/// the identifier so editors underline the useful token.
+fn diagnosticCharacters(text: []const u8, line: usize, byte_character: usize) DiagnosticCharacters {
+    const bounds = lineBounds(text, line) orelse return .{ .start = 0, .end = 0 };
+    const offset = offsetForByteColumn(text, line, byte_character);
+    var end_offset = offset;
+    if (end_offset < bounds.end and text[end_offset] == '<') end_offset += 1;
+    if (end_offset < bounds.end and text[end_offset] == '/') end_offset += 1;
+    while (end_offset < bounds.end and isNameChar(text[end_offset])) end_offset += 1;
+
+    const start_character = utf16CharacterForOffset(text, line, offset);
+    if (end_offset == offset) {
+        if (end_offset < bounds.end) {
+            const scalar = utf8ScalarAt(text, end_offset, bounds.end);
+            end_offset += scalar.byte_len;
+        } else {
+            return .{ .start = start_character, .end = start_character };
+        }
+    }
+    return .{
+        .start = start_character,
+        .end = utf16CharacterForOffset(text, line, end_offset),
+    };
 }
 
 fn isNameChar(byte: u8) bool {
@@ -691,6 +761,31 @@ test "readFrame rejects a frame without Content-Length" {
     try testing.expectError(error.InvalidFrame, readFrame(allocator, &reader));
 }
 
+test "offsetForPosition maps UTF-16 characters to UTF-8 byte offsets" {
+    const source = "你好😀<row ";
+    try testing.expectEqual(@as(usize, 0), offsetForPosition(source, 0, 0));
+    try testing.expectEqual(@as(usize, 3), offsetForPosition(source, 0, 1));
+    try testing.expectEqual(@as(usize, 6), offsetForPosition(source, 0, 2));
+    // A position between the emoji's surrogate halves floors to the
+    // codepoint boundary instead of splitting its UTF-8 encoding.
+    try testing.expectEqual(@as(usize, 6), offsetForPosition(source, 0, 3));
+    try testing.expectEqual(@as(usize, 10), offsetForPosition(source, 0, 4));
+    try testing.expectEqual(@as(usize, 11), offsetForPosition(source, 0, 5));
+    try testing.expectEqual(source.len, offsetForPosition(source, 0, 100));
+}
+
+test "offsetForPosition handles multiple lines and CRLF endings" {
+    const source = "前\r\n😀<row \r\n尾";
+    // Clamp to the logical line end, before the CRLF bytes.
+    try testing.expectEqual(@as(usize, 3), offsetForPosition(source, 0, 100));
+    try testing.expectEqual(@as(usize, 5), offsetForPosition(source, 1, 0));
+    try testing.expectEqual(@as(usize, 5), offsetForPosition(source, 1, 1));
+    try testing.expectEqual(@as(usize, 9), offsetForPosition(source, 1, 2));
+    try testing.expectEqual(@as(usize, 10), offsetForPosition(source, 1, 3));
+    try testing.expectEqual(@as(usize, 16), offsetForPosition(source, 2, 0));
+    try testing.expectEqual(source.len, offsetForPosition(source, 99, 0));
+}
+
 test "serve: initialize, didOpen with broken markup, publishDiagnostics round trip" {
     const allocator = testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -710,6 +805,14 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
         "\"uri\":\"file:///tmp/app.native\",\"version\":3},\"contentChanges\":[{" ++
         "\"text\":\"<avatar >CT</avatar>\"}]}}";
+    const unicode_doc =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
+        "\"uri\":\"file:///tmp/app.native\",\"version\":4},\"contentChanges\":[{" ++
+        "\"text\":\"<row>你好😀<button label=\\\"Go\\\">Go</button></row>\"}]}}";
+    const unicode_broken =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
+        "\"uri\":\"file:///tmp/app.native\",\"version\":5},\"contentChanges\":[{" ++
+        "\"text\":\"<!--你好😀--><bogus />\"}]}}";
 
     var input: std.Io.Writer.Allocating = .init(arena);
     for ([_][]const u8{
@@ -721,7 +824,11 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":2}}}",
         avatar_doc,
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":8}}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"shutdown\"}",
+        unicode_doc,
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":17}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":12}}}",
+        unicode_broken,
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"shutdown\"}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}",
     }) |body| {
         const framed = try frame(arena, body);
@@ -746,11 +853,13 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     }
     // initialize response, diagnostics (broken), diagnostics (clean),
     // completion, hover, diagnostics (avatar), avatar completion,
-    // shutdown.
-    try testing.expectEqual(@as(usize, 8), bodies.items.len);
+    // diagnostics (Unicode document), Unicode completion and hover,
+    // diagnostics (Unicode prefix + broken element), shutdown.
+    try testing.expectEqual(@as(usize, 12), bodies.items.len);
 
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"id\":1") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"capabilities\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"positionEncoding\":\"utf-16\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"hoverProvider\":true") != null);
 
     // Broken document: one diagnostic at line 1, character 2..8 ("<bogus").
@@ -783,9 +892,25 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"label\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"on-press\"") != null);
 
+    // UTF-16 positions after CJK text and a supplementary-plane emoji map
+    // back to the byte offsets used by completion and hover internals.
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"gap\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"on-press\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[9], "Text-bearing control") != null);
+
+    // The parser reports a byte column for `<bogus`; the LSP range accounts
+    // for the CJK text and supplementary-plane emoji in the comment before it.
+    const unicode_diag = try std.json.parseFromSliceLeaky(std.json.Value, arena, bodies.items[10], .{});
+    const unicode_diagnostics = unicode_diag.object.get("params").?.object.get("diagnostics").?.array.items;
+    try testing.expectEqual(@as(usize, 1), unicode_diagnostics.len);
+    try testing.expectEqualStrings("unknown element", unicode_diagnostics[0].object.get("message").?.string);
+    const unicode_range = unicode_diagnostics[0].object.get("range").?;
+    try testing.expectEqual(@as(i64, 11), unicode_range.object.get("start").?.object.get("character").?.integer);
+    try testing.expectEqual(@as(i64, 17), unicode_range.object.get("end").?.object.get("character").?.integer);
+
     // Shutdown response.
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"id\":5") != null);
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"result\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[11], "\"id\":7") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[11], "\"result\":null") != null);
 }
 
 test "analyze reports parser and validation findings with positions" {
