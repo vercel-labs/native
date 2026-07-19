@@ -1774,8 +1774,8 @@ static NSMutableDictionary<NSNumber *, id> *NativeSdkRegisteredFontDescriptors(v
 // before installing the new descriptor. The measured-width NSCache in
 // `native_sdk_appkit_measure_text` goes stale at the same moment but
 // cannot be prefix-evicted (NSCache does not enumerate keys), so it is
-// invalidated by generation instead — see
-// NativeSdkRegisteredFontGenerations below. Accessed only under the
+// invalidated by registration token instead — see
+// NativeSdkRegisteredFontTokens below. Accessed only under the
 // descriptor table's @synchronized guard, like the descriptors.
 static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCache(void) {
     static NSMutableDictionary<NSString *, NSFont *> *cache = nil;
@@ -1786,17 +1786,26 @@ static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCac
     return cache;
 }
 
-// Per-id registration generations, the invalidation handle for the
+// Per-id registration tokens, the invalidation handle for the
 // measured-width NSCache in `native_sdk_appkit_measure_text`. That
 // cache has the same lifetime hazard as the size cache above (per-
 // process cache, per-runtime id permanence) but no way to evict an
 // id's entries — NSCache cannot enumerate keys — so every registration
-// bumps the id's generation here and the width-cache key includes it:
-// a previous runtime's widths become unreachable and age out under the
-// cache's own count limit. Ids never registered (the built-in faces)
-// stay at generation 0 forever. Accessed only under the descriptor
-// table's @synchronized guard, like the descriptors.
-static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontGenerations(void) {
+// stamps its id with the next value of ONE process-global monotonic
+// counter and the width-cache key includes the stamp. Tokens never
+// repeat, so no registration can ever reach widths a previous life of
+// its id cached (those entries become unreachable and age out under
+// the cache's own count limit) — which is exactly what makes an id's
+// record REMOVABLE at unregister, retaining zero state per retired id.
+// A per-id bump counter could not offer that: deleting a per-id count
+// would let a future registration of the id restart at 1 and collide
+// with the retired life's still-cached widths, so retired ids would
+// each pin a record for the process lifetime. Ids never registered
+// (the built-in faces) have no record and measure under token 0 — the
+// same value an unregistered id returns to, honest because both states
+// resolve through the same built-in candidates. Accessed only under
+// the descriptor table's @synchronized guard, like the descriptors.
+static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontTokens(void) {
     static NSMutableDictionary<NSNumber *, NSNumber *> *table = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -1805,13 +1814,19 @@ static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontGener
     return table;
 }
 
-// The current registration generation for a font id: 0 until the id
-// first registers, bumped by every (re)registration.
-static unsigned long long NativeSdkRegisteredFontGeneration(unsigned long long value) {
+// The process-global registration token counter: pre-incremented at
+// every registration, so 0 is never a live token and stays the honest
+// "no registered face" value. Mutated only under the descriptor
+// table's @synchronized guard, like every table here.
+static unsigned long long NativeSdkRegisteredFontTokenCounter = 0;
+
+// The current registration token for a font id: 0 unless the id holds
+// a live registration.
+static unsigned long long NativeSdkRegisteredFontToken(unsigned long long value) {
     NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
     @synchronized (table) {
-        NSNumber *generation = NativeSdkRegisteredFontGenerations()[@(value)];
-        return generation ? generation.unsignedLongLongValue : 0;
+        NSNumber *token = NativeSdkRegisteredFontTokens()[@(value)];
+        return token ? token.unsignedLongLongValue : 0;
     }
 }
 
@@ -1865,12 +1880,11 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
                 if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
             }
             // The measured-width cache holds the same stale state but
-            // cannot be enumerated for eviction, so bump the id's
-            // generation instead: width-cache keys include it, and the
-            // old generation's entries become unreachable.
-            NSMutableDictionary<NSNumber *, NSNumber *> *generations = NativeSdkRegisteredFontGenerations();
-            NSNumber *previous = generations[@(font_id)];
-            generations[@(font_id)] = @((previous ? previous.unsignedLongLongValue : 0) + 1);
+            // cannot be enumerated for eviction, so stamp the id with a
+            // fresh process-global token instead: width-cache keys
+            // include the token, tokens never repeat, and everything
+            // cached under any previous stamp becomes unreachable.
+            NativeSdkRegisteredFontTokens()[@(font_id)] = @(++NativeSdkRegisteredFontTokenCounter);
             table[@(font_id)] = (__bridge_transfer id)descriptor;
         }
         return 1;
@@ -1881,12 +1895,18 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
 // each id the dying runtime registered: font ids are per-runtime but
 // every table here is per-process, so without this removal an embedder
 // cycling runtimes with fresh ids grows the descriptor table (and its
-// caches) for the process lifetime. Removal runs the SAME eviction the
-// re-registration path runs — prefix-evict the id's cached NSFonts and
-// bump its generation so measured widths keyed under the old generation
-// become unreachable — then drops the descriptor itself. An id with no
-// installed descriptor (never registered host-side, or already returned)
-// is a no-op accept.
+// caches) for the process lifetime. Removal drops EVERYTHING the
+// registration installed: the id's cached NSFonts (the same prefix
+// eviction re-registration runs), the id's registration token record,
+// and the descriptor itself — zero retained state per retired id, so
+// runtime cycles truly do not accumulate host entries. Deleting the
+// token record (rather than bumping it) is safe precisely because
+// tokens come from one process-global monotonic counter: a future
+// registration of this id takes a fresh, never-repeated token, so the
+// widths this life cached in the measured-width NSCache stay
+// unreachable without any per-id record surviving to say so. An id
+// with no installed descriptor (never registered host-side, or already
+// returned) is a no-op accept.
 int native_sdk_appkit_unregister_font(uint64_t font_id) {
     if (font_id == 0) return 0;
     @autoreleasepool {
@@ -1899,9 +1919,7 @@ int native_sdk_appkit_unregister_font(uint64_t font_id) {
             for (NSString *cachedKey in cachedKeys) {
                 if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];
             }
-            NSMutableDictionary<NSNumber *, NSNumber *> *generations = NativeSdkRegisteredFontGenerations();
-            NSNumber *previous = generations[@(font_id)];
-            generations[@(font_id)] = @((previous ? previous.unsignedLongLongValue : 0) + 1);
+            [NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];
             [table removeObjectForKey:@(font_id)];
         }
         return 1;
@@ -1988,13 +2006,13 @@ double native_sdk_appkit_measure_text(uint64_t font_id, double size, const char 
             widthCache = [[NSCache alloc] init];
             widthCache.countLimit = 16384;
         });
-        // The key carries the id's registration generation so a face
+        // The key carries the id's registration token so a face
         // re-registered under the same id (a new runtime in this
-        // process) never serves the previous face's widths — see
-        // NativeSdkRegisteredFontGenerations for why generation, not
-        // eviction, invalidates this cache.
-        unsigned long long generation = NativeSdkRegisteredFontGeneration((unsigned long long)font_id);
-        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f/%@", (unsigned long long)font_id, generation, (double)clamped, value];
+        // process) never serves a previous face's widths — see
+        // NativeSdkRegisteredFontTokens for why token, not eviction,
+        // invalidates this cache.
+        unsigned long long token = NativeSdkRegisteredFontToken((unsigned long long)font_id);
+        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f/%@", (unsigned long long)font_id, token, (double)clamped, value];
         NSNumber *cached = [widthCache objectForKey:key];
         if (cached) return cached.doubleValue;
         NSFont *font = NativeSdkFontForFontId(font_id, clamped);

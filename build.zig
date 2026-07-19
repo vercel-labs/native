@@ -809,7 +809,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkItalicSansFont(base)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkItalicSansFont(NativeSdkWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], base, NSFontWeightBold, YES, size))" },
     });
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-registered-font-cache-eviction", "Verify the AppKit host invalidates BOTH per-process registered-font caches at registration (the caches are per-process while font-id permanence is per-runtime, so a new runtime re-registering an id must never resolve the previous runtime's face or its measured widths): the NSFont size cache by prefix eviction and the measured-width NSCache by a per-id generation in its key", &.{
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-registered-font-cache-eviction", "Verify the AppKit host invalidates BOTH per-process registered-font caches at registration (the caches are per-process while font-id permanence is per-runtime, so a new runtime re-registering an id must never resolve the previous runtime's face or its measured widths): the NSFont size cache by prefix eviction and the measured-width NSCache by a process-global registration token in its key", &.{
         // No SDK test tier links appkit_host.m (only managed app builds
         // compile it), so the eviction wiring is pinned textually like
         // the other AppKit host contracts: the shared accessor both the
@@ -820,23 +820,27 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "an id is only permanent within" },
         // The width-cache half: NSCache cannot enumerate keys, so the
-        // measured-width cache is invalidated by a per-id generation
-        // that registration bumps and the cache key includes — the
-        // generation table, the bump inside register_font, and the
-        // generation-carrying key inside measure_text.
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontGenerations(void)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "generations[@(font_id)] = @((previous ? previous.unsignedLongLongValue : 0) + 1);" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "unsigned long long generation = NativeSdkRegisteredFontGeneration((unsigned long long)font_id);" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NSString stringWithFormat:@\"%llu/%llu/%.3f/%@\", (unsigned long long)font_id, generation, (double)clamped, value]" },
+        // measured-width cache is invalidated by a registration token
+        // drawn from one process-global monotonic counter (tokens never
+        // repeat, which is what lets unregister DELETE an id's record
+        // instead of retaining a bumped one per retired id) — the token
+        // table, the fresh stamp inside register_font, and the
+        // token-carrying key inside measure_text.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontTokens(void)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRegisteredFontTokens()[@(font_id)] = @(++NativeSdkRegisteredFontTokenCounter);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "unsigned long long token = NativeSdkRegisteredFontToken((unsigned long long)font_id);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NSString stringWithFormat:@\"%llu/%llu/%.3f/%@\", (unsigned long long)font_id, token, (double)clamped, value]" },
         // The teardown half: Runtime.deinit returns the host-side
         // registration through the platform unregister seam, and the
-        // ObjC removal runs the SAME eviction machinery before dropping
-        // the descriptor entry. Pinned like the registration half
-        // (appkit_host.m has no SDK test tier); the deinit call site is
-        // pinned too so the seam can never silently lose its one caller,
-        // and the embed cycle test asserts that call behaviorally
-        // against the null platform's recorder.
+        // ObjC removal drops the descriptor, the size-cache entries, AND
+        // the token record — zero retained state per retired id. Pinned
+        // like the registration half (appkit_host.m has no SDK test
+        // tier); the deinit call site is pinned too so the seam can
+        // never silently lose its one caller, and the embed cycle test
+        // asserts that call behaviorally against the null platform's
+        // recorder.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "int native_sdk_appkit_unregister_font(uint64_t font_id) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[table removeObjectForKey:@(font_id)];" },
         .{ .path = "src/runtime/core.zig", .pattern = "self.options.platform.services.unregisterGpuSurfaceFont(entry.id) catch {};" },
     });
