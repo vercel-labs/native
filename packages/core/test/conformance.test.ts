@@ -5555,6 +5555,69 @@ export function tally(msg: Msg): number {
 }
 `,
   },
+  {
+    // The narrowing maps key on the tested expression's TEXT, so a
+    // DIFFERENT variable spelling the same name collides the key: a
+    // callback parameter shadowing the switch subject. The kind guard over
+    // the shadow overwrites the subject's optional-payload marker under
+    // the shared "e.value" key, and only a full-map restore puts the
+    // subject's marker back — a delete-additions-only restore leaves the
+    // stale marker, the later null test reads the payload as already
+    // non-null, and the narrowing lowering is skipped (an optional lands
+    // in integer arithmetic).
+    name: "a kind guard over a SHADOWING callback parameter keeps the subject's payload optional",
+    src: `
+export type Entry =
+  | { readonly kind: "score"; readonly value: number | null; readonly bonus: number }
+  | { readonly kind: "empty" };
+export function total(e: Entry, others: readonly Entry[]): number {
+  switch (e.kind) {
+    case "score": {
+      const anyPositive = others.some((e) => (e.kind === "score" ? e.bonus > 0 : false));
+      const boost = anyPositive ? 1 : 0;
+      if (e.value !== null) {
+        return e.value + e.bonus + boost;
+      }
+      return e.bonus + boost;
+    }
+    case "empty":
+      return 0;
+  }
+}
+`,
+  },
+  {
+    // Statement spelling of the shadow: a block-scoped declaration of the
+    // same union-typed name inside the payload capture's scope, with a
+    // kind-guard STATEMENT over it, then a null test on the subject's
+    // payload after the block closes. The block boundary must hand back
+    // the subject's markers untouched by the shadow's narrowing.
+    name: "a kind guard over a block-scoped SHADOWING declaration keeps the subject's payload optional",
+    src: `
+export type Entry =
+  | { readonly kind: "score"; readonly value: number | null; readonly bonus: number }
+  | { readonly kind: "empty" };
+export function tally(e: Entry, other: Entry): number {
+  switch (e.kind) {
+    case "score": {
+      let acc = 0;
+      {
+        const e = other;
+        if (e.kind === "score") {
+          acc = e.bonus;
+        }
+      }
+      if (e.value !== null) {
+        return e.value + e.bonus + acc;
+      }
+      return e.bonus + acc;
+    }
+    case "empty":
+      return 0;
+  }
+}
+`,
+  },
 ];
 
 const corpus: Case[] = [
