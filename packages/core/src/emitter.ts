@@ -4252,6 +4252,13 @@ export class Emitter {
     const t = unwrapOptional(this.zTypeOfExpr(guard.base, ctx));
     if (t.k !== "union") return emitBranch();
     const savedSubst = new Map(ctx.memberSubst);
+    // stillOptionalSubst rides along: narrowUnion overwrites an optional
+    // payload's marker with ITS access spelling, and a marker left out of
+    // sync with the restored memberSubst breaks the identity check
+    // zTypeOfExpr keys on — a redundant kind guard inside a payload
+    // capture would leave the capture looking non-null for the rest of
+    // the arm, routing reads around the null-narrowing lowerings.
+    const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrow = new Map(ctx.narrowedUnion);
     this.narrowUnion(guard.base, t.name, guard.tag, ctx);
     try {
@@ -4259,6 +4266,8 @@ export class Emitter {
     } finally {
       ctx.memberSubst.clear();
       for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
+      ctx.stillOptionalSubst.clear();
+      for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
       ctx.narrowedUnion.clear();
       for (const [k, v] of savedNarrow) ctx.narrowedUnion.set(k, v);
     }
@@ -4932,6 +4941,7 @@ export class Emitter {
       const sub = this.nestedCtx(armCtx);
       // Payload capture + member substitution for this arm's fields.
       const savedSubst = new Map(ctx.memberSubst);
+      const savedStillOptional = new Map(ctx.stillOptionalSubst);
       let capture = "";
       const payloadUsed = arm.fields.some((f) =>
         stmts.some((s) => s.getText().includes(`.${f.tsName}`)),
@@ -4961,8 +4971,12 @@ export class Emitter {
         }
       }
       this.emitBlockStatements(stmts, sub);
-      // Restore: captures are arm-scoped.
+      // Restore: captures are arm-scoped, and the still-optional markers
+      // stay paired with the substitutions they annotate.
       for (const k of [...ctx.memberSubst.keys()]) if (!savedSubst.has(k)) ctx.memberSubst.delete(k);
+      for (const k of [...ctx.stillOptionalSubst.keys()]) {
+        if (!savedStillOptional.has(k)) ctx.stillOptionalSubst.delete(k);
+      }
 
       const labels = [...pending, tag].map((t) => `.${zigId(t)}`).join(", ");
       pending = [];

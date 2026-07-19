@@ -5481,8 +5481,56 @@ export function f(msgs: readonly Msg[]): number {
   },
 ];
 
+// Scoped kind-narrowing must restore EVERY map it mutates. narrowUnion
+// writes memberSubst, narrowedUnion, and — for optional payload fields —
+// stillOptionalSubst; a wrapper that snapshots only the first two leaves
+// the optional marker overwritten on exit, so the payload capture reads as
+// non-null afterward and null tests route around the narrowing lowerings.
+const kindNarrowRestoreCases: Case[] = [
+  {
+    name: "a redundant kind guard inside a payload capture keeps the payload optional after it",
+    src: `
+export type Msg =
+  | { readonly kind: "got"; readonly parsed: number | null }
+  | { readonly kind: "miss" };
+export function score(msg: Msg): number {
+  switch (msg.kind) {
+    case "got": {
+      const marker = msg.kind === "got" ? 1 : 2;
+      return msg.parsed !== null ? msg.parsed + marker : 0;
+    }
+    case "miss":
+      return -1;
+  }
+}
+`,
+  },
+  {
+    name: "a nested kind guard STATEMENT inside the capture keeps the optional too",
+    src: `
+export type Msg =
+  | { readonly kind: "got"; readonly parsed: number | null }
+  | { readonly kind: "miss" };
+export function tally(msg: Msg): number {
+  switch (msg.kind) {
+    case "got": {
+      let bonus = 0;
+      if (msg.kind === "got") {
+        bonus = 5;
+      }
+      return msg.parsed === null ? bonus : msg.parsed + bonus;
+    }
+    case "miss":
+      return -1;
+  }
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...exitGuardNarrowingCases,
+  ...kindNarrowRestoreCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,
