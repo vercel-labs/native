@@ -167,7 +167,7 @@ Selections dispatch each item's `command` through `on_command` with source `.tra
 
 The tray-player pattern (a Spotify-shaped app that lives in the menu bar) is two declarations and two verbs:
 
-1. The window declares `close_policy = "hide"` in app.zon, so the red close button hides it instead of quitting — the app keeps running behind its status item, and on macOS clicking the Dock icon re-shows the hidden window on its own. The default (`"quit"`) keeps the classic behavior; see [Windows](/windows#close-policy).
+1. The window declares `close_policy = "hide"` in app.zon, so the red close button hides it instead of quitting — the app keeps running behind its status item, and on macOS clicking the Dock icon re-shows the hidden window on its own. On Windows this requires the `"tray"` capability (the status item is the only way back to a hidden window there — the build refuses `"hide"` without it, and a tray that fails to install downgrades the first hide-close to a real close with a loud log). The default (`"quit"`) keeps the classic behavior; see [Windows](/windows#close-policy).
 2. The tray rows map to the window verbs in `update`: "Open" returns `fx.showWindow(label)` (un-hide + activate; it also restores a minimized window) and "Quit" returns `fx.quitApp()` — the real graceful terminate, riding the same shutdown path a last-window close takes.
 
 ```zig
