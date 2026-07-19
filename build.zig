@@ -382,6 +382,14 @@ pub fn build(b: *std.Build) void {
         .name = "check-file-contains",
         .root_module = file_contains_checker_mod,
     });
+    const file_contains_checker_tests = testArtifact(b, file_contains_checker_mod);
+
+    const file_exists_checker_mod = module(b, host_target, optimize, "tools/check_file_exists.zig");
+    const file_exists_checker = b.addExecutable(.{
+        .name = "check-file-exists",
+        .root_module = file_exists_checker_mod,
+    });
+    const file_exists_checker_tests = testArtifact(b, file_exists_checker_mod);
 
     // Registry pin printer: emits the ui_schema table counts and
     // fingerprints in the exact form ui_schema_tests.zig pins, plus the
@@ -447,6 +455,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
     test_step.dependOn(&b.addRunArtifact(markup_cli_tests).step);
     test_step.dependOn(&b.addRunArtifact(evals_cmdview_tests).step);
+    test_step.dependOn(&b.addRunArtifact(file_contains_checker_tests).step);
+    test_step.dependOn(&b.addRunArtifact(file_exists_checker_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "NativeSdkCommandInfo" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "list(): Promise<NativeSdkCommandInfo[]>" },
@@ -666,7 +676,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
         .{ .path = "src/tooling/templates.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
     });
-    addLayoutCheckStep(b, test_step, "test-windows-webview2-loader-layout", "Verify the vendored WebView2 loader binaries are present", &.{
+    addLayoutCheckStep(b, file_exists_checker, test_step, "test-windows-webview2-loader-layout", "Verify the vendored WebView2 loader binaries are present", &.{
         "third_party/webview2/x64/WebView2Loader.dll",
         "third_party/webview2/arm64/WebView2Loader.dll",
     });
@@ -1277,7 +1287,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const mobile_examples_step = b.step("test-examples-mobile", "Verify mobile example project layouts");
-    addLayoutCheckStep(b, mobile_examples_step, "test-example-ios-layout", "Verify iOS example layout", &.{
+    addLayoutCheckStep(b, file_exists_checker, mobile_examples_step, "test-example-ios-layout", "Verify iOS example layout", &.{
         "examples/ios/README.md",
         "examples/ios/app.zon",
         "examples/ios/NativeSdkIOSExample.xcodeproj/project.pbxproj",
@@ -1287,7 +1297,7 @@ pub fn build(b: *std.Build) void {
         "examples/ios/NativeSdkIOSExample/native_sdk.h",
         "examples/ios/NativeSdkIOSExample/NativeSdkDyldShim.c",
     });
-    addLayoutCheckStep(b, mobile_examples_step, "test-example-android-layout", "Verify Android example layout", &.{
+    addLayoutCheckStep(b, file_exists_checker, mobile_examples_step, "test-example-android-layout", "Verify Android example layout", &.{
         "examples/android/README.md",
         "examples/android/app.zon",
         "examples/android/settings.gradle",
@@ -1299,7 +1309,7 @@ pub fn build(b: *std.Build) void {
         "examples/android/app/src/main/cpp/native_sdk_jni.c",
         "examples/android/app/src/main/cpp/native_sdk.h",
     });
-    addLayoutCheckStep(b, mobile_examples_step, "test-example-mobile-shell-layout", "Verify shared mobile-shell metadata", &.{
+    addLayoutCheckStep(b, file_exists_checker, mobile_examples_step, "test-example-mobile-shell-layout", "Verify shared mobile-shell metadata", &.{
         "examples/mobile-shell/README.md",
         "examples/mobile-shell/app.zon",
     });
@@ -1329,7 +1339,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-ios-layout/package-manifest.zon",
     };
     for (package_ios_layout_paths) |path| {
-        const check = b.addSystemCommand(&.{ "test", "-f", path });
+        const check = addFileExistsCheck(b, file_exists_checker, path);
         check.step.dependOn(&package_ios_layout_run.step);
         package_ios_layout_step.dependOn(&check.step);
         mobile_examples_step.dependOn(&check.step);
@@ -1376,7 +1386,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-android-layout/package-manifest.zon",
     };
     for (package_android_layout_paths) |path| {
-        const check = b.addSystemCommand(&.{ "test", "-f", path });
+        const check = addFileExistsCheck(b, file_exists_checker, path);
         check.step.dependOn(&package_android_layout_run.step);
         package_android_layout_step.dependOn(&check.step);
         mobile_examples_step.dependOn(&check.step);
@@ -3186,10 +3196,17 @@ fn managedExampleRun(b: *std.Build, cli_exe: *std.Build.Step.Compile, argv_tail:
     return run;
 }
 
-fn addLayoutCheckStep(b: *std.Build, group: *std.Build.Step, name: []const u8, description: []const u8, paths: []const []const u8) void {
+fn addFileExistsCheck(b: *std.Build, checker: *std.Build.Step.Compile, path: []const u8) *std.Build.Step.Run {
+    const check = b.addRunArtifact(checker);
+    check.setCwd(b.path("."));
+    check.addArg(path);
+    return check;
+}
+
+fn addLayoutCheckStep(b: *std.Build, checker: *std.Build.Step.Compile, group: *std.Build.Step, name: []const u8, description: []const u8, paths: []const []const u8) void {
     const step = b.step(name, description);
     for (paths) |path| {
-        const check = b.addSystemCommand(&.{ "test", "-f", path });
+        const check = addFileExistsCheck(b, checker, path);
         step.dependOn(&check.step);
         group.dependOn(&check.step);
     }
