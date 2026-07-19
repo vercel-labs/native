@@ -85,6 +85,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.coverflood")) return .load_flood;
     if (std.mem.eql(u8, name, "core.coverfrac")) return .load_frac;
     if (std.mem.eql(u8, name, "core.coversized")) return .load_sized;
+    if (std.mem.eql(u8, name, "core.covertopbytes")) return .load_top_bytes;
+    if (std.mem.eql(u8, name, "core.coverpastbytes")) return .load_past_bytes;
     if (std.mem.eql(u8, name, "core.covercancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "core.cancelmissing")) return .cancel_missing;
     if (std.mem.eql(u8, name, "core.evictfirst")) return .evict_first;
@@ -1138,6 +1140,36 @@ test "a fractional dynamic expectedBytes reaches the engine as unknown size, a w
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .loaded);
     try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+}
+
+test "the dynamic expectedBytes bound is exclusive at 2^53" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // 2^53 - 1, the emitter gate's own top (Number.isSafeInteger), as
+    // a model-owned DYNAMIC count: the last one the f64 wire carries
+    // exactly, so it installs as the verification size verbatim.
+    try h.menu("core.covertopbytes");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    const top_request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 63), top_request.id);
+    try std.testing.expectEqual(@as(u64, 9007199254740991), top_request.expected_bytes);
+
+    // 2^53 — and 2^53 + 1, which arrives as this same wire value (the
+    // f64 grid steps by 2 there): no one honest count exists, so the
+    // bridge maps it to "unknown size" (0) with the fractionals. An
+    // installed 2^53 would be a verification size every real download
+    // misses — silently re-fetching on every launch. The load itself
+    // parks healthy: unknown size skips verification, never fails.
+    try h.menu("core.coverpastbytes");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+    const past_request = fx.pendingImageLoadAt(1).?;
+    try std.testing.expectEqual(@as(u64, 64), past_request.id);
+    try std.testing.expectEqual(@as(u64, 0), past_request.expected_bytes);
 }
 
 // -------------------------------------------------------- record / replay

@@ -56,6 +56,12 @@ export interface Model {
   // it must carry through exactly.
   readonly fracBytes: number;
   readonly wholeBytes: number;
+  // The expectedBytes wire boundary, model-owned like topId: 2^53 - 1
+  // is the last exactly-carried count, and 2^53 (which 2^53 + 1
+  // aliases on the f64 wire) must map to "unknown size" — there is no
+  // one honest count to verify against.
+  readonly topBytes: number;
+  readonly pastBytes: number;
 }
 
 export type Msg =
@@ -96,6 +102,8 @@ export type Msg =
   | { readonly kind: "load_flood" }
   | { readonly kind: "load_frac" }
   | { readonly kind: "load_sized" }
+  | { readonly kind: "load_top_bytes" }
+  | { readonly kind: "load_past_bytes" }
   | { readonly kind: "cancel_cover" }
   | { readonly kind: "cancel_missing" }
   | { readonly kind: "evict_first" }
@@ -136,6 +144,8 @@ export function initialModel(): [Model, Cmd<Msg>] {
       topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
       fracBytes: 1.5,
       wholeBytes: 4096,
+      topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
+      pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -281,6 +291,17 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // The whole-number control: a dynamic representable count rides
       // the wire into the engine exactly.
       return [model, Cmd.imageLoad(62, { url: asciiBytes("https://cdn.test/sized.png"), cachePath: asciiBytes("cache/sized.png"), expectedBytes: model.wholeBytes }, { event: "image_done" })];
+    case "load_top_bytes":
+      // 2^53 - 1 as a DYNAMIC count: the last one the f64 wire carries
+      // exactly, so it must install as the verification size verbatim.
+      return [model, Cmd.imageLoad(63, { url: asciiBytes("https://cdn.test/top.png"), cachePath: asciiBytes("cache/top.png"), expectedBytes: model.topBytes }, { event: "image_done" })];
+    case "load_past_bytes":
+      // 2^53 as a DYNAMIC count — and 2^53 + 1 arrives as this exact
+      // wire value (the f64 grid steps by 2 there), so there is no one
+      // honest count to verify against. The bridge maps it to "unknown
+      // size" (0), joining the fractionals: installing it would make
+      // every real download miss verification and re-fetch on launch.
+      return [model, Cmd.imageLoad(64, { url: asciiBytes("https://cdn.test/past.png"), cachePath: asciiBytes("cache/past.png"), expectedBytes: model.pastBytes }, { event: "image_done" })];
     case "cancel_cover":
       // The numeric-id cancel: ends the in-flight load under id 21
       // loudly (its own event arm delivers state "cancelled") and

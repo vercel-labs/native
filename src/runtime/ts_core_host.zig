@@ -1301,10 +1301,16 @@ pub fn TsCoreHost(comptime core: type) type {
                 // engine's own default. The integer clause matters:
                 // @intFromFloat would truncate 1.5 to 1, and the cache
                 // would then verify downloads against a size the app
-                // never declared — re-fetching on every launch. 0 is
-                // the honest mapping; the emitter already stops the
-                // literal spellings (NS1030).
-                .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0 and @floor(expected) == expected)
+                // never declared — re-fetching on every launch. The
+                // bound is strictly BELOW 2^53, the id gate's: 2^53 is
+                // the first f64 that aliases a neighbor (2^53 + 1
+                // arrives as the same wire value), so there is no one
+                // honest count to install — it maps to "unknown" with
+                // the fractionals rather than becoming a verification
+                // size every real download misses. 0 is the honest
+                // mapping; the emitter already stops the literal
+                // spellings (NS1030).
+                .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected)
                     @intFromFloat(expected)
                 else
                     0,
