@@ -405,6 +405,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     }
                     if (pane_count != 2) fail(node, markup.split_children_message);
                 }
+                // Interpreter parity: the image leaf takes no children —
+                // widget layout gives it no child slots, so nested
+                // content would silently vanish. A compile error here
+                // (icon's leaf policy exactly).
+                if (kind == .image and inner.children.len > 0) {
+                    fail(node, markup.image_children_message);
+                }
                 // Interpreter parity: the a11y lint's error half — an
                 // unnamed interactive control or a misused role ships a
                 // view a screen reader user cannot operate, so it is a

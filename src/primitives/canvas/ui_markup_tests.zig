@@ -700,6 +700,10 @@ test "the image attribute validates as one binding on avatar and image" {
         // ...and required on the leaf: an unbound image is statically
         // dead markup (avatar keeps its initials fallback instead).
         .{ .source = "<row>\n  <image label=\"Art\" />\n</row>", .message = markup.image_missing_image_message },
+        // The leaf takes no children (icon's policy): widget layout
+        // gives an image no child slots, so a nested caption would
+        // silently vanish instead of rendering.
+        .{ .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>", .message = markup.image_children_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena, case.source);

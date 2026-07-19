@@ -2640,6 +2640,14 @@ test "image leaf misuse fails the build with the teaching messages" {
             .source = image_negative_markup_source,
             .message = canvas.ui_markup.image_binding_message,
         },
+        .{
+            // A leaf like icon: widget layout gives an image no child
+            // slots, so a nested caption would silently vanish - the
+            // build refuses it instead (the compiled engine rejects
+            // the same construct as a compile error).
+            .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>",
+            .message = canvas.ui_markup.image_children_message,
+        },
     };
     for (cases) |case| {
         var view = try ImageMarkup.init(arena, case.source);

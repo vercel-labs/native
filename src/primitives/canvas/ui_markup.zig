@@ -1249,6 +1249,7 @@ pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on 
 pub const image_binding_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders nothing (an avatar falls back to its initials)";
 pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays a Zig view (ElementOptions.image)";
 pub const image_missing_image_message = "image requires image={binding} naming the u64 ImageId the app registered at runtime - without one the leaf can never draw anything (dead markup, same policy as icon without name)";
+pub const image_children_message = "image is a leaf - it takes no children";
 
 pub const media_surface_surface_message = "surface takes one {binding} to the u64 surface id a producer targets (runtime.acquireMediaSurfaceProducer) - surface ids are model data, not markup literals; 0 leaves the surface unbound and it draws nothing";
 pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
@@ -2942,6 +2943,10 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 // An image leaf without its id binding can never draw:
                 // the same dead-markup policy as media-surface.
                 if (node.attr("image") == null) return errorAt(node, image_missing_image_message);
+                // A leaf like icon: widget layout gives an image no
+                // child slots, so any nested content would silently
+                // vanish - rejected instead (icon's policy exactly).
+                if (node.children.len > 0) return errorAt(node.children[0], image_children_message);
             }
             if (std.mem.eql(u8, node.name, "split")) {
                 // Exactly two pane children, statically: the divider sits

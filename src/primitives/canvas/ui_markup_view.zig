@@ -398,6 +398,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (pane_count != 2) return self.failNode(node, markup.split_children_message);
             }
+            // The image leaf takes no children - widget layout gives it
+            // no child slots, so nested content would silently vanish.
+            // Mirrors the validator and the compiled engine's compile
+            // error (icon's leaf policy exactly).
+            if (kind == .image and inner.children.len > 0) {
+                return self.failNode(node, markup.image_children_message);
+            }
             // The a11y lint's error half: an unnamed interactive control
             // or a misused role ships a view a screen reader user cannot
             // operate, so it fails the build like any other markup
