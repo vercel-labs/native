@@ -2977,6 +2977,26 @@ export class Emitter {
   }
 
   private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx): void {
+    // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
+    // narrows the statements after it in ITS list, and whatever those
+    // statements nest — never code beyond the list. The narrowing maps ride
+    // the shared ctx, so this entry/exit snapshot is what bounds them: a
+    // `break`/`continue`/`return` guard inside a loop body or a branch
+    // cannot leak its captures into code after the construct (where the
+    // capture is out of scope in Zig and the narrowing wrong in TS).
+    const savedSubst = new Map(ctx.memberSubst);
+    const savedStillOptional = new Map(ctx.stillOptionalSubst);
+    const savedNarrowed = new Map(ctx.narrowedUnion);
+    this.emitStatementList(stmts, ctx);
+    ctx.memberSubst.clear();
+    for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
+    ctx.stillOptionalSubst.clear();
+    for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
+    ctx.narrowedUnion.clear();
+    for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
+  }
+
+  private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
     for (let i = 0; i < stmts.length; i++) {
       const stmt = stmts[i];
       for (const c of this.leadingComments(stmt)) this.push(ctx, c);
@@ -3063,8 +3083,15 @@ export class Emitter {
     }
   }
 
+  /// Whether a statement NEVER falls through to the statement after it.
+  /// tsc's control-flow analysis narrows after any such statement — return,
+  /// throw, break, and continue all qualify (a break/continue jumps to an
+  /// enclosing construct's boundary, never to the next statement in
+  /// sequence), so an early-exit guard narrows the remainder of its block
+  /// no matter which exit the guard takes.
   private alwaysExits(stmt: ts.Statement): boolean {
     if (ts.isReturnStatement(stmt)) return true;
+    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return true;
     // R20: a throw never falls through (it unwinds to a catch or out of
     // the function), and a try/catch exits when both arms do — any throw
     // mid-try lands in the catch, which exits. NS1058 keeps `finally`
@@ -3087,6 +3114,11 @@ export class Emitter {
       );
     }
     if (ts.isSwitchStatement(stmt)) {
+      // A break bound to THIS switch resumes right after it, so the switch
+      // completes normally even when every clause body ends in an exit
+      // statement (the ubiquitous clause-terminating `break;` is exactly
+      // such a break).
+      if (this.bindsBreak(stmt)) return false;
       // A value switch (R13d) without a default may skip every clause, so
       // only kind switches (exhaustive by NS1015) and defaulted switches
       // count as exiting. Exhaustiveness itself is enforced at emission;
@@ -3110,19 +3142,13 @@ export class Emitter {
     ctx.localTypes.set(decl, inner);
     const init = orelseOperand(this.emitExpr(decl.initializer!, ctx).code);
     const exitStmts = ts.isBlock(exit) ? exit.statements : [exit];
-    if (exitStmts.length === 1 && ts.isReturnStatement(exitStmts[0])) {
-      const r = exitStmts[0];
-      if (!r.expression) {
-        this.push(ctx, `const ${name} = ${init} orelse ${this.returnText(ctx, null, r)}`);
-        return;
-      }
-      // Simple return value -> inline orelse; value needing statements -> block.
-      const sub = this.childCtx(ctx);
-      const v = this.emitReturn(r.expression, sub);
-      if (sub.lines.length === 0) {
-        this.push(ctx, `const ${name} = ${init} orelse ${this.returnText(ctx, v, r)}`);
-        return;
-      }
+    // A one-statement exit inlines (`orelse return v` / `orelse break` /
+    // `orelse continue`); anything needing statements takes the block form
+    // below — the block never falls through, so Zig types it noreturn.
+    const inline = this.singleExitText(exit, ctx);
+    if (inline !== null) {
+      this.push(ctx, `const ${name} = ${init} orelse ${inline}`);
+      return;
     }
     this.push(ctx, `const ${name} = ${init} orelse {`);
     const sub = this.nestedCtx(ctx);
@@ -3220,6 +3246,17 @@ export class Emitter {
       return;
     }
     if (ts.isBreakStatement(stmt)) {
+      // An unlabeled JS break binds the nearest loop OR switch; Zig's
+      // `break` binds loops only. A break that reaches statement emission
+      // bound to a switch (the clause-terminating `break;` never gets
+      // here — the switch emitters strip it) would jump past the wrong
+      // construct, so it stops the build instead of miscompiling.
+      if (!stmt.label && this.breakBindsEnclosingSwitch(stmt)) {
+        this.fail(
+          stmt,
+          "a `break` that exits a `switch` from inside a clause body (only a clause-ending `break` has a mapping; restructure with an early `return`, or label the switch and `break <label>`)",
+        );
+      }
       this.push(ctx, stmt.label ? `break :${loopLabel(stmt.label.text)};` : `break;`);
       return;
     }
@@ -3507,6 +3544,66 @@ export class Emitter {
     return found;
   }
 
+  /// Whether an unlabeled `break` statement binds a `switch` rather than a
+  /// loop: the nearest enclosing loop-or-switch, walking out of the break,
+  /// is a switch. (tsc already rejects a break with neither.)
+  private breakBindsEnclosingSwitch(stmt: ts.BreakStatement): boolean {
+    let cur: ts.Node | undefined = stmt.parent;
+    while (cur) {
+      if (
+        ts.isWhileStatement(cur) ||
+        ts.isDoStatement(cur) ||
+        ts.isForStatement(cur) ||
+        ts.isForOfStatement(cur) ||
+        ts.isForInStatement(cur) ||
+        ts.isFunctionLike(cur)
+      ) {
+        return false;
+      }
+      if (ts.isSwitchStatement(cur)) return true;
+      cur = cur.parent;
+    }
+    return false;
+  }
+
+  /// Whether a `break` inside this switch's clauses binds the switch
+  /// itself: an unlabeled one outside any nested loop or switch, or a
+  /// labeled one naming a label wrapped directly around this switch. Such
+  /// a break resumes right AFTER the switch — the switch falls through.
+  /// (A break inside a callback cannot reach out — tsc rejects it — so
+  /// function boundaries need no special casing, same as bindsContinue.)
+  private bindsBreak(stmt: ts.SwitchStatement): boolean {
+    const wrappingLabels = new Set<string>();
+    let p: ts.Node | undefined = stmt.parent;
+    while (p && ts.isLabeledStatement(p)) {
+      wrappingLabels.add(p.label.text);
+      p = p.parent;
+    }
+    let found = false;
+    const visit = (n: ts.Node, insideNested: boolean): void => {
+      if (found) return;
+      if (ts.isBreakStatement(n)) {
+        if (n.label) {
+          if (wrappingLabels.has(n.label.text)) found = true;
+        } else if (!insideNested) {
+          found = true;
+        }
+        return;
+      }
+      const nested =
+        insideNested ||
+        ts.isWhileStatement(n) ||
+        ts.isDoStatement(n) ||
+        ts.isForStatement(n) ||
+        ts.isForOfStatement(n) ||
+        ts.isForInStatement(n) ||
+        ts.isSwitchStatement(n);
+      ts.forEachChild(n, (c) => visit(c, nested));
+    };
+    ts.forEachChild(stmt.caseBlock, (c) => visit(c, false));
+    return found;
+  }
+
   private isSimpleAssignment(stmt: ts.Statement): boolean {
     if (!ts.isExpressionStatement(stmt)) return false;
     const e = stmt.expression;
@@ -3777,10 +3874,19 @@ export class Emitter {
       const exit = this.singleExitText(stmt.thenStatement, ctx);
       if (exit !== null) {
         this.push(ctx, `if (${base} != .${zigId(tag)}) ${exit}`);
-        const t = this.zTypeOfExpr(cond.left.expression, ctx);
-        if (t.k === "union") this.narrowUnion(cond.left.expression, t.name, tag, ctx);
-        return;
+      } else {
+        // Multi-statement exits (a throw is always two emitted statements)
+        // keep the guard's narrowing through the block form.
+        this.push(ctx, `if (${base} != .${zigId(tag)}) {`);
+        const sub = this.nestedCtx(ctx);
+        const exitStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
+        this.emitBlockStatements(exitStmts, sub);
+        ctx.lines.push(...sub.lines);
+        this.push(ctx, `}`);
       }
+      const t = this.zTypeOfExpr(cond.left.expression, ctx);
+      if (t.k === "union") this.narrowUnion(cond.left.expression, t.name, tag, ctx);
+      return;
     }
 
     // R7: `if (x === null) <exit>` -> `const v = x orelse <exit>;` for
@@ -3796,18 +3902,34 @@ export class Emitter {
       const t = this.zTypeOfExpr(exitTest.target, ctx);
       if (t.k === "optional") {
         const exit = this.singleExitText(stmt.thenStatement, ctx);
-        if (exit !== null) {
-          this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
-          const prop = this.emitExpr(exitTest.target, ctx).code;
-          // A guard whose narrowed value the rest of the scope never reads
-          // must not bind a capture — an unused Zig const is a compile
-          // error — so it stays a plain null test.
-          if (!this.followingReadsTarget(stmt, exitTest.target)) {
+        // A guard whose narrowed value the rest of the scope never reads
+        // must not bind a capture — an unused Zig const is a compile
+        // error — so it stays a plain null test (one-statement exits
+        // here; multi-statement unread exits ride the generic arm below).
+        if (!this.followingReadsTarget(stmt, exitTest.target)) {
+          if (exit !== null) {
+            this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
+            const prop = this.emitExpr(exitTest.target, ctx).code;
             this.push(ctx, `if (${prop} == null) ${exit}`);
             return;
           }
+        } else {
+          this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
+          const prop = this.emitExpr(exitTest.target, ctx).code;
           const name = this.freshName(ctx, this.narrowHint(exitTest.target));
-          this.push(ctx, `const ${name} = ${prop} orelse ${exit}`);
+          if (exit !== null) {
+            this.push(ctx, `const ${name} = ${prop} orelse ${exit}`);
+          } else {
+            // Multi-statement exits (a throw is always two emitted
+            // statements) take the block form; the block never falls
+            // through, so Zig types it noreturn and the unwrap holds.
+            this.push(ctx, `const ${name} = ${prop} orelse {`);
+            const sub = this.nestedCtx(ctx);
+            const exitStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
+            this.emitBlockStatements(exitStmts, sub);
+            ctx.lines.push(...sub.lines);
+            this.push(ctx, `};`);
+          }
           ctx.memberSubst.set(normalize(exitTest.target), name);
           return;
         }
@@ -3900,6 +4022,16 @@ export class Emitter {
           ctx.lines.push(...esub.lines);
         }
         this.push(ctx, `}`);
+        // An else branch that always exits narrows everything AFTER the if
+        // too (the mirror of the R7-dual rule above): only the hit path
+        // falls through, so reads there unwrap via the safety-checked `.?`.
+        if (
+          stmt.elseStatement &&
+          this.alwaysExits(stmt.elseStatement) &&
+          this.followingReadsTarget(stmt, presentTest.target)
+        ) {
+          ctx.memberSubst.set(key, `${prop}.?`);
+        }
         return;
       }
     }
@@ -3952,6 +4084,29 @@ export class Emitter {
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);
+    // tsc narrows AFTER an if whose empty-testing arm always exits — only
+    // the non-empty path falls through. The tailored R7 paths above return
+    // for the shapes where an arm READS the target; these are the generic
+    // leftovers (the miss arm has an else, or no arm reads the target), so
+    // fall-through reads unwrap via the safety-checked `.?`.
+    const postNarrow =
+      (exitTest && this.alwaysExits(stmt.thenStatement) ? exitTest : null) ??
+      (presentTest && stmt.elseStatement && this.alwaysExits(stmt.elseStatement) ? presentTest : null);
+    if (
+      postNarrow &&
+      (ts.isPropertyAccessExpression(postNarrow.target) || ts.isIdentifier(postNarrow.target)) &&
+      this.followingReadsTarget(stmt, postNarrow.target)
+    ) {
+      const t = this.zTypeOfExpr(postNarrow.target, ctx);
+      const empties = this.tast.emptiesOf(postNarrow.target);
+      // The unfaithful-empty spellings keep their R7c teaching on the
+      // paths that emit tests; here the narrow just quietly declines.
+      const faithful = postNarrow.flavor === "null" ? !empties.undefined : !empties.null;
+      if (t.k === "optional" && faithful) {
+        const code = this.emitExpr(postNarrow.target, ctx).code;
+        ctx.memberSubst.set(normalize(postNarrow.target), `${code}.?`);
+      }
+    }
   }
 
   /// Capture-name hint for a narrowed optional target.
@@ -4036,6 +4191,9 @@ export class Emitter {
     return text;
   }
 
+  /// A guard's exit branch as ONE Zig statement (`return v;`, `break;`,
+  /// `continue;`, labeled forms included), or null when it needs a block
+  /// (multi-statement bodies; a throw always emits two statements).
   private singleExitText(stmt: ts.Statement, ctx: Ctx): string | null {
     const single = unwrapSingle(stmt);
     if (single && ts.isReturnStatement(single)) {
@@ -4044,6 +4202,16 @@ export class Emitter {
       const v = this.emitReturn(single.expression, sub);
       if (sub.lines.length === 0) return this.returnText(ctx, v, single);
       return null;
+    }
+    if (single && (ts.isBreakStatement(single) || ts.isContinueStatement(single))) {
+      // A break bound to a switch has no one-statement Zig spelling (Zig
+      // `break` binds loops); declining here routes it through statement
+      // emission, where it stops the build with its teaching.
+      if (ts.isBreakStatement(single) && !single.label && this.breakBindsEnclosingSwitch(single)) {
+        return null;
+      }
+      const kw = ts.isBreakStatement(single) ? "break" : "continue";
+      return single.label ? `${kw} :${loopLabel(single.label.text)};` : `${kw};`;
     }
     return null;
   }

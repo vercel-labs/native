@@ -5190,7 +5190,299 @@ export function update(model: Model, msg: Msg): Model {
   },
 ];
 
+// Flow-exit guard narrowing: tsc narrows after ANY statement that never
+// falls through — return, break, continue, throw — so a loop's early-exit
+// guard must narrow the remainder of the loop body exactly like an early
+// return narrows the rest of the function. The dogfooding report behind
+// these: `if (r === null) break;` inside a parse loop emitted Zig field
+// access on the still-optional `r`. The scope cases pin the other half:
+// the narrowing ENDS with the block the guard sits in (a break path may
+// bypass it), so reads after the loop or branch see the unnarrowed value.
+const exitGuardNarrowingCases: Case[] = [
+  {
+    name: "break guard narrows an optional for the rest of the loop body (the report's parse loop)",
+    src: `
+export interface NumResult { readonly value: number; readonly next: number; }
+export function parseNumber(body: Uint8Array, i: number): NumResult | null {
+  if (i >= body.length) return null;
+  return { value: body[i], next: i + 1 };
+}
+export function collect(body: Uint8Array): readonly number[] {
+  const out: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const r = parseNumber(body, i);
+    if (r === null) break;
+    out.push(r.value);
+    i = r.next;
+  }
+  return out;
+}
+`,
+  },
+  {
+    name: "continue guard narrows an optional for the rest of the iteration",
+    src: `
+export interface Hit { readonly value: number; }
+export function lookup(i: number): Hit | null {
+  if (i % 2 === 0) return null;
+  return { value: i * 3 };
+}
+export function oddTotal(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const r = lookup(i);
+    if (r === null) continue;
+    sum += r.value;
+  }
+  return sum;
+}
+`,
+  },
+  {
+    name: "kind guard with break narrows the union payload for the rest of the loop body",
+    src: `
+export type Msg =
+  | { readonly kind: "num"; readonly value: number }
+  | { readonly kind: "stop" };
+export function prefixTotal(msgs: readonly Msg[]): number {
+  let sum = 0;
+  for (const msg of msgs) {
+    if (msg.kind !== "num") break;
+    sum += msg.value;
+  }
+  return sum;
+}
+`,
+  },
+  {
+    name: "kind guard with continue skips non-matching arms and narrows the rest",
+    src: `
+export type Msg =
+  | { readonly kind: "num"; readonly value: number }
+  | { readonly kind: "stop" };
+export function numTotal(msgs: readonly Msg[]): number {
+  let sum = 0;
+  for (const msg of msgs) {
+    if (msg.kind !== "num") continue;
+    sum += msg.value;
+  }
+  return sum;
+}
+`,
+  },
+  {
+    name: "labeled break guard narrows through nested loops",
+    src: `
+export interface Cell { readonly weight: number; }
+export function probe(r: number, c: number): Cell | null {
+  if (r + c > 4) return null;
+  return { weight: r * 10 + c };
+}
+export function scan(rows: number, cols: number): number {
+  let sum = 0;
+  outer: for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const cell = probe(r, c);
+      if (cell === null) break outer;
+      sum += cell.weight;
+    }
+  }
+  return sum;
+}
+`,
+  },
+  {
+    name: "multi-statement break exit still narrows (block-form orelse)",
+    src: `
+export interface P { readonly v: number; }
+export function next(i: number): P | null {
+  if (i >= 3) return null;
+  return { v: i };
+}
+export function run(n: number): number {
+  let sum = 0;
+  let misses = 0;
+  for (let i = 0; i < n; i += 1) {
+    const p = next(i);
+    if (p === null) {
+      misses += 1;
+      break;
+    }
+    sum += p.v;
+  }
+  return sum + misses;
+}
+`,
+  },
+  {
+    name: "throw exit on a property target narrows the rest (block-form guard)",
+    src: `
+export interface ParseError { readonly kind: "parse"; readonly at: number; }
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; }
+function selValue(model: Model, at: number): number {
+  if (model.sel === null) throw { kind: "parse", at: at } as ParseError;
+  return model.sel.value;
+}
+export function readSel(model: Model, at: number): number {
+  try {
+    return selValue(model, at);
+  } catch (e) {
+    return e.at - 1;
+  }
+}
+`,
+  },
+  {
+    name: "present-test with a break else-arm narrows after the if",
+    src: `
+export interface Tok { readonly v: number; readonly n: number; }
+export function read(i: number): Tok | null {
+  if (i >= 5) return null;
+  return { v: i, n: i + 1 };
+}
+export function consume(limit: number): number {
+  let acc = 0;
+  let i = 0;
+  while (i < limit) {
+    const t = read(i);
+    if (t !== null) {
+      acc += t.v;
+    } else {
+      break;
+    }
+    i = t.n;
+  }
+  return acc;
+}
+`,
+  },
+  {
+    name: "present-test with a return else-arm narrows after the if (no read inside the hit arm)",
+    src: `
+export interface R2 { readonly value: number; }
+export function tally(r: R2 | null): number {
+  let t = 0;
+  if (r !== null) {
+    t += 1;
+  } else {
+    return 0;
+  }
+  return t + r.value;
+}
+`,
+  },
+  {
+    name: "the narrowing ends with the loop body: post-loop reads re-test the optional",
+    src: `
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; readonly count: number; }
+export function drain(model: Model): number {
+  let total = 0;
+  let i = 0;
+  while (i < model.count) {
+    if (model.sel === null) break;
+    total += model.sel.value;
+    i += 1;
+  }
+  return model.sel === null ? total : total + model.sel.value;
+}
+`,
+  },
+  {
+    name: "the narrowing ends with the branch: a guard under a flag never leaks to the merge",
+    src: `
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; readonly count: number; }
+export function pick(flag: boolean, model: Model): number {
+  let total = 0;
+  for (let i = 0; i < model.count; i += 1) {
+    if (flag) {
+      if (model.sel === null) break;
+      total += model.sel.value;
+    }
+    total += model.sel === null ? 0 : model.sel.value;
+  }
+  return total;
+}
+`,
+  },
+  {
+    name: "return guard regression pin: the long-supported early return still narrows",
+    src: `
+export interface Parsed { readonly value: number; readonly rest: number; }
+export function parseOne(body: Uint8Array, i: number): Parsed | null {
+  if (i >= body.length) return null;
+  return { value: body[i], rest: i + 1 };
+}
+export function first(body: Uint8Array): number {
+  const r = parseOne(body, 0);
+  if (r === null) return -1;
+  return r.value + r.rest;
+}
+`,
+  },
+  {
+    name: "a do-while body ending in break drops the (unreachable) trailing test",
+    src: `
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; }
+export function once(model: Model): number {
+  let total = 0;
+  do {
+    if (model.sel !== null) {
+      total += model.sel.value;
+    }
+    break;
+  } while (total < 3);
+  return total;
+}
+`,
+  },
+  {
+    name: "break guard inside a do-while narrows the rest of its body",
+    src: `
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; }
+export function drainDo(model: Model): number {
+  let total = 0;
+  do {
+    if (model.sel === null) break;
+    total += model.sel.value;
+  } while (total < 10);
+  return total;
+}
+`,
+  },
+  {
+    name: "an early break out of a switch clause is gated (Zig break binds loops, not switches)",
+    gate: "NS9001",
+    src: `
+export type Msg =
+  | { readonly kind: "a"; readonly v: number }
+  | { readonly kind: "b" };
+export function f(msgs: readonly Msg[]): number {
+  let sum = 0;
+  for (const m of msgs) {
+    switch (m.kind) {
+      case "a":
+        if (m.v > 10) break;
+        sum += m.v;
+        break;
+      case "b":
+        sum += 1;
+        break;
+    }
+  }
+  return sum;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
+  ...exitGuardNarrowingCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

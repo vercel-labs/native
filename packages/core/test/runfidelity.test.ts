@@ -4668,6 +4668,76 @@ export function pick(q: Quote | null, fallback: Quote): Quote {
     }
 `,
   },
+  {
+    name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
+    src: `
+export interface NumResult { readonly value: number; readonly next: number; }
+export function parseNumber(body: Uint8Array, i: number): NumResult | null {
+  if (i >= body.length) return null;
+  return { value: body[i], next: i + 1 };
+}
+export function collect(body: Uint8Array): readonly number[] {
+  const out: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const r = parseNumber(body, i);
+    if (r === null) break;
+    out.push(r.value);
+    i = r.next;
+  }
+  return out;
+}
+export interface Hit { readonly value: number; }
+export function lookup(i: number): Hit | null {
+  if (i % 2 === 0) return null;
+  return { value: i * 3 };
+}
+export function oddTotal(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const r = lookup(i);
+    if (r === null) continue;
+    sum += r.value;
+  }
+  return sum;
+}
+export type Msg = { readonly kind: "num"; readonly value: number } | { readonly kind: "stop" };
+export function prefixTotal(raw: readonly number[]): number {
+  let sum = 0;
+  for (const x of raw) {
+    const msg: Msg = x < 0 ? { kind: "stop" } : { kind: "num", value: x };
+    if (msg.kind !== "num") break;
+    sum += msg.value;
+  }
+  return sum;
+}
+export interface Sel { readonly value: number; }
+export interface Model { readonly sel: Sel | null; readonly count: number; }
+export function drain(count: number, selVal: number, hasSel: boolean): number {
+  const model: Model = { sel: hasSel ? { value: selVal } : null, count: count };
+  let total = 0;
+  let i = 0;
+  while (i < model.count) {
+    if (model.sel === null) break;
+    total += model.sel.value;
+    i += 1;
+  }
+  return model.sel === null ? total - 1 : total + model.sel.value;
+}
+`,
+    calls: [
+      { fn: "collect", args: [{ t: "bytes", v: [3, 7, 9] }] },
+      { fn: "collect", args: [{ t: "bytes", v: [] }] },
+      { fn: "oddTotal", args: [i(6)] },
+      { fn: "oddTotal", args: [i(0)] },
+      { fn: "prefixTotal", args: [{ t: "nums", v: [4, 5, -1, 9] }] },
+      { fn: "prefixTotal", args: [{ t: "nums", v: [-2, 8] }] },
+      { fn: "prefixTotal", args: [{ t: "nums", v: [] }] },
+      { fn: "drain", args: [i(3), i(5), { t: "b", v: true }] },
+      { fn: "drain", args: [i(3), i(5), { t: "b", v: false }] },
+      { fn: "drain", args: [i(0), i(5), { t: "b", v: true }] },
+    ],
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling
