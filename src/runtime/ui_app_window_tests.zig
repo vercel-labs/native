@@ -902,6 +902,62 @@ test "an app-driven close of a policy-hidden window clears hidden with open, and
     try std.testing.expect(found);
 }
 
+test "the modeled host mirrors the app close of a hidden window, and the reopen never resurrects a closed one" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A menu-bar-shaped window, policy-hidden by the user's close.
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+
+    // The app closes the hidden window through the runtime. The modeled
+    // host's mirror must read closed AND un-hidden — the same
+    // hidden-clears-with-open rule the real hosts' close paths carry
+    // (set cleanup before the open=false emit) and the runtime table
+    // already pins for its own flags.
+    try fixture.harness.runtime.closeWindow(info.id);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+
+    // The Dock reopen after the close: NO frame event for the closed
+    // window — nothing hidden-and-open remains to re-show.
+    var reopen_buffer: [support.platform.max_windows]support.platform.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
+
+    // The reopen's liveness check must hold on its own, not lean on the
+    // close mirror's hidden clear: model a host whose close path forgot
+    // that cleanup by forcing the stale flag onto the closed slot — the
+    // reopen still refuses to resurrect (hidden alone is not liveness).
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |*window| {
+        if (window.id == info.id) window.hidden = true;
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
+
+    // No events dispatched, so the runtime table is untouched: the
+    // window stays closed, un-hidden, never re-focused.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+    try std.testing.expect(found);
+}
+
 test "focus-while-hidden routes through the show verb: hidden clears before the window takes key" {
     const fixture = try Fixture.create();
     defer fixture.destroy();

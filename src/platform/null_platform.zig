@@ -926,6 +926,12 @@ pub const NullPlatform = struct {
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         self.windows[index].open = false;
         self.windows[index].focused = false;
+        // hidden clears WITH open, mirroring the real hosts' close
+        // paths (every macOS close exit leaves the policy-hidden set
+        // before its emit) and the runtime table's own close flip: a
+        // closed window is not "hidden", it is gone — a stale
+        // hidden=true here is exactly what lets a reopen resurrect it.
+        self.windows[index].hidden = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
     }
@@ -1995,6 +2001,13 @@ pub const NullPlatform = struct {
         var count: usize = 0;
         for (self.windows[0..self.window_count], 0..) |*window, index| {
             if (!window.hidden) continue;
+            // Liveness, not just the hidden flag: a closed window keeps
+            // its slot in this mirror, and the reopen must never
+            // resurrect one — even if a close path left the hidden flag
+            // stale, re-showing a window the app closed (hidden=false,
+            // focused=true, a frame event) is the exact bug the real
+            // hosts' set hygiene prevents.
+            if (!window.open) continue;
             if (count >= output.len) break;
             window.hidden = false;
             window.focused = count == 0;
