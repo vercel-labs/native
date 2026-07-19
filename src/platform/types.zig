@@ -1140,6 +1140,14 @@ pub const AppInfo = struct {
     /// default menus: web items like Reload only exist when a webview
     /// can answer them.
     has_web_content: bool = false,
+    /// Whether the manifest declares the "tray" capability (a status
+    /// item). Close policy `.hide` leans on it where the OS has no
+    /// built-in re-show affordance: hiding a window on windows removes
+    /// its taskbar entry and windows has no dock-reopen path, so only a
+    /// tray icon can bring the hidden window back. The Windows host
+    /// folds this into its `window_hide_on_close` answer; macOS ignores
+    /// it (the Dock reopen path always exists).
+    declares_tray: bool = false,
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",

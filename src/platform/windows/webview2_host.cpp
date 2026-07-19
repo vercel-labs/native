@@ -4933,6 +4933,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd && entry.second.close_policy == 1) {
+                        /* The hide is honest only while a tray icon is
+                         * live: SW_HIDE removes the taskbar entry and
+                         * Windows has no dock-reopen path, so without a
+                         * tray the hidden window is a running, invisible,
+                         * unreachable app. tray_active is set only when
+                         * Shell_NotifyIcon actually added the icon, so a
+                         * declared tray whose creation FAILED at runtime
+                         * lands here too. The trade: consulting the live
+                         * state at close time means a close that arrives
+                         * before the app installs its tray (or after it
+                         * removes it) really closes — a loud, visible
+                         * close beats a silently stranded process. */
+                        if (!host->tray_active) {
+                            fprintf(stderr, "native-sdk: close_policy \"hide\" downgraded to a real close: no live tray icon exists (tray creation failed or no status item was installed), so a hidden window would have no re-show affordance\n");
+                            break;
+                        }
                         entry.second.policy_hidden = true;
                         ShowWindow(hwnd, SW_HIDE);
                         emit(host, entry.second, kWindowFrame);

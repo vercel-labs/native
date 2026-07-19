@@ -2183,6 +2183,7 @@ fn runnerZig() []const u8 {
     \\        var info: native_sdk.AppInfo = .{
     \\            .app_name = self.app_name,
     \\            .has_web_content = manifestHasWebContent(),
+    \\            .declares_tray = manifestDeclaresTrayCapability(),
     \\            .window_title = self.window_title,
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,
@@ -2456,9 +2457,10 @@ fn runnerZig() []const u8 {
     \\
     \\/// What the window's close affordance does, from app.zon. `.hide` is
     \\/// validated against the TARGET platform at comptime: a host with no
-    \\/// affordance to bring a hidden window back (GTK has no status item)
-    \\/// refuses the declaration here, at build time, instead of stranding a
-    \\/// hidden window at runtime.
+    \\/// affordance to bring a hidden window back (GTK has no status item;
+    \\/// windows without a declared tray, since hiding removes the taskbar
+    \\/// entry and windows has no dock) refuses the declaration here, at
+    \\/// build time, instead of stranding a hidden window at runtime.
     \\fn windowClosePolicy(comptime window: anytype) native_sdk.WindowClosePolicy {
     \\    if (comptime !@hasField(@TypeOf(window), "close_policy")) return .quit;
     \\    const value = window.close_policy;
@@ -2467,9 +2469,26 @@ fn runnerZig() []const u8 {
     \\        if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
     \\            @compileError("app.zon window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds");
     \\        }
+    \\        if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+    \\            if (comptime !manifestDeclaresTrayCapability()) {
+    \\                @compileError("app.zon window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default); macos needs no capability because the dock reopen path always exists");
+    \\            }
+    \\        }
     \\        return .hide;
     \\    }
     \\    @compileError("unknown app.zon window close_policy - supported values: \"quit\" (close really closes; the default) and \"hide\" (the menu-bar-app shape: close hides the window and the app keeps running)");
+    \\}
+    \\
+    \\/// Whether app.zon declares the "tray" capability — the status item
+    \\/// `.hide` leans on where the OS has no built-in re-show affordance.
+    \\/// Evaluated at comptime over the manifest import, like the web scan.
+    \\fn manifestDeclaresTrayCapability() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    \\    inline for (app_manifest.capabilities) |capability| {
+    \\        const name: []const u8 = capability;
+    \\        if (comptime std.mem.eql(u8, name, "tray")) return true;
+    \\    }
+    \\    return false;
     \\}
     \\
     \\fn menuItem(comptime item: anytype) native_sdk.MenuItem {
@@ -3789,6 +3808,13 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".min_height = windowMinSize(window, \"min_height\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".close_policy = windowClosePolicy(window)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" is not supported on linux") != null);
+    // The windows-conditional twin: `.hide` hides the taskbar entry and
+    // windows has no dock-reopen path, so the declaration requires the
+    // "tray" capability (the status item IS the re-show affordance).
+    // macOS stays exempt — the Dock reopen path always exists.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "close_policy \\\"hide\\\" on windows requires the \\\"tray\\\" capability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestDeclaresTrayCapability()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".declares_tray = manifestDeclaresTrayCapability()") != null);
     // The scene-first twin: an app.zon that declares its one window under
     // `.shell.windows` (the default `native init` shape) hits the
     // windows.len == 0 branch, and the startup window's host-create state

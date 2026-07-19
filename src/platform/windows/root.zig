@@ -9,6 +9,7 @@ pub const Error = error{
     CreateFailed,
     FocusFailed,
     CloseFailed,
+    UnsupportedWindowClosePolicy,
 };
 
 const WindowsHost = opaque {};
@@ -224,6 +225,23 @@ const WindowsMessageDialogOpts = extern struct {
     tertiary_button_len: usize,
 };
 
+/// The startup-window twin of the runtime's create-time `.hide` gate:
+/// on windows, hide-on-close is honest only when the app declares a
+/// tray (status item) — SW_HIDE removes the taskbar entry and windows
+/// has no dock-reopen path, so without a tray a hidden window is a
+/// running, invisible, unreachable app. The generated runner refuses
+/// the declaration at comptime, the runtime refuses secondary windows
+/// at create (through the conditional `window_hide_on_close` answer
+/// below), and this refuses the platform-created main window at init.
+/// Pure (no Win32 externs), so the refusal is unit-testable on every
+/// host.
+fn refuseUnsupportedMainWindowClosePolicy(app_info: platform_mod.AppInfo) Error!void {
+    if (app_info.resolvedMainWindow().close_policy != .hide) return;
+    if (app_info.declares_tray) return;
+    std.debug.print("window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default)\n", .{});
+    return error.UnsupportedWindowClosePolicy;
+}
+
 pub const WindowsPlatform = struct {
     host: *WindowsHost,
     web_engine: platform_mod.WebEngine,
@@ -241,6 +259,14 @@ pub const WindowsPlatform = struct {
 
     pub fn initWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!WindowsPlatform {
         const window_options = app_info.resolvedMainWindow();
+        // The MAIN window is created right here, before any runtime
+        // exists, so the runtime's create-time `.hide` gate (the
+        // window_hide_on_close feature check) never sees it — the same
+        // seam the GTK host holds for its unconditional refusal. On
+        // windows the refusal is conditional: hiding removes the
+        // taskbar entry and windows has no dock-reopen path, so a
+        // declared tray (status item) is the ONLY re-show affordance.
+        try refuseUnsupportedMainWindowClosePolicy(app_info);
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
@@ -364,12 +390,15 @@ pub const WindowsPlatform = struct {
             .gpu_surfaces,
             .audio_playback,
             .audio_streaming,
+            => self.web_engine == .system,
             // close_policy .hide: WM_CLOSE hides (ShowWindow SW_HIDE),
             // the window stays in the host map, and the tray is the
-            // re-show affordance — the same Win32 shape tray players
-            // ship.
-            .window_hide_on_close,
-            => self.web_engine == .system,
+            // ONLY re-show affordance — SW_HIDE removes the taskbar
+            // entry and windows has no dock-reopen path. An app that
+            // declares no tray gets an honest false, so the runtime's
+            // create-time gates refuse a `.hide` declaration instead of
+            // stranding a hidden window nothing could re-show.
+            .window_hide_on_close => self.web_engine == .system and self.app_info.declares_tray,
             // Spectrum analysis captures the app's OWN audio session
             // through process-scoped WASAPI loopback, which the OS grew
             // in Windows 10 2004 — the host probes the activation
@@ -1493,6 +1522,57 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_playback));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_streaming));
+}
+
+test "windows hide-on-close support requires the declared tray (the only re-show affordance)" {
+    // A system-engine host with a declared tray keeps hide-on-close.
+    var with_tray = testPlatformWithEngine(.system);
+    with_tray.app_info.declares_tray = true;
+    try std.testing.expect(WindowsPlatform.supportsFeature(&with_tray, .window_hide_on_close));
+    // Without the declaration the answer is an honest false: SW_HIDE
+    // removes the taskbar entry and windows has no dock-reopen path, so
+    // the runtime's create-time gates must refuse a `.hide` declaration
+    // instead of stranding a hidden window nothing could re-show.
+    var without_tray = testPlatformWithEngine(.system);
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&without_tray, .window_hide_on_close));
+    // The chromium engine answers false regardless, tray or not.
+    var chromium = testPlatformWithEngine(.chromium);
+    chromium.app_info.declares_tray = true;
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .window_hide_on_close));
+}
+
+test "windows refuses a tray-less .hide main window at platform init instead of stranding it hidden" {
+    // The pre-created MAIN window never passes through the runtime's
+    // create gate, so the platform's init gate must hold the same line
+    // (the GTK host's init refusal is the unconditional twin).
+    const hide_no_tray: platform_mod.AppInfo = .{ .app_name = "player", .main_window = .{ .close_policy = .hide } };
+    try std.testing.expectError(error.UnsupportedWindowClosePolicy, refuseUnsupportedMainWindowClosePolicy(hide_no_tray));
+    // The declared tray is the re-show affordance: with it, the same
+    // declaration passes.
+    const hide_with_tray: platform_mod.AppInfo = .{ .app_name = "player", .declares_tray = true, .main_window = .{ .close_policy = .hide } };
+    try refuseUnsupportedMainWindowClosePolicy(hide_with_tray);
+    // The default (.quit) never consults the tray.
+    const quit_app: platform_mod.AppInfo = .{ .app_name = "player" };
+    try refuseUnsupportedMainWindowClosePolicy(quit_app);
+}
+
+test "windows WM_CLOSE hide consults the live tray state and downgrades to a real close without it" {
+    // The downgrade branch is C++ this test suite cannot execute, so
+    // this pins the tray-alive consult and the loud downgrade line
+    // textually: a refactor that drops either fails here. Compilation
+    // is covered by the cross-target syntax checks the packaging path
+    // runs; live close behavior stays windows-host territory.
+    const host_source = @embedFile("webview2_host.cpp");
+    const close_at = std.mem.indexOf(u8, host_source, "case WM_CLOSE:");
+    try std.testing.expect(close_at != null);
+    const close_hook = host_source[close_at.?..];
+    const consult_at = std.mem.indexOf(u8, close_hook, "if (!host->tray_active)");
+    const hide_at = std.mem.indexOf(u8, close_hook, "ShowWindow(hwnd, SW_HIDE);");
+    try std.testing.expect(consult_at != null);
+    try std.testing.expect(hide_at != null);
+    // The consult sits INSIDE the close hook, BEFORE the hide.
+    try std.testing.expect(consult_at.? < hide_at.?);
+    try std.testing.expect(std.mem.indexOf(u8, close_hook, "downgraded to a real close") != null);
 }
 
 test "windows audio event maps kinds and payload" {
