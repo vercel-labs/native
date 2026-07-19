@@ -3165,7 +3165,23 @@ pub fn Effects(comptime Msg: type) type {
                     std.ascii.eqlIgnoreCase(uri.scheme, "https");
                 if (!scheme_ok) return self.rejectImage(options.id, options.on_result, true);
             }
-            if (self.findActiveSlot(options.id) != null) return self.rejectImage(options.id, options.on_result, true);
+            // Occupied = running (any kind — the key space is shared),
+            // OR an image slot in the posted-but-undelivered window:
+            // the worker (or feed) already stored `.draining`, but no
+            // drain has delivered the terminal yet, so the id's one
+            // pending result is still ahead of this call. Under session
+            // replay the same request is still a parked `.running` fake
+            // at this point (its journaled terminal feeds at the
+            // recorded delivery position), so counting the window as
+            // occupied is what keeps the two sides agreeing: both
+            // reject a reload until the terminal is delivered. Delivery
+            // ends the window — the drain takes the slot's buffer
+            // BEFORE the terminal Msg reaches update — so a handler
+            // that answers its own terminal by reloading the same id
+            // (the gallery-refresh idiom) still parks as a fresh load.
+            if (self.findActiveSlot(options.id) != null or self.findUndeliveredImageSlot(options.id) != null) {
+                return self.rejectImage(options.id, options.on_result, true);
+            }
             const slot_index = self.findIdleSlot() orelse return self.rejectImage(options.id, options.on_result, true);
 
             const slot = &self.slots[slot_index];
@@ -5488,6 +5504,28 @@ pub fn Effects(comptime Msg: type) type {
         fn findActiveSlot(self: *Self, key: u64) ?usize {
             for (&self.slots, 0..) |*slot, index| {
                 if (slot.state.load(.acquire) == .running and slot.key == key) return index;
+            }
+            return null;
+        }
+
+        /// An image slot holding `id` whose terminal is posted but not
+        /// yet delivered: state `.draining` with the staged buffer
+        /// still owned by the slot. Delivery IS the buffer handoff —
+        /// the drain's `.image` arm takes `fetch_buffer` before the
+        /// terminal Msg reaches update, and every loop-side retire
+        /// (`releaseFetchSlot`) frees it — so a non-null `fetch_buffer`
+        /// under `.draining` means exactly "terminal still pending";
+        /// the moment update sees the result, the buffer is gone and
+        /// the id is free for a reload. Loop-thread only: the state
+        /// load is the acquire pairing with the worker's `.draining`
+        /// release store (the worker's last slot access), and the
+        /// buffer pointer itself is only ever mutated on the loop
+        /// thread.
+        fn findUndeliveredImageSlot(self: *Self, id: u64) ?usize {
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.kind != .image or slot.key != id) continue;
+                if (slot.state.load(.acquire) != .draining) continue;
+                if (slot.fetch_buffer != null) return index;
             }
             return null;
         }

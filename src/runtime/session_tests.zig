@@ -1602,6 +1602,104 @@ test "image loads record into the blob store (deduplicated) and replay byte-iden
     try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
 }
 
+/// Record the undelivered-window reference session: load id 21, feed
+/// its bytes (terminal queued, slot `.draining`, delivery still
+/// ahead), then — before any drain — an UNRELATED dispatch loads id
+/// 21 again. That reload must reject on BOTH sides: under replay the
+/// first request is still a parked `.running` fake at that dispatch
+/// (its recorded terminal feeds at the journaled delivery position),
+/// so a live executor that accepted the reload would journal a
+/// different Msg stream than replay derives — accepted live, rejected
+/// replayed, with the extra regenerated rejection diverging the model.
+fn recordWindowReloadSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // NO wake between the feed and the next command: the terminal is
+    // queued but undelivered when the reload dispatch lands — the
+    // window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a reload inside the undelivered terminal window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordWindowReloadSession(gpa, buffer, &store);
+    // The live side already rejected the in-window reload: one loaded
+    // terminal for the first request, one rejection for the reload.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The loaded terminal feeds; the in-window rejection regenerates
+    // from the replayed duplicate check itself — the agreement pin.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
 /// Record the queue-saturation reference session: a chatty spawn and
 /// an image load whose results journal as ONE unbroken run — 64 line
 /// records (the completion queue's whole capacity) followed by the

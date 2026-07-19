@@ -530,6 +530,53 @@ test "an update that reloads the same id from its own terminal parks instead of 
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
 }
 
+test "an unrelated dispatch reloading the id inside the undelivered window rejects; the window ends at delivery" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+
+    test_path = "assets/cover.png";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+
+    // Park the terminal undelivered: the feed queues the entry and
+    // stores `.draining`, and no drain runs before the next dispatch —
+    // the posted-but-undelivered window a real worker leaves between
+    // its post and the loop's drain. (The test above rewinds the state
+    // to `.running` to model a PREEMPTED worker; here the store has
+    // landed, so this is exactly the state `findActiveSlot` no longer
+    // sees.)
+    var encoded_buffer: [2048]u8 = undefined;
+    const encoded = encodePngFixture(&encoded_buffer, 1, 1);
+    try h.app_state.effects.feedImageBytes(image_id, encoded);
+
+    // An UNRELATED dispatch (a second user action, not the terminal
+    // handler) reloads the same id while the terminal is still
+    // undelivered. Under session replay this same load must reject —
+    // there the first request is still a parked `.running` fake until
+    // its recorded terminal feeds — so the live executor must reject
+    // too, or the recorded stream and the replayed stream disagree.
+    // Rejected means no new parked request.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingImageLoadCount());
+
+    // Delivery order: the staged rejection drains first, then the
+    // queued loaded terminal.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.result_count);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, h.app_state.model.last.?.outcome);
+
+    // The occupied window ends exactly at delivery: the identical
+    // reload now parks as a fresh load and completes on its own feed.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingImageLoadCount());
+    try h.app_state.effects.feedImageBytes(image_id, encoded);
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 3), h.app_state.model.result_count);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, h.app_state.model.last.?.outcome);
+}
+
 // ------------------------------------------------------------ real executor
 
 test "real executor loads a local file through decode and registration" {
