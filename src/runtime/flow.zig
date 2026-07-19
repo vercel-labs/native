@@ -618,6 +618,23 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 };
                 self.windows[runtime_index].source_reloads_from_app = true;
                 if (index > 0) {
+                    // The same `.hide` gate as the runtime create path
+                    // (window_storage): secondary startup windows reach
+                    // the platform through this direct create, so the
+                    // policy check must ride here too or a declared
+                    // `.hide` is silently accepted on hosts that cannot
+                    // re-show a closed window. `.hide` needs a host that
+                    // can keep a closed-by-the-user window alive and
+                    // re-show it; refusing here is the loud teaching
+                    // (GTK: no status item exists to bring the window
+                    // back, declare .quit — the default — instead).
+                    // NEVER a silent no-op that strands a hidden window.
+                    // The main window (index 0) is created by the host
+                    // itself, which refuses the declaration at its own
+                    // init.
+                    if (window.close_policy == .hide and !self.options.platform.supports(.window_hide_on_close)) {
+                        return error.UnsupportedWindowClosePolicy;
+                    }
                     _ = try self.options.platform.services.createWindow(window);
                 }
                 try self.options.platform.services.loadWindowWebView(window.id, self.windows[runtime_index].source.?);

@@ -1144,3 +1144,42 @@ test "close_policy .hide is refused loudly at create on hosts without the afford
     });
     try std.testing.expect(info.open);
 }
+
+test "close_policy .hide on a secondary startup window is refused loudly at startup load on hosts without the affordance" {
+    const SourceApp = struct {
+        fn app(self: *@This()) support.App {
+            return .{ .context = self, .name = "startup-hide", .source = support.platform.WebViewSource.html("<p>Startup</p>") };
+        }
+    };
+    const startup_windows = [_]support.platform.WindowOptions{
+        .{ .id = 1, .label = "main", .title = "Main" },
+        .{ .id = 2, .label = "panel", .title = "Panel", .close_policy = .hide },
+    };
+
+    // Model a GTK-shaped host: the feature reports false, and the
+    // startup-window load — which creates secondary windows through
+    // the platform services directly, not the runtime's createWindow —
+    // must refuse the secondary window's `.hide` declaration with the
+    // same loud error as the create seam. A silent accept here means
+    // the host ignores the policy and the user's close really closes.
+    {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.window_hide_on_close = false;
+        harness.runtime.options.platform.app_info.windows = &startup_windows;
+        var app_state: SourceApp = .{};
+        try std.testing.expectError(error.UnsupportedWindowClosePolicy, harness.start(app_state.app()));
+    }
+
+    // A host WITH the affordance loads the same declaration: both
+    // startup windows come up.
+    {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.runtime.options.platform.app_info.windows = &startup_windows;
+        var app_state: SourceApp = .{};
+        try harness.start(app_state.app());
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        try std.testing.expectEqual(@as(usize, 2), harness.runtime.listWindows(&buffer).len);
+    }
+}
