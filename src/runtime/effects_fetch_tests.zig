@@ -101,6 +101,9 @@ var test_payload: ?[]const u8 = null;
 var test_timeout_ms: u32 = effects_mod.default_effect_fetch_timeout_ms;
 var test_response_mode: effects_mod.FetchResponseMode = .buffered;
 var test_max_line_bytes: usize = effects_mod.max_effect_line_bytes;
+/// The poll idiom (one-shot): when set, the update reacts to a response
+/// by immediately fetching the same key again.
+var test_refetch_on_response: bool = false;
 
 fn fetchUpdate(model: *FetchModel, msg: FetchMsg, fx: *FetchEffects) void {
     switch (msg) {
@@ -118,7 +121,17 @@ fn fetchUpdate(model: *FetchModel, msg: FetchMsg, fx: *FetchEffects) void {
         }),
         .stop => fx.cancel(fetch_key),
         .line => |line| model.recordLine(line),
-        .response => |response| model.record(response),
+        .response => |response| {
+            model.record(response);
+            if (test_refetch_on_response) {
+                test_refetch_on_response = false;
+                fx.fetch(.{
+                    .key = fetch_key,
+                    .url = test_url,
+                    .on_response = FetchEffects.responseMsg(.response),
+                });
+            }
+        },
     }
 }
 
@@ -1112,4 +1125,37 @@ test "a fetch response still undelivered occupies its key against a second fetch
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 3), h.app_state.model.response_count);
     try std.testing.expectEqual(@as(u16, 201), h.app_state.model.status);
+}
+
+test "an update that refetches the same key from its own response parks instead of rejecting" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_url = "https://api.example.com/v1/poll";
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_response_mode = .buffered;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    test_refetch_on_response = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try fx.feedResponse(fetch_key, 200, "first");
+
+    // The drain retires the slot BEFORE the terminal Msg reaches
+    // update, so the handler's refetch of its own key is a fresh
+    // accepted fetch — the poll idiom must not regress.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+
+    // The refetched occupancy is fully live: its own terminal delivers.
+    try fx.feedResponse(fetch_key, 201, "second");
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(u16, 201), h.app_state.model.status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.rejected_count);
 }

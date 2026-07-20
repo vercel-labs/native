@@ -4341,8 +4341,30 @@ pub fn Effects(comptime Msg: type) type {
                         // rewrite) so the key frees exactly when the
                         // terminal reaches — or would have reached —
                         // update, and a handler that respawns its own
-                        // key parks as a fresh effect.
-                        if (entry.generation == slot.generation) slot.exit_undelivered = false;
+                        // key parks as a fresh effect. Retire the slot
+                        // in the same stroke (see the `.image` arm's
+                        // race note): the real worker stores `.draining`
+                        // only AFTER posting this exit, so a drain can
+                        // consume it while the slot still reads
+                        // `.running` — and the handler's respawn would
+                        // reject as a duplicate active key. The
+                        // happens-before chain is complete here: the
+                        // worker's mark-then-post publishes the marker
+                        // (and every other slot write) before the entry
+                        // is consumable — the enqueue releases the queue
+                        // mutex this dequeue acquired — so with the
+                        // generations matching, clearing the marker and
+                        // storing `.draining` before the handler leaves
+                        // the key free by the time any update code runs.
+                        // The worker's own store keeps its role (it must
+                        // stay after the post — a `.draining` slot is
+                        // joinable, and the post can park in a
+                        // full-queue retry only the loop can relieve);
+                        // re-storing `.draining` is idempotent.
+                        if (entry.generation == slot.generation) {
+                            slot.exit_undelivered = false;
+                            slot.state.store(.draining, .release);
+                        }
                         // Collect exits own a heap stdout buffer: take it
                         // before any early-out so the slot retires even
                         // when the handler is absent. A mismatched
@@ -4396,6 +4418,13 @@ pub fn Effects(comptime Msg: type) type {
                         // generation means the occupant was already
                         // retired with its own terminal Msg.
                         if (entry.generation != slot.generation) continue;
+                        // Retire the slot BEFORE the terminal reaches
+                        // any handler (the `.image` arm's race note):
+                        // the real worker stores `.draining` only after
+                        // posting this entry, so a same-key fetch from
+                        // the response handler must not find the slot
+                        // still `.running`. Idempotent re-store.
+                        slot.state.store(.draining, .release);
                         // Take body ownership so the slot can be reused
                         // while `update` still reads the slice; the
                         // buffer is freed when the next response drains.
@@ -4435,6 +4464,13 @@ pub fn Effects(comptime Msg: type) type {
                         // `.response`: a mismatched generation means the
                         // occupant was already retired.
                         if (entry.generation != slot.generation) continue;
+                        // Retire the slot BEFORE the terminal reaches
+                        // any handler (the `.image` arm's race note):
+                        // the real worker stores `.draining` only after
+                        // posting this entry, so a same-key file effect
+                        // from the result handler must not find the
+                        // slot still `.running`. Idempotent re-store.
+                        slot.state.store(.draining, .release);
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the bytes.
                         if (self.drain_fetch_body) |old| self.allocator.free(old);
@@ -4469,7 +4505,12 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => {
                         // One terminal per clipboard occupancy, mirroring
                         // `.file`: a mismatched generation means the
-                        // occupant was already retired.
+                        // occupant was already retired. No consumer-side
+                        // `.draining` store is needed here (unlike the
+                        // worker-fed arms): clipboard terminals are
+                        // staged on the loop thread with the store
+                        // sequenced before the enqueue, so this drain
+                        // can never observe the entry ahead of it.
                         if (entry.generation != slot.generation) continue;
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the text.
@@ -4514,7 +4555,14 @@ pub fn Effects(comptime Msg: type) type {
                         // `.response`: a mismatched generation means the
                         // occupant was already retired (replaced or
                         // cancelled — its result drops silently, per the
-                        // request contract).
+                        // request contract). No consumer-side
+                        // `.draining` store is needed here (unlike the
+                        // worker-fed arms): host answers are fed on the
+                        // loop thread with the store sequenced before
+                        // the enqueue — and a same-key host request
+                        // REPLACES an in-flight one rather than
+                        // rejecting, so no handler retry hinges on the
+                        // state either way.
                         if (entry.generation != slot.generation) continue;
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the bytes.

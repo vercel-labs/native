@@ -1604,13 +1604,26 @@ test "an update that respawns the same key from its own exit parks instead of re
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
     try fx.feedExit(stream_key, 0);
 
-    // The drain clears the undelivered-exit marker BEFORE the terminal
-    // Msg reaches update, so the handler's respawn of its own key is a
-    // fresh accepted spawn — the restart idiom must not regress.
+    // The drain clears the undelivered-exit marker AND retires the slot
+    // BEFORE the terminal Msg reaches update, so the handler's respawn
+    // of its own key is a fresh accepted spawn — the restart idiom must
+    // not regress. (The retire is the loop-side half of the worker's
+    // post-then-store epilogue; on this fed path the slot was already
+    // `.draining`, so the drain's store is an idempotent re-store.)
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
     try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The respawned occupancy is a full fresh effect, not a resurrected
+    // slot: its own exit delivers and the cycle restarts cleanly.
+    test_respawn_on_exit = true;
+    try fx.feedExit(stream_key, 7);
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(i32, 7), h.app_state.model.exit_code);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    test_respawn_on_exit = false;
 }
 
 /// Spawn slots carrying a set undelivered-exit marker.

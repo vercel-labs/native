@@ -1365,6 +1365,13 @@ const ImageSessionModel = struct {
     responses_rejected: u32 = 0,
     exits: u32 = 0,
     exits_rejected: u32 = 0,
+    files: u32 = 0,
+    /// Armed by `.arm_fetch_chain` / `.arm_file_chain`: the NEXT
+    /// terminal of that family answers by reissuing the SAME key from
+    /// inside its own update (one-shot) — the poll/reload idiom whose
+    /// acceptance must hold identically live and under replay.
+    chain_next_fetch: bool = false,
+    chain_next_file: bool = false,
 
     fn outcomeName(self: *const ImageSessionModel) []const u8 {
         return self.last_outcome_name[0..self.last_outcome_len];
@@ -1379,14 +1386,18 @@ const ImageSessionMsg = union(enum) {
     load_invalid,
     load_hostless,
     arm_chain,
+    arm_fetch_chain,
+    arm_file_chain,
     cancel_cover,
     start_chatty,
     fetch_cover,
     spawn_cover,
+    read_note,
     line: effects_mod.EffectLine,
     image: effects_mod.EffectImageResult,
     response: effects_mod.EffectResponse,
     exit: effects_mod.EffectExit,
+    file: effects_mod.EffectFileResult,
 };
 
 const ImageSessionApp = ui_app_mod.UiApp(ImageSessionModel, ImageSessionMsg);
@@ -1421,6 +1432,11 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
             .on_line = ImageSessionApp.Effects.lineMsg(.line),
         }),
         .arm_chain => model.chain_on_cover = true,
+        .arm_fetch_chain => model.chain_next_fetch = true,
+        .arm_file_chain => model.chain_next_file = true,
+        // A file read on its own key (26 — never colliding with the
+        // image/fetch/spawn probes above).
+        .read_note => fx.readFile(.{ .key = 26, .path = "notes/session.txt", .on_result = ImageSessionApp.Effects.fileMsg(.file) }),
         // Aimed at the cover's id: against a running load this marks
         // it cancelled; against a staged start-failure rejection (no
         // slot exists) it is a no-op and the rejection stands.
@@ -1433,10 +1449,27 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
         .response => |response| {
             model.responses += 1;
             if (response.outcome == .rejected) model.responses_rejected += 1;
+            // The armed poll idiom: answer the cover fetch's terminal
+            // by refetching the SAME key from inside update. Pure
+            // model logic, so record and replay both issue it at
+            // exactly this dispatch — acceptance is the executor-side
+            // agreement under test.
+            if (model.chain_next_fetch and response.key == 21) {
+                model.chain_next_fetch = false;
+                fx.fetch(.{ .key = 21, .url = "http://gallery.test/cover.png", .on_response = ImageSessionApp.Effects.responseMsg(.response) });
+            }
         },
         .exit => |exit| {
             model.exits += 1;
             if (exit.reason == .rejected) model.exits_rejected += 1;
+        },
+        .file => |result| {
+            model.files += 1;
+            // The armed reload idiom, the fetch chain's file twin.
+            if (model.chain_next_file and result.key == 26) {
+                model.chain_next_file = false;
+                fx.readFile(.{ .key = 26, .path = "notes/session.txt", .on_result = ImageSessionApp.Effects.fileMsg(.file) });
+            }
         },
         .image => |result| {
             // The armed chain: answering the cover's loaded terminal by
@@ -1474,6 +1507,7 @@ fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) Im
         ui.text(.{}, ui.fmt("last {s} {d}x{d}", .{ model.outcomeName(), model.last_width, model.last_height })),
         ui.text(.{}, ui.fmt("{d} lines, {d} before image", .{ model.lines_seen, model.lines_before_image })),
         ui.text(.{}, ui.fmt("{d}/{d} responses, {d}/{d} exits rejected", .{ model.responses_rejected, model.responses, model.exits_rejected, model.exits })),
+        ui.text(.{}, ui.fmt("{d} files", .{model.files})),
     });
 }
 
@@ -1485,6 +1519,9 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
     if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
     if (std.mem.eql(u8, name, "image.chain")) return .arm_chain;
+    if (std.mem.eql(u8, name, "image.fetch-chain")) return .arm_fetch_chain;
+    if (std.mem.eql(u8, name, "image.file-chain")) return .arm_file_chain;
+    if (std.mem.eql(u8, name, "image.read-note")) return .read_note;
     if (std.mem.eql(u8, name, "image.cancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
     if (std.mem.eql(u8, name, "image.fetch-cover")) return .fetch_cover;
@@ -2294,6 +2331,111 @@ test "a fire-and-forget start failure journals and replays: the parked fake reti
     // replayed occupancy check itself.
     try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
     try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the handler-retry reference session: a fetch terminal whose
+/// handler refetches the SAME key from inside update, and a file
+/// terminal whose handler rereads its key the same way. Delivery
+/// retires the slot BEFORE the terminal Msg reaches update on both
+/// sides — the recording's drain and the replay's fed drain — so the
+/// retry parks as a fresh effect on both, and its own terminal feeds
+/// at the recorded position.
+fn recordHandlerRetrySession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fetch: terminal delivered, handler refetches key 21 — accepted.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-cover", .window_id = 1 } });
+    try app_state.effects.feedResponse(21, 200, "cover-v1");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingFetchCount());
+    try app_state.effects.feedResponse(21, 200, "cover-v2");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // File: terminal delivered, handler rereads key 26 — accepted.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.file-chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.read-note", .window_id = 1 } });
+    try app_state.effects.feedFileResult(26, .ok, "note-v1");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingFileCount());
+    try app_state.effects.feedFileResult(26, .ok, "note-v2");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a same-key retry from a fetch or file terminal handler is accepted live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordHandlerRetrySession(gpa, buffer, &store);
+    // Live truth: both retries were accepted — two responses and two
+    // file results, no rejections anywhere.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.responses);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.responses_rejected);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.files);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // All four terminals are executor truth and feed; the replayed
+    // retries park fresh (delivery retired the slot before the handler
+    // ran) and their feeds retire them in turn — nothing regenerates.
+    try std.testing.expectEqual(@as(u64, 4), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
     try std.testing.expectEqualDeep(recorded.model, app_state.model);
     try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
 }

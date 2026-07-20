@@ -73,6 +73,9 @@ const file_key: u64 = 77;
 // Set by each test before dispatching `.save`/`.load`.
 var test_path: []const u8 = "";
 var test_bytes: []const u8 = "";
+/// The reload idiom (one-shot): when set, the update reacts to a file
+/// terminal by immediately reading the same key again.
+var test_reread_on_result: bool = false;
 
 fn fileUpdate(model: *FileModel, msg: FileMsg, fx: *FileEffects) void {
     switch (msg) {
@@ -88,7 +91,17 @@ fn fileUpdate(model: *FileModel, msg: FileMsg, fx: *FileEffects) void {
             .on_result = FileEffects.fileMsg(.file_result),
         }),
         .stop => fx.cancel(file_key),
-        .file_result => |result| model.record(result),
+        .file_result => |result| {
+            model.record(result);
+            if (test_reread_on_result) {
+                test_reread_on_result = false;
+                fx.readFile(.{
+                    .key = file_key,
+                    .path = test_path,
+                    .on_result = FileEffects.fileMsg(.file_result),
+                });
+            }
+        },
     }
 }
 
@@ -235,6 +248,33 @@ test "cancelling a fake file effect delivers one cancelled terminal" {
 
     // The key is terminal: feeding it now reports EffectNotFound.
     try std.testing.expectError(error.EffectNotFound, fx.feedFileResult(file_key, .ok, ""));
+}
+
+test "an update that rereads the same key from its own file result parks instead of rejecting" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_path = "sessions/state.json";
+    test_bytes = "";
+    test_reread_on_result = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load);
+    try fx.feedFileResult(file_key, .ok, "{\"stage\":\"one\"}");
+
+    // The drain retires the slot BEFORE the terminal Msg reaches
+    // update, so the handler's reread of its own key is a fresh
+    // accepted file effect — the reload idiom must not regress.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectFileOutcome.ok, h.app_state.model.last_outcome.?);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+
+    // The reread occupancy is fully live: its own terminal delivers.
+    try fx.feedFileResult(file_key, .ok, "{\"stage\":\"two\"}");
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.result_count);
+    try std.testing.expectEqualStrings("{\"stage\":\"two\"}", h.app_state.model.bytesPrefix());
 }
 
 test "file requests that cannot run are rejected loudly, never silently" {
