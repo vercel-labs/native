@@ -3718,12 +3718,21 @@ export class Emitter {
   /// that assign it, so its flow-exhaustiveness can be false at runtime.
   /// alwaysExits stays syntax-only on every other construct, and every
   /// caller is an emission path where `this.tast` is live, so the capability
-  /// is unconditional. The lowering side of the same claim lives in
-  /// emitValueSwitch: a covered-by-type defaultless switch whose arms all
-  /// exit closes its never-reached fallthrough with `else => unreachable`
-  /// (numeric) or emits no else at all (string enums, already
-  /// Zig-exhaustive), so the terminality claim and the emitted shape agree —
-  /// both consumers read this one memoized judgment and demote together.
+  /// is unconditional. THE AGREEMENT INVARIANT: the terminality claim and
+  /// the emitted shape must never disagree — no switch construct may be
+  /// claimed terminal while its lowering emits a completable fallthrough.
+  /// Each lowering either closes or declines:
+  ///   - emitSwitch (kind): a Zig enum switch is exhaustive by construction
+  ///     (NS1015 gates uncovered arms), and a terminal claim requires every
+  ///     arm group to exit, so the shape closes by construction;
+  ///   - emitValueSwitch: a covered-by-type defaultless switch whose arms
+  ///     all exit closes its never-reached fallthrough with
+  ///     `else => unreachable` (numeric) or emits no else at all (string
+  ///     enums, already Zig-exhaustive), and asserts the agreement;
+  ///   - emitPlainSwitch: the lowered if/else chain closes a
+  ///     claimed-terminal defaultless switch with an `unreachable` else
+  ///     (its `claimsTerminal`), and asserts the agreement.
+  /// All consumers read this one memoized judgment and demote together.
   private valueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {
     const memo = this.switchCoversTypeMemo.get(stmt);
     if (memo !== undefined) return memo;
@@ -6748,6 +6757,15 @@ export class Emitter {
       // terminality claim declines with it — a reached `unreachable` is
       // never acceptable.
       const coveredByType = covered.size === total || this.valueSwitchCoversScrutineeType(stmt);
+      // AGREEMENT: alwaysExits claims terminality off this same coverage
+      // judgment, and a claimed-terminal switch must never lower to a
+      // completable shape (`else => {}`). The claim's conditions imply
+      // coveredByType && allExit, so the disagreement cannot arise; if a
+      // future edit splits the two judgments, stop the build rather than
+      // emit an arm that completes where the claim said it cannot.
+      if (!(coveredByType && allExit) && this.alwaysExits(stmt)) {
+        this.fail(stmt, "a switch claimed always-exiting whose lowering left a completable fallthrough arm (terminality/lowering disagreement)");
+      }
       if (t.k === "numAlias") {
         // The Zig scrutinee is an integer type, so an else arm is always
         // required. With every member covered by an exiting arm the else is
@@ -6838,6 +6856,18 @@ export class Emitter {
     }
     // Trailing label-only clauses (and a trailing empty default): JS no-ops.
     const defaultArm = arms.find((a) => a.alsoDefault) ?? null;
+    // AGREEMENT: alwaysExits may claim this switch terminal (defaultless,
+    // no bound break, case labels covering the scrutinee's SOUND coverage
+    // type, every clause group exiting — the same memoized
+    // valueSwitchCoversScrutineeType judgment emitValueSwitch closes its
+    // `else => unreachable` off). The lowered chain must then close too:
+    // left open, the claim suppresses the trailing completion a value
+    // block or a returning function needs, and the chain's end — which
+    // the claim just promised is unreachable — completes into invalid
+    // Zig. The coverage judgment is sound by construction (declared type,
+    // or a flow type no nested assigner can have run against), so the
+    // closing arm is an `else` real execution never reaches.
+    const claimsTerminal = this.alwaysExits(stmt);
     // The lowered if/else chain's arms are the switch's clauses — siblings
     // (noFallthroughCasesInSwitch): kills join and apply after the chain.
     const join = new Set<string>();
@@ -6865,6 +6895,19 @@ export class Emitter {
       ctx.lines.push(...sub.lines);
       this.applyJoinedNarrowKills(ctx, join);
       return;
+    } else if (opened && claimsTerminal) {
+      // The claimed-terminal defaultless chain closes its never-reached
+      // fallthrough (see the AGREEMENT note above).
+      this.push(ctx, `} else {`);
+      const sub = this.nestedCtx(ctx);
+      this.push(sub, `unreachable;`);
+      ctx.lines.push(...sub.lines);
+    } else if (claimsTerminal) {
+      // Terminal without any emitted arm cannot happen (a terminality
+      // claim needs an exiting, statement-bearing clause); if a future
+      // edit breaks that, stop the build rather than emit a shape that
+      // completes where the claim said it cannot.
+      this.fail(stmt, "a switch claimed always-exiting whose lowering emitted no arms (terminality/lowering disagreement)");
     }
     if (opened) this.push(ctx, `}`);
     this.applyJoinedNarrowKills(ctx, join);

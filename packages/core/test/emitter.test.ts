@@ -1909,6 +1909,113 @@ export function realFor(n: number, q: number | null): number {
   assert.match(zig, /return p orelse -2;/);
 });
 
+test("R13f a claimed-terminal inferred-union plain switch closes its chain with unreachable", () => {
+  // The AGREEMENT invariant, plain-switch leg: an INFERRED literal union
+  // (`const k = x > 0 ? 1 : 2` types as 1 | 2) passes the sound coverage
+  // judgment, so alwaysExits claims the switch terminal — but the
+  // emitter-level type is plain number, and the lowering is the if/else
+  // chain. The claim suppresses the trailing completion a value block or
+  // a returning function needs, so the chain itself must close the
+  // never-reached fallthrough.
+  const zig = emit(`
+export function m(xs: number[]): number[] {
+  return xs.map((x) => {
+    const k = x > 0 ? 1 : 2;
+    switch (k) {
+      case 1: return 10;
+      case 2: return 20;
+    }
+  });
+}
+export function s(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+    case 2: return 20;
+  }
+}
+`);
+  const closers = zig.match(/\} else \{\s*\n\s*unreachable;/g) ?? [];
+  assert.equal(closers.length, 2, `both positions close the chain:\n${zig}`);
+});
+
+test("R13f a non-exhaustive inferred-union plain switch still completes normally", () => {
+  const zig = emit(`
+export function t(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+  }
+  return 5;
+}
+`);
+  assert.doesNotMatch(zig, /unreachable/);
+  assert.match(zig, /return 5;/);
+});
+
+test("terminality/lowering agreement across all three switch lowerings", () => {
+  // No switch construct may be CLAIMED terminal (alwaysExits) while its
+  // lowering emits a completable fallthrough. Each lowering either closes
+  // or declines: emitSwitch (kind) is Zig-exhaustive by construction,
+  // emitValueSwitch closes with `else => unreachable`, emitPlainSwitch
+  // closes its chain with an `unreachable` else.
+  const shapes: { name: string; src: string; closed: RegExp }[] = [
+    {
+      name: "kind switch",
+      src: `
+export type Msg = { readonly kind: "a"; readonly n: number } | { readonly kind: "b" };
+export function f(m: Msg): number {
+  switch (m.kind) {
+    case "a": return m.n;
+    case "b": return 2;
+  }
+}
+`,
+      closed: /switch \(m\) \{/,
+    },
+    {
+      name: "value switch",
+      src: `
+export type Level = 0 | 1;
+export function f(lvl: Level): number {
+  switch (lvl) {
+    case 0: return 1;
+    case 1: return 2;
+  }
+}
+`,
+      closed: /else => unreachable,/,
+    },
+    {
+      name: "plain switch",
+      src: `
+export function f(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+    case 2: return 20;
+  }
+}
+`,
+      closed: /\} else \{\s*\n\s*unreachable;/,
+    },
+  ];
+  for (const shape of shapes) {
+    const { emitter, file } = buildEmitter(shape.src);
+    let sw: unknown = null;
+    const find = (n: any): void => {
+      if (ts.isSwitchStatement(n)) sw = n;
+      ts.forEachChild(n, find);
+    };
+    ts.forEachChild(file as any, find);
+    assert.notEqual(sw, null, `${shape.name}: switch found`);
+    const claims = (emitter as unknown as { alwaysExits(s: unknown): boolean }).alwaysExits(sw);
+    assert.equal(claims, true, `${shape.name}: terminality claimed`);
+    const zig = emit(shape.src);
+    assert.match(zig, shape.closed, `${shape.name}: the claimed-terminal lowering closes`);
+    assert.doesNotMatch(zig, /else => \{\},/, `${shape.name}: no completable fallthrough arm`);
+  }
+});
 
 test("R13d flow trust is position-aware over nested functions", () => {
   // scrutineeFlowTrustable, all four directions of the reach-before-use

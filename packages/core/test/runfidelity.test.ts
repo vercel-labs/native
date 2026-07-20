@@ -152,6 +152,32 @@ export function realBreakRoute(es: number[], q: number | null): number {
     ],
   },
   {
+    name: "a claimed-terminal inferred-union plain switch never reaches its closing arm",
+    src: `
+export function inferredSwitch(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+    case 2: return 20;
+  }
+}
+export function inferredSwitchMapped(xs: number[]): number[] {
+  return xs.map((x) => {
+    const k = x > 0 ? 1 : 2;
+    switch (k) {
+      case 1: return 10;
+      case 2: return 20;
+    }
+  });
+}
+`,
+    calls: [
+      { fn: "inferredSwitch", args: [f(3)] },
+      { fn: "inferredSwitch", args: [f(-3)] },
+      { fn: "inferredSwitchMapped", args: [{ t: "nums", v: [4, -4, 0] }] },
+    ],
+  },
+  {
     name: "a write-only ternary arm mutates through the raw slot, no capture",
     src: `
 export interface P { readonly v: number; }

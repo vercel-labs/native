@@ -8310,6 +8310,54 @@ export function f(n: number, q: number | null): number {
   },
 ];
 
+const plainSwitchTerminalityCases: Case[] = [
+  {
+    // An INFERRED literal union (1 | 2) passes the sound coverage
+    // judgment, so the switch is claimed terminal — but the emitter-level
+    // type is plain number and the lowering is the if/else chain. In a
+    // callback value block the chain must produce on every path: the
+    // claimed-terminal chain closes with an unreachable else.
+    name: "inferred-union plain switch as the tail of a callback value block",
+    src: `
+export function m(xs: number[]): number[] {
+  return xs.map((x) => {
+    const k = x > 0 ? 1 : 2;
+    switch (k) {
+      case 1: return 10;
+      case 2: return 20;
+    }
+  });
+}
+`,
+  },
+  {
+    name: "inferred-union plain switch as a returning function's last statement",
+    src: `
+export function s(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+    case 2: return 20;
+  }
+}
+`,
+  },
+  {
+    // A non-exhaustive inferred union declines the claim and completes
+    // normally — no unreachable, and the trailing return still emits.
+    name: "non-exhaustive inferred-union plain switch completes normally",
+    src: `
+export function t(x: number): number {
+  const k = x > 0 ? 1 : 2;
+  switch (k) {
+    case 1: return 10;
+  }
+  return 5;
+}
+`,
+  },
+];
+
 const finallyStaticExclusionCases: Case[] = [
   {
     // The repro: `if (false) p = null` is unreachable to tsc, so the
@@ -9307,6 +9355,7 @@ const corpus: Case[] = [
   ...flowTypeSoundnessCases,
   ...finallyStaticExclusionCases,
   ...tscExcludedRouteCases,
+  ...plainSwitchTerminalityCases,
   ...writeOnlyArmCaptureCases,
   ...staticBranchJoinCases,
   ...scrutineePositionCases,
