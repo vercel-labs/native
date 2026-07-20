@@ -2010,6 +2010,17 @@ pub fn Effects(comptime Msg: type) type {
             collect_buffer: ?[]u8 = null,
             collect_len: usize = 0,
             collect_truncated: bool = false,
+            /// A `.lines` spawn's posted-but-undelivered exit marker:
+            /// set alongside the exit entry's enqueue (worker commit or
+            /// feed), cleared by the drain the moment it dequeues the
+            /// generation-matched exit — the delivery instant the other
+            /// families mark by their buffer handoff (`fetch_buffer`,
+            /// `collect_buffer`). While set, the slot parks in
+            /// `.draining` and its key stays occupied
+            /// (`findUndeliveredTerminalSlot`). Written by the worker
+            /// before its `.draining` release store (the worker's last
+            /// slot access); loop-thread only after that.
+            exit_undelivered: bool = false,
             /// Ring of the child's most recent stderr bytes. Written by
             /// the stderr reader (worker-side thread in real mode, loop
             /// thread in fake mode); read only after the child is done.
@@ -2806,7 +2817,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.max_line_bytes == 0 or options.max_line_bytes > max_effect_line_bytes_ceiling) {
                 return self.reject(options);
             }
-            if (self.findActiveSlot(options.key) != null) return self.reject(options);
+            if (self.keyOccupiedUntilDelivery(options.key)) return self.reject(options);
             const slot_index = self.findIdleSlot() orelse return self.reject(options);
 
             const slot = &self.slots[slot_index];
@@ -2818,6 +2829,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_line = options.on_line;
             slot.on_exit = options.on_exit;
             slot.on_response = null;
+            slot.exit_undelivered = false;
             slot.cancel_requested.store(false, .release);
             // `cancelled_generation` is deliberately NOT reset: entries
             // from a cancelled previous occupant may still sit in the
@@ -2959,7 +2971,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.max_line_bytes == 0 or options.max_line_bytes > max_effect_line_bytes_ceiling) {
                 return self.rejectFetch(options);
             }
-            if (self.findActiveSlot(options.key) != null) return self.rejectFetch(options);
+            if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectFetch(options);
             const slot_index = self.findIdleSlot() orelse return self.rejectFetch(options);
 
             const slot = &self.slots[slot_index];
@@ -3065,7 +3077,7 @@ pub fn Effects(comptime Msg: type) type {
             if (file_path.len == 0 or file_path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(key, op, on_result);
             }
-            if (self.findActiveSlot(key) != null) return self.rejectFile(key, op, on_result);
+            if (self.keyOccupiedUntilDelivery(key)) return self.rejectFile(key, op, on_result);
             const slot_index = self.findIdleSlot() orelse return self.rejectFile(key, op, on_result);
 
             const slot = &self.slots[slot_index];
@@ -3197,20 +3209,13 @@ pub fn Effects(comptime Msg: type) type {
                 if (!scheme_ok) return self.rejectImage(options.id, options.on_result, true);
             }
             // Occupied = running (any kind — the key space is shared),
-            // OR an image slot in the posted-but-undelivered window:
-            // the worker (or feed) already stored `.draining`, but no
-            // drain has delivered the terminal yet, so the id's one
-            // pending result is still ahead of this call. Under session
-            // replay the same request is still a parked `.running` fake
-            // at this point (its journaled terminal feeds at the
-            // recorded delivery position), so counting the window as
-            // occupied is what keeps the two sides agreeing: both
-            // reject a reload until the terminal is delivered. Delivery
-            // ends the window — the drain takes the slot's buffer
+            // OR any slot in the posted-but-undelivered terminal
+            // window (`keyOccupiedUntilDelivery`). Delivery ends the
+            // window — the drain takes the slot's delivery marker
             // BEFORE the terminal Msg reaches update — so a handler
             // that answers its own terminal by reloading the same id
             // (the gallery-refresh idiom) still parks as a fresh load.
-            if (self.findActiveSlot(options.id) != null or self.findUndeliveredImageSlot(options.id) != null) {
+            if (self.keyOccupiedUntilDelivery(options.id)) {
                 return self.rejectImage(options.id, options.on_result, true);
             }
             const slot_index = self.findIdleSlot() orelse return self.rejectImage(options.id, options.on_result, true);
@@ -3330,7 +3335,7 @@ pub fn Effects(comptime Msg: type) type {
             // Services are bound before init_fx/update ever run; a null
             // here means a host without the platform clipboard arm.
             if (!fake and self.services == null) return self.rejectClipboard(key, op, on_result);
-            if (self.findActiveSlot(key) != null) return self.rejectClipboard(key, op, on_result);
+            if (self.keyOccupiedUntilDelivery(key)) return self.rejectClipboard(key, op, on_result);
             const slot_index = self.findIdleSlot() orelse return self.rejectClipboard(key, op, on_result);
 
             const slot = &self.slots[slot_index];
@@ -3464,16 +3469,23 @@ pub fn Effects(comptime Msg: type) type {
                 // In flight = running (no answer yet) OR draining with
                 // an undelivered answer: both are replaced, dropping
                 // the old result silently (its queued entry dies by
-                // generation mismatch at drain). A running occupancy of
-                // another kind is a key collision and rejects; a
-                // draining one is already terminal — its key is free.
+                // generation mismatch at drain). An occupancy of
+                // another kind is a key collision and rejects — while
+                // running AND through its posted-but-undelivered
+                // terminal window (under session replay that request
+                // is still a parked `.running` fake until its
+                // journaled terminal feeds, so accepting the key here
+                // live would diverge); a drained one is fully
+                // delivered — its key is free.
                 var replaced: ?usize = null;
                 for (&self.slots, 0..) |*slot, index| {
                     const state = slot.state.load(.acquire);
                     if (state != .running and state != .draining) continue;
                     if (slot.key != options.key) continue;
                     if (slot.kind != .host) {
-                        if (state == .running) return self.rejectHost(options.key, options.on_result);
+                        if (state == .running or slotTerminalUndelivered(slot)) {
+                            return self.rejectHost(options.key, options.on_result);
+                        }
                         continue;
                     }
                     // Tell the host first: a late answer for the old
@@ -4303,6 +4315,14 @@ pub fn Effects(comptime Msg: type) type {
                         return line_fn(line);
                     },
                     .exit => {
+                        // Dequeueing the occupant's exit IS its delivery
+                        // for key occupancy: clear the `.lines` marker
+                        // before any early-out (absent handler, cancel
+                        // rewrite) so the key frees exactly when the
+                        // terminal reaches — or would have reached —
+                        // update, and a handler that respawns its own
+                        // key parks as a fresh effect.
+                        if (entry.generation == slot.generation) slot.exit_undelivered = false;
                         // Collect exits own a heap stdout buffer: take it
                         // before any early-out so the slot retires even
                         // when the handler is absent. A mismatched
@@ -4753,8 +4773,14 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             }
             const delivered = self.enqueue(&entry);
-            slot.state.store(.idle, .release);
-            if (!delivered) {
+            if (delivered) {
+                // Park until the drain takes the exit: the key stays
+                // occupied through the posted-but-undelivered window,
+                // exactly like the real worker's commit.
+                slot.exit_undelivered = true;
+                slot.state.store(.draining, .release);
+            } else {
+                slot.state.store(.idle, .release);
                 self.deliverLoopExit(.{
                     .key = entry.key,
                     .code = code,
@@ -5464,6 +5490,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 slot.line_buffer = null;
             }
+            slot.exit_undelivered = false;
             slot.state.store(.idle, .release);
         }
 
@@ -5622,26 +5649,59 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
-        /// An image slot holding `id` whose terminal is posted but not
-        /// yet delivered: state `.draining` with the staged buffer
-        /// still owned by the slot. Delivery IS the buffer handoff —
-        /// the drain's `.image` arm takes `fetch_buffer` before the
-        /// terminal Msg reaches update, and every loop-side retire
-        /// (`releaseFetchSlot`) frees it — so a non-null `fetch_buffer`
-        /// under `.draining` means exactly "terminal still pending";
-        /// the moment update sees the result, the buffer is gone and
-        /// the id is free for a reload. Loop-thread only: the state
-        /// load is the acquire pairing with the worker's `.draining`
-        /// release store (the worker's last slot access), and the
-        /// buffer pointer itself is only ever mutated on the loop
-        /// thread.
-        fn findUndeliveredImageSlot(self: *Self, id: u64) ?usize {
+        /// The shared admission gate for the keyed effect families
+        /// (spawn/fetch/file/clipboard/image — they share the slots
+        /// and one key space): a key is occupied while its effect runs
+        /// AND through the posted-but-undelivered terminal window that
+        /// follows. Under session replay the same request is a parked
+        /// `.running` fake until its journaled terminal feeds at the
+        /// recorded delivery position, so any admission that accepted
+        /// a key live inside that window would journal a Msg stream
+        /// replay rejects (`ReplayEffectDivergence`). Delivery ends
+        /// the window on both sides at the same causal instant — the
+        /// drain retires the slot before the terminal Msg reaches
+        /// update — so reissuing a key from its own terminal handler
+        /// is always accepted.
+        fn keyOccupiedUntilDelivery(self: *Self, key: u64) bool {
+            if (self.findActiveSlot(key) != null) return true;
+            if (self.findUndeliveredTerminalSlot(key) != null) return true;
+            return false;
+        }
+
+        /// A slot of ANY kind holding `key` whose terminal is posted
+        /// but not yet delivered: state `.draining` with its
+        /// per-family delivery marker still set. Delivery IS the
+        /// marker handoff, derived from how each family's drain
+        /// retires the slot: the drain takes `fetch_buffer` (fetch,
+        /// file, clipboard, host, and image terminals) or
+        /// `collect_buffer` (collect spawns) before the terminal Msg
+        /// reaches update, and clears `exit_undelivered` (`.lines`
+        /// spawns, which own no delivery buffer) at the same instant;
+        /// every loop-side retire (`releaseFetchSlot`,
+        /// `releaseSpawnSlot`) resets the markers too. So a set marker
+        /// under `.draining` means exactly "terminal still pending" —
+        /// the moment update sees the result, the key is free for
+        /// reuse. Loop-thread only: the state load is the acquire
+        /// pairing with the worker's `.draining` release store (the
+        /// worker's last slot access), and the markers are only ever
+        /// cleared on the loop thread.
+        fn findUndeliveredTerminalSlot(self: *Self, key: u64) ?usize {
             for (&self.slots, 0..) |*slot, index| {
-                if (slot.kind != .image or slot.key != id) continue;
+                if (slot.key != key) continue;
                 if (slot.state.load(.acquire) != .draining) continue;
-                if (slot.fetch_buffer != null) return index;
+                if (slotTerminalUndelivered(slot)) return index;
             }
             return null;
+        }
+
+        /// The per-family "terminal still pending" predicate for a
+        /// slot already observed `.draining` (see
+        /// `findUndeliveredTerminalSlot` for the marker derivations).
+        fn slotTerminalUndelivered(slot: *const Slot) bool {
+            return switch (slot.kind) {
+                .spawn => slot.collect_buffer != null or slot.exit_undelivered,
+                .fetch, .file, .clipboard, .host, .image => slot.fetch_buffer != null,
+            };
         }
 
         /// The most recent no-longer-running occupant with `key` (done
@@ -5710,13 +5770,16 @@ pub fn Effects(comptime Msg: type) type {
                         joinWorker(slot);
                         slot.state.store(.idle, .release);
                     },
-                    // A draining slot is reusable once the drain took its
-                    // heap buffer (fetch body or collected stdout — the
-                    // terminal Msg was delivered). Its worker is already
-                    // finished either way: retire the thread now.
+                    // A draining slot is reusable once the drain
+                    // delivered its terminal (took the fetch body or
+                    // collected stdout, or cleared a `.lines` exit's
+                    // marker). Its worker is already finished either
+                    // way: retire the thread now.
                     .draining => {
                         joinWorker(slot);
-                        if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
+                        if (slot.fetch_buffer == null and slot.collect_buffer == null and !slot.exit_undelivered) {
+                            slot.state.store(.idle, .release);
+                        }
                     },
                     else => {},
                 }
@@ -5993,9 +6056,15 @@ pub fn Effects(comptime Msg: type) type {
                 slot.stderr_total = ctx.stderr_total;
             }
             self.postExit(slot, @intCast(slot_index), generation, io, exit);
-            // A collect slot still owns its stdout buffer; park it in
-            // `.draining` until the drain takes the buffer (fetch-style).
-            slot.state.store(if (ctx.output_mode == .collect) .draining else .done, .release);
+            // Park in `.draining` until the drain delivers the exit: a
+            // collect slot still owns its stdout buffer (fetch-style),
+            // and a `.lines` slot marks its posted-but-undelivered exit
+            // explicitly — either way the key stays occupied through
+            // the window between this post and the drain, which is
+            // exactly the span session replay keeps the parked fake
+            // occupying (`findUndeliveredTerminalSlot`).
+            if (ctx.output_mode != .collect) slot.exit_undelivered = true;
+            slot.state.store(.draining, .release);
             self.wakeHost();
         }
 

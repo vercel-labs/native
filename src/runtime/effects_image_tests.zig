@@ -1065,3 +1065,50 @@ test "the image effect surface is exported through the public root" {
     try std.testing.expectEqualStrings(path, runtime_path);
     try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/caches/images/"));
 }
+
+test "a fetch terminal still undelivered occupies its key against loadImage" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+
+    // A fetch — a different family in the same shared key space — parks
+    // under the fake executor; feeding its response queues the terminal
+    // and stores `.draining`, with delivery still ahead.
+    h.app_state.effects.fetch(.{ .key = image_id, .url = "http://example.test/cover" });
+    try h.app_state.effects.feedResponse(image_id, 200, "ok");
+
+    // Under session replay the fetch is still a parked `.running` fake
+    // at this dispatch (its journaled terminal feeds at the recorded
+    // delivery position), so a live executor that accepts this image
+    // load journals a Msg stream replay cannot reproduce. Rejected
+    // means no new parked image request.
+    test_path = "assets/cover.png";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingImageLoadCount());
+}
+
+test "an image terminal still undelivered occupies its id against a spawn of the same key" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.executor = .fake;
+
+    test_path = "assets/cover.png";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    var encoded_buffer: [2048]u8 = undefined;
+    const encoded = encodePngFixture(&encoded_buffer, 1, 1);
+    try h.app_state.effects.feedImageBytes(image_id, encoded);
+
+    // Inside the posted-but-undelivered window a spawn of the same key
+    // must reject: the families share one key space, and under session
+    // replay the image request is still a parked `.running` fake here
+    // — the parked fake rejects the spawn, so a live executor that
+    // accepted it would journal a Msg stream replay cannot reproduce.
+    h.app_state.effects.spawn(.{ .key = image_id, .argv = &.{"noop"}, .on_exit = ImageEffects.exitMsg(.spawn_exit) });
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingSpawnCount());
+
+    // Delivery frees the key: after the drain the same spawn parks.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.result_count);
+    h.app_state.effects.spawn(.{ .key = image_id, .argv = &.{"noop"}, .on_exit = ImageEffects.exitMsg(.spawn_exit) });
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingSpawnCount());
+}

@@ -1071,3 +1071,45 @@ test "real fetch cancels mid-flight with exactly one cancelled terminal" {
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.response_count);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
 }
+
+test "a fetch response still undelivered occupies its key against a second fetch; delivery frees it" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_url = "https://api.example.com/v1/data";
+    test_method = .GET;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_response_mode = .buffered;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+
+    // The fed response queues the terminal and parks the slot in
+    // `.draining` — posted but undelivered. A second fetch of the same
+    // key inside that window must reject: under session replay the
+    // first request is still a parked `.running` fake here (its
+    // journaled response feeds at the recorded delivery position), so
+    // a live accept would journal a Msg stream replay rejects.
+    try fx.feedResponse(fetch_key, 200, "first");
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+
+    // Delivery order: the staged rejection first (loop-side pending),
+    // then the queued response.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.rejected_count);
+    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.ok, h.app_state.model.outcome.?);
+
+    // The window ends at delivery: the same key fetches again.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try fx.feedResponse(fetch_key, 201, "second");
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 3), h.app_state.model.response_count);
+    try std.testing.expectEqual(@as(u16, 201), h.app_state.model.status);
+}

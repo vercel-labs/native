@@ -1357,6 +1357,14 @@ const ImageSessionModel = struct {
     /// update — the chained-load shape whose fast completion must not
     /// deliver in the drain pass that issued it.
     chain_on_cover: bool = false,
+    /// Cross-family same-key probes (the fetch and spawn arms below
+    /// reuse the cover's key 21): terminal counts with rejections
+    /// tallied separately, view-pinned so the fingerprint checkpoints
+    /// hold the whole Msg stream, rejections included.
+    responses: u32 = 0,
+    responses_rejected: u32 = 0,
+    exits: u32 = 0,
+    exits_rejected: u32 = 0,
 
     fn outcomeName(self: *const ImageSessionModel) []const u8 {
         return self.last_outcome_name[0..self.last_outcome_len];
@@ -1371,8 +1379,12 @@ const ImageSessionMsg = union(enum) {
     load_hostless,
     arm_chain,
     start_chatty,
+    fetch_cover,
+    spawn_cover,
     line: effects_mod.EffectLine,
     image: effects_mod.EffectImageResult,
+    response: effects_mod.EffectResponse,
+    exit: effects_mod.EffectExit,
 };
 
 const ImageSessionApp = ui_app_mod.UiApp(ImageSessionModel, ImageSessionMsg);
@@ -1402,7 +1414,19 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
             .on_line = ImageSessionApp.Effects.lineMsg(.line),
         }),
         .arm_chain => model.chain_on_cover = true,
+        // The cover's key from another family: the effect families
+        // share one key space, so these collide with image id 21.
+        .fetch_cover => fx.fetch(.{ .key = 21, .url = "http://gallery.test/cover.png", .on_response = ImageSessionApp.Effects.responseMsg(.response) }),
+        .spawn_cover => fx.spawn(.{ .key = 21, .argv = &.{"refresh-cover"}, .on_exit = ImageSessionApp.Effects.exitMsg(.exit) }),
         .line => model.lines_seen += 1,
+        .response => |response| {
+            model.responses += 1;
+            if (response.outcome == .rejected) model.responses_rejected += 1;
+        },
+        .exit => |exit| {
+            model.exits += 1;
+            if (exit.reason == .rejected) model.exits_rejected += 1;
+        },
         .image => |result| {
             // The armed chain: answering the cover's loaded terminal by
             // starting the NEXT load, from inside update — pure model
@@ -1438,6 +1462,7 @@ fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) Im
         ui.text(.{}, ui.fmt("{d} results, {d} loaded, {d} failed, {d} rejected", .{ model.results, model.loaded, model.failed, model.rejected })),
         ui.text(.{}, ui.fmt("last {s} {d}x{d}", .{ model.outcomeName(), model.last_width, model.last_height })),
         ui.text(.{}, ui.fmt("{d} lines, {d} before image", .{ model.lines_seen, model.lines_before_image })),
+        ui.text(.{}, ui.fmt("{d}/{d} responses, {d}/{d} exits rejected", .{ model.responses_rejected, model.responses, model.exits_rejected, model.exits })),
     });
 }
 
@@ -1449,6 +1474,8 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
     if (std.mem.eql(u8, name, "image.chain")) return .arm_chain;
     if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
+    if (std.mem.eql(u8, name, "image.fetch-cover")) return .fetch_cover;
+    if (std.mem.eql(u8, name, "image.spawn-cover")) return .spawn_cover;
     return null;
 }
 
@@ -1711,6 +1738,194 @@ test "a reload inside the undelivered terminal window rejects identically live a
     try std.testing.expect(report.checkpoints_verified > 0);
     // The loaded terminal feeds; the in-window rejection regenerates
     // from the replayed duplicate check itself — the agreement pin.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the cross-family window reference session: a FETCH of key 21
+/// completes (terminal queued, slot `.draining`, delivery still ahead),
+/// then — before any drain — a dispatch loads IMAGE id 21. The families
+/// share one key space, so that load must reject on BOTH sides: under
+/// replay the fetch is still a parked `.running` fake at that dispatch
+/// (its recorded response feeds at the journaled delivery position),
+/// and the parked fake is what rejects the image load there.
+fn recordCrossFamilyWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-cover", .window_id = 1 } });
+    try app_state.effects.feedResponse(21, 200, "cover-bytes");
+    // NO wake between the feed and the next command: the fetch terminal
+    // is queued but undelivered when the image load lands.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "an image load inside another family's undelivered window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordCrossFamilyWindowSession(gpa, buffer, &store);
+    // The live side already rejected the in-window image load: one ok
+    // response for the fetch, one regenerable rejection for the load.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.responses);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.responses_rejected);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The response feeds; the in-window image rejection regenerates
+    // from the replayed cross-family occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// The mirror of `recordCrossFamilyWindowSession`: IMAGE id 21 completes
+/// (terminal queued, undelivered), then — before any drain — a dispatch
+/// SPAWNS key 21. The spawn must reject on both sides for the same
+/// reason: under replay the image request is still a parked `.running`
+/// fake until its recorded terminal feeds.
+fn recordSpawnInImageWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // NO wake between the feed and the next command: the image terminal
+    // is queued but undelivered when the spawn lands.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.spawn-cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a spawn inside an image's undelivered window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordSpawnInImageWindowSession(gpa, buffer, &store);
+    // The live side already rejected the in-window spawn: one loaded
+    // image terminal, one regenerable spawn rejection.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.exits);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.exits_rejected);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The loaded terminal feeds; the in-window spawn rejection
+    // regenerates from the replayed occupancy check itself.
     try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
     try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
     try std.testing.expectEqualDeep(recorded.model, app_state.model);

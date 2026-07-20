@@ -1536,3 +1536,79 @@ test "real executor reports unspawnable binaries as spawn_failed" {
     try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.line_count);
 }
+
+test "a spawn exit still undelivered occupies its key against a respawn; delivery frees it" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The fed exit queues the terminal and parks the slot — posted but
+    // undelivered. A respawn of the same key inside that window must
+    // reject: under session replay the first spawn is still a parked
+    // `.running` fake here (its journaled exit feeds at the recorded
+    // delivery position), so a live accept would journal a Msg stream
+    // replay rejects.
+    try fx.feedExit(stream_key, 0);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+
+    // Delivery order: the staged rejection first (loop-side pending),
+    // then the queued exit.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(i32, 0), h.app_state.model.exit_code);
+
+    // The window ends at delivery: the same key spawns again.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+}
+
+/// One-shot flag for the respawn-from-own-exit idiom test below.
+var test_respawn_on_exit: bool = false;
+
+/// `streamUpdate` plus the restart idiom: the exit handler answers its
+/// own terminal by respawning the same key (one-shot).
+fn respawnUpdate(model: *StreamModel, msg: StreamMsg, fx: *StreamEffects) void {
+    if (msg == .done and test_respawn_on_exit) {
+        test_respawn_on_exit = false;
+        model.recordExit(msg.done);
+        fx.spawn(.{
+            .key = stream_key,
+            .argv = test_argv,
+            .on_line = StreamEffects.lineMsg(.line),
+            .on_exit = StreamEffects.exitMsg(.done),
+        });
+        return;
+    }
+    streamUpdate(model, msg, fx);
+}
+
+test "an update that respawns the same key from its own exit parks instead of rejecting" {
+    var h = try Harness.createWith(respawnUpdate);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    test_respawn_on_exit = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try fx.feedExit(stream_key, 0);
+
+    // The drain clears the undelivered-exit marker BEFORE the terminal
+    // Msg reaches update, so the handler's respawn of its own key is a
+    // fresh accepted spawn — the restart idiom must not regress.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+}
