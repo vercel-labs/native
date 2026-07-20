@@ -4007,20 +4007,68 @@ export class Emitter {
   private emitTry(stmt: ts.TryStatement, ctx: Ctx): void {
     const fin = stmt.finallyBlock && stmt.finallyBlock.statements.length > 0 ? stmt.finallyBlock : undefined;
     if (fin) {
+      // The defer's TEXT precedes the try body's, but its FLOW follows it:
+      // the finally runs at the construct's exits, after the body and catch.
+      // So the finally emits in a bracketed scope — its entry state is the
+      // pre-try narrows minus the keys tsc widens for a finally (see
+      // finallyEntryKills: any possibly-null assignment in the try or catch
+      // kills, path-insensitively), and its own kills stage in `finStage`
+      // rather than merging, so the body emitted after this text still
+      // holds every narrow tsc keeps at its program points (the finally
+      // has not run there). The staged kills apply once at the construct's
+      // exit below — the state every fall-through continuation resumes
+      // from — and propagate outward through the enclosing frames exactly
+      // like a merge-class kill applied at that spot.
       this.push(ctx, `{`);
       const wrap = this.nestedCtx(ctx);
       this.push(wrap, `// finally: a scoped defer runs it on every exit of this block.`);
       this.push(wrap, `defer {`);
       const finCtx = this.nestedCtx(wrap);
-      this.emitBlockStatements(fin.statements, finCtx);
+      const finStage = new Set<string>();
+      this.withNarrowScope(
+        finCtx,
+        "merge",
+        () => {
+          for (const key of this.finallyEntryKills(stmt, finCtx)) finCtx.memberSubst.delete(key);
+          this.emitBlockStatements(fin.statements, finCtx);
+        },
+        finStage,
+      );
       wrap.lines.push(...finCtx.lines);
       this.push(wrap, `}`);
       this.emitTryCore(stmt, wrap);
       ctx.lines.push(...wrap.lines);
       this.push(ctx, `}`);
+      this.applyJoinedNarrowKills(ctx, finStage);
       return;
     }
     this.emitTryCore(stmt, ctx);
+  }
+
+  /// The narrows dead at a finally block's entry: tsc types a finally from
+  /// the pre-try state minus every key the try or catch body may assign
+  /// null/undefined to — path-insensitively, because an exception can hand
+  /// control to the finally from between any two statements, so a later
+  /// non-null re-assignment does not revive the narrow there. A provably
+  /// non-null assignment keeps a live-slot `.?` spelling (it reads the
+  /// variable, never a stale value) but drops a capture, mirroring the
+  /// assignment emitter's own kill rule.
+  private finallyEntryKills(stmt: ts.TryStatement, ctx: Ctx): Set<string> {
+    const kills = new Set<string>();
+    const visit = (n: ts.Node): void => {
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const key = this.narrowKey(n.left);
+        const subst = ctx.memberSubst.get(key);
+        const empties = this.tast.emptiesOf(n.right);
+        const mayBeEmpty = empties.null || empties.undefined;
+        const survives = subst !== undefined && subst.endsWith(".?") && !mayBeEmpty;
+        if (!survives && (subst !== undefined || mayBeEmpty)) kills.add(key);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(stmt.tryBlock);
+    if (stmt.catchClause) visit(stmt.catchClause.block);
+    return kills;
   }
 
   private emitTryCore(stmt: ts.TryStatement, ctx: Ctx): void {

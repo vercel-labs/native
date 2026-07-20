@@ -5491,6 +5491,43 @@ export function f(q: number | null, flag: boolean, n: number): number {
       { fn: "f", args: [f(3), { t: "b", v: false }, i(9)] },
     ],
   },
+  {
+    // The finally's kill runs AFTER the try body's return value is
+    // computed (JS evaluates the return expression, then the finally): the
+    // body's read must see the narrowed value, and a finally read of a key
+    // the try body killed re-checks the live variable on both paths.
+    name: "finally kills apply in flow order: after the body's reads, live in its own",
+    src: `
+export function ret(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  try {
+    return p + 10;
+  } finally {
+    p = null;
+  }
+}
+export function readsKilled(q: number | null, drop: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let seen: number = 0;
+  try {
+    if (drop) { p = null; }
+  } finally {
+    if (p !== null) { seen = p + 1; }
+  }
+  if (p === null) { return seen + 100; }
+  return seen;
+}
+`,
+    calls: [
+      { fn: "ret", args: [{ t: "null" }] },
+      { fn: "ret", args: [i(5)] },
+      { fn: "readsKilled", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "readsKilled", args: [i(4), { t: "b", v: true }] },
+      { fn: "readsKilled", args: [i(4), { t: "b", v: false }] },
+    ],
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling

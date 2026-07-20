@@ -7319,6 +7319,91 @@ export function labeledCont(xs: readonly number[]): number {
   },
 ];
 
+// A finally clause emits as a Zig defer whose TEXT precedes the try body's,
+// but whose FLOW follows it: the finally runs at the construct's exits. Its
+// kills must therefore stage until the construct's exit — never apply to the
+// body emitted after the defer's text, where tsc keeps the narrow (the
+// finally has not run at those program points). In the other temporal
+// direction, tsc types the finally itself from the pre-try state minus every
+// key the try or catch may assign null to, path-insensitively (an exception
+// can enter the finally from between any two statements), so a finally read
+// of such a key re-checks the LIVE optional — never a stale capture.
+const finallyFlowOrderCases: Case[] = [
+  {
+    // The try body's read keeps its narrow even though the defer carrying
+    // the kill is emitted first: flow order, not emission order.
+    name: "a finally-clause kill stays off the try body's own reads",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p === null) { return -1; }
+  try {
+    return p.v;
+  } finally {
+    p = null;
+  }
+}
+`,
+  },
+  {
+    // tsc widens the killed key inside the finally (the kill may or may not
+    // have run when an exception hands control over), so the finally's read
+    // re-checks and must test the live variable, not a pre-try capture.
+    name: "a finally clause re-checks a narrow the try body killed",
+    src: `
+export function f(q: number | null, drop: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let seen: number = 0;
+  try {
+    if (drop) { p = null; }
+  } finally {
+    if (p !== null) { seen = p + 1; }
+  }
+  return seen;
+}
+`,
+  },
+  {
+    // Kills in all three regions land where flow says: the try's kill is
+    // visible in the finally and after the construct; the catch's kill
+    // falls through to the post-try state; the finally's own kill applies
+    // at the construct's exit — and none of them touches the try body's
+    // reads before the killing statement.
+    name: "kills in try, catch, and finally each land at their flow destinations",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+function mayThrow(flag: boolean): void {
+  if (flag) { throw { kind: "boom" } as Boom; }
+}
+export function f(q: number | null, r: number | null, s: number | null, flag: boolean): number {
+  let a: number | null = q;
+  let b: number | null = r;
+  let c: number | null = s;
+  if (a === null) { return -1; }
+  if (b === null) { return -2; }
+  if (c === null) { return -3; }
+  let out: number = 0;
+  try {
+    a = null;
+    mayThrow(flag);
+    out += b;
+  } catch {
+    b = null;
+  } finally {
+    c = null;
+    if (a !== null) { out += a; }
+  }
+  if (a !== null) { out += a; }
+  if (b !== null) { out += b; }
+  if (c !== null) { out += c; }
+  return out;
+}
+`,
+  },
+];
+
 // A lifted block-body callback whose only return is the trailing statement
 // emits as straight-line statements plus that value. The statement prefix
 // and the trailing expression are ONE flow in tsc — a guard in the prefix
@@ -7693,6 +7778,7 @@ const corpus: Case[] = [
   ...narrowInvalidationMergeCases,
   ...killFallthroughCases,
   ...edgeKillStagingCases,
+  ...finallyFlowOrderCases,
   ...callbackTrailingNarrowCases,
   ...textMethodCases,
   ...releaseModeCases,
