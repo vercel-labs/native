@@ -5484,6 +5484,76 @@ export function g(xs: number[], q: P | null, seed: P | null): number {
 }
 `,
   },
+  {
+    // Capture gates compare declaration-QUALIFIED keys, never source text:
+    // the map callback's parameter shadows the tested `box`, so its
+    // `box.q` is NOT a read of the outer target — a text match would bind
+    // a capture the declaration-keyed substitution never rewrites, a Zig
+    // unused-capture error. The arm reads only the shadow: no capture.
+    name: "a shadowed property spelling in a ternary arm binds no capture",
+    src: `
+export interface B { readonly q: number | null; }
+export function g(box: B, xs: readonly B[]): number {
+  return box.q === null ? 0 : xs.map((box) => box.q === null ? 0 : 1).length;
+}
+`,
+  },
+  {
+    // The dual: the arm reads the OUTER target too, so the capture binds
+    // and the outer read rewrites onto it while the shadowed read keeps
+    // its own declaration.
+    name: "a ternary arm reading both the outer property and a shadow binds a used capture",
+    src: `
+export interface B { readonly q: number | null; }
+export function g(box: B, xs: readonly B[]): number {
+  return box.q === null ? 0 : box.q + xs.map((box) => box.q === null ? 0 : 1).length;
+}
+`,
+  },
+  {
+    // The if-statement capture gate (branchReadsTarget) under the same
+    // shadowing: the then-branch reads only the shadow, so the plain
+    // comparison form emits, capture-free.
+    name: "a shadowed property spelling in a guarded branch binds no capture",
+    src: `
+export interface B { readonly q: number | null; }
+export function g(box: B, xs: readonly B[]): number {
+  if (box.q !== null) {
+    return xs.map((box) => box.q === null ? 0 : 1).length;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // The early-exit fusion gate (followingReadsTarget) under the same
+    // shadowing: nothing after the guard reads the outer target, so no
+    // orelse capture binds.
+    name: "a shadowed property spelling after an exit guard binds no orelse capture",
+    src: `
+export interface B { readonly q: number | null; }
+export function g(box: B, xs: readonly B[]): number {
+  if (box.q === null) return 0;
+  return xs.map((box) => box.q === null ? 0 : 1).length;
+}
+`,
+  },
+  {
+    // The switch payload-use gate under a same-named field: `box.v` is
+    // not a read of the payload field `v`, so no payload capture binds
+    // for the arm.
+    name: "a same-named field of another value binds no switch payload capture",
+    src: `
+export type Msg = { readonly kind: "set"; readonly v: number } | { readonly kind: "clear" };
+export interface Box { readonly v: number; }
+export function upd(m: Msg, box: Box): number {
+  switch (m.kind) {
+    case "set": return box.v + 1;
+    case "clear": return 0;
+  }
+}
+`,
+  },
 ];
 
 // Plain lexical blocks are NOT merge boundaries: tsc's narrowing is

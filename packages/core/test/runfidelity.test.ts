@@ -5328,6 +5328,47 @@ export function f(xs: number[], flag: boolean, seed: P | null): number {
 `,
   },
   {
+    // Shadowed property spellings under the capture gates: the callback's
+    // `box.q` is its own declaration, the outer read (when present) rides
+    // the capture — both must value exactly as node does on hit and miss.
+    name: "shadowed property reads under narrowing gates run byte-identically to node",
+    src: `
+export interface B { readonly q: number | null; }
+export function shadowOnly(box: B, xs: readonly B[]): number {
+  return box.q === null ? 0 : xs.map((box) => box.q === null ? 0 : 1).length;
+}
+export function outerAndShadow(box: B, xs: readonly B[]): number {
+  return box.q === null ? 0 : box.q + xs.map((box) => box.q === null ? 0 : 1).length;
+}
+`,
+    node: `
+{
+  const hit = { q: 40 };
+  const miss = { q: null };
+  const xs = [{ q: 1 }, { q: null }, { q: 3 }];
+  line("p0", mod.shadowOnly(hit, xs));
+  line("p1", mod.shadowOnly(miss, xs));
+  line("p2", mod.shadowOnly(hit, []));
+  line("p3", mod.outerAndShadow(hit, xs));
+  line("p4", mod.outerAndShadow(miss, xs));
+  line("p5", mod.outerAndShadow(hit, []));
+}
+`,
+    zig: `
+    {
+        const hit = m.B{ .q = 40 };
+        const miss = m.B{ .q = null };
+        const xs = [_]m.B{ .{ .q = 1 }, .{ .q = null }, .{ .q = 3 } };
+        row("p0", m.shadowOnly(hit, &xs));
+        row("p1", m.shadowOnly(miss, &xs));
+        row("p2", m.shadowOnly(hit, &.{}));
+        row("p3", m.outerAndShadow(hit, &xs));
+        row("p4", m.outerAndShadow(miss, &xs));
+        row("p5", m.outerAndShadow(hit, &.{}));
+    }
+`,
+  },
+  {
     name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
     src: `
 export interface NumResult { readonly value: number; readonly next: number; }

@@ -4921,7 +4921,9 @@ export class Emitter {
       const decl = this.tast.declarationOf(target);
       if (decl) return this.identifierRead(branch, decl);
     }
-    return branch.getText().includes(target.getText());
+    // Property chains compare by declaration-qualified key, never text —
+    // a shadowed spelling in a nested callback is not a read (anyReadsKey).
+    return this.anyReadsKey([branch], this.narrowKey(target));
   }
 
   /// identifierUsed, minus references that are the bare TARGET of a plain
@@ -4952,9 +4954,11 @@ export class Emitter {
 
   /// Whether any statement AFTER an early-exit guard reads the guarded
   /// target — the scope a `const v = x orelse <exit>;` capture serves. An
-  /// unread capture would be an unused Zig const, a compile error. The
-  /// text match is boundary-aware so `model.now` never matches inside
-  /// `model.nowDurationMs`.
+  /// unread capture would be an unused Zig const, a compile error.
+  /// Property chains compare by declaration-qualified key (anyReadsKey),
+  /// which is inherently boundary-aware — `model.now` is a different key
+  /// from `model.nowDurationMs`, and a shadowed spelling in a nested
+  /// callback is a different declaration.
   private followingReadsTarget(stmt: ts.IfStatement, target: ts.Expression): boolean {
     const following = this.followingStatementsOf(stmt);
     if (following.length === 0) return false;
@@ -4962,9 +4966,7 @@ export class Emitter {
       const decl = this.tast.declarationOf(target);
       if (decl) return following.some((s) => this.identifierUsed(s, decl));
     }
-    const escaped = target.getText().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const read = new RegExp(`${escaped}(?![A-Za-z0-9_$])`);
-    return following.some((s) => read.test(s.getText()));
+    return this.anyReadsKey(following, this.narrowKey(target));
   }
 
   /// The statements after `stmt` in its own list — the scope an early-exit
@@ -5190,16 +5192,42 @@ export class Emitter {
     return test;
   }
 
-  /// Whether any of the nodes reads the guarded target (decl identity for
-  /// identifiers, source text for property chains — same heuristic as
-  /// branchReadsTarget).
+  /// Whether any of the nodes reads the guarded target — declaration
+  /// identity for identifiers, declaration-QUALIFIED narrowKeys for
+  /// property chains (anyReadsKey). Never source text: a shadowed spelling
+  /// inside a nested callback (`xs.map((box) => box.q)`) is not a read of
+  /// the outer `box.q`, and matching it by text binds a capture the
+  /// declaration-keyed substitution (correctly) never rewrites — a Zig
+  /// unused-capture error.
   private anyReadsTarget(nodes: readonly ts.Node[], target: ts.Expression): boolean {
     if (ts.isIdentifier(target)) {
       const decl = this.tast.declarationOf(target);
       if (decl) return nodes.some((n) => this.identifierUsed(n, decl));
     }
-    const text = target.getText();
-    return nodes.some((n) => n.getText().includes(text));
+    return this.anyReadsKey(nodes, this.narrowKey(target));
+  }
+
+  /// The property-chain read walk every capture/substitution GATE in the
+  /// narrowing machinery uses: visit the nodes' property accesses (and
+  /// identifiers, for the no-declaration corner), canonicalize each
+  /// through narrowKey, and compare against the target's key — the same
+  /// identity the installed substitutions are looked up by, so a gate that
+  /// fires here is a gate whose capture WILL be consumed. Wrapper
+  /// spellings (`(box.q)`, `box.q!`) match through the key's own
+  /// canonicalization; a longer chain (`box.q.name`) matches via its
+  /// inner access on the recursive walk.
+  private anyReadsKey(nodes: readonly ts.Node[], key: string): boolean {
+    let found = false;
+    const visit = (n: ts.Node): void => {
+      if (found) return;
+      if ((ts.isPropertyAccessExpression(n) || ts.isIdentifier(n)) && this.narrowKey(n) === key) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    for (const n of nodes) visit(n);
+    return found;
   }
 
   /// Whether the nodes ASSIGN the guarded local (only identifiers are
@@ -5821,12 +5849,16 @@ export class Emitter {
       if (last && ts.isBreakStatement(last) && !last.label) stmts = stmts.slice(0, -1);
 
       const sub = this.nestedCtx(armCtx);
-      // Payload capture + member substitution for this arm's fields.
+      // Payload capture + member substitution for this arm's fields. Field
+      // use is judged by the declaration-qualified key the substitutions
+      // are installed under — a same-named field of some OTHER value in
+      // the body (`box.v` beside payload field `v`) is not a payload read,
+      // and binding the capture for it would leave it unused.
       const savedSubst = new Map(ctx.memberSubst);
       const savedStillOptional = new Map(ctx.stillOptionalSubst);
       let capture = "";
       const payloadUsed = arm.fields.some((f) =>
-        stmts.some((s) => s.getText().includes(`.${f.tsName}`)),
+        this.anyReadsKey(stmts, `${baseKey}.${f.tsName}`),
       );
       if (pending.length > 0 && payloadUsed) {
         // The shared body would need one capture per differently-shaped
