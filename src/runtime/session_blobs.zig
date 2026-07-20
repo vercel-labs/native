@@ -242,7 +242,18 @@ pub const DirBlobStore = struct {
         var file = cwd.openFile(self.io, blob_path, .{}) catch return error.BlobMissing;
         defer file.close(self.io);
         const len = file.readPositionalAll(self.io, buffer, 0) catch return error.BlobIoFailed;
-        if (len == buffer.len) return error.BlobOverBudget;
+        if (len == buffer.len) {
+            // A full buffer is ambiguous: `readPositionalAll` stops at
+            // `buffer.len`, so the blob is either exactly buffer-sized
+            // (the designed case — callers size the buffer from the
+            // journal record's byte length) or larger. Probe one byte
+            // past the end to tell them apart — the effects layer's
+            // one-spare-byte idiom, and a probe rather than a stat so
+            // no size/read race can disagree with what was just read.
+            var spare: [1]u8 = undefined;
+            const extra = file.readPositionalAll(self.io, &spare, buffer.len) catch return error.BlobIoFailed;
+            if (extra != 0) return error.BlobOverBudget;
+        }
         const bytes = buffer[0..len];
         if (!std.mem.eql(u8, &hashBytes(bytes), &hash)) return error.BlobCorrupt;
         return bytes;
@@ -448,6 +459,69 @@ test "dir store writes atomically, dedups by existence, and verifies on read" {
     const rel = try std.fmt.bufPrint(&path_buffer, "blobs/{s}", .{name});
     try tmp.dir.writeFile(io, .{ .sub_path = rel, .data = damaged[0..bytes.len] });
     try testing.expectError(error.BlobCorrupt, store.read(hash, &read_buffer));
+}
+
+test "both stores accept an exact-fit buffer and refuse one byte under" {
+    // The SessionBlobSource contract lets callers size the buffer from
+    // the journal record's byte length — an exact-fit read is the
+    // designed case, not an over-budget one. Over-budget is a buffer
+    // the blob does NOT fit in, even by one byte.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    var dir_buffer: [256]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/blobs", .{tmp.sub_path[0..]});
+    var dir_store = try DirBlobStore.init(io, dir_path);
+
+    const bytes = "encoded image bytes";
+    const hash = hashBytes(bytes);
+    try dir_store.write(hash, bytes);
+
+    var buffer: [bytes.len]u8 = undefined;
+    try testing.expectEqualStrings(bytes, try dir_store.read(hash, &buffer));
+    try testing.expectError(error.BlobOverBudget, dir_store.read(hash, buffer[0 .. bytes.len - 1]));
+
+    // Store parity: the memory store answers the same three sizes the
+    // same way, so a test against it exercises the real contract.
+    var memory_store = MemoryBlobStore.init(testing.allocator);
+    defer memory_store.deinit();
+    try memory_store.write(hash, bytes);
+    try testing.expectEqualStrings(bytes, try memory_store.read(hash, &buffer));
+    try testing.expectError(error.BlobOverBudget, memory_store.read(hash, buffer[0 .. bytes.len - 1]));
+}
+
+test "an exact-fit read of damaged bytes is BlobCorrupt, not BlobOverBudget" {
+    // The budget check must not mask corruption detection: a blob that
+    // fills the buffer exactly still gets re-hashed, and damage is
+    // reported as damage.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    var dir_buffer: [256]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/blobs", .{tmp.sub_path[0..]});
+    var dir_store = try DirBlobStore.init(io, dir_path);
+
+    const bytes = "encoded image bytes";
+    const hash = hashBytes(bytes);
+    try dir_store.write(hash, bytes);
+    var damaged: [bytes.len]u8 = undefined;
+    @memcpy(&damaged, bytes);
+    damaged[0] ^= 0x40;
+    const name = hexName(hash);
+    var path_buffer: [300]u8 = undefined;
+    const rel = try std.fmt.bufPrint(&path_buffer, "blobs/{s}", .{name});
+    try tmp.dir.writeFile(io, .{ .sub_path = rel, .data = &damaged });
+
+    var buffer: [bytes.len]u8 = undefined;
+    try testing.expectError(error.BlobCorrupt, dir_store.read(hash, &buffer));
+
+    var memory_store = MemoryBlobStore.init(testing.allocator);
+    defer memory_store.deinit();
+    try memory_store.write(hash, bytes);
+    memory_store.entries[0].bytes[0] ^= 0x40;
+    try testing.expectError(error.BlobCorrupt, memory_store.read(hash, &buffer));
 }
 
 test "two recorders sharing one blobs directory both record the same blob successfully" {
