@@ -156,7 +156,7 @@ const AUDIO_STATES = ["loaded", "position", "completed", "failed", "rejected", "
 const IMAGE_STATES = [
   "loaded", "rejected", "not_found", "io_failed", "connect_failed", "tls_failed",
   "protocol_failed", "timed_out", "http_status", "cancelled", "too_large",
-  "unsupported", "decode_failed", "registry_full",
+  "unsupported", "decode_failed", "registry_full", "alloc_failed",
 ];
 
 /// Names the emitted module's own fixtures occupy (header helpers + commit
@@ -2602,7 +2602,7 @@ export class Emitter {
   /// Resolve the image result arm: exactly the five SDK-fixed fields,
   /// matched by NAME — id (a number: the requested ImageId echoed
   /// verbatim), state (a named literal-union alias carrying exactly the
-  /// fourteen image states, any order), width/height/status (numbers).
+  /// fifteen image states, any order), width/height/status (numbers).
   private imageEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
     const unionName = ctx.cmdReturn!.msgUnion;
     const info = this.table.unions.get(unionName);

@@ -20,7 +20,8 @@ import { Cmd, asciiBytes } from "@native-sdk/core";
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
   | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
-  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
 
 export interface Model {
   readonly cover: number; // 0 until the load lands
@@ -92,7 +93,7 @@ Prefer **omitting** `cachePath` for URL sources: when the app wiring configures 
 Exactly one event arm dispatches per load — a five-field record matched by field name: `id`, `state`, `width`, `height`, `status`. `id` echoes the requested ImageId, so two loads in flight at once share one arm and still tell their results apart (that is what the example's `cover: msg.id` reads); `status` is the HTTP status for url loads that performed an exchange, and **0 when none occurred** — local paths and cache hits — so a `loaded` with status 0 is honest signal that the pixels came without a network round trip, never a fabricated 200; `loaded` means the pixels are registered and drawable; everything else names what actually happened:
 
 - **Source classes** — `not_found` (missing local file, no url), `io_failed` (a local read failure), `connect_failed` / `tls_failed` / `protocol_failed` / `timed_out` (the fetch taxonomy, on the fetch machinery's own timeout), `http_status` (a non-2xx answer, with the status carried through — an error page is not an image, so the body is discarded).
-- **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`.
+- **Decode and registry classes** — the same errors the direct registration API raises: `decode_failed`, `unsupported` (a host without a codec), `too_large`, `registry_full`, and `alloc_failed` (the host refused the memory the registration needed — resource exhaustion, not corrupt bytes: the same source may load once memory frees, so it is never reported as `decode_failed`).
 - **Discipline classes** — `rejected` (an invalid id, no source at all, or a duplicate live id: one load per id at a time, the spawn rule — a load in flight is never replaced implicitly) and `cancelled` (`Cmd.imageCancel(id)` ended the load).
 
 `Cmd.imageCancel(id)` is the load's cancel — image loads are keyed by their numeric id, so the string-keyed `Cmd.cancel` never touches them. Cancel is **loud**, the spawn discipline: the one terminal still arrives, as the load's own event arm with state `cancelled`, and the id is free for a fresh load once it lands (a slow CDN fetch no longer pins its id against a retry). Aimed at an id with no live load it no-ops — whatever it targeted already delivered its terminal.

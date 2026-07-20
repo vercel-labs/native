@@ -1193,7 +1193,7 @@ pub fn Kernel(comptime opts: Options) type {
         //               ImageId echoed verbatim so concurrent loads sharing
         //               one arm stay distinguishable; an id the wire cannot
         //               carry exactly echoes 0), `state` (an enum whose
-        //               members are exactly the fourteen image outcome names,
+        //               members are exactly the fifteen image outcome names,
         //               matched by member NAME), width and height (numbers,
         //               the decoded dimensions on "loaded"), and status
         //               (number, the HTTP status for url loads that

@@ -338,13 +338,91 @@ test "a full registry fails the load with registry_full, never silence" {
     try std.testing.expectEqual(effects_mod.EffectImageOutcome.registry_full, h.app_state.model.last.?.outcome);
 }
 
+test "a registry allocation failure fails the load with alloc_failed, never decode_failed" {
+    // The registry allocates each slot's pixel buffer lazily, at the
+    // slot's first registration, from the runtime's frozen allocator —
+    // so a FailingAllocator there is exactly an OOM at registration
+    // time: AFTER a successful decode, with perfectly valid bytes. The
+    // load's terminal must say resource exhaustion (`alloc_failed`),
+    // never report the bytes corrupt (`decode_failed`).
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    // Rebind the runtime over the injectable allocator BEFORE anything
+    // starts — the slot-buffer OOM tests' convention
+    // (canvas_image_tests' `startedGpuHarnessWithRuntimeAllocator`).
+    core.Runtime.initAt(&harness.runtime, .{
+        .platform = harness.null_platform.platform(),
+        .trace_sink = harness.trace_sink.sink(),
+        .allocator = failing.allocator(),
+        .environ = std.testing.environ,
+    });
+    harness.runtime.dispatch_error_policy = .propagate;
+
+    const app_state = try std.testing.allocator.create(ImageApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ImageApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-image-oom",
+        .scene = image_scene,
+        .canvas_label = canvas_label,
+        .update_fx = imageUpdate,
+        .view = imageView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    app_state.effects.executor = .fake;
+    test_id = image_id;
+    test_path = "assets/cover.png";
+    test_url = "";
+    test_cache_path = "";
+    test_expected_bytes = 0;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_reload_on_result = false;
+
+    var encoded_buffer: [2048]u8 = undefined;
+    const encoded = encodePngFixture(&encoded_buffer, 1, 1);
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try app_state.effects.feedImageBytes(image_id, encoded);
+    // Exhaust the runtime allocator before the drain delivers: the
+    // registry's lazy slot-buffer allocation is the next (and only)
+    // runtime allocation on the decode+register path.
+    failing.fail_index = failing.alloc_index;
+    while (harness.null_platform.takeWake()) |_| {}
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 1), app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.alloc_failed, app_state.model.last.?.outcome);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(image_id) == null);
+
+    // Memory heals: the SAME bytes load and register on retry, proving
+    // the class was resource exhaustion, not corruption.
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try app_state.effects.feedImageBytes(image_id, encoded);
+    while (harness.null_platform.takeWake()) |_| {}
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, app_state.model.last.?.outcome);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(image_id) != null);
+}
+
 test "recorded terminals feed verbatim: the failure classes and a loaded record's re-registration" {
     var h = try Harness.create();
     defer h.destroy();
     h.app_state.effects.executor = .fake;
 
     test_path = "assets/cover.png";
-    const classes = [_]effects_mod.EffectImageOutcome{ .not_found, .io_failed, .connect_failed, .tls_failed, .protocol_failed, .timed_out, .decode_failed };
+    const classes = [_]effects_mod.EffectImageOutcome{ .not_found, .io_failed, .connect_failed, .tls_failed, .protocol_failed, .timed_out, .decode_failed, .alloc_failed };
     for (classes, 1..) |class, count| {
         try h.app_state.dispatch(&h.harness.runtime, 1, .start);
         try h.app_state.effects.feedImageResult(image_id, class, 0, 0, 0, "");

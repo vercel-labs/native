@@ -15,7 +15,8 @@ export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejec
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
   | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
-  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
 
 export interface Model {
   readonly polling: boolean;

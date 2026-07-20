@@ -311,7 +311,10 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish
 /// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
 /// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
 /// it), "cancelled", "too_large" (source or decoded pixels over budget),
-/// "unsupported" (no platform codec), "decode_failed", and "registry_full".
+/// "unsupported" (no platform codec), "decode_failed", "registry_full", and
+/// "alloc_failed" (the host refused the memory the registration needed —
+/// resource exhaustion, not corrupt bytes: the same source may load once
+/// memory frees).
 export type ImageState =
   | "loaded"
   | "rejected"
@@ -326,7 +329,8 @@ export type ImageState =
   | "too_large"
   | "unsupported"
   | "decode_failed"
-  | "registry_full";
+  | "registry_full"
+  | "alloc_failed";
 
 /// The payload shape of an image result arm — five fields, matched by NAME
 /// (the AudioEventArm convention). `id` is the requested ImageId echoed
@@ -334,7 +338,7 @@ export type ImageState =
 /// distinguishable in `update` (an id the wire cannot carry exactly — 0,
 /// negatives, fractions, 2^53 and past — echoes 0, the no-image sentinel:
 /// there is no honest integer to echo); `state` must be a named
-/// string-literal-union alias carrying exactly the fourteen ImageState
+/// string-literal-union alias carrying exactly the fifteen ImageState
 /// members (any declaration order — the host matches members by name);
 /// `width`/`height` are the decoded pixel dimensions ("loaded" only, 0
 /// otherwise); `status` is the HTTP status for url loads that performed an

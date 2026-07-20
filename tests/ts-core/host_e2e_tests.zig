@@ -743,6 +743,18 @@ test "image loads route their one terminal into the transpiled core through the 
     try std.testing.expect(Bridge.model().imageState == .decode_failed);
     // The model kept the previously adopted id (store-on-success).
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+
+    // The resource class crosses the wire by NAME like every other
+    // member: a registration the host refused memory for reaches TS as
+    // "alloc_failed" — the fifteenth ImageState, distinct from
+    // decode_failed because the bytes may be perfectly valid.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try fx.feedImageResult(21, .alloc_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 4), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .alloc_failed);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
 }
 
 test "concurrent image loads distinguish their completions by the echoed id" {

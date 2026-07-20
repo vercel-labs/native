@@ -761,6 +761,15 @@ pub const EffectImageOutcome = enum(u8) {
     /// Every registered-image slot holds another id
     /// (`error.ImageRegistryFull`).
     registry_full,
+    /// The host refused the memory the registration needed
+    /// (`error.OutOfMemory` — the registry slot's lazily allocated
+    /// pixel buffer). The bytes may be perfectly valid: this is
+    /// resource exhaustion, not corruption, so it gets its own class —
+    /// calling it `decode_failed` would tell the app to distrust a
+    /// source that decodes fine on retry. Named for the failing stage
+    /// like its siblings (`io_failed`, `decode_failed`): the
+    /// allocation failed.
+    alloc_failed,
 };
 
 /// Payload for `on_result` Msg constructors of image loads. All plain
@@ -1092,6 +1101,12 @@ fn classifyImageRegisterError(err: anyerror) EffectImageOutcome {
         error.UnsupportedService => .unsupported,
         error.ImageTooLarge => .too_large,
         error.ImageRegistryFull => .registry_full,
+        // Resource exhaustion is its own class, never `decode_failed`:
+        // the registry allocates each slot's pixel buffer lazily at its
+        // first registration, and an OOM there says nothing about the
+        // bytes — reporting valid bytes as corrupt would send the app
+        // chasing its source instead of its memory.
+        error.OutOfMemory => .alloc_failed,
         // Invalid ids are refused at issue time, before any I/O; a
         // decode that produced impossible dimensions is a decode
         // failure like any other undecodable stream.

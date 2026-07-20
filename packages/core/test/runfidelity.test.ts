@@ -3155,7 +3155,8 @@ import { Cmd, asciiBytes } from "@native-sdk/core";
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
   | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
-  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
 export interface Model {
   readonly cover: number; readonly w: number; readonly h: number;
   readonly errs: number; readonly lastStatus: number; readonly state: ImageState;

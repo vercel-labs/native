@@ -3476,13 +3476,14 @@ const streamTail = `
 }
 `;
 
-// The image-load fixture: the fourteen-state union and the five-field
+// The image-load fixture: the fifteen-state union and the five-field
 // result arm imageLoad routes (id echoes the requested ImageId).
 const imageMsg = `
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
   | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
-  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full";
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
 export interface Model { readonly w: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
