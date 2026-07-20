@@ -3123,10 +3123,17 @@ export class Emitter {
     cond: ts.Expression,
     op: ts.SyntaxKind = ts.SyntaxKind.EqualsEqualsEqualsToken,
   ): { target: ts.Expression; flavor: "null" | "undefined" } | null {
-    if (!ts.isBinaryExpression(cond) || cond.operatorToken.kind !== op) return null;
+    // Parenthesized spellings must not change what the test matches: the
+    // condition, either operand, and the returned target all strip parens
+    // (`(q) === null` tests `q`, so downstream shape checks and key
+    // derivations see the identifier itself).
+    const c = ts.skipParentheses(cond);
+    if (!ts.isBinaryExpression(c) || c.operatorToken.kind !== op) return null;
+    const left = ts.skipParentheses(c.left);
+    const right = ts.skipParentheses(c.right);
     const sides: Array<[ts.Expression, ts.Expression]> = [
-      [cond.left, cond.right],
-      [cond.right, cond.left],
+      [left, right],
+      [right, left],
     ];
     for (const [target, emptySide] of sides) {
       const flavor = this.emptyFlavorOf(emptySide);
@@ -4565,10 +4572,13 @@ export class Emitter {
     cond: ts.Expression,
     op: ts.SyntaxKind = ts.SyntaxKind.EqualsEqualsEqualsToken,
   ): { base: ts.Expression; tag: string } | null {
-    if (!ts.isBinaryExpression(cond) || cond.operatorToken.kind !== op) return null;
+    // Parens strip exactly as in emptyTestOf: a parenthesized guard or
+    // operand must narrow the same arm the bare spelling does.
+    const c = ts.skipParentheses(cond);
+    if (!ts.isBinaryExpression(c) || c.operatorToken.kind !== op) return null;
     const sides: Array<[ts.Expression, ts.Expression]> = [
-      [cond.left, cond.right],
-      [cond.right, cond.left],
+      [ts.skipParentheses(c.left), ts.skipParentheses(c.right)],
+      [ts.skipParentheses(c.right), ts.skipParentheses(c.left)],
     ];
     for (const [kindSide, litSide] of sides) {
       if (
@@ -9435,8 +9445,15 @@ function escapeZigString(s: string): string {
   return out;
 }
 
+/// The text key an expression narrows/substitutes under. Parenthesized
+/// spellings must not change what the machinery matches: `(q)` is the
+/// tested `q` wherever an arm or operand meets a narrowed target, and keys
+/// derived from either spelling must collide — so top-level parens strip
+/// before the text is taken.
 function normalize(expr: ts.Node): string {
-  return expr.getText().replace(/\s+/g, "");
+  let e: ts.Node = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return e.getText().replace(/\s+/g, "");
 }
 
 function unwrapOptional(t: ZType): ZType {

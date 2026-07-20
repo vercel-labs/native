@@ -5217,6 +5217,58 @@ export function update(model: Model, msg: Msg): Model {
 }
 `,
   },
+  {
+    // A parenthesized arm is still the tested target: `(q)` must value the
+    // inferred local as the non-optional Quote exactly like the bare `q`
+    // spelling — parens defeating the match typed the local `?Quote` and
+    // its field reads failed to compile.
+    name: "INFERRED local from a spread-arm ternary whose narrowed arm is parenthesized",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q === null ? { ...fallback, price: 0 } : (q);
+  return picked.price + picked.id;
+}
+`,
+  },
+  {
+    // The statement-free flavor routes through the orelse fusion instead of
+    // the temp lowering; the parenthesized arm must fuse the same way.
+    name: "orelse fusion still fires when the narrowed ternary arm is parenthesized",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q === null ? fallback : (q);
+  return picked.price + picked.id;
+}
+`,
+  },
+  {
+    // Doubly parenthesized: paren stripping must recurse, not peel one layer.
+    name: "a doubly-parenthesized narrowed ternary arm still matches the tested target",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q === null ? { ...fallback, price: 0 } : ((q));
+  return picked.price + picked.id;
+}
+`,
+  },
+  {
+    // The tested side of the condition can carry the parens too.
+    name: "a parenthesized tested target still narrows its ternary arm",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = (q) === null ? { ...fallback, price: 0 } : q;
+  return picked.price + picked.id;
+}
+`,
+  },
 ];
 
 // Flow-exit guard narrowing: tsc narrows after ANY statement that never
