@@ -5308,6 +5308,95 @@ export function f(q: P | null): number {
 }
 `,
   },
+  {
+    // Emission erases non-null assertions exactly like parens, so the
+    // arm-identity comparison must see through them: `q!` IS the tested
+    // `q`, the ternary values non-optional, and the spread arm's temp
+    // types the struct — not `?Quote` with a field read Zig rejects.
+    name: "a non-null-asserted narrowed ternary arm still matches the tested target",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q !== null ? q! : { ...fallback, price: 0 };
+  return picked.price + picked.qty;
+}
+`,
+  },
+  {
+    // The `as` spelling of the same wrapper erasure.
+    name: "an as-cast narrowed ternary arm still matches the tested target",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q !== null ? (q as Quote) : { ...fallback, price: 0 };
+  return picked.price + picked.qty;
+}
+`,
+  },
+  {
+    // The `satisfies` spelling too — all three wrappers canonicalize in
+    // the narrowing key itself, so every consumer agrees at once.
+    name: "a satisfies-wrapped narrowed ternary arm still matches the tested target",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q !== null ? (q satisfies Quote) : { ...fallback, price: 0 };
+  return picked.price + picked.qty;
+}
+`,
+  },
+  {
+    // A wrapper on the TESTED side narrows too: tsc sees through `q!` when
+    // narrowing `q`, so the capture form must fire exactly as for the bare
+    // spelling (the erased assertion emits the same `q != null` test).
+    name: "a non-null-asserted tested target still narrows its ternary arm",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function pick(q: Quote | null, fallback: Quote): number {
+  const picked = q! !== null ? q! : { ...fallback, price: 0 };
+  return picked.price + picked.qty;
+}
+`,
+  },
+  {
+    // The orelse fold recognizes the wrapped arm as the tested value:
+    // `q === null ? A : q!` is `q orelse A`, never a lowered temp.
+    name: "a non-null-asserted miss-test arm still folds to orelse",
+    src: `
+export function fold(q: number | null): number {
+  return q === null ? -1 : q!;
+}
+`,
+  },
+  {
+    // The statement-level orelse fusion sees through the wrapper on the
+    // guard's tested side too, and matches by declaration identity (tsc
+    // itself narrows through `!` — it is a reference candidate — so the
+    // follow-up read is tsc-clean).
+    name: "a non-null-asserted early-exit guard still fuses to orelse",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function first(qs: readonly Quote[]): number {
+  const q = qs.find((x) => x.qty > 0);
+  if (q! === undefined) return -1;
+  return q.price;
+}
+`,
+  },
+  {
+    // tsc does NOT narrow through `as` in tested position, so the
+    // follow-up read carries its own assertion — and the canonicalized
+    // key routes it onto the fusion's capture all the same.
+    name: "an as-wrapped guard with an asserted follow-up read still fuses to orelse",
+    src: `
+export interface Quote { readonly price: number; readonly qty: number; }
+export function first(qs: readonly Quote[]): number {
+  const q = qs.find((x) => x.qty > 0);
+  if ((q as Quote | undefined) === undefined) return -1;
+  return q!.price;
+}
+`,
+  },
 ];
 
 // Plain lexical blocks are NOT merge boundaries: tsc's narrowing is

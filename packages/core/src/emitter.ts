@@ -3003,12 +3003,24 @@ export class Emitter {
   /// leaves its entries live for the OUTER q after the block, and an
   /// outer capture rewrites a callback parameter's reads. Symbol identity
   /// makes the collision impossible; the maps' values and mechanics are
-  /// unchanged. Parenthesized spellings still collide by design (`(q)` is
-  /// the tested `q`). A base the checker cannot resolve keys by plain
-  /// text — same behavior as before, and such bases are never locals.
+  /// unchanged. Wrapper spellings collide by design: parentheses,
+  /// non-null assertions, `as`, and `satisfies` all erase at emission
+  /// (`(q)`, `q!`, and `q as Quote` are the tested `q`), so every
+  /// consumer comparing or looking up keys sees through them — an arm
+  /// spelled `q!` matches its guard's `q`, and a narrow installed for `q`
+  /// rewrites the `q!` read. A base the checker cannot resolve keys by
+  /// plain text — same behavior as before, and such bases are never
+  /// locals.
   private narrowKey(expr: ts.Node): string {
     let e: ts.Node = expr;
-    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    ) {
+      e = e.expression;
+    }
     if (ts.isPropertyAccessExpression(e)) {
       return `${this.narrowKey(e.expression)}${e.questionDotToken ? "?." : "."}${e.name.text}`;
     }
@@ -3389,7 +3401,10 @@ export class Emitter {
           !next.elseStatement &&
           test !== null &&
           ts.isIdentifier(test.target) &&
-          test.target.text === decl.name.text &&
+          // Declaration identity, not name text: the guard must test THIS
+          // declaration for the fusion's const to stand in for it (a
+          // same-named outer local tested here narrows the wrong slot).
+          this.tast.declarationOf(test.target) === decl &&
           this.alwaysExits(next.thenStatement) &&
           // A reassigned `let` cannot fuse: the fusion emits `const` typed by
           // the non-optional payload, so a later `p = ...` (or a legal
@@ -3417,14 +3432,16 @@ export class Emitter {
     cond: ts.Expression,
     op: ts.SyntaxKind = ts.SyntaxKind.EqualsEqualsEqualsToken,
   ): { target: ts.Expression; flavor: "null" | "undefined" } | null {
-    // Parenthesized spellings must not change what the test matches: the
-    // condition, either operand, and the returned target all strip parens
-    // (`(q) === null` tests `q`, so downstream shape checks and key
-    // derivations see the identifier itself).
-    const c = ts.skipParentheses(cond);
+    // Wrapper spellings must not change what the test matches: the
+    // condition, either operand, and the returned target all strip
+    // parentheses, non-null assertions, `as`, and `satisfies` — emission
+    // erases every one of them, and tsc's own narrowing sees through them
+    // too (`(q) === null` and `q! !== null` both test `q`), so downstream
+    // shape checks and key derivations see the identifier itself.
+    const c = unwrapExpr(cond);
     if (!ts.isBinaryExpression(c) || c.operatorToken.kind !== op) return null;
-    const left = ts.skipParentheses(c.left);
-    const right = ts.skipParentheses(c.right);
+    const left = unwrapExpr(c.left);
+    const right = unwrapExpr(c.right);
     const sides: Array<[ts.Expression, ts.Expression]> = [
       [left, right],
       [right, left],
@@ -5009,13 +5026,14 @@ export class Emitter {
     cond: ts.Expression,
     op: ts.SyntaxKind = ts.SyntaxKind.EqualsEqualsEqualsToken,
   ): { base: ts.Expression; tag: string } | null {
-    // Parens strip exactly as in emptyTestOf: a parenthesized guard or
-    // operand must narrow the same arm the bare spelling does.
-    const c = ts.skipParentheses(cond);
+    // Wrappers strip exactly as in emptyTestOf: a parenthesized, asserted,
+    // or `as`/`satisfies`-cast guard or operand must narrow the same arm
+    // the bare spelling does (emission erases every one of them).
+    const c = unwrapExpr(cond);
     if (!ts.isBinaryExpression(c) || c.operatorToken.kind !== op) return null;
     const sides: Array<[ts.Expression, ts.Expression]> = [
-      [ts.skipParentheses(c.left), ts.skipParentheses(c.right)],
-      [ts.skipParentheses(c.right), ts.skipParentheses(c.left)],
+      [unwrapExpr(c.left), unwrapExpr(c.right)],
+      [unwrapExpr(c.right), unwrapExpr(c.left)],
     ];
     for (const [kindSide, litSide] of sides) {
       if (
@@ -7569,8 +7587,9 @@ export class Emitter {
       missTest &&
       (ts.isPropertyAccessExpression(missTest.target) || ts.isIdentifier(missTest.target)) &&
       // An unread capture would be a Zig unused-capture error; unread
-      // guards keep the plain comparison.
-      expr.whenFalse.getText().includes(missTest.target.getText())
+      // guards keep the plain comparison. Declaration identity for
+      // identifier targets: a wrapped read (`q!`) is still a read of q.
+      this.anyReadsTarget([expr.whenFalse], missTest.target)
     ) {
       const t = this.zTypeOfExpr(missTest.target, ctx);
       if (t.k === "optional") {
@@ -7584,8 +7603,9 @@ export class Emitter {
       hitTest &&
       (ts.isPropertyAccessExpression(hitTest.target) || ts.isIdentifier(hitTest.target)) &&
       // An unread capture would be a Zig unused-capture error; unread guards
-      // keep the plain comparison.
-      expr.whenTrue.getText().includes(hitTest.target.getText())
+      // keep the plain comparison. Declaration identity for identifier
+      // targets: a wrapped read (`q!`) is still a read of q.
+      this.anyReadsTarget([expr.whenTrue], hitTest.target)
     ) {
       const t = this.zTypeOfExpr(hitTest.target, ctx);
       if (t.k === "optional") {

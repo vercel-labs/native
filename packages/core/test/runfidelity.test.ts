@@ -5189,6 +5189,70 @@ export function pickHit(q: Quote | null, fallback: Quote): Quote {
 `,
   },
   {
+    // The wrapper spellings of the spread-arm ternary: emission erases
+    // `q!` and `as`, so the arm-identity match must see through them —
+    // the hit rows hand the quote back untouched, the miss rows build the
+    // fallback copy, byte-identically to node (a mis-typed `?Quote` temp
+    // would not even compile).
+    name: "wrapped spread-arm ternaries (non-null assertion, as-cast) match node",
+    src: `
+export type QuoteState = "idle" | "ok" | "failed";
+export interface Quote { readonly id: number; readonly state: QuoteState; readonly price: number; }
+export function pickBang(q: Quote | null, fallback: Quote): Quote {
+  const picked = q !== null ? q! : { ...fallback, price: 0 };
+  return picked;
+}
+export function pickAs(q: Quote | null, fallback: Quote): Quote {
+  const picked = q !== null ? (q as Quote) : { ...fallback, price: 0 };
+  return picked;
+}
+`,
+    node: `
+{
+  const base = { id: 7, state: "ok", price: 12 };
+  const fallback = { id: 9, state: "failed", price: 3 };
+  const a = mod.pickBang(base, fallback);
+  line("p0", a.id);
+  line("p1", a.state);
+  line("p2", a.price);
+  const b = mod.pickBang(null, fallback);
+  line("p3", b.id);
+  line("p4", b.state);
+  line("p5", b.price);
+  const c = mod.pickAs(base, fallback);
+  line("p6", c.id);
+  line("p7", c.state);
+  line("p8", c.price);
+  const d = mod.pickAs(null, fallback);
+  line("p9", d.id);
+  line("p10", d.state);
+  line("p11", d.price);
+}
+`,
+    zig: `
+    {
+        const base = m.Quote{ .id = 7, .state = .ok, .price = 12 };
+        const fallback = m.Quote{ .id = 9, .state = .failed, .price = 3 };
+        const a = m.pickBang(base, fallback);
+        row("p0", a.id);
+        row("p1", a.state);
+        row("p2", a.price);
+        const b = m.pickBang(null, fallback);
+        row("p3", b.id);
+        row("p4", b.state);
+        row("p5", b.price);
+        const c = m.pickAs(base, fallback);
+        row("p6", c.id);
+        row("p7", c.state);
+        row("p8", c.price);
+        const d = m.pickAs(null, fallback);
+        row("p9", d.id);
+        row("p10", d.state);
+        row("p11", d.price);
+    }
+`,
+  },
+  {
     name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
     src: `
 export interface NumResult { readonly value: number; readonly next: number; }
