@@ -5253,6 +5253,45 @@ export function pickAs(q: Quote | null, fallback: Quote): Quote {
 `,
   },
   {
+    // The `undefined` arm spelling of the guarded ternary local: the arm
+    // is an EMPTY (never a void value), so the local stays optional and
+    // the `=== undefined` guard unwraps — both polarities, both branches,
+    // byte-identical to node (a non-optional mis-typing would not even
+    // compile).
+    name: "undefined-arm ternary locals guard and unwrap byte-identically to node",
+    src: `
+export interface P { readonly v: number; }
+export function pickMiss(q: P | null): number {
+  const picked = q === null ? undefined : q;
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+export function pickHit(q: P | null): number {
+  const picked = q !== null ? q : undefined;
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+`,
+    node: `
+{
+  const base = { v: 7 };
+  line("p0", mod.pickMiss(base));
+  line("p1", mod.pickMiss(null));
+  line("p2", mod.pickHit(base));
+  line("p3", mod.pickHit(null));
+}
+`,
+    zig: `
+    {
+        const base = m.P{ .v = 7 };
+        row("p0", m.pickMiss(base));
+        row("p1", m.pickMiss(null));
+        row("p2", m.pickHit(base));
+        row("p3", m.pickHit(null));
+    }
+`,
+  },
+  {
     name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
     src: `
 export interface NumResult { readonly value: number; readonly next: number; }

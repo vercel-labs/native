@@ -5397,6 +5397,60 @@ export function first(qs: readonly Quote[]): number {
 }
 `,
   },
+  {
+    // The global `undefined` in arm position is an EMPTY exactly like the
+    // null keyword — its internal type is void, so a ZType-based arm check
+    // reads it as a non-empty value, types the local non-optional, skips
+    // the later guard's unwrap, and the field read hits the raw optional.
+    name: "an undefined alternate arm still values the ternary optional",
+    src: `
+export interface P { readonly v: number; }
+export function pick(q: P | null): number {
+  const picked = q === null ? undefined : q;
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+`,
+  },
+  {
+    name: "an undefined arm on the OTHER side values the ternary optional too",
+    src: `
+export interface P { readonly v: number; }
+export function pick(q: P | null): number {
+  const picked = q !== null ? q : undefined;
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+`,
+  },
+  {
+    // Wrapper canonicalization composes with the undefined-empty decision:
+    // an `as`-wrapped undefined arm paired with an `as`-wrapped tested
+    // value keeps the optional and fuses the guard exactly like the bare
+    // spelling.
+    name: "as-wrapped undefined and value arms still value the ternary optional",
+    src: `
+export interface P { readonly v: number; }
+export function pick(q: P | null): number {
+  const picked = q === null ? (undefined as P | undefined) : (q as P);
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+`,
+  },
+  {
+    // The doubly-parenthesized undefined spelling, symmetric with the
+    // `((null))` case above: the empty check recurses through every layer.
+    name: "a doubly-parenthesized undefined arm still values the ternary optional",
+    src: `
+export interface P { readonly v: number; }
+export function pick(q: P | null): number {
+  const picked = q === null ? ((undefined)) : q;
+  if (picked === undefined) return 0;
+  return picked.v;
+}
+`,
+  },
 ];
 
 // Plain lexical blocks are NOT merge boundaries: tsc's narrowing is

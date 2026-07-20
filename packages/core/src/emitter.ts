@@ -3465,6 +3465,17 @@ export class Emitter {
     return null;
   }
 
+  /// A literal JS empty in VALUE position, through the value-preserving
+  /// wrappers emission erases (parens, `as`, `satisfies`, non-null
+  /// assertions): the `null` keyword or the global `undefined` identifier.
+  /// Every ternary-arm and nullish EMPTINESS decision must use this, never
+  /// a ZType check — `undefined`'s internal type is void, so a type check
+  /// reads an `undefined` arm as a non-empty value and drops the
+  /// optionality it carries, skipping the later guard's unwrap.
+  private isEmptyLiteral(e: ts.Expression): boolean {
+    return this.emptyFlavorOf(unwrapExpr(e)) !== null;
+  }
+
   /// R7c: JS keeps null and undefined distinct; the native optional folds
   /// both into one empty. An empty test therefore only maps when the
   /// target's own type carries exactly the tested empty — testing the wrong
@@ -7350,8 +7361,9 @@ export class Emitter {
       // `x ?? null` folds JS undefined and null into one empty value — which
       // is exactly what the native optional already is, so the left side IS
       // the result (this is also how a `?.` chain value normalizes). The
-      // wrapped spellings (`x ?? (null)`) fold identically.
-      if (isNullLiteral(expr.right)) {
+      // wrapped spellings (`x ?? (null)`) and the `x ?? undefined` flavor
+      // fold identically.
+      if (this.isEmptyLiteral(expr.right)) {
         return this.emitExpr(expr.left, ctx, expected);
       }
       // Both sides see the expected type: either may need an enum re-tag.
@@ -9439,14 +9451,16 @@ export class Emitter {
       return ctx.thisType ?? { k: "void" };
     }
     if (ts.isConditionalExpression(expr)) {
-      // A null branch makes the ternary's VALUE optional (`hit === undefined
-      // ? null : hit.at` is `?i64`, not `i64`) — dropping it here would type
-      // locals non-optional and break every later null test on them.
-      const trueNull = isNullLiteral(expr.whenTrue);
-      const falseNull = isNullLiteral(expr.whenFalse);
-      if (trueNull && falseNull) return { k: "void" };
-      if (trueNull || falseNull) {
-        const t = this.zTypeOfExpr(trueNull ? expr.whenFalse : expr.whenTrue, ctx);
+      // An empty branch — `null` or the global `undefined` — makes the
+      // ternary's VALUE optional (`hit === undefined ? null : hit.at` is
+      // `?i64`, not `i64`; `q === null ? undefined : q` stays `?P`) —
+      // dropping it here would type locals non-optional and break every
+      // later null test on them.
+      const trueEmpty = this.isEmptyLiteral(expr.whenTrue);
+      const falseEmpty = this.isEmptyLiteral(expr.whenFalse);
+      if (trueEmpty && falseEmpty) return { k: "void" };
+      if (trueEmpty || falseEmpty) {
+        const t = this.zTypeOfExpr(trueEmpty ? expr.whenFalse : expr.whenTrue, ctx);
         return t.k === "optional" || t.k === "void" ? t : { k: "optional", inner: t };
       }
       // The condition's own null test narrows the arm that reuses the
@@ -9456,7 +9470,8 @@ export class Emitter {
       // local `?Quote` and its first non-optional use fails to compile.
       // The unwrap only holds when the OTHER arm cannot contribute null:
       // a known-optional other arm keeps the optional (its null flows
-      // through), and the null-literal arms were handled above.
+      // through), and the empty-literal arms (`null`/`undefined`, wrapped
+      // or bare, in either position) were handled above.
       const missTest = this.emptyTestOf(expr.condition);
       const hitTest = this.emptyTestOf(expr.condition, ts.SyntaxKind.ExclamationEqualsEqualsToken);
       const narrowedByCond = (arm: ts.Expression, t: ZType, other: ts.Expression): ZType => {
@@ -9953,26 +9968,6 @@ function isPlainLexicalBlock(b: ts.Block): boolean {
     ts.isCaseClause(b.parent) ||
     ts.isDefaultClause(b.parent)
   );
-}
-
-/// The null LITERAL an expression spells, seen through value-preserving
-/// wrappers: parenthesized and assertion spellings (`(null)`, `((null))`,
-/// `null as P | null`, a non-null-asserted paren) all carry the same runtime
-/// null the bare keyword does, so every null-literal DECISION must look
-/// through them. A wrapped null read as a non-null arm types the ternary
-/// non-optional, and the later guard's unwrap — which the narrowed reads
-/// rely on — is skipped.
-function isNullLiteral(e: ts.Expression): boolean {
-  let n: ts.Expression = e;
-  while (
-    ts.isParenthesizedExpression(n) ||
-    ts.isAsExpression(n) ||
-    ts.isSatisfiesExpression(n) ||
-    ts.isNonNullExpression(n)
-  ) {
-    n = n.expression;
-  }
-  return n.kind === ts.SyntaxKind.NullKeyword;
 }
 
 function unwrapOptional(t: ZType): ZType {
