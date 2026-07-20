@@ -7692,6 +7692,220 @@ export function g(q: P | null): number {
   },
 ];
 
+// Terminality must read constructs the way tsc's CFA does, not clause by
+// clause or wrapper by wrapper: stacked case labels share the next
+// statement-bearing clause's body (JS falls through empty clauses; the
+// switch emitters coalesce the labels into one arm), and a label adds
+// exactly one edge — `break label` resumes right after the labeled
+// statement. Judging a stacked clause empty-handed or a labeled statement
+// as never-terminal merges kills from branches that cannot reach the
+// merge, stripping the surviving flow of a narrowing tsc keeps there —
+// and the read emits raw optional arithmetic Zig rejects.
+const terminalityGroupingCases: Case[] = [
+  {
+    // Stacked labels on a kind switch: every group exits, so the killing
+    // branch never reaches the merge and the surviving read keeps its
+    // unwrap. Judged clause by clause, the empty "inc" clause reads as
+    // non-exiting and the merged kill emits `p + 1` on a raw `?f64`.
+    name: "stacked case labels whose shared bodies all exit keep the branch terminal (kind switch)",
+    src: `
+export type Msg =
+  | { readonly kind: "inc" }
+  | { readonly kind: "dec" }
+  | { readonly kind: "reset" };
+export function f(q: number | null, flag: boolean, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (msg.kind) {
+      case "inc":
+      case "dec":
+        return 10;
+      case "reset":
+        return 20;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // The defaulted value-switch spelling of the same shape (the else
+    // prong is the group tail for the trailing labels' semantics).
+    name: "stacked case labels whose shared bodies all exit keep the branch terminal (defaulted value switch)",
+    src: `
+export type Mode = "a" | "b" | "c" | "d";
+export function f(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+      default:
+        return 20;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // Non-regression: a group whose shared body does NOT exit falls out of
+    // the switch, so the kill still merges and the post-branch re-check
+    // reads the live slot.
+    name: "a stacked group that falls out of the switch still merges its kill",
+    src: `
+export type Msg =
+  | { readonly kind: "inc" }
+  | { readonly kind: "dec" }
+  | { readonly kind: "reset" };
+export function f(q: number | null, flag: boolean, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (msg.kind) {
+      case "inc":
+      case "dec":
+        return 10;
+      case "reset":
+        p = q;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+  {
+    // A trailing run of empty clauses has no body at all: control falls
+    // out of the switch (JS no-op labels), the branch is nonterminal, and
+    // the kill merges into the re-check.
+    name: "trailing empty clauses make the switch nonterminal and merge the kill",
+    src: `
+export type Msg =
+  | { readonly kind: "inc" }
+  | { readonly kind: "dec" }
+  | { readonly kind: "reset" };
+export function f(q: number | null, flag: boolean, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (msg.kind) {
+      case "inc":
+        return 10;
+      case "dec":
+      case "reset":
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+  {
+    // An empty clause before `default` shares the default's body in JS,
+    // but the emitters have no clean arm mapping for that shape and stop
+    // with the fall-into-default teaching.
+    name: "an empty case falling into default gates at emission",
+    gate: "NS9001",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(mode: Mode): number {
+  switch (mode) {
+    case "a":
+      return 1;
+    case "b":
+    default:
+      return 2;
+  }
+}
+`,
+  },
+  {
+    // A label is not a break: the constant-true loop under it still never
+    // completes, so the killing branch leaves the function and the
+    // surviving read keeps its unwrap. Judged as a bare LabeledStatement,
+    // the branch reads nonterminal and the merged kill emits `p + 1` on a
+    // raw `?f64`.
+    name: "a labeled constant-true loop with no break to the label stays terminal",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    spin: while (true) {}
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // Non-regression: a break naming the label makes the loop's end
+    // reachable — the killing branch DOES reach the merge, so the
+    // post-branch re-check must read the live slot.
+    name: "a break to the label carries the kill past the labeled loop",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    spin: while (true) {
+      if (flag) { break spin; }
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+  {
+    // A labeled block whose statement list exits, with no break to the
+    // label, is as terminal as the bare block.
+    name: "a labeled terminal block with no break to the label stays terminal",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    blk: {
+      return 5;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // ... and one break to the label re-opens the block's end: the kill
+    // merges and the re-check reads the live slot.
+    name: "a break to the label re-opens a labeled block's end and merges the kill",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    blk: {
+      if (flag) { break blk; }
+      return 5;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8242,6 +8456,7 @@ const corpus: Case[] = [
   ...catchRouteKillCases,
   ...callbackTrailingNarrowCases,
   ...doWhileTrailingTestCases,
+  ...terminalityGroupingCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

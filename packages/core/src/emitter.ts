@@ -3658,12 +3658,36 @@ export class Emitter {
         ts.isPropertyAccessExpression(stmt.expression) && stmt.expression.name.text === "kind";
       const hasDefault = stmt.caseBlock.clauses.some((c) => ts.isDefaultClause(c));
       if (!kindSwitch && !hasDefault) return false;
-      return stmt.caseBlock.clauses.every((c) => {
+      // Stacked case labels (`case "a": case "b": body`) share one body:
+      // JS falls through an empty clause onto the next clause's statements
+      // (the switch emitters coalesce the labels into one arm the same
+      // way), so an empty clause's terminality is its group's tail's — the
+      // next statement-bearing clause at or after it. A trailing run of
+      // empty clauses has no body at all: control falls out of the switch,
+      // so the switch completes normally.
+      const clauses = stmt.caseBlock.clauses;
+      return clauses.every((c, i) => {
         let stmts: readonly ts.Statement[] = c.statements;
+        for (let j = i + 1; stmts.length === 0 && j < clauses.length; j++) {
+          stmts = clauses[j].statements;
+        }
         if (stmts.length === 1 && ts.isBlock(stmts[0])) stmts = (stmts[0] as ts.Block).statements;
         const last = stmts[stmts.length - 1];
         return last !== undefined && this.alwaysExits(last);
       });
+    }
+    if (ts.isLabeledStatement(stmt)) {
+      // A label adds exactly one edge: `break label` resumes right AFTER
+      // the labeled statement, making its end reachable. So the statement
+      // is terminal iff the wrapped statement is terminal AND nothing
+      // inside breaks to the label. The check is additive: a wrapped
+      // loop's unlabeled breaks are already the loop's own concern
+      // (bindsBreak, which also sees wrapping labels), and a labeled
+      // BLOCK's inner terminality comes from the block rule above.
+      return (
+        this.alwaysExits(stmt.statement) &&
+        !this.breaksToLabel(stmt.statement, stmt.label.text)
+      );
     }
     return false;
   }
@@ -4483,6 +4507,26 @@ export class Emitter {
       // can bind this loop.
       visit(stmt.statement, false);
     }
+    return found;
+  }
+
+  /// Whether any `break` naming `label` sits inside `node`. Function
+  /// boundaries stop the walk: a labeled break cannot cross one (tsc
+  /// rejects it), and a nested function may legally reuse the label name
+  /// for a labeled statement of its own. tsc rejects duplicate labels on
+  /// the same nesting path, so no inner rebinding can shadow `label`.
+  private breaksToLabel(node: ts.Node, label: string): boolean {
+    let found = false;
+    const visit = (n: ts.Node): void => {
+      if (found) return;
+      if (ts.isBreakStatement(n)) {
+        if (n.label !== undefined && n.label.text === label) found = true;
+        return;
+      }
+      if (ts.isFunctionLike(n)) return;
+      ts.forEachChild(n, visit);
+    };
+    visit(node);
     return found;
   }
 

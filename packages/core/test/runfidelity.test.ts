@@ -1956,6 +1956,140 @@ export function killClause(a: number | null, sel: Sel): number {
     ],
   },
   {
+    // Terminality grouping through live paths: stacked case labels share
+    // one exiting body (the killing branch never reaches the merge, so the
+    // surviving read keeps its narrow), a group that falls out of the
+    // switch still merges its kill, and a labeled loop's break-to-label /
+    // a labeled block's break-to-label carry the kill to the re-check
+    // exactly like node. Every function's every route runs on both sides.
+    name: "stacked-clause and labeled-statement terminality routes kills like node",
+    src: `
+export type Mode = "a" | "b" | "c" | "d";
+export type Msg =
+  | { readonly kind: "inc" }
+  | { readonly kind: "dec" }
+  | { readonly kind: "reset" };
+export function pickMsg(n: number): Msg {
+  if (n === 0) { return { kind: "inc" }; }
+  if (n === 1) { return { kind: "dec" }; }
+  return { kind: "reset" };
+}
+export function stackedExit(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+      default:
+        return 20;
+    }
+  }
+  return p + 1;
+}
+export function stackedKindExit(q: number | null, flag: boolean, n: number): number {
+  const msg: Msg = pickMsg(n);
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (msg.kind) {
+      case "inc":
+      case "dec":
+        return 10;
+      case "reset":
+        return 20;
+    }
+  }
+  return p + 1;
+}
+export function stackedFallout(q: number | null, flag: boolean, n: number): number {
+  const msg: Msg = pickMsg(n);
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (msg.kind) {
+      case "inc":
+      case "dec":
+        return 10;
+      case "reset":
+        p = q;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+export function labeledBreakKill(q: number | null, n: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (n > 0) {
+    p = null;
+    let k = 0;
+    spin: while (true) {
+      k += 1;
+      if (k >= n) { break spin; }
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+export function labeledBlockTerminal(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    blk: {
+      return 5;
+    }
+  }
+  return p + 1;
+}
+export function labeledBlockBreak(q: number | null, flag: boolean, cut: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    blk: {
+      if (cut) { break blk; }
+      return 5;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+    calls: [
+      { fn: "stackedExit", args: [{ t: "null" }, { t: "b", v: false }, { t: "tag", v: "a" }] },
+      { fn: "stackedExit", args: [i(5), { t: "b", v: true }, { t: "tag", v: "a" }] },
+      { fn: "stackedExit", args: [i(5), { t: "b", v: true }, { t: "tag", v: "b" }] },
+      { fn: "stackedExit", args: [i(5), { t: "b", v: true }, { t: "tag", v: "c" }] },
+      { fn: "stackedExit", args: [i(5), { t: "b", v: false }, { t: "tag", v: "d" }] },
+      { fn: "stackedKindExit", args: [{ t: "null" }, { t: "b", v: false }, i(0)] },
+      { fn: "stackedKindExit", args: [i(5), { t: "b", v: true }, i(0)] },
+      { fn: "stackedKindExit", args: [i(5), { t: "b", v: true }, i(1)] },
+      { fn: "stackedKindExit", args: [i(5), { t: "b", v: true }, i(2)] },
+      { fn: "stackedKindExit", args: [i(5), { t: "b", v: false }, i(2)] },
+      { fn: "stackedFallout", args: [{ t: "null" }, { t: "b", v: true }, i(2)] },
+      { fn: "stackedFallout", args: [i(5), { t: "b", v: true }, i(0)] },
+      { fn: "stackedFallout", args: [i(5), { t: "b", v: true }, i(1)] },
+      { fn: "stackedFallout", args: [i(5), { t: "b", v: true }, i(2)] },
+      { fn: "stackedFallout", args: [i(5), { t: "b", v: false }, i(2)] },
+      { fn: "labeledBreakKill", args: [{ t: "null" }, i(1)] },
+      { fn: "labeledBreakKill", args: [i(5), i(0)] },
+      { fn: "labeledBreakKill", args: [i(5), i(3)] },
+      { fn: "labeledBlockTerminal", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "labeledBlockTerminal", args: [i(5), { t: "b", v: true }] },
+      { fn: "labeledBlockTerminal", args: [i(5), { t: "b", v: false }] },
+      { fn: "labeledBlockBreak", args: [{ t: "null" }, { t: "b", v: false }, { t: "b", v: false }] },
+      { fn: "labeledBlockBreak", args: [i(5), { t: "b", v: true }, { t: "b", v: true }] },
+      { fn: "labeledBlockBreak", args: [i(5), { t: "b", v: true }, { t: "b", v: false }] },
+      { fn: "labeledBlockBreak", args: [i(5), { t: "b", v: false }, { t: "b", v: true }] },
+    ],
+  },
+  {
     // The post-construct narrow subtracts the arms' kills: a surviving
     // arm's `p = null` means the re-check after the statement reads the
     // live (possibly-null) slot on every path, exactly like node.
