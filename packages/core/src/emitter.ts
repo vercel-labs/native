@@ -3700,21 +3700,23 @@ export class Emitter {
   }
 
   /// Whether a defaultless VALUE switch's case labels cover every member of
-  /// the scrutinee's literal-union type — tsc's own exhaustiveness judgment,
-  /// the one its CFA uses to keep a narrowing past a branch that ends in
-  /// such a switch. Enumerable scrutinees are string/number/boolean literal
-  /// unions ONLY: any wider type, any non-literal member, or any case label
-  /// that is not a literal after wrapper-stripping answers false — the
-  /// conservative side (a false merely merges a kill tsc kept; a wrong true
-  /// would resurrect a dead route). The type consult reads the checker's
-  /// flow type at the scrutinee, exactly what tsc's exhaustiveness check
-  /// sees; alwaysExits stays syntax-only on every other construct, and every
+  /// the scrutinee's literal-union type. Enumerable scrutinees are
+  /// string/number/boolean literal unions ONLY: any wider type, any
+  /// non-literal member, or any case label that is not a literal after
+  /// wrapper-stripping answers false — the conservative side (a false merely
+  /// merges a kill tsc kept and completes the lowered fallthrough; a wrong
+  /// true emits an `else => unreachable` real execution can REACH). The type
+  /// consulted is scrutineeCoverageType's SOUND type, never the checker's
+  /// raw flow type: tsc keeps a local's narrowing across callback bodies
+  /// that assign it, so its flow-exhaustiveness can be false at runtime.
+  /// alwaysExits stays syntax-only on every other construct, and every
   /// caller is an emission path where `this.tast` is live, so the capability
   /// is unconditional. The lowering side of the same claim lives in
   /// emitValueSwitch: a covered-by-type defaultless switch whose arms all
   /// exit closes its never-reached fallthrough with `else => unreachable`
   /// (numeric) or emits no else at all (string enums, already
-  /// Zig-exhaustive), so the terminality claim and the emitted shape agree.
+  /// Zig-exhaustive), so the terminality claim and the emitted shape agree —
+  /// both consumers read this one memoized judgment and demote together.
   private valueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {
     const memo = this.switchCoversTypeMemo.get(stmt);
     if (memo !== undefined) return memo;
@@ -3723,8 +3725,119 @@ export class Emitter {
     return answer;
   }
 
+  /// The type a defaultless switch's exhaustiveness may be judged against —
+  /// null when no sound basis exists (the caller then answers false). tsc's
+  /// flow type at the scrutinee is NOT such a basis on its own: tsc never
+  /// widens a local's narrowing for assignments inside callbacks (it types
+  /// `let k: "a" | "b" = "a"; xs.map(() => { k = "b"; }); switch (k)` with
+  /// k still "a"), so a flow-exhaustive switch can be skipped by real
+  /// execution. Sound bases, in order:
+  ///   - an identifier local/param never assigned inside any nested
+  ///     function of the switch's own enclosing function keeps the flow
+  ///     type: locals cannot alias, so a scan over nested-function scopes
+  ///     for assignments is exact, and without a capture-site assignment
+  ///     the straight-line CFA is;
+  ///   - any other narrowable reference (identifier, property read) is
+  ///     judged by its DECLARED type — a symbol can hold any member of its
+  ///     declared union at runtime whatever the flow claims;
+  ///   - a non-reference scrutinee (call result, arithmetic, literal) has
+  ///     no flow claims to distrust: its own resolved type stands.
+  private scrutineeCoverageType(expr: ts.Expression): ts.Type | null {
+    const e = unwrapExpr(expr);
+    if (ts.isIdentifier(e)) {
+      if (this.scrutineeFlowTrustable(e)) return this.tast.typeOf(e);
+      return this.declaredTypeOfReference(e);
+    }
+    if (ts.isPropertyAccessExpression(e)) return this.declaredTypeOfReference(e.name);
+    if (ts.isElementAccessExpression(e)) return null;
+    return this.tast.typeOf(e);
+  }
+
+  /// The declared (declaration-site) type of a reference: the annotation
+  /// when the declaration carries one, else the checker's type AT the
+  /// declaration name — the symbol's initial type, which no flow narrowing
+  /// has touched. Null when the declaration shape is not one whose declared
+  /// type is recoverable; callers treat null as "cannot judge".
+  private declaredTypeOfReference(name: ts.Node): ts.Type | null {
+    const decl = this.tast.declarationOf(name);
+    if (!decl) return null;
+    if (
+      (ts.isVariableDeclaration(decl) ||
+        ts.isParameter(decl) ||
+        ts.isPropertySignature(decl) ||
+        ts.isPropertyDeclaration(decl)) &&
+      decl.type
+    ) {
+      return this.tast.typeFromTypeNode(decl.type);
+    }
+    if (ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) {
+      return this.tast.typeOf(decl.name);
+    }
+    return null;
+  }
+
+  /// Whether the flow type of this identifier may be trusted for an
+  /// exhaustiveness claim: it names a local/param declared in the SAME
+  /// enclosing function, and no nested function/callback in that function's
+  /// body assigns it. Locals cannot alias in TypeScript, so the only escape
+  /// hatch from the straight-line CFA is a capture-site assignment — the
+  /// exact hole tsc's optimistic callback model leaves open. Declines when
+  /// the declaration lives in an outer scope (the local IS a capture there)
+  /// or when any nested function contains an assignment or ++/-- on it.
+  private scrutineeFlowTrustable(id: ts.Identifier): boolean {
+    const decl = this.tast.declarationOf(id);
+    if (!decl || (!ts.isVariableDeclaration(decl) && !ts.isParameter(decl))) return false;
+    const isFnScope = (n: ts.Node): boolean =>
+      ts.isArrowFunction(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isFunctionDeclaration(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n);
+    const enclosing = (n: ts.Node): ts.Node => {
+      let cur: ts.Node | undefined = n.parent;
+      while (cur && !isFnScope(cur)) cur = cur.parent;
+      return cur ?? n.getSourceFile();
+    };
+    const scope = enclosing(id);
+    if (scope !== enclosing(decl)) return false;
+    let assignedInNested = false;
+    const visit = (n: ts.Node, nested: boolean): void => {
+      if (assignedInNested) return;
+      const enter = nested || (n !== scope && isFnScope(n));
+      if (enter) {
+        if (
+          ts.isBinaryExpression(n) &&
+          n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+        ) {
+          const target = unwrapExpr(n.left);
+          if (ts.isIdentifier(target) && this.tast.declarationOf(target) === decl) {
+            assignedInNested = true;
+            return;
+          }
+        }
+        if (
+          (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+          (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
+        ) {
+          const target = unwrapExpr(n.operand as ts.Expression);
+          if (ts.isIdentifier(target) && this.tast.declarationOf(target) === decl) {
+            assignedInNested = true;
+            return;
+          }
+        }
+      }
+      ts.forEachChild(n, (c) => visit(c, enter));
+    };
+    visit(scope, false);
+    return !assignedInNested;
+  }
+
   private computeValueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {
-    const type = this.tast.typeOf(stmt.expression);
+    const type = this.scrutineeCoverageType(stmt.expression);
+    if (type === null) return false;
     const members = type.isUnion() ? type.types : [type];
     const wanted = new Set<string>();
     for (const member of members) {
@@ -6388,10 +6501,14 @@ export class Emitter {
     if (pending.length > 0) this.push(armCtx, `${pending.join(", ")} => {},`);
     if (!sawDefault) {
       const total = t.k === "enum" ? t.members.length : t.values.length;
-      // Coverage of the declared members, or of the checker's (possibly
-      // narrower) flow type at the scrutinee: either proves the fallthrough
-      // arm never runs, and alwaysExits claims terminality off the second,
-      // so the emitted shape must close the path the claim closed.
+      // Coverage of the declared members, or of the scrutinee's sound
+      // coverage type (valueSwitchCoversScrutineeType — declared-type based,
+      // never the raw flow type): either proves the fallthrough arm never
+      // runs, and alwaysExits claims terminality off the second, so the
+      // emitted shape must close exactly the path the claim closed. When
+      // the judgment declines, the else completes (`else => {}`) and the
+      // terminality claim declines with it — a reached `unreachable` is
+      // never acceptable.
       const coveredByType = covered.size === total || this.valueSwitchCoversScrutineeType(stmt);
       if (t.k === "numAlias") {
         // The Zig scrutinee is an integer type, so an else arm is always

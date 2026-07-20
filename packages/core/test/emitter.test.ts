@@ -1616,6 +1616,66 @@ export function partial(f: Filter): number {
   assert.match(zig, /else => \{\},/);
 });
 
+test("R13d a callback-mutated scrutinee gets a completing else, never unreachable", () => {
+  // tsc keeps k's flow type at "a" across the callback (it never widens
+  // locals for nested-function assignments), but execution reaches the
+  // switch with k === "b" whenever xs is non-empty: an `else =>
+  // unreachable` armed off that flow claim is a safety panic in Debug and
+  // UB in ReleaseFast. Coverage judged by the declared union declines
+  // here, so the fallthrough must complete.
+  const zig = emit(`
+export type AB = "a" | "b";
+export function f(xs: readonly number[]): number {
+  let k: AB = "a";
+  const ys = xs.map((x) => { k = "b"; return x; });
+  switch (k) {
+    case "a":
+      return 1;
+  }
+  return 2 + ys.length;
+}
+`);
+  assert.doesNotMatch(zig, /else => unreachable/);
+  assert.match(zig, /else => \{\},/);
+});
+
+test("R13d declared-union coverage still closes the numeric else with unreachable", () => {
+  // The sound case is untouched: every declared member armed and exiting
+  // proves the integer scrutinee's required else arm never runs.
+  const zig = emit(`
+export type Level = 0 | 1 | 2;
+export function f(lvl: Level): number {
+  switch (lvl) {
+    case 0:
+      return 1;
+    case 1:
+    case 2:
+      return 2;
+  }
+}
+`);
+  assert.match(zig, /else => unreachable,/);
+});
+
+test("R13d flow-narrowed coverage still claims for a local no nested function assigns", () => {
+  // The precise middle, pinned: with no capture-site assignment the
+  // straight-line CFA is exact for an unaliased local, so the guard's
+  // exclusion holds on every real path and the flow type may judge.
+  const zig = emit(`
+export type Mode = "a" | "b" | "c";
+export function f(mode: Mode): number {
+  if (mode === "c") return 30;
+  switch (mode) {
+    case "a":
+      return 1;
+    case "b":
+      return 2;
+  }
+}
+`);
+  assert.match(zig, /else => unreachable,/);
+});
+
 test("kernel capacities: default header uses the shared default kernel", () => {
   const zig = emit(`export function f(n: number): number { return n & 1; }`);
   assert.match(zig, /pub const rt = @import\("rt\.zig"\)\.default;/);

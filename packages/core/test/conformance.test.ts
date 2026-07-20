@@ -8084,6 +8084,130 @@ export function g(lvl: Level): number {
   },
 ];
 
+// The exhaustiveness consult must never trust a flow type a callback
+// assignment can falsify: tsc keeps `k` narrowed to "a" across
+// `xs.map(() => { k = "b"; })` (it never widens locals for nested-function
+// assignments), so judging coverage by the flow type claims terminality for
+// a switch real execution skips — and the aligned lowering closes the
+// skipped fallthrough with an `else => unreachable` execution then REACHES.
+// The judgment reads the scrutinee's DECLARED union instead; a local never
+// assigned inside any nested function may still keep the flow type (the
+// straight-line CFA is exact for unaliased, uncaptured locals).
+const flowTypeSoundnessCases: Case[] = [
+  {
+    // The callback-mutation repro: declared "a" | "b", flow type "a",
+    // cases cover only "a". The coverage claim must decline — the kill
+    // merges (the re-check below stays legal) and the lowered else
+    // completes instead of trapping.
+    name: "a callback-mutated scrutinee declines flow-type coverage and merges the kill",
+    src: `
+export type AB = "a" | "b";
+export function f(q: number | null, flag: boolean, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let k: AB = "a";
+  const ys = xs.map((x) => {
+    k = "b";
+    return x;
+  });
+  if (flag) {
+    p = null;
+    switch (k) {
+      case "a":
+        return 1;
+    }
+  }
+  if (p === null) return ys.length;
+  return p + 1;
+}
+`,
+  },
+  {
+    // The precise middle, pinned: flow narrowing on a local no nested
+    // function assigns still claims coverage — the guard's exclusion holds
+    // on every real path, the branch stays terminal, and the killing
+    // branch's kill never reaches the merge (the unguarded read compiles).
+    name: "flow-narrowed coverage still claims for a local never assigned in a callback",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  if (mode === "c") return 30;
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+        return 1;
+      case "b":
+        return 2;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // A callback assignment elsewhere in the function demotes even a
+    // DECLARED-uncovered flow claim: with "c" excluded by the guard but k
+    // assignable by the callback, only the declared union may judge — it
+    // is not covered, so the kill merges and the re-check stays legal.
+    name: "a callback assignment demotes flow-narrowed coverage to the declared union",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(q: number | null, flag: boolean, mode: Mode, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let k: Mode = mode;
+  const ys = xs.map((x) => {
+    k = "c";
+    return x;
+  });
+  if (k === "c") return 30;
+  if (flag) {
+    p = null;
+    switch (k) {
+      case "a":
+        return 1;
+      case "b":
+        return 2;
+    }
+  }
+  if (p === null) return ys.length;
+  return p + 1;
+}
+`,
+  },
+  {
+    // Declared-union coverage stays sound whatever any callback does: all
+    // members armed and exiting keeps the branch terminal and the merge
+    // kill dropped (the unguarded read compiles).
+    name: "declared-union coverage keeps terminality despite a callback assignment",
+    src: `
+export type AB = "a" | "b";
+export function f(q: number | null, flag: boolean, ab: AB, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let k: AB = ab;
+  const ys = xs.map((x) => {
+    k = "b";
+    return x;
+  });
+  if (flag) {
+    p = null;
+    switch (k) {
+      case "a":
+        return 1 + ys.length;
+      case "b":
+        return 2;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8636,6 +8760,7 @@ const corpus: Case[] = [
   ...doWhileTrailingTestCases,
   ...terminalityGroupingCases,
   ...valueSwitchExhaustivenessCases,
+  ...flowTypeSoundnessCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

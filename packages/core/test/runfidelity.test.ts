@@ -74,6 +74,29 @@ const f = (v: number | "nan" | "inf" | "-inf" | "-0"): Arg => ({ t: "f", v });
 
 const runCorpus: RunCase[] = [
   {
+    name: "callback-mutated scrutinee falls out of a defaultless value switch",
+    src: `
+export type AB = "a" | "b";
+export function flowSwitch(nonEmpty: boolean): number {
+  const xs: number[] = nonEmpty ? [1, 2, 3] : [];
+  let k: AB = "a";
+  const ys = xs.map((x) => {
+    k = "b";
+    return x;
+  });
+  switch (k) {
+    case "a":
+      return 1;
+  }
+  return 2 + ys.length;
+}
+`,
+    calls: [
+      { fn: "flowSwitch", args: [{ t: "b", v: false }] },
+      { fn: "flowSwitch", args: [{ t: "b", v: true }] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }
