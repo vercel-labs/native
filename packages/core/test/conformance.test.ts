@@ -8215,6 +8215,101 @@ export function f(q: number | null, flag: boolean, ab: AB, xs: readonly number[]
 // callback defined in the try assigns the target). Counting either kills a
 // narrow tsc typed the finally's reads with and emits member access on a
 // raw optional — invalid Zig.
+const tscExcludedRouteCases: Case[] = [
+  {
+    // The repro: the killing branch always returns, so tsc keeps p
+    // narrowed at the post-loop read; the `if (false) break` sits outside
+    // its CFA. The route walks must give the excluded arm no routes, or
+    // the dead break reads as a loop-escaping edge and stages a kill at
+    // the loop exit — the post-loop read then emits on a raw optional.
+    name: "a dead break inside an always-returning branch never kills the post-loop narrow",
+    src: `
+export function f(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (false) break; return 1; }
+  }
+  return p;
+}
+`,
+  },
+  {
+    name: "a dead continue inside an always-returning branch never kills the post-loop narrow",
+    src: `
+export function f(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (false) continue; return 1; }
+  }
+  return p;
+}
+`,
+  },
+  {
+    // Non-regression: a REAL break in the same shape is a loop-escaping
+    // edge, the kill stages at the loop exit, and the post-loop read must
+    // re-guard.
+    name: "a real break in the same shape still stages the loop-exit kill",
+    src: `
+export function f(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (e > 1) break; return 1; }
+  }
+  return p === null ? -2 : p;
+}
+`,
+  },
+  {
+    // The ForStatement leg of tscExcludedArm at the branch-join layer:
+    // `for (; false;)` mirrors `while (false)` — the body's kills never
+    // reach the post-loop state.
+    name: "a for(;false;) body's kill is excluded at the join",
+    src: `
+export function f(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (let i = 0; false; i += 1) p = null;
+  return p;
+}
+`,
+  },
+  {
+    // ... and at the finally entry scan: tsc types the finally read with
+    // the narrow intact, so the emitted read must keep its substitution.
+    name: "a for(;false;) body in a try never kills the finally's narrow",
+    src: `
+export function f(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let t = 0;
+  try {
+    t = t + 1;
+    for (let i = 0; false; i += 1) p = null;
+  } finally {
+    t = t + p;
+  }
+  return t;
+}
+`,
+  },
+  {
+    // Non-regression: a real classic for's kills still count.
+    name: "a real for-loop kill still widens the post-loop read",
+    src: `
+export function f(n: number, q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (let i = 0; i < n; i += 1) p = null;
+  return p === null ? -2 : p;
+}
+`,
+  },
+];
+
 const finallyStaticExclusionCases: Case[] = [
   {
     // The repro: `if (false) p = null` is unreachable to tsc, so the
@@ -9211,6 +9306,7 @@ const corpus: Case[] = [
   ...valueSwitchExhaustivenessCases,
   ...flowTypeSoundnessCases,
   ...finallyStaticExclusionCases,
+  ...tscExcludedRouteCases,
   ...writeOnlyArmCaptureCases,
   ...staticBranchJoinCases,
   ...scrutineePositionCases,

@@ -3464,14 +3464,21 @@ export class Emitter {
         ts.isForOfStatement(n) ||
         ts.isForInStatement(n)
       ) {
-        ts.forEachChild(n, (c) => visit(c, { ...st, breakBound: true, continueBound: true }));
+        ts.forEachChild(n, (c) => {
+          if (!this.tscExcludedArm(n, c)) visit(c, { ...st, breakBound: true, continueBound: true });
+        });
         return;
       }
       if (ts.isSwitchStatement(n)) {
         ts.forEachChild(n, (c) => visit(c, { ...st, breakBound: true }));
         return;
       }
-      ts.forEachChild(n, (c) => visit(c, st));
+      // tsc-excluded arms carry no escaping edges: an edge the CFA cannot
+      // take must not stage kills at its would-be destination
+      // (tscExcludedArm — mirrors allRoutesLeaveFunction's route walk).
+      ts.forEachChild(n, (c) => {
+        if (!this.tscExcludedArm(n, c)) visit(c, st);
+      });
     };
     const start: Bound = { labels: new Set(), breakBound: false, continueBound: false };
     for (const s of stmts) visit(s, start);
@@ -4021,10 +4028,14 @@ export class Emitter {
         // The loop binds unlabeled break/continue for its whole subtree
         // (heads hold no break/continue — tsc rejects them there). A
         // fallthrough inside the body resumes at the back edge, in the
-        // function, so the body scans against a resuming tail.
+        // function, so the body scans against a resuming tail. A
+        // tsc-excluded body (while (false), for (; false;)) contributes
+        // no routes at all — an edge tsc's CFA cannot take is not a route
+        // (tscExcludedArm; the joins already give such arms no kills).
         return (
           ts.forEachChild(n, (c) =>
-            resumes(c, { ...st, breaks: st.breaks + 1, continues: st.continues + 1 }, false) ||
+            (!this.tscExcludedArm(n, c) &&
+              resumes(c, { ...st, breaks: st.breaks + 1, continues: st.continues + 1 }, false)) ||
             undefined,
           ) === true
         );
@@ -4045,7 +4056,10 @@ export class Emitter {
         if ([...this.hoistedFns.values()].includes(n)) return false;
         return resumes(n.body, { ...st, inCallback: true }, false);
       }
-      return ts.forEachChild(n, (c) => walk(c) || undefined) === true;
+      // tsc-excluded arms (`if (false)` then, `if (true)` else) hold no
+      // routes tsc's CFA can take: a dead `break` must not read as a
+      // loop-escaping edge (tscExcludedArm).
+      return ts.forEachChild(n, (c) => (!this.tscExcludedArm(n, c) && walk(c)) || undefined) === true;
     };
     // One right-to-left pass over a statement list: `resumes` is whether
     // any route out of any statement resumes in-function (each statement
@@ -4166,7 +4180,11 @@ export class Emitter {
       return;
     }
     if (ts.isForStatement(stmt)) {
-      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitClassicFor(stmt, ctx, null)));
+      const staged = this.stagedEdgeKills(ctx, "loop", null, () => this.emitClassicFor(stmt, ctx, null));
+      // A `for (; false;)` body is tsc-unreachable exactly like a
+      // `while (false)` body (tscExcludedArm): kills its break edges
+      // staged here never execute, so they don't apply.
+      this.applyJoinedNarrowKills(ctx, this.tscExcludedArm(stmt, stmt.statement) ? new Set() : staged);
       return;
     }
     if (ts.isForOfStatement(stmt)) {
@@ -4196,7 +4214,9 @@ export class Emitter {
       } else if (ts.isDoStatement(inner)) {
         this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitDoWhile(inner, ctx, label)));
       } else if (ts.isForStatement(inner)) {
-        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitClassicFor(inner, ctx, label)));
+        const staged = this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitClassicFor(inner, ctx, label));
+        // Same tsc-unreachable exclusion as the unlabeled for dispatch.
+        this.applyJoinedNarrowKills(ctx, this.tscExcludedArm(inner, inner.statement) ? new Set() : staged);
       } else if (ts.isForOfStatement(inner)) {
         this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitForOf(inner, ctx, label)));
       } else if (label === null) {
@@ -4382,23 +4402,48 @@ export class Emitter {
 
   /// Whether tsc's CFA treats `arm` as statically unreachable inside
   /// `construct` — the then-arm of `if (false)`, the else-arm of
-  /// `if (true)`, a `while (false)` body. Such an arm contributes NOTHING
-  /// to the flow bookkeeping: no kills at the branch join, no widening of
-  /// a finally's entry narrows (both consumers share this one judgment).
-  /// The arm still EMITS — Zig compiles `if (false)` fine — only the flow
-  /// accounting skips it.
+  /// `if (true)`, a `while (false)` body, a `for (; false;)` body (and its
+  /// incrementor, which runs only after a body iteration). Such an arm
+  /// contributes NOTHING to the flow bookkeeping: no kills at the branch
+  /// join, no widening of a finally's entry narrows, no ROUTES either —
+  /// a `break`/`continue`/`return`/`throw` under an excluded arm is not an
+  /// edge tsc's CFA can take, so the route walks (allRoutesLeaveFunction,
+  /// escapingEdgesOf) and the terminality binders (bindsBreak,
+  /// breaksToLabel) give it nothing. Zig's comptime-false folding makes the
+  /// same call on the emitted text, so the two terminality judgments stay
+  /// aligned. The arm still EMITS — Zig compiles `if (false)` fine — only
+  /// the flow accounting skips it.
+  ///
+  /// The split among the statement walkers is by QUESTION, not by walker:
+  ///   - FLOW-SEMANTICS walks (what can execute) exclude, per the above.
+  ///   - EMISSION-SHAPE walks keep counting excluded arms, because the
+  ///     arm's TEXT still emits: labelReferenced (a dead `break outer`
+  ///     still spells `break :outer` — Zig's unused-label check is
+  ///     syntactic, so the label must stay and stays used) and
+  ///     bindsContinue (the do-while first-pass-flag form must host any
+  ///     `continue` the body emits, dead or not — the plain trailing-test
+  ///     lowering has no valid spelling for that text).
   ///
   /// Only the bare `true`/`false` keywords qualify, pinned against the
   /// checker provider: a `const NEVER = false` alias condition WIDENS
   /// under tsc, so a reference never excludes. A do-while(false) body is
   /// never excluded either — the test runs AFTER the body, so the body
-  /// executes once and tsc counts its assignments.
+  /// executes once and tsc counts its assignments. A `for (;;)` with an
+  /// OMITTED condition is the opposite judgment — an infinite loop
+  /// (alwaysExits) — and never lands here: literal `false` ≠ omitted.
   private tscExcludedArm(construct: ts.Node, arm: ts.Node | undefined): boolean {
     if (arm === undefined) return false;
     if (ts.isIfStatement(construct)) {
       if (construct.expression.kind === ts.SyntaxKind.FalseKeyword) return arm === construct.thenStatement;
       if (construct.expression.kind === ts.SyntaxKind.TrueKeyword) return arm === construct.elseStatement;
       return false;
+    }
+    if (ts.isForStatement(construct)) {
+      return (
+        construct.condition !== undefined &&
+        construct.condition.kind === ts.SyntaxKind.FalseKeyword &&
+        (arm === construct.statement || arm === construct.incrementor)
+      );
     }
     return (
       ts.isWhileStatement(construct) &&
@@ -4457,6 +4502,14 @@ export class Emitter {
         }
       }
       if (ts.isWhileStatement(n) && this.tscExcludedArm(n, n.statement)) return;
+      if (ts.isForStatement(n) && this.tscExcludedArm(n, n.statement)) {
+        // `for (<init>; false; <inc>) <body>`: the initializer still runs
+        // once (tsc counts its assignments); the bare-false condition holds
+        // nothing to count; the body and the incrementor are excluded — the
+        // incrementor runs only after a body iteration that never happens.
+        if (n.initializer) visit(n.initializer);
+        return;
+      }
       if (ts.isBinaryExpression(n)) {
         const op = n.operatorToken.kind;
         if (op === ts.SyntaxKind.AmpersandAmpersandToken && n.left.kind === ts.SyntaxKind.FalseKeyword) return;
@@ -4698,6 +4751,10 @@ export class Emitter {
   /// function boundaries (the breaksToLabel rule), or a reuse would keep a
   /// Zig label emitted that nothing in THIS function consumes — an
   /// unused-label error.
+  /// An EMISSION-SHAPE walk: tsc-excluded arms deliberately COUNT here
+  /// (contrast the flow walks — see tscExcludedArm). A dead `break outer`
+  /// still emits as `break :outer`, and Zig's unused-label check is
+  /// syntactic, so the label must stay emitted and stays used.
   private labelReferenced(body: ts.Node, name: string): boolean {
     let found = false;
     const visit = (n: ts.Node): void => {
@@ -4719,6 +4776,11 @@ export class Emitter {
   /// function boundaries (the breaksToLabel rule): a nested function may
   /// legally reuse the label name for a labeled loop of its own, and its
   /// `continue` binds that inner loop, never this one.
+  /// An EMISSION-SHAPE walk: tsc-excluded arms deliberately COUNT here
+  /// (contrast the flow walks — see tscExcludedArm). Both consumers pick
+  /// the do-while lowering form, and a dead `continue` still EMITS — only
+  /// the first-pass-flag form gives that text a spelling whose jump
+  /// semantics match JS.
   private bindsContinue(body: ts.Node, label: string | null): boolean {
     let found = false;
     const visit = (n: ts.Node, insideNested: boolean): void => {
@@ -4777,6 +4839,10 @@ export class Emitter {
   /// reuse a wrapping label's name for a label of its own, and its `break`
   /// binds the helper's label, never this construct — counting it read a
   /// constant-true loop as fallible and merged branch kills tsc keeps.
+  /// This is a FLOW-SEMANTICS walk (it feeds alwaysExits' terminality,
+  /// which mirrors tsc's CFA): a break under a tsc-excluded arm is not an
+  /// edge the CFA can take, so it never counts (tscExcludedArm — Zig's
+  /// comptime-false folding reads the emitted text the same way).
   private bindsBreak(
     stmt: ts.SwitchStatement | ts.WhileStatement | ts.DoStatement | ts.ForStatement,
   ): boolean {
@@ -4806,7 +4872,9 @@ export class Emitter {
         ts.isForOfStatement(n) ||
         ts.isForInStatement(n) ||
         ts.isSwitchStatement(n);
-      ts.forEachChild(n, (c) => visit(c, nested));
+      ts.forEachChild(n, (c) => {
+        if (!this.tscExcludedArm(n, c)) visit(c, nested);
+      });
     };
     if (ts.isSwitchStatement(stmt)) {
       ts.forEachChild(stmt.caseBlock, (c) => visit(c, false));
@@ -4823,6 +4891,10 @@ export class Emitter {
   /// rejects it), and a nested function may legally reuse the label name
   /// for a labeled statement of its own. tsc rejects duplicate labels on
   /// the same nesting path, so no inner rebinding can shadow `label`.
+  /// A FLOW-SEMANTICS walk like bindsBreak (it feeds alwaysExits' labeled
+  /// terminality): a labeled break under a tsc-excluded arm never counts
+  /// (tscExcludedArm). Contrast labelReferenced, the EMISSION-SHAPE twin
+  /// that must keep counting.
   private breaksToLabel(node: ts.Node, label: string): boolean {
     let found = false;
     const visit = (n: ts.Node): void => {
@@ -4832,7 +4904,9 @@ export class Emitter {
         return;
       }
       if (ts.isFunctionLike(n)) return;
-      ts.forEachChild(n, visit);
+      ts.forEachChild(n, (c) => {
+        if (!this.tscExcludedArm(n, c)) visit(c);
+      });
     };
     visit(node);
     return found;
@@ -6204,7 +6278,15 @@ export class Emitter {
     this.push(ctx, `${head} (${cond}) : (${inc}) {`);
     const sub = this.nestedCtx(ctx);
     const body = ts.isBlock(stmt.statement) ? stmt.statement.statements : [stmt.statement];
-    this.emitBlockStatements(body, sub);
+    // A `for (; false;)` body is statically unreachable to tsc's CFA
+    // (tscExcludedArm), so its kills never reach the post-loop state —
+    // the same drop emitWhile applies to a `while (false)` body. The
+    // body still emits; only the flow bookkeeping skips.
+    if (this.tscExcludedArm(stmt, stmt.statement)) {
+      this.withNarrowScope(ctx, "drop", () => this.emitBlockStatements(body, sub));
+    } else {
+      this.emitBlockStatements(body, sub);
+    }
     ctx.lines.push(...sub.lines);
     this.push(ctx, `}`);
   }

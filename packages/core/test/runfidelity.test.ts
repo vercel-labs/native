@@ -123,6 +123,35 @@ export function guardedFinally(a: number): number {
     ],
   },
   {
+    name: "a dead break in an always-returning branch keeps the post-loop narrow live",
+    src: `
+export function deadBreakRoute(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (false) break; return 1; }
+  }
+  return p;
+}
+export function realBreakRoute(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (e > 1) break; return 1; }
+  }
+  return p === null ? -2 : p;
+}
+`,
+    calls: [
+      { fn: "deadBreakRoute", args: [{ t: "nums", v: [] }, f(5)] },
+      { fn: "deadBreakRoute", args: [{ t: "nums", v: [-1, -2] }, f(7)] },
+      { fn: "deadBreakRoute", args: [{ t: "nums", v: [3] }, f(7)] },
+      { fn: "deadBreakRoute", args: [{ t: "nums", v: [] }, { t: "null" }] },
+      { fn: "realBreakRoute", args: [{ t: "nums", v: [2] }, f(7)] },
+      { fn: "realBreakRoute", args: [{ t: "nums", v: [-1] }, f(7)] },
+    ],
+  },
+  {
     name: "a write-only ternary arm mutates through the raw slot, no capture",
     src: `
 export interface P { readonly v: number; }

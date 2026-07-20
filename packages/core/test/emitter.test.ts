@@ -1795,6 +1795,121 @@ export function f(): number {
   assert.equal(excluded(ifAlias, ifAlias.thenStatement), false);
 });
 
+test("tscExcludedArm: for(;false;) excludes body and incrementor; omitted or real conditions never do", () => {
+  // The classic-for leg of the same judgment: tsc's CFA never enters a
+  // `for (; false;)` body, and the incrementor runs only after a body
+  // iteration that never happens. An OMITTED condition is the opposite
+  // judgment — an infinite loop (alwaysExits) — so the two must not
+  // collide: literal false ≠ omitted.
+  const { emitter, file } = buildEmitter(`
+export function f(n: number): number {
+  let t = 0;
+  for (let i = 0; false; i += 1) t += 1;
+  for (let i = 0; i < n; i += 1) t += 2;
+  return t;
+}
+export function g(): number {
+  for (;;) {
+    // never completes
+  }
+}
+`);
+  const em = emitter as unknown as {
+    tscExcludedArm(c: unknown, a: unknown): boolean;
+    alwaysExits(s: unknown): boolean;
+  };
+  const fnBody = (name: string): readonly any[] =>
+    (file.statements as readonly any[]).find((s) => s.name?.text === name).body.statements;
+  const [, forFalse, forReal] = fnBody("f");
+  assert.equal(em.tscExcludedArm(forFalse, forFalse.statement), true);
+  assert.equal(em.tscExcludedArm(forFalse, forFalse.incrementor), true);
+  assert.equal(em.tscExcludedArm(forFalse, forFalse.initializer), false);
+  assert.equal(em.tscExcludedArm(forReal, forReal.statement), false);
+  assert.equal(em.tscExcludedArm(forReal, forReal.incrementor), false);
+  const [forever] = fnBody("g");
+  // `for (;;)` keeps round 10's terminality and is never "excluded".
+  assert.equal(em.tscExcludedArm(forever, forever.statement), false);
+  assert.equal(em.alwaysExits(forever), true);
+});
+
+test("route walks give tsc-excluded arms no routes: a dead break/continue never stages a loop-exit kill", () => {
+  // tsc keeps p narrowed at the post-loop read: the killing branch always
+  // returns, and the `if (false) break` inside it sits outside tsc's CFA.
+  // The route walks (allRoutesLeaveFunction, escapingEdgesOf) must read
+  // the branch the same way — an excluded arm contributes NO routes — or
+  // the dead break turns the always-leaving branch into a loop-escaping
+  // one and stages a kill at the loop exit that only paths tsc has ruled
+  // out could carry: the emitted read drops its `.?` and returns a raw
+  // optional, invalid Zig. A REAL break in the same shape still stages
+  // the kill, and the post-loop read re-guards.
+  const zig = emit(`
+export function deadBreak(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (false) break; return 1; }
+  }
+  return p;
+}
+export function deadContinue(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (false) continue; return 1; }
+  }
+  return p;
+}
+export function realBreak(es: number[], q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (const e of es) {
+    if (e > 0) { p = null; if (e > 1) break; return 1; }
+  }
+  return p === null ? -2 : p;
+}
+`);
+  const narrowedReturns = zig.match(/return p\.\?;/g) ?? [];
+  assert.equal(narrowedReturns.length, 2, `deadBreak and deadContinue keep the narrow:\n${zig}`);
+  assert.match(zig, /return p orelse -2;/);
+});
+
+test("a for(;false;) body's kills are excluded at the join and the finally scan like while(false)", () => {
+  // The ForStatement leg of tscExcludedArm, consumer by consumer: the
+  // loop-dispatch join drops the body's staged kills, and the finally
+  // entry scan skips the body — while a REAL classic for's kills still
+  // count at both.
+  const zig = emit(`
+export function joined(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (let i = 0; false; i += 1) p = null;
+  return p;
+}
+export function inFinally(q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let t = 0;
+  try {
+    t = t + 1;
+    for (let i = 0; false; i += 1) p = null;
+  } finally {
+    t = t + p;
+  }
+  return t;
+}
+export function realFor(n: number, q: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  for (let i = 0; i < n; i += 1) p = null;
+  return p === null ? -2 : p;
+}
+`);
+  assert.match(zig, /return p\.\?;/);
+  assert.match(zig, /t = t \+ p\.\?;/);
+  assert.match(zig, /return p orelse -2;/);
+});
+
+
 test("R13d flow trust is position-aware over nested functions", () => {
   // scrutineeFlowTrustable, all four directions of the reach-before-use
   // rule. The declining directions use shapes the subset checker gates out
