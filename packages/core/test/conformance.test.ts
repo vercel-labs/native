@@ -6077,11 +6077,62 @@ export function f(q: number | null, flag: boolean): number {
   },
 ];
 
+// A lifted block-body callback whose only return is the trailing statement
+// emits as straight-line statements plus that value. The statement prefix
+// and the trailing expression are ONE flow in tsc — a guard in the prefix
+// narrows the expression after it — so they must share one narrowing scope:
+// a scope closed between them restores the maps before the expression they
+// guard, emitting the read against the unnarrowed optional.
+const callbackTrailingNarrowCases: Case[] = [
+  {
+    name: "a throw guard in a map callback narrows the trailing return expression",
+    src: `
+export interface P { readonly v: number; }
+export interface BadError { readonly kind: "bad"; readonly at: number; }
+export function f(xs: readonly (P | null)[]): readonly number[] {
+  return xs.map((p) => {
+    if (p === null) { throw { kind: "bad", at: 0 } as BadError; }
+    return p.v;
+  });
+}
+`,
+  },
+  {
+    name: "a kind guard in a map callback narrows the trailing payload read",
+    src: `
+export type Msg = { readonly kind: "num"; readonly value: number } | { readonly kind: "none" };
+export interface BadError { readonly kind: "bad"; readonly at: number; }
+export function f(xs: readonly Msg[]): readonly number[] {
+  return xs.map((m) => {
+    if (m.kind !== "num") { throw { kind: "bad", at: 0 } as BadError; }
+    return m.value;
+  });
+}
+`,
+  },
+  {
+    // The early-return spelling lifts as a labeled value block whose whole
+    // body already shares one scope; pinned so the two lifting paths keep
+    // agreeing on where a prefix guard's narrowing ends.
+    name: "an early-return guard in a map callback narrows the trailing return too",
+    src: `
+export interface P { readonly v: number; }
+export function f(xs: readonly (P | null)[]): readonly number[] {
+  return xs.map((p) => {
+    if (p === null) { return -1; }
+    return p.v;
+  });
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
   ...killFallthroughCases,
+  ...callbackTrailingNarrowCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

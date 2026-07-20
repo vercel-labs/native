@@ -3024,32 +3024,42 @@ export class Emitter {
     return killed;
   }
 
-  private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx): void {
-    // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
-    // narrows the statements after it in ITS list, and whatever those
-    // statements nest — never code beyond the list. The narrowing maps ride
-    // the shared ctx, so this entry/exit snapshot is what bounds them: a
-    // `break`/`continue`/`return` guard inside a loop body or a branch
-    // cannot leak its captures into code after the construct (where the
-    // capture is out of scope in Zig and the narrowing wrong in TS).
+  /// Bracket `emit` in one narrowing flow scope: on exit, restore the three
+  /// narrowing maps to their entry snapshot (containment), then re-apply and
+  /// merge — or, when `leavesFn`, drop — the kills recorded inside (see
+  /// popNarrowKillFrame).
+  private withNarrowScope<T>(ctx: Ctx, leavesFn: boolean, emit: () => T): T {
     const savedSubst = new Map(ctx.memberSubst);
     const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrowed = new Map(ctx.narrowedUnion);
     this.pushNarrowKillFrame(ctx);
-    this.emitStatementList(stmts, ctx);
-    ctx.memberSubst.clear();
-    for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
-    ctx.stillOptionalSubst.clear();
-    for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
-    ctx.narrowedUnion.clear();
-    for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
-    // Containment restored; now keep invalidation: an assignment inside the
-    // block that killed a narrowing (assigned a possibly-null value) must
-    // stay dead past the merge — the snapshot restore above would otherwise
-    // resurrect its `.?` spelling on a value that may be null again. But a
-    // list that always LEAVES the function cannot reach the merge, so its
-    // kills apply nowhere the maps still matter and are dropped: tsc keeps
-    // the narrow on the surviving flow, and reads there depend on it.
+    try {
+      return emit();
+    } finally {
+      ctx.memberSubst.clear();
+      for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
+      ctx.stillOptionalSubst.clear();
+      for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
+      ctx.narrowedUnion.clear();
+      for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
+      this.popNarrowKillFrame(ctx, leavesFn);
+    }
+  }
+
+  private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx): void {
+    // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
+    // narrows the statements after it in ITS list, and whatever those
+    // statements nest — never code beyond the list. The narrowing maps ride
+    // the shared ctx, so the scope's entry/exit snapshot is what bounds
+    // them: a `break`/`continue`/`return` guard inside a loop body or a
+    // branch cannot leak its captures into code after the construct (where
+    // the capture is out of scope in Zig and the narrowing wrong in TS).
+    //
+    // Invalidation survives the restore — an assignment inside the block
+    // that killed a narrowing (assigned a possibly-null value) must stay
+    // dead past the merge — UNLESS the list always LEAVES the function:
+    // then no path carrying the kills reaches the merge, tsc keeps the
+    // narrow on the surviving flow, and reads there depend on it.
     // `break`/`continue` never qualify (a break-guarded kill runs and then
     // control resumes after the loop or switch, where the kill must hold);
     // a `return` only qualifies where it emits as a real return (inside a
@@ -3060,7 +3070,7 @@ export class Emitter {
     const leavesFn =
       last !== undefined &&
       this.alwaysExits(last, { returnLeaves: ctx.retLabel === null, throwCaught: ctx.tryLabel != null });
-    this.popNarrowKillFrame(ctx, leavesFn);
+    this.withNarrowScope(ctx, leavesFn, () => this.emitStatementList(stmts, ctx));
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -7727,8 +7737,16 @@ export class Emitter {
     const last = body[body.length - 1];
     const earlyReturns = body.slice(0, -1).some((s) => containsReturn(s));
     if (last && ts.isReturnStatement(last) && last.expression && !earlyReturns) {
-      this.emitBlockStatements(body.slice(0, -1), sub);
-      return this.emitExpr(last.expression, sub, expected).code;
+      // The prefix's guards narrow the trailing return's expression, so both
+      // emit inside ONE flow scope — a scope around the prefix alone would
+      // restore the maps before the expression they guard. The restore still
+      // runs before the caller continues, so the callback's narrowing never
+      // reaches its siblings in the emitted loop body.
+      const trailing = last.expression;
+      return this.withNarrowScope(sub, false, () => {
+        this.emitStatementList(body.slice(0, -1), sub);
+        return this.emitExpr(trailing, sub, expected).code;
+      });
     }
     const label = this.freshName(sub, "cb");
     const name = this.freshName(sub, hint);

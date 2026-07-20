@@ -253,6 +253,35 @@ export function pastLoop(q: number | null, xs: readonly number[]): number {
     ],
   },
   {
+    // A map callback whose only return trails a throw guard lifts as
+    // straight-line statements plus the return's expression; the guard's
+    // narrowing must still cover that expression (one flow scope), and the
+    // values it reads must be the guarded element's, row for row.
+    name: "a throw-guarded map callback reads the narrowed value in its trailing return",
+    src: `
+export interface BadError { readonly kind: "bad"; readonly at: number; }
+export function half(x: number): number | null {
+  if (x < 0) { return null; }
+  return x / 2;
+}
+export function total(xs: readonly number[]): number {
+  const halved = xs.map((x) => {
+    const h = half(x);
+    if (h === null) { throw { kind: "bad", at: 0 } as BadError; }
+    return h + 1;
+  });
+  let acc: number = 0;
+  for (const d of halved) { acc = acc + d; }
+  return acc;
+}
+`,
+    calls: [
+      { fn: "total", args: [{ t: "nums", v: [2, 4, 7] }] },
+      { fn: "total", args: [{ t: "nums", v: [] }] },
+      { fn: "total", args: [{ t: "nums", v: [5] }] },
+    ],
+  },
+  {
     name: "orelse fusion over a ternary initializer keeps both arms (parenthesized conditional)",
     src: `
 export function low(bytes: Uint8Array): number | null {
