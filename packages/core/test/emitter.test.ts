@@ -1871,6 +1871,45 @@ export function f(xs: readonly number[]): number {
 `), false);
 });
 
+test("a nested helper's label reuse neither binds the enclosing loop nor keeps its label", () => {
+  // Labels are function-scoped: the helper's `break outer` binds the
+  // HELPER's own label, so the enclosing constant-true loop stays terminal
+  // (the branch kill drops; the fall-through read keeps its unwrap) and
+  // the enclosing `outer:` drops (Zig rejects an unused loop label). The
+  // hoisted helper keeps its own, consumed label.
+  const zig = emit(`
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      const helper = (): number => {
+        outer: while (true) {
+          break outer;
+        }
+        return 1;
+      };
+      p = null;
+      return helper();
+    }
+  }
+  return p.v;
+}
+`);
+  const enclosing = zig.split("pub fn f")[1].split("\n}")[0];
+  assert.match(enclosing, /\n        while \(true\) \{/);
+  assert.doesNotMatch(enclosing, /outer:/);
+  assert.match(enclosing, /return p\.\?\.v;/);
+  const helper = zig.split("\nfn helper")[1].split("\n}")[0];
+  assert.match(helper, /outer: while \(true\) \{/);
+  assert.match(helper, /break :outer;/);
+});
+
 test("kernel capacities: default header uses the shared default kernel", () => {
   const zig = emit(`export function f(n: number): number { return n & 1; }`);
   assert.match(zig, /pub const rt = @import\("rt\.zig"\)\.default;/);

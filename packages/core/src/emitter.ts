@@ -4691,7 +4691,13 @@ export class Emitter {
 
   /// Whether any `break`/`continue` under `body` names this label (JS
   /// allows an unreferenced label; Zig rejects one, so it must drop).
-  /// Duplicate nested labels cannot shadow — tsc rejects them.
+  /// Duplicate nested labels cannot shadow on one nesting path — tsc
+  /// rejects them — but labels are FUNCTION-scoped: a nested function may
+  /// legally reuse the name for a label of its own, and its `break`/
+  /// `continue` binds that inner label, never this one. The walk stops at
+  /// function boundaries (the breaksToLabel rule), or a reuse would keep a
+  /// Zig label emitted that nothing in THIS function consumes — an
+  /// unused-label error.
   private labelReferenced(body: ts.Node, name: string): boolean {
     let found = false;
     const visit = (n: ts.Node): void => {
@@ -4700,6 +4706,7 @@ export class Emitter {
         found = true;
         return;
       }
+      if (ts.isFunctionLike(n)) return;
       ts.forEachChild(n, visit);
     };
     visit(body);
@@ -4708,7 +4715,10 @@ export class Emitter {
 
   /// Whether a loop body contains a `continue` that binds to THIS loop: an
   /// unlabeled one outside any nested loop, or a labeled one naming this
-  /// loop's label.
+  /// loop's label. Labels are function-scoped, so the walk stops at
+  /// function boundaries (the breaksToLabel rule): a nested function may
+  /// legally reuse the label name for a labeled loop of its own, and its
+  /// `continue` binds that inner loop, never this one.
   private bindsContinue(body: ts.Node, label: string | null): boolean {
     let found = false;
     const visit = (n: ts.Node, insideNested: boolean): void => {
@@ -4721,6 +4731,7 @@ export class Emitter {
         }
         return;
       }
+      if (ts.isFunctionLike(n)) return;
       const nested =
         insideNested ||
         ts.isWhileStatement(n) ||
@@ -4728,8 +4739,6 @@ export class Emitter {
         ts.isForStatement(n) ||
         ts.isForOfStatement(n) ||
         ts.isForInStatement(n);
-      // Callbacks cannot `continue` an outer loop (tsc rejects it), so
-      // function boundaries need no special casing here.
       ts.forEachChild(n, (c) => visit(c, nested));
     };
     visit(body, false);
@@ -4763,8 +4772,11 @@ export class Emitter {
   /// loop or switch, or a labeled one naming a label wrapped directly
   /// around this statement. Such a break resumes right AFTER the
   /// statement — the switch/loop falls through.
-  /// (A break inside a callback cannot reach out — tsc rejects it — so
-  /// function boundaries need no special casing, same as bindsContinue.)
+  /// Labels are function-scoped in JS, so the walk stops at function
+  /// boundaries (the breaksToLabel rule): a nested helper may legally
+  /// reuse a wrapping label's name for a label of its own, and its `break`
+  /// binds the helper's label, never this construct — counting it read a
+  /// constant-true loop as fallible and merged branch kills tsc keeps.
   private bindsBreak(
     stmt: ts.SwitchStatement | ts.WhileStatement | ts.DoStatement | ts.ForStatement,
   ): boolean {
@@ -4785,6 +4797,7 @@ export class Emitter {
         }
         return;
       }
+      if (ts.isFunctionLike(n)) return;
       const nested =
         insideNested ||
         ts.isWhileStatement(n) ||
@@ -6800,6 +6813,9 @@ export class Emitter {
       ) {
         return; // breaks inside these target them, not the switch
       }
+      // A nested function's breaks bind inside the function (the
+      // breaksToLabel boundary rule), never this switch.
+      if (ts.isFunctionLike(n)) return;
       if (ts.isBreakStatement(n) && !n.label) {
         this.fail(n, "an early `break` inside a plain-value switch clause (end the clause with a single trailing `break` or a `return`)");
       }

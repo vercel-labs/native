@@ -244,6 +244,55 @@ export function loopShared(xs: readonly number[]): number {
     ],
   },
   {
+    name: "a nested helper's label reuse keeps the enclosing loop terminal; a real break still merges",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function nestedLabel(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      const helper = (): number => {
+        outer: while (true) {
+          break outer;
+        }
+        return 1;
+      };
+      if (a > 100) {
+        p = null;
+        continue outer;
+      }
+      return helper();
+    }
+  }
+  return p.v;
+}
+export function realBreak(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      p = null;
+      break outer;
+    }
+  }
+  if (p === null) return -2;
+  return p.v;
+}
+`,
+    calls: [
+      { fn: "nestedLabel", args: [i(5), { t: "b", v: true }] },
+      { fn: "nestedLabel", args: [i(5), { t: "b", v: false }] },
+      { fn: "nestedLabel", args: [i(-4), { t: "b", v: true }] },
+      { fn: "realBreak", args: [i(5), { t: "b", v: true }] },
+      { fn: "realBreak", args: [i(5), { t: "b", v: false }] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }

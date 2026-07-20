@@ -8560,6 +8560,103 @@ export function f(xs: readonly number[]): number {
   },
 ];
 
+// Labels are function-scoped in JS: a nested helper's `break outer` binds
+// the HELPER's own `outer` label, never the enclosing function's loop. All
+// break/continue-binding walks stop at function boundaries (the
+// breaksToLabel rule), so an enclosing constant-true loop stays terminal
+// and its label drops when nothing in THIS function consumes it.
+const labelFunctionScopeCases: Case[] = [
+  {
+    // The repro: the helper reuses `outer`; the enclosing infinite loop
+    // must stay terminal, so the guarded branch's kill drops and the
+    // fall-through read keeps its unwrap. Binding the helper's break here
+    // read the loop as fallible and merged the kill — a raw optional read.
+    name: "a nested helper's labeled break never binds the enclosing loop",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      const helper = (): number => {
+        outer: while (true) {
+          break outer;
+        }
+        return 1;
+      };
+      if (a > 100) {
+        p = null;
+        continue outer;
+      }
+      return helper();
+    }
+  }
+  return p.v;
+}
+`,
+  },
+  {
+    // With no reference left in THIS function, the enclosing label must
+    // drop entirely (Zig rejects an unused loop label); the helper keeps
+    // its own.
+    name: "a label only a nested helper reuses drops from the enclosing loop",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      const helper = (): number => {
+        outer: while (true) {
+          break outer;
+        }
+        return 1;
+      };
+      p = null;
+      return helper();
+    }
+  }
+  return p.v;
+}
+`,
+  },
+  {
+    // Non-regression: a REAL labeled break in the same function still
+    // makes the loop fallible, so the branch kill merges and the
+    // fall-through re-guards.
+    name: "a real labeled break in the same function still merges its kill",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) {
+    outer: while (true) {
+      p = null;
+      break outer;
+    }
+  }
+  if (p === null) return -2;
+  return p.v;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -9117,6 +9214,7 @@ const corpus: Case[] = [
   ...writeOnlyArmCaptureCases,
   ...staticBranchJoinCases,
   ...scrutineePositionCases,
+  ...labelFunctionScopeCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,
