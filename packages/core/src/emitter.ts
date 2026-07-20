@@ -2948,6 +2948,44 @@ export class Emitter {
     return this.table.zigTypeRef(t);
   }
 
+  /// Per-declaration ids for narrowing keys (see narrowKey). A WeakMap
+  /// identity id rather than the declaration's source position: positions
+  /// can collide across files, and imported consts narrow too.
+  private readonly narrowKeyIds = new WeakMap<ts.Declaration, number>();
+  private narrowKeyNextId = 1;
+
+  /// The key an expression narrows/substitutes under: normalized source
+  /// text with the base identifier DECLARATION-qualified (`q#3`, member
+  /// chains `q#3.v`). Emission FLATTENS plain lexical blocks and callback
+  /// bodies share the enclosing maps, so raw text would let two
+  /// same-named declarations collide — a block-local `const q` shadow
+  /// leaves its entries live for the OUTER q after the block, and an
+  /// outer capture rewrites a callback parameter's reads. Symbol identity
+  /// makes the collision impossible; the maps' values and mechanics are
+  /// unchanged. Parenthesized spellings still collide by design (`(q)` is
+  /// the tested `q`). A base the checker cannot resolve keys by plain
+  /// text — same behavior as before, and such bases are never locals.
+  private narrowKey(expr: ts.Node): string {
+    let e: ts.Node = expr;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (ts.isPropertyAccessExpression(e)) {
+      return `${this.narrowKey(e.expression)}${e.questionDotToken ? "?." : "."}${e.name.text}`;
+    }
+    if (ts.isIdentifier(e)) {
+      const decl = this.tast.declarationOf(e);
+      if (decl) {
+        let id = this.narrowKeyIds.get(decl);
+        if (id === undefined) {
+          id = this.narrowKeyNextId++;
+          this.narrowKeyIds.set(decl, id);
+        }
+        return `${e.text}#${id}`;
+      }
+      return e.text;
+    }
+    return e.getText().replace(/\s+/g, "");
+  }
+
   private identifierUsed(body: ts.Node, decl: ts.Node): boolean {
     let used = false;
     const visit = (n: ts.Node): void => {
@@ -4120,8 +4158,8 @@ export class Emitter {
           this.push(ctx, `${varKw} ${name} = ${seed.code};`);
           this.push(ctx, `var ${lenVar}: usize = ${name}.len;`);
         }
-        ctx.memberSubst.set(decl.name.text, `${name}[0..${lenVar}]`);
-        ctx.memberSubst.set(`${decl.name.text}.length`, `@as(i64, @intCast(${lenVar}))`);
+        ctx.memberSubst.set(this.narrowKey(decl.name), `${name}[0..${lenVar}]`);
+        ctx.memberSubst.set(`${this.narrowKey(decl.name)}.length`, `@as(i64, @intCast(${lenVar}))`);
         return;
       }
       if (sliceT.k === "slice" && ts.isArrayLiteralExpression(init) && init.elements.length === 0) {
@@ -4149,7 +4187,7 @@ export class Emitter {
     if (v.code === name) return; // lowered directly into a named temp
     const annotation = this.varAnnotation(decl, t, reassigned, ctx);
     this.push(ctx, `${kw} ${name}${annotation} = ${v.code};`);
-    if (v.filterLen) ctx.memberSubst.set(`${decl.name.text}.length`, `@as(i64, @intCast(${v.filterLen}))`);
+    if (v.filterLen) ctx.memberSubst.set(`${this.narrowKey(decl.name)}.length`, `@as(i64, @intCast(${v.filterLen}))`);
   }
 
   /// R6b: `const { total, done: doneCount } = stats;` — record-field
@@ -4347,7 +4385,7 @@ export class Emitter {
               ctx.lines.push(...sub.lines);
               this.push(ctx, `}`);
             }
-            ctx.memberSubst.set(normalize(exitTest.target), `${prop}.?`);
+            ctx.memberSubst.set(this.narrowKey(exitTest.target), `${prop}.?`);
             return;
           }
           const name = this.freshName(ctx, this.narrowHint(exitTest.target));
@@ -4364,7 +4402,7 @@ export class Emitter {
             ctx.lines.push(...sub.lines);
             this.push(ctx, `};`);
           }
-          ctx.memberSubst.set(normalize(exitTest.target), name);
+          ctx.memberSubst.set(this.narrowKey(exitTest.target), name);
           return;
         }
       }
@@ -4383,7 +4421,7 @@ export class Emitter {
       const t = this.zTypeOfExpr(exitTest.target, ctx);
       if (t.k === "optional") {
         this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
-        const key = normalize(exitTest.target);
+        const key = this.narrowKey(exitTest.target);
         const prop = this.emitExpr(exitTest.target, ctx).code;
         const name = this.freshName(ctx, this.narrowHint(exitTest.target));
         const join = new Set<string>();
@@ -4432,7 +4470,7 @@ export class Emitter {
       const t = this.zTypeOfExpr(presentTest.target, ctx);
       if (t.k === "optional") {
         this.requireFaithfulEmptyTest(presentTest.target, presentTest.flavor, cond);
-        const key = normalize(presentTest.target);
+        const key = this.narrowKey(presentTest.target);
         const prop = this.emitExpr(presentTest.target, ctx).code;
         const name = this.freshName(ctx, this.narrowHint(presentTest.target));
         const single = unwrapSingle(stmt.thenStatement);
@@ -4568,7 +4606,7 @@ export class Emitter {
     if (
       postNarrow &&
       (ts.isPropertyAccessExpression(postNarrow.target) || ts.isIdentifier(postNarrow.target)) &&
-      !join.has(normalize(postNarrow.target)) &&
+      !join.has(this.narrowKey(postNarrow.target)) &&
       this.followingReadsTarget(stmt, postNarrow.target)
     ) {
       const t = this.zTypeOfExpr(postNarrow.target, ctx);
@@ -4578,7 +4616,7 @@ export class Emitter {
       const faithful = postNarrow.flavor === "null" ? !empties.undefined : !empties.null;
       if (t.k === "optional" && faithful) {
         const code = this.emitExpr(postNarrow.target, ctx).code;
-        ctx.memberSubst.set(normalize(postNarrow.target), `${code}.?`);
+        ctx.memberSubst.set(this.narrowKey(postNarrow.target), `${code}.?`);
       }
     }
   }
@@ -4812,7 +4850,7 @@ export class Emitter {
     const arm = info.arms.find((a) => a.tag === tag);
     if (!arm) return;
     const baseText = this.emitExpr(expr, ctx).code;
-    const key = normalize(expr);
+    const key = this.narrowKey(expr);
     ctx.narrowedUnion.set(key, tag);
     for (const f of arm.fields) {
       const access =
@@ -4938,7 +4976,7 @@ export class Emitter {
     const guard = this.nullGuardOf(c0, op, ctx);
     if (guard && this.anyReadsTarget(rest, guard.target)) {
       this.requireFaithfulEmptyTest(guard.target, guard.flavor, c0);
-      const key = normalize(guard.target);
+      const key = this.narrowKey(guard.target);
       const prop = this.emitExpr(guard.target, ctx).code;
       const cap = this.freshName(ctx, this.narrowHint(guard.target));
       const saved = ctx.memberSubst.get(key);
@@ -4978,7 +5016,7 @@ export class Emitter {
       const guard = this.nullGuardOf(c0, op, ctx);
       if (guard) {
         this.requireFaithfulEmptyTest(guard.target, guard.flavor, c0);
-        const key = normalize(guard.target);
+        const key = this.narrowKey(guard.target);
         const prop = this.emitExpr(guard.target, ctx).code;
         const head = `${prop} ${isAnd ? "!=" : "=="} null`;
         if (rest.length === 0) return head;
@@ -5086,7 +5124,7 @@ export class Emitter {
         // goes stale); the unwrap spelling below reads the live variable.
         if (this.assignsTarget(readers, g.target)) break;
         this.requireFaithfulEmptyTest(g.target, g.flavor, conjuncts[gi]);
-        const key = normalize(g.target);
+        const key = this.narrowKey(g.target);
         const prop = this.emitExpr(g.target, ctx).code;
         const cap = this.freshName(ctx, this.narrowHint(g.target));
         caps.push({ key, saved: ctx.memberSubst.get(key) });
@@ -5422,7 +5460,7 @@ export class Emitter {
     const info = this.table.unions.get(baseType.name);
     if (!info) this.fail(stmt, `unknown union ${baseType.name}`);
     const base = this.emitExpr(scrutinee.expression, ctx).code;
-    const baseKey = normalize(scrutinee.expression);
+    const baseKey = this.narrowKey(scrutinee.expression);
     this.push(ctx, `switch (${base}) {`);
     const armCtx = { ...ctx, indent: ctx.indent + 1 };
     const covered = new Set<string>();
@@ -5926,7 +5964,7 @@ export class Emitter {
         // narrowing dies with the assignment, exactly like TS.
         const t = this.zTypeOfExprClassed(expr.left, ctx);
         const v = this.emitExpr(expr.right, ctx, t, undefined);
-        const key = normalize(expr.left);
+        const key = this.narrowKey(expr.left);
         const hadSubst = ctx.memberSubst.get(key);
         if (hadSubst !== undefined) ctx.memberSubst.delete(key);
         const target = this.emitExpr(expr.left, ctx).code;
@@ -6725,7 +6763,7 @@ export class Emitter {
   }
 
   private emitExprValue(expr: ts.Expression, ctx: Ctx, expected?: ZType, nameHint?: string): Emitted {
-    const subst = ctx.memberSubst.get(normalize(expr));
+    const subst = ctx.memberSubst.get(this.narrowKey(expr));
     if (subst !== undefined) return { code: subst };
 
     if (ts.isParenthesizedExpression(expr)) {
@@ -6854,7 +6892,7 @@ export class Emitter {
   }
 
   private emitPropertyAccess(expr: ts.PropertyAccessExpression, ctx: Ctx): Emitted {
-    const key = normalize(expr);
+    const key = this.narrowKey(expr);
     const subst = ctx.memberSubst.get(key);
     if (subst !== undefined) return { code: subst };
     // Layer-3 re-derivation of NS1017 (`Cmd.none` outside the return slot)
@@ -6895,8 +6933,8 @@ export class Emitter {
     if (ts.isOptionalChain(expr)) return this.emitOptionalChain(expr, ctx);
     const prop = expr.name.text;
     if (prop === "length") {
-      const lenKey = `${expr.expression.getText()}.length`;
-      const lenSubst = ctx.memberSubst.get(lenKey.replace(/\s+/g, ""));
+      const lenKey = `${this.narrowKey(expr.expression)}.length`;
+      const lenSubst = ctx.memberSubst.get(lenKey);
       if (lenSubst !== undefined) return { code: lenSubst };
       const baseT = this.zTypeOfExpr(expr.expression, ctx);
       const base = this.emitExpr(expr.expression, ctx);
@@ -7276,7 +7314,7 @@ export class Emitter {
     // `x === null ? A : x` -> `x orelse A` (the `=== undefined` spelling on
     // undefined-flavored values maps the same way, per R7c).
     const missTest = this.emptyTestOf(cond);
-    if (missTest && normalize(expr.whenFalse) === normalize(missTest.target)) {
+    if (missTest && this.narrowKey(expr.whenFalse) === this.narrowKey(missTest.target)) {
       this.requireFaithfulEmptyTest(missTest.target, missTest.flavor, cond);
       // Probe both sides in throwaway child ctxs: the fusion only holds
       // when the miss arm is statement-free. An arm that lowers statements
@@ -7449,7 +7487,7 @@ export class Emitter {
     expected: ZType | undefined,
     nameHint: string | undefined,
   ): Emitted {
-    const key = normalize(targetExpr);
+    const key = this.narrowKey(targetExpr);
     const target = this.emitExpr(targetExpr, ctx).code;
     const cap = this.freshName(ctx, this.narrowHint(targetExpr));
     const emitNarrowedArm = (sub: Ctx): string => {
@@ -8130,7 +8168,7 @@ export class Emitter {
     const cap = this.freshName(ctx, hint);
     const sub = this.nestedCtx(ctx);
     sub.memberSubst = new Map(ctx.memberSubst);
-    sub.memberSubst.set(normalize(recv), cap);
+    sub.memberSubst.set(this.narrowKey(recv), cap);
     const inner = this.emitCall(expr, sub, undefined, nameHint);
     const resT = this.zTypeOfExprClassed(expr, sub);
     if (resT.k === "void") this.fail(expr, `optional-chain call .${callee.name.text} without a mapped value type`);
@@ -8985,7 +9023,7 @@ export class Emitter {
     // as-is and must keep the optional (stillOptionalSubst records those
     // by their exact replacement).
     if (t.k === "optional") {
-      const key = normalize(expr);
+      const key = this.narrowKey(expr);
       const rep = ctx.memberSubst.get(key);
       if (rep !== undefined && rep !== ctx.stillOptionalSubst.get(key)) return t.inner;
     }
@@ -9173,7 +9211,7 @@ export class Emitter {
       const hitTest = this.emptyTestOf(expr.condition, ts.SyntaxKind.ExclamationEqualsEqualsToken);
       const narrowedByCond = (arm: ts.Expression, t: ZType, other: ts.Expression): ZType => {
         const test = arm === expr.whenFalse ? missTest : hitTest;
-        if (test === null || t.k !== "optional" || normalize(arm) !== normalize(test.target)) return t;
+        if (test === null || t.k !== "optional" || this.narrowKey(arm) !== this.narrowKey(test.target)) return t;
         const otherT = this.zTypeOfExpr(other, ctx);
         return otherT.k === "optional" ? t : t.inner;
       };
@@ -9685,17 +9723,6 @@ function isNullLiteral(e: ts.Expression): boolean {
     n = n.expression;
   }
   return n.kind === ts.SyntaxKind.NullKeyword;
-}
-
-/// The text key an expression narrows/substitutes under. Parenthesized
-/// spellings must not change what the machinery matches: `(q)` is the
-/// tested `q` wherever an arm or operand meets a narrowed target, and keys
-/// derived from either spelling must collide — so top-level parens strip
-/// before the text is taken.
-function normalize(expr: ts.Node): string {
-  let e: ts.Node = expr;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  return e.getText().replace(/\s+/g, "");
 }
 
 function unwrapOptional(t: ZType): ZType {

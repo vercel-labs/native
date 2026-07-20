@@ -1876,6 +1876,46 @@ export function killedReadingArm(a: number | null, flag: boolean): number {
     ],
   },
   {
+    // Declaration-qualified narrowing keys: a block-local or callback-
+    // parameter shadow of a narrowed outer name must read ITS value on
+    // every path — with text keys the outer capture rewrote the shadow's
+    // reads (or vice versa), running wrong while still compiling.
+    name: "shadowed declarations narrow independently: flattened block, callback parameter",
+    src: `
+export function shadowInBlock(a: number | null, b: number | null): number {
+  let q: number | null = a;
+  let n = 0;
+  {
+    const q = b;
+    n += 1;
+    if (q === null) return -2;
+    n += q;
+  }
+  if (q === null) return -1;
+  return q + n;
+}
+export function shadowInCallback(a: number | null, xs: readonly number[]): number {
+  const q = a;
+  let n = 0;
+  n += 1;
+  if (q === null) return -1;
+  const found = xs.filter((q) => q > 2);
+  let m = 0;
+  for (const g of found) m += g;
+  return q + m + n;
+}
+`,
+    calls: [
+      { fn: "shadowInBlock", args: [{ t: "null" }, i(10)] },
+      { fn: "shadowInBlock", args: [i(5), { t: "null" }] },
+      { fn: "shadowInBlock", args: [i(5), i(10)] },
+      { fn: "shadowInCallback", args: [{ t: "null" }, { t: "nums", v: [1, 5, 9] }] },
+      { fn: "shadowInCallback", args: [i(1), { t: "nums", v: [1, 5, 9] }] },
+      { fn: "shadowInCallback", args: [i(9), { t: "nums", v: [1, 2] }] },
+      { fn: "shadowInCallback", args: [i(9), { t: "nums", v: [] }] },
+    ],
+  },
+  {
     name: "module const tables read identically: arrays, records, enums, derived scans",
     src: `
 import { asciiBytes } from "@native-sdk/core";

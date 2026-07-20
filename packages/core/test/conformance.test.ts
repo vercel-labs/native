@@ -7105,9 +7105,109 @@ export function f(a: P | null): number {
   },
 ];
 
+// Narrowing keys are DECLARATION-qualified, so two same-named declarations
+// can never collide in the narrowing maps. Emission flattens plain lexical
+// blocks (a fall-through block is not a merge boundary), which leaves no
+// restore point at the block's end — with raw text keys, a block-local
+// shadow's entries stayed live for the OUTER name after the block, binding
+// its null checks and reads to the inner declaration's capture. Callback
+// parameters share the enclosing maps the same way.
+const shadowedDeclarationCases: Case[] = [
+  {
+    // A shadow in a flattened block: the inner guard's capture must not
+    // rewrite the outer q's re-check after the block (with text keys it
+    // emitted a null test against the inner non-optional capture).
+    name: "a block-local shadow's narrow dies with the block despite flattening",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, b: P | null): number {
+  let q: P | null = a;
+  let n = 0;
+  {
+    const q = b;
+    n += 1;
+    if (q === null) return -2;
+    n += q.v;
+  }
+  if (q === null) return -1;
+  return q.v + n;
+}
+`,
+  },
+  {
+    // A shadow in an if-arm while the OUTER name's capture narrow is
+    // active: the inner declaration's guard must bind the inner value,
+    // not the outer capture.
+    name: "an arm-local shadow narrows independently of the outer capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, b: P | null, flag: boolean): number {
+  const q = a;
+  let n = 0;
+  n += 1;
+  if (q === null) return -1;
+  if (flag) {
+    const q = b;
+    if (q === null) return -2;
+    return q.v + n;
+  }
+  return q.v + n;
+}
+`,
+  },
+  {
+    // A callback parameter named like an actively narrowed outer local:
+    // the parameter's reads must bind the loop capture, never the outer
+    // one (with text keys the filter tested the outer value — code that
+    // compiled and ran wrong; the run-fidelity corpus pins the behavior).
+    name: "a callback parameter shadowing a narrowed outer local reads its own capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, xs: readonly P[]): number {
+  const q = a;
+  let n = 0;
+  n += 1;
+  if (q === null) return -1;
+  const found = xs.filter((q) => q.v > 0);
+  let m = 0;
+  for (const g of found) m += g.v;
+  return q.v + m + n;
+}
+`,
+  },
+  {
+    // Two shadows deep inside nested flattened blocks: every level keys
+    // its own declaration, and the outer re-check still reads the outer
+    // slot.
+    name: "nested block shadows two deep keep all three narrows separate",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, b: P | null, c: P | null): number {
+  let q: P | null = a;
+  let n = 0;
+  {
+    const q = b;
+    n += 1;
+    if (q === null) return -2;
+    n += q.v;
+    {
+      const q = c;
+      n += 1;
+      if (q === null) return -3;
+      n += q.v;
+    }
+  }
+  if (q === null) return -1;
+  return q.v + n;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...branchKillJoinCases,
   ...postNarrowKillSubtractionCases,
+  ...shadowedDeclarationCases,
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
