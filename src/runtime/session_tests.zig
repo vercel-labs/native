@@ -1373,6 +1373,7 @@ const ImageSessionModel = struct {
 
 const ImageSessionMsg = union(enum) {
     load_cover,
+    load_cover_ff,
     load_cover_again,
     load_broken,
     load_invalid,
@@ -1393,6 +1394,11 @@ const ImageSessionApp = ui_app_mod.UiApp(ImageSessionModel, ImageSessionMsg);
 fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *ImageSessionApp.Effects) void {
     switch (msg) {
         .load_cover => fx.loadImage(.{ .id = 21, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // The cover load with NO handler — fire-and-forget. Its
+        // terminal delivers no Msg, but an executor-truth terminal
+        // (a start failure) must still journal and occupy the id
+        // through its staged window, exactly like the handled form.
+        .load_cover_ff => fx.loadImage(.{ .id = 21, .path = "art/cover.png", .on_result = null }),
         // A second id over the SAME bytes: the journal's blob store
         // must hold ONE blob for both records.
         .load_cover_again => fx.loadImage(.{ .id = 22, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
@@ -1473,6 +1479,7 @@ fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) Im
 
 fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.cover")) return .load_cover;
+    if (std.mem.eql(u8, name, "image.cover-ff")) return .load_cover_ff;
     if (std.mem.eql(u8, name, "image.again")) return .load_cover_again;
     if (std.mem.eql(u8, name, "image.broken")) return .load_broken;
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
@@ -2181,6 +2188,114 @@ test "a cancel that lost to a start failure live cannot rewrite the fed rejectio
     try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
     try std.testing.expect(report.ok());
     try std.testing.expect(report.checkpoints_verified > 0);
+}
+
+/// Record the fire-and-forget start-failure reference session: the
+/// channel allocator fails at image 21's staged source buffer inside
+/// a load that carries NO handler. The failure is executor truth, so
+/// it must journal and hold the id through its staged window even
+/// though no Msg will ever deliver from it: under replay the same
+/// load allocates its own buffer and PARKS (the fake executor never
+/// touches the failing seam), and ONLY the journaled terminal's feed
+/// retires that parked fake — with no record, the id and a slot stay
+/// occupied replay-side forever and the post-drain reload diverges.
+fn recordFireAndForgetStartFailureSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // handlerless loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover-ff", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // NO wake yet: a HANDLED reload inside the staged window must
+    // reject — the silent failure's occupancy, the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // The window ended at the drain: the same id parks and loads.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    var png_buffer: [4096]u8 = undefined;
+    try app_state.effects.feedImageBytes(21, imageSessionPng(&png_buffer));
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a fire-and-forget start failure journals and replays: the parked fake retires with no Msg" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordFireAndForgetStartFailureSession(gpa, buffer, &store);
+    // Live truth: the fire-and-forget terminal delivered NO Msg — the
+    // model saw only the in-window reload's rejection and the
+    // post-drain reload's load.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The fire-and-forget terminal FEEDS (retiring the parked fake,
+    // delivering no Msg through its absent handler), and so does the
+    // post-drain load; the in-window rejection regenerates from the
+    // replayed occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
 }
 
 /// Record the queue-saturation reference session: a chatty spawn and

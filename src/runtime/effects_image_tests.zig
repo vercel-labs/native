@@ -69,6 +69,7 @@ const ImageModel = struct {
 
 const ImageMsg = union(enum) {
     start,
+    start_fire_and_forget,
     stop,
     burst,
     result: effects_mod.EffectImageResult,
@@ -103,6 +104,15 @@ fn imageUpdate(model: *ImageModel, msg: ImageMsg, fx: *ImageEffects) void {
             .expected_bytes = test_expected_bytes,
             .timeout_ms = test_timeout_ms,
             .on_result = ImageEffects.imageMsg(.result),
+        }),
+        .start_fire_and_forget => fx.loadImage(.{
+            .id = test_id,
+            .path = test_path,
+            .url = test_url,
+            .cache_path = test_cache_path,
+            .expected_bytes = test_expected_bytes,
+            .timeout_ms = test_timeout_ms,
+            .on_result = null,
         }),
         .stop => fx.cancel(test_id),
         .burst => {
@@ -1229,4 +1239,66 @@ test "a start-failure rejection holds the id until it drains; a reload inside th
     try std.testing.expectEqual(@as(usize, 3), app_state.model.result_count);
     try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, app_state.model.last.?.outcome);
     try std.testing.expectEqual(@as(usize, 2), app_state.model.rejected_count);
+}
+
+test "a fire-and-forget start failure still stages: the id stays occupied until the terminal drains" {
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try std.testing.allocator.create(ImageApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ImageApp.init(failing.allocator(), .{}, .{
+        .name = "effects-image-ff-start-fail",
+        .scene = image_scene,
+        .canvas_label = canvas_label,
+        .update_fx = imageUpdate,
+        .view = imageView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    app_state.effects.executor = .fake;
+    test_id = image_id;
+    test_path = "assets/cover.png";
+    test_url = "";
+    test_cache_path = "";
+    test_expected_bytes = 0;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_reload_on_result = false;
+
+    // A fire-and-forget load (no on_result) whose source buffer
+    // allocation fails: executor truth, so the terminal must stage —
+    // occupying the id — even though no Msg will ever deliver from it.
+    failing.armed = true;
+    try app_state.dispatch(&harness.runtime, 1, .start_fire_and_forget);
+    try std.testing.expect(!failing.armed);
+    try std.testing.expectEqual(@as(usize, 0), app_state.effects.pendingImageLoadCount());
+
+    // Inside the staged window a reload of the same id must reject,
+    // exactly as it does when the failed load carried a handler: under
+    // session replay the fire-and-forget request is a parked
+    // `.running` fake until its journaled terminal feeds.
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), app_state.effects.pendingImageLoadCount());
+
+    // The drain delivers the reload's rejection only — the
+    // fire-and-forget terminal retires silently (no handler, no Msg).
+    while (harness.null_platform.takeWake()) |_| {}
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.model.result_count);
+    try std.testing.expectEqual(@as(usize, 1), app_state.model.rejected_count);
+
+    // The window ends at the drain: the same id parks again.
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingImageLoadCount());
 }

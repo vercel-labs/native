@@ -4263,7 +4263,13 @@ pub fn Effects(comptime Msg: type) type {
                             return event_fn(event);
                         },
                         .image => |entry| {
-                            const image_fn = entry.image_fn orelse continue;
+                            // Journal BEFORE the handler gate: a staged
+                            // executor-truth terminal with no handler
+                            // (a fire-and-forget load's start failure)
+                            // still journals, because its record is
+                            // what retires the parked replay-side fake
+                            // (see `deliverLoopImage`). Only the Msg
+                            // depends on the handler.
                             self.journalNote(.{
                                 .kind = .image,
                                 .key = entry.result.id,
@@ -4282,6 +4288,7 @@ pub fn Effects(comptime Msg: type) type {
                                 // and is fed from the journal.
                                 .exit_reason = if (entry.regenerates) .rejected else .exited,
                             });
+                            const image_fn = entry.image_fn orelse continue;
                             return image_fn(entry.result);
                         },
                     }
@@ -4470,7 +4477,6 @@ pub fn Effects(comptime Msg: type) type {
                         self.drain_fetch_body = slot.fetch_buffer;
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
-                        const clipboard_fn = entry.clipboard_fn orelse continue;
                         const text: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
@@ -4485,6 +4491,13 @@ pub fn Effects(comptime Msg: type) type {
                                 .text = text,
                                 .dropped_before = entry.dropped_before,
                             };
+                        // Journal BEFORE the handler gate: a clipboard
+                        // terminal is executor truth (the pasteboard
+                        // ran), so a fire-and-forget write's `.ok` or
+                        // `.failed` must still journal — under session
+                        // replay the request is a parked fake that only
+                        // this record's feed retires. Only the Msg
+                        // depends on the handler.
                         self.journalNote(.{
                             .kind = .clipboard,
                             .key = result.key,
@@ -4493,6 +4506,7 @@ pub fn Effects(comptime Msg: type) type {
                             .clipboard_op = result.op,
                             .clipboard_outcome = result.outcome,
                         });
+                        const clipboard_fn = entry.clipboard_fn orelse continue;
                         return clipboard_fn(result);
                     },
                     .host => {
@@ -4509,9 +4523,11 @@ pub fn Effects(comptime Msg: type) type {
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
                         // A cancel that raced the feed (the entry was
-                        // already queued) still drops silently.
+                        // already queued) still drops silently — on
+                        // both sides: live never journals it, and the
+                        // replayed cancel drops the parked fake, so
+                        // neither side has a record to feed.
                         if (cancelled) continue;
-                        const host_fn = entry.host_fn orelse continue;
                         const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
@@ -4521,6 +4537,12 @@ pub fn Effects(comptime Msg: type) type {
                             .ok = entry.host_ok,
                             .bytes = bytes,
                         };
+                        // Journal BEFORE the handler gate: a host
+                        // answer is executor truth, so it must journal
+                        // even when no `on_result` route exists — under
+                        // session replay the request is a parked fake
+                        // that only this record's feed retires. Only
+                        // the Msg depends on the handler.
                         self.journalNote(.{
                             .kind = .host,
                             .key = result.key,
@@ -4528,6 +4550,7 @@ pub fn Effects(comptime Msg: type) type {
                             // `.host` journal encoding: route in `code`.
                             .code = @intFromBool(!result.ok),
                         });
+                        const host_fn = entry.host_fn orelse continue;
                         return host_fn(result);
                     },
                     .image => {
@@ -5370,8 +5393,21 @@ pub fn Effects(comptime Msg: type) type {
         /// registers. Staged outside the lossy pending ring: image
         /// terminals must never evict or be evicted (see
         /// `PendingImage`).
+        ///
+        /// Only the Msg is gated on the handler. An executor-truth
+        /// terminal (`regenerates = false`) stages even without one:
+        /// it occupies its id through the staged window
+        /// (`stagedImageOccupiesKey`) and journals at drain, because
+        /// under session replay the request it answers is a parked
+        /// fake that ONLY the journaled record's feed retires —
+        /// skipping the stage for a fire-and-forget load would leave
+        /// the id and a slot occupied replay-side forever. A
+        /// handlerless REGENERATING refusal stages nothing: replay
+        /// re-runs the same loop-side validation at the same dispatch
+        /// and refuses identically, so both sides stay symmetric with
+        /// no record, no occupancy, and no Msg.
         fn deliverLoopImage(self: *Self, result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool) void {
-            if (image_fn == null) return;
+            if (image_fn == null and regenerates) return;
             self.stagePendingImage(.{
                 .seq = self.nextPendingSeq(),
                 .result = result,

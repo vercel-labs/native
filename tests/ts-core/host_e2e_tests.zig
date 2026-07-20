@@ -1348,12 +1348,15 @@ test "a recorded transpiled-core session replays byte-identically with no host c
     });
     try std.testing.expect(report.ok());
     // Fed from the journal: the ok and err host answers, the clock
-    // read, the file write and read terminals, and the clipboard read
-    // (the fire-and-forget clipboard write routes to nobody, so it is
-    // never journaled; timer fires ride the event log). Nothing
-    // touched the stub host — and the deleted store proves nothing
-    // touched the disk.
-    try std.testing.expectEqual(@as(u64, 6), report.effects_fed);
+    // read, the file write and read terminals, and BOTH clipboard
+    // terminals — the read and the fire-and-forget write. The write
+    // routes no Msg, but its terminal is executor truth (the
+    // pasteboard ran), so it journals and its feed is what retires
+    // the replayed request, which parks in the stub executor instead
+    // of running. (Timer fires ride the event log.) Nothing touched
+    // the stub host — and the deleted store proves nothing touched
+    // the disk.
+    try std.testing.expectEqual(@as(u64, 7), report.effects_fed);
     try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
     try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
     try std.testing.expectEqualDeep(recorded, CoreSnapshot.take());
