@@ -5671,17 +5671,25 @@ export class Emitter {
     return test;
   }
 
-  /// Whether any of the nodes reads the guarded target — declaration
+  /// Whether any of the nodes READS the guarded target — declaration
   /// identity for identifiers, declaration-QUALIFIED narrowKeys for
   /// property chains (anyReadsKey). Never source text: a shadowed spelling
   /// inside a nested callback (`xs.map((box) => box.q)`) is not a read of
   /// the outer `box.q`, and matching it by text binds a capture the
   /// declaration-keyed substitution (correctly) never rewrites — a Zig
   /// unused-capture error.
+  ///
+  /// Reads, not uses (identifierRead, the same judgment branchReadsTarget
+  /// and captureServesBranch apply): the bare TARGET of a plain `=`
+  /// assignment writes the raw slot, never the capture, so a write-only
+  /// occurrence cannot consume a binding — gating a capture on it binds
+  /// the capture unused, a Zig error. Compound assignments and `++`/`--`
+  /// read the slot and still count. Property-chain targets are immutable
+  /// model data, so their key walk needs no write exclusion.
   private anyReadsTarget(nodes: readonly ts.Node[], target: ts.Expression): boolean {
     if (ts.isIdentifier(target)) {
       const decl = this.tast.declarationOf(target);
-      if (decl) return nodes.some((n) => this.identifierUsed(n, decl));
+      if (decl) return nodes.some((n) => this.identifierRead(n, decl));
     }
     return this.anyReadsKey(nodes, this.narrowKey(target));
   }

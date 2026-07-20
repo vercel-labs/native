@@ -123,6 +123,26 @@ export function guardedFinally(a: number): number {
     ],
   },
   {
+    name: "a write-only ternary arm mutates through the raw slot, no capture",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function writeOnlyArm(a: number, xs: readonly number[]): number {
+  let p: P | null = make(a);
+  const n = p !== null ? xs.map((x) => { p = null; return x; }).length : 0;
+  return p === null ? n + 100 : n;
+}
+`,
+    calls: [
+      { fn: "writeOnlyArm", args: [i(5), { t: "nums", v: [1, 2, 3] }] },
+      { fn: "writeOnlyArm", args: [i(5), { t: "nums", v: [] }] },
+      { fn: "writeOnlyArm", args: [i(-1), { t: "nums", v: [1, 2] }] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }

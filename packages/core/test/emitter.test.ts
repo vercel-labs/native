@@ -1699,6 +1699,26 @@ export function f(q: P | null, xs: readonly number[]): number {
   assert.match(zig, /n \+= p\.\?\.v;/);
 });
 
+test("a write-only ternary arm takes the plain comparison, a reading arm the capture", () => {
+  // A guarded capture serves READS: the bare target of a plain `=` inside
+  // the hit arm's callback never consumes it, so the arm declines the
+  // capture form (a bound-but-unused Zig capture is a compile error) and
+  // keeps `!= null`; the reading arm still binds and consumes its capture.
+  const zig = emit(`
+export interface P { readonly v: number; }
+export function writes(q: P | null, xs: readonly number[]): number {
+  let p: P | null = q;
+  return p !== null ? xs.map((x) => { p = null; return x; }).length : 0;
+}
+export function reads(q: P | null): number {
+  return q !== null ? q.v : 0;
+}
+`);
+  assert.match(zig, /if \(p != null\) \{/);
+  assert.doesNotMatch(zig, /if \(p\) \|/);
+  assert.match(zig, /if \(q\) \|q_2\| q_2\.v else 0/);
+});
+
 test("kernel capacities: default header uses the shared default kernel", () => {
   const zig = emit(`export function f(n: number): number { return n & 1; }`);
   assert.match(zig, /pub const rt = @import\("rt\.zig"\)\.default;/);

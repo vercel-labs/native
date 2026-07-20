@@ -8329,6 +8329,67 @@ export function f(q: P | null, flag: boolean): number {
   },
 ];
 
+// A guarded capture serves READS only: the bare target of a plain `=`
+// assignment writes the raw slot, never the capture, so an arm that only
+// writes the guarded local must decline the capture form (a Zig capture
+// nothing consumes is an unused-capture error). Compound assignments and
+// `++`/`--` read the slot and still gate the capture on.
+const writeOnlyArmCaptureCases: Case[] = [
+  {
+    // The repro: the hit arm's only occurrence of `p` is a callback's
+    // plain assignment — no read, so no capture; the plain `!= null`
+    // comparison keeps the ternary valid.
+    name: "a write-only ternary hit arm declines the capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, xs: readonly number[]): number {
+  let p: P | null = q;
+  return p !== null ? xs.map((x) => { p = null; return x; }).length : 0;
+}
+`,
+  },
+  {
+    // The `=== null` dual: TS narrows the ELSE arm, so the same read-aware
+    // judgment gates that side's capture.
+    name: "a write-only ternary miss-arm dual declines the capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, xs: readonly number[]): number {
+  let p: P | null = q;
+  return p === null ? 0 : xs.map((x) => { p = null; return x; }).length;
+}
+`,
+  },
+  {
+    // Non-regression: an arm that READS the target still binds the capture
+    // (and the unwrapped read consumes it).
+    name: "a reading ternary arm still binds the capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  return q !== null ? q.v : 0;
+}
+`,
+  },
+  {
+    // A guarded while-chain whose body only writes the target takes the
+    // same judgment: no read, no capture.
+    name: "a write-only guarded while body declines the capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  let n = 0;
+  while (p !== null && n < 3) {
+    p = null;
+    n += 1;
+  }
+  return n;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8883,6 +8944,7 @@ const corpus: Case[] = [
   ...valueSwitchExhaustivenessCases,
   ...flowTypeSoundnessCases,
   ...finallyStaticExclusionCases,
+  ...writeOnlyArmCaptureCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,
