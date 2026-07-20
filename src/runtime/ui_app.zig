@@ -1119,6 +1119,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         record.status,
                         record.payload,
                     ),
+                    // `.channel` records deliver the RECORDED event
+                    // verbatim through the channel the replayed
+                    // dispatch opened — the source thread never re-runs
+                    // at replay, so the journaled events are the whole
+                    // stream. Admission `.rejected` records never reach
+                    // here (marked by `exit_reason == .rejected`, they
+                    // regenerate and are skipped); an executor-truth
+                    // rejection feeds and retires the parked slot.
+                    .channel => try self.effects.feedChannelEvent(
+                        record.key,
+                        record.channel_kind,
+                        record.payload,
+                        record.dropped,
+                        record.channel_dropped_total,
+                    ),
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every
                     // other audio kind rides the plain shape.

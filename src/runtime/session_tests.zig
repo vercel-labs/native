@@ -2812,12 +2812,13 @@ test "a journal referencing blobs refuses to replay without its blob store" {
     try std.testing.expectError(error.ReplayMissingBlob, result);
 }
 
-/// Zero the `image_blob_len` field — the LAST eight bytes of the effect
-/// payload, see `journal.encodeEffect` — of the first journaled
-/// `.loaded` image record, in place. Framing and every other field stay
-/// valid, so the journal reader decodes the record fine: only replay's
-/// record-consistency gate can catch the damage. Returns whether a
-/// record was damaged.
+/// Zero the `image_blob_len` field of the first journaled `.loaded`
+/// image record, in place. Per `journal.encodeEffect` the v8 payload
+/// ends with image_blob_len (u64), channel_kind (u8),
+/// channel_dropped_total (u32), so the blob length lives 13 bytes from
+/// the end. Framing and every other field stay valid, so the journal
+/// reader decodes the record fine: only replay's record-consistency
+/// gate can catch the damage. Returns whether a record was damaged.
 fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
     var pos: usize = journal.preamble_len;
     while (bytes.len - pos >= 5) {
@@ -2828,7 +2829,7 @@ fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .image or record.image_outcome != .loaded or record.image_blob_len == 0) continue;
-        @memset(payload[payload.len - 8 ..], 0);
+        @memset(payload[payload.len - 13 ..][0..8], 0);
         return true;
     }
     return false;
@@ -2836,9 +2837,10 @@ fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
 
 /// Overwrite the decoded-dimension fields of the first journaled image
 /// record whose outcome matches, in place — `zeroFirstLoadedImageBlobLen`'s
-/// sibling. Per `journal.encodeEffect`, the effect payload ends with
+/// sibling. Per `journal.encodeEffect`, the v8 effect payload ends with
 /// image_width (u64), image_height (u64), image_blob_hash (16 bytes),
-/// image_blob_len (u64), so the dims live 40 and 32 bytes from the end.
+/// image_blob_len (u64), channel_kind (u8), channel_dropped_total
+/// (u32), so the dims live 45 and 37 bytes from the end.
 /// Framing and every other field stay valid: only replay's
 /// record-consistency gate can catch the damage. Returns whether a
 /// record was damaged.
@@ -2852,8 +2854,8 @@ fn patchFirstImageDims(bytes: []u8, outcome: effects_mod.EffectImageOutcome, wid
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .image or record.image_outcome != outcome) continue;
-        std.mem.writeInt(u64, payload[payload.len - 40 ..][0..8], width, .little);
-        std.mem.writeInt(u64, payload[payload.len - 32 ..][0..8], height, .little);
+        std.mem.writeInt(u64, payload[payload.len - 45 ..][0..8], width, .little);
+        std.mem.writeInt(u64, payload[payload.len - 37 ..][0..8], height, .little);
         return true;
     }
     return false;

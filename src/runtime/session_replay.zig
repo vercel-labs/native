@@ -32,6 +32,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const automation_protocol = @import("../automation/protocol.zig");
 const core = @import("core.zig");
 const journal = @import("session_journal.zig");
+const runtime_effects = @import("effects.zig");
 const session_blobs = @import("session_blobs.zig");
 
 pub const ReplayError = error{
@@ -210,6 +211,23 @@ pub fn replaySession(
                 // codec, in the completion entry, and in
                 // `EffectImageResult`, so every downstream cast
                 // (i64/f64 arm fields) holds by type.
+                // Channel records obey the recorder the same way: a
+                // post can never exceed `max_effect_channel_bytes`
+                // (`ChannelHandle.post` refuses the bound before
+                // staging), and only `.data` events carry bytes at all
+                // — `.closed` and `.rejected` are payload-free
+                // terminals. A record that decodes fine but claims
+                // otherwise is damaged or hand-edited, and the fed
+                // bytes would flow verbatim into the app's Msg (and
+                // into a fixed-size feed buffer) before anything could
+                // disprove them — refuse HERE, before the feed.
+                if (effect.kind == .channel and channelRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: channel record for key {d} claims .{s} with {d} payload bytes - a recorded post is bounded at {d} bytes and only .data events carry bytes, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.channel_kind), effect.payload.len, runtime_effects.max_effect_channel_bytes },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effect.kind == .image and imageDimsDamaged(effect)) {
                     std.debug.print(
                         "replay refused after event {d}: image record for id {d} claims .{s} with dimensions {d}x{d} - a recorded .loaded always carries nonzero decoded dimensions within the registered-image pixel budget and every other outcome records 0x0, so the journal is damaged or hand-edited; re-record the session\n",
@@ -340,6 +358,15 @@ fn resolveBlob(
 /// overflow-checked, a hand-edited product that wraps u64 is damage,
 /// not a small image — fits `registerCanvasImage`'s per-image slot
 /// bound; every other outcome carries 0x0.
+/// Whether a channel record's journaled shape contradicts what the
+/// recorder can produce (see the gate in `replaySession`): `.data`
+/// payloads stay within the post bound; `.closed` and `.rejected`
+/// carry no bytes.
+fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len > runtime_effects.max_effect_channel_bytes) return true;
+    return record.channel_kind != .data and record.payload.len > 0;
+}
+
 fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
     if (record.image_outcome != .loaded) {
         return record.image_width != 0 or record.image_height != 0;
@@ -381,6 +408,18 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // those requests, so the journaled record is the ONLY terminal
         // and must be fed like every other worker truth.
         .image => record.exit_reason == .rejected,
+        // Channel `.rejected` terminals follow the image convention
+        // exactly: admission refusals (occupied key, full channel
+        // table) mark themselves with the exit reason and regenerate —
+        // the replayed `openChannel` re-runs the same deterministic
+        // gates against re-derived occupancy windows and stages its
+        // own. An executor-truth rejection (the open that could not
+        // stage its channel) keeps `.exited` and FEEDS, retiring the
+        // slot the replayed open parked. `.data` and `.closed` are
+        // executor truth by definition — the source thread never
+        // re-runs at replay, so the journaled events are the ONLY
+        // delivery.
+        .channel => record.exit_reason == .rejected,
         // Launch-env deliveries are exactly what must NOT regenerate:
         // the recorded values feed the replayed envMsgs dispatch so the
         // replay launch's environment is never consulted.

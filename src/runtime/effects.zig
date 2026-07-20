@@ -792,6 +792,162 @@ pub const EffectImageResult = struct {
     status: u16 = 0,
 };
 
+/// How many external-source channels (`openChannel`) may be open at
+/// once. Channels are LONG-LIVED occupancies (open until close
+/// delivers), so they live in their own fixed table beside the effect
+/// slots — like timers and audio — while still sharing the keyed
+/// families' one key space.
+pub const max_effect_channels: usize = 8;
+
+/// Largest single `ChannelHandle.post` payload. Channel posts are
+/// small-message-shaped (sensor readings, socket frames, watcher
+/// notifications) — the spawn line bound is the honest ceiling, and it
+/// keeps a post inside one completion-queue entry and one inline
+/// journal record. Oversized posts return false and count as drops.
+pub const max_effect_channel_bytes: usize = max_effect_line_bytes;
+
+/// Staged posts one channel holds between drains. The staging FIFO is
+/// NON-LOSSY: nothing already staged is ever evicted — a full stage
+/// makes `post` return false and counts the drop, and the next
+/// delivered event carries the counts (never silence, never a stall of
+/// the posting thread).
+pub const max_effect_channel_pending: usize = 32;
+
+/// What one channel event Msg reports. `.data` is one delivered post;
+/// `.closed` is the exactly-one terminal `closeChannel` produces (final
+/// drop totals aboard); `.rejected` is the exactly-one terminal a
+/// refused `openChannel` produces (duplicate occupied key, full channel
+/// table, or an executor that could not stage the channel).
+pub const EffectChannelEventKind = enum(u8) {
+    data,
+    closed,
+    rejected,
+};
+
+/// Payload for `on_event` Msg constructors of external-source channels.
+/// `bytes` is drain scratch, valid only during the `update` call that
+/// receives it — copy what the model keeps. `dropped_pending` counts
+/// posts refused since the previous delivered event on this channel;
+/// `dropped_total` is the occupancy's cumulative count — back-pressure
+/// is part of the contract, reported honestly, never silent.
+pub const EffectChannelEvent = struct {
+    key: u64,
+    kind: EffectChannelEventKind = .data,
+    bytes: []const u8 = "",
+    dropped_pending: u32 = 0,
+    dropped_total: u32 = 0,
+};
+
+/// One channel's cross-thread staging FIFO: fixed entries, never
+/// evicted (see `max_effect_channel_pending`). Allocated from
+/// `process_allocator` per open occupancy and freed when the `.closed`
+/// terminal delivers (or at teardown) — the loop thread frees it only
+/// after `open` was cleared under the mutex, so no post can still be
+/// copying into it.
+const ChannelStaging = struct {
+    head: usize = 0,
+    len: usize = 0,
+    lens: [max_effect_channel_pending]u32 = @splat(0),
+    seqs: [max_effect_channel_pending]u64 = @splat(0),
+    data: [max_effect_channel_pending][max_effect_channel_bytes]u8 = undefined,
+};
+
+/// The owner-side references a post may touch WHILE THE CHANNEL IS
+/// OPEN: the shared post-order stamp, the pending mirror behind
+/// `hasPending`, and the services binding behind the host wake. The
+/// validity argument is the mutex: every close path (closeChannel,
+/// teardown) clears `open` under `ChannelShared.mutex` before the owner
+/// can be freed, and a post reads these only after observing `open`
+/// under that same mutex — so a post that may touch the owner holds the
+/// lock the close must first acquire.
+const ChannelOwnerRefs = struct {
+    seq: *std.atomic.Value(u64),
+    pending: *std.atomic.Value(usize),
+    services: *const ?*const platform.PlatformServices,
+};
+
+/// The thread-shared half of one channel table slot — the block a
+/// `ChannelHandle` resolves through. Allocated from `process_allocator`
+/// the first time its slot opens and DELIBERATELY NEVER FREED (the
+/// abandoned-worker invariant): the app's posting threads are the
+/// app's, nothing here can join them, so a handle may call `post` at
+/// any later time — including after `closeChannel` and after the whole
+/// runtime tore down — and everything that call can reach must stay
+/// allocated forever. The leak is bounded (one ~200-byte header per
+/// channel slot per Effects instance; the multi-KiB staging FIFO is
+/// separate and freed on close) and the post-after-death answer is a
+/// plain `false` through the header's `open`/`generation` gate, never a
+/// use-after-free.
+pub const ChannelShared = struct {
+    mutex: SpinMutex = .{},
+    /// Posts are accepted only while set. Cleared under the mutex by
+    /// every close path before anything a post could reach is freed.
+    open: bool = false,
+    /// The occupancy this block currently serves; a handle stamped
+    /// with an older generation posts into nothing (returns false).
+    generation: u32 = 0,
+    /// The occupancy's effective staging bound (1..max_effect_channel_pending).
+    max_pending: u32 = max_effect_channel_pending,
+    /// Posts refused since the last delivered event / over the whole
+    /// occupancy. Producer- and consumer-shared, guarded by `mutex`.
+    dropped_pending: u32 = 0,
+    dropped_total: u32 = 0,
+    staging: ?*ChannelStaging = null,
+    /// Valid only while `open` (see `ChannelOwnerRefs`).
+    owner: ?ChannelOwnerRefs = null,
+};
+
+/// The THREAD-SAFE posting handle `openChannel` returns: the one
+/// sanctioned way an app-owned thread (socket reader, file watcher,
+/// worker) wakes the UI loop and produces a Msg. Plain copyable value —
+/// hand it to the source thread and post away. Lifetime by
+/// construction, not discipline: the handle resolves through a
+/// generation-stamped process-lifetime header (`ChannelShared`), never
+/// a raw pointer into a table slot, so a post after `closeChannel`,
+/// after the slot was reused by a later `openChannel`, or after the
+/// runtime itself tore down answers `false` safely instead of touching
+/// freed memory.
+pub const ChannelHandle = struct {
+    shared: ?*ChannelShared = null,
+    generation: u32 = 0,
+
+    /// Stage `bytes` for delivery as one `.data` event Msg on the next
+    /// drain, and wake the host loop. Callable from ANY thread. Returns
+    /// false — never blocking, never silently dropping a delivered
+    /// event — when the channel is closed (or this handle's occupancy
+    /// is over), when `bytes` exceeds `max_effect_channel_bytes`, or
+    /// when the staging FIFO is full; the bound and capacity refusals
+    /// count into the drop counters the next delivered event carries.
+    pub fn post(handle: ChannelHandle, bytes: []const u8) bool {
+        const shared = handle.shared orelse return false;
+        shared.mutex.lock();
+        defer shared.mutex.unlock();
+        if (!shared.open or shared.generation != handle.generation) return false;
+        // Open implies the owner references are alive (see
+        // `ChannelOwnerRefs`) and staging is installed.
+        const owner = shared.owner.?;
+        const staging = shared.staging.?;
+        if (bytes.len > max_effect_channel_bytes or staging.len >= shared.max_pending) {
+            shared.dropped_pending +|= 1;
+            shared.dropped_total +|= 1;
+            // Wake anyway: the counts surface on the next delivered
+            // event, and a stalled consumer is exactly when the app
+            // needs to hear about drops.
+            if (owner.services.*) |services| services.wake() catch {};
+            return false;
+        }
+        const seq = owner.seq.fetchAdd(1, .monotonic);
+        const index = (staging.head + staging.len) % max_effect_channel_pending;
+        staging.lens[index] = @intCast(bytes.len);
+        staging.seqs[index] = seq;
+        @memcpy(staging.data[index][0..bytes.len], bytes);
+        staging.len += 1;
+        _ = owner.pending.fetchAdd(1, .monotonic);
+        if (owner.services.*) |services| services.wake() catch {};
+        return true;
+    }
+};
+
 /// Base platform timer id for fx timers: slot N arms the platform timer
 /// `effect_timer_platform_id_base + N`. Lives in the framework-reserved
 /// id range (`platform.reserved_timer_id_base`) with an `0x00f7_0000`
@@ -841,6 +997,14 @@ pub const EffectResultKind = enum(u8) {
     /// journaling `image_blob_hash`/`image_blob_len` in their place
     /// (journal format v7).
     image = 11,
+    /// One external-source channel event (`EffectChannelEvent`) —
+    /// journal format v8. The post bytes ride the record's `payload`
+    /// INLINE, never the blob store: a post is bounded at
+    /// `max_effect_channel_bytes` (small-message-shaped by contract),
+    /// so the record stays far under budget and replay needs no side
+    /// store to resolve it. `dropped_pending` rides the shared
+    /// `dropped` field; the cumulative total gets its own field.
+    channel = 12,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -913,6 +1077,11 @@ pub const EffectResultRecord = struct {
     /// no bytes (source-stage failures).
     image_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     image_blob_len: u64 = 0,
+    /// `.channel` records: the delivered event kind (post bytes ride
+    /// `payload` inline, `dropped_pending` rides `dropped`) and the
+    /// occupancy's cumulative drop total.
+    channel_kind: EffectChannelEventKind = .data,
+    channel_dropped_total: u32 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -1142,6 +1311,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
+        pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -1246,6 +1416,18 @@ pub fn Effects(comptime Msg: type) type {
             return struct {
                 fn make(result: EffectImageResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_event` of external-source
+        /// channels: `channelMsg(.tick)` builds `Msg{ .tick = event }` —
+        /// the variant's payload type must be
+        /// `native_sdk.EffectChannelEvent`.
+        pub fn channelMsg(comptime tag: std.meta.Tag(Msg)) ChannelMsgFn {
+            return struct {
+                fn make(event: EffectChannelEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
         }
@@ -1567,6 +1749,54 @@ pub fn Effects(comptime Msg: type) type {
             on_fire: ?TimerMsgFn = null,
         };
 
+        pub const OpenChannelOptions = struct {
+            /// Caller-chosen identity, stored in the model. Shares the
+            /// keyed families' one key space: occupied from open until
+            /// the `.closed` terminal delivers, blocking (and blocked
+            /// by) a same-key spawn/fetch/file/clipboard/host/image.
+            key: u64,
+            /// Every channel event — each delivered post, the
+            /// `.closed` terminal, a refused open's `.rejected` —
+            /// arrives through this constructor. Required: a channel
+            /// with nothing to tell is not a channel.
+            on_event: ChannelMsgFn,
+            /// Back-pressure bound: staged posts held between drains,
+            /// clamped to 1..`max_effect_channel_pending`. Posts past
+            /// it return false and count as drops — deterministic
+            /// arithmetic on the wire value, so replay clamps
+            /// identically.
+            max_pending: u32 = max_effect_channel_pending,
+        };
+
+        /// How one channel table slot advances: `.open` accepts posts
+        /// and delivers `.data` events; `.closing` (closeChannel ran)
+        /// flushes the staged backlog, delivers the one `.closed`
+        /// terminal, and retires to `.idle`. The KEY stays occupied
+        /// through `.closing` — delivery of the terminal is what frees
+        /// it, the families' shared discipline.
+        const ChannelSlotState = enum(u8) { idle, open, closing };
+
+        const ChannelSlot = struct {
+            state: ChannelSlotState = .idle,
+            key: u64 = 0,
+            generation: u32 = 0,
+            on_event: ?ChannelMsgFn = null,
+            /// The slot's process-lifetime posting header — created at
+            /// the slot's first open, reused across occupancies, never
+            /// freed (see `ChannelShared`).
+            shared: ?*ChannelShared = null,
+            /// `.closing` only: the close marker's post-order stamp.
+            /// The `.closed` terminal delivers once every staged post
+            /// older than it has drained (all of them — nothing stages
+            /// after close), keeping data-before-closed order by the
+            /// same stamp the posts carry.
+            closed_seq: u64 = 0,
+            /// `.closing` only: whether `closed_seq` is armed. Never
+            /// set under session replay — there the journaled `.closed`
+            /// record is the one delivery (`feedChannelEvent`).
+            closed_staged: bool = false,
+        };
+
         /// The single audio playback channel — one player is the whole
         /// platform surface, so the effects layer holds exactly one.
         /// Like timers it is a platform service arm, not a worker-thread
@@ -1658,7 +1888,7 @@ pub fn Effects(comptime Msg: type) type {
 
         const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, image };
 
-        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image, channel };
 
         const Entry = struct {
             kind: EntryKind = .line,
@@ -1715,6 +1945,14 @@ pub fn Effects(comptime Msg: type) type {
             image_fed: bool = false,
             image_fed_width: u64 = 0,
             image_fed_height: u64 = 0,
+            /// `.channel` entries (session replay's fed channel events;
+            /// live events ride the per-channel staging instead): the
+            /// recorded event kind. `slot_index`/`generation` name a
+            /// CHANNEL table slot here, not an effect slot; the bytes
+            /// ride `line_bytes` (`max_effect_channel_bytes` fits by
+            /// construction), `dropped_before` carries dropped_pending
+            /// and `dropped_lines` the cumulative total.
+            channel_kind: EffectChannelEventKind = .data,
             line_fn: ?LineMsgFn = null,
             exit_fn: ?ExitMsgFn = null,
             response_fn: ?ResponseMsgFn = null,
@@ -1765,6 +2003,17 @@ pub fn Effects(comptime Msg: type) type {
             /// there for why they must be non-lossy) and take this
             /// union shape only at drain time, in `takePendingMsg`.
             image: struct { result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool },
+            /// Loop-thread channel `.rejected` terminals (refused
+            /// opens). Exactly the image discipline: never in the
+            /// lossy ring — they stage in the non-lossy
+            /// `pending_channels` (see `PendingChannel`) and take this
+            /// union shape only at drain time, in `takePendingMsg`.
+            /// `regenerates` follows the image classification:
+            /// validation refusals (occupied key, full channel table)
+            /// re-derive under replay and are skipped; an executor
+            /// that could not stage the channel is executor truth and
+            /// feeds.
+            channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -1788,6 +2037,10 @@ pub fn Effects(comptime Msg: type) type {
                     // eviction here would silently break the
                     // exactly-one-terminal-per-load contract.
                     .image => unreachable,
+                    // Channel terminals stage in the non-lossy
+                    // `pending_channels` for the same reason —
+                    // exactly one `.rejected` per refused open.
+                    .channel => unreachable,
                 }
             }
 
@@ -1802,6 +2055,7 @@ pub fn Effects(comptime Msg: type) type {
                     .host => 0,
                     // Never in the ring; see `addDropped`.
                     .image => unreachable,
+                    .channel => unreachable,
                 };
             }
         };
@@ -1823,6 +2077,19 @@ pub fn Effects(comptime Msg: type) type {
             seq: u64,
             result: EffectImageResult,
             image_fn: ?ImageMsgFn,
+            regenerates: bool,
+        };
+
+        /// One loop-side channel `.rejected` terminal awaiting drain —
+        /// the channel twin of `PendingImage`, non-lossy for the same
+        /// contract (exactly one terminal per refused open, no drop
+        /// counter that could make an eviction visible, unbounded per
+        /// dispatch). Shares the `pending_seq` stamp so the drain
+        /// merges all three loop-side stages in enqueue order.
+        const PendingChannel = struct {
+            seq: u64,
+            event: EffectChannelEvent,
+            channel_fn: ?ChannelMsgFn,
             regenerates: bool,
         };
 
@@ -2257,6 +2524,25 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        /// Fixed external-source channel table (see
+        /// `max_effect_channels`): long-lived keyed occupancies beside
+        /// the effect slots. Loop-thread only — the thread-shared half
+        /// of each slot lives behind its `ChannelSlot.shared` header.
+        channel_slots: [max_effect_channels]ChannelSlot = [_]ChannelSlot{.{}} ** max_effect_channels,
+        /// Monotonic post-order stamp shared by every channel's staging
+        /// FIFO and the close markers: the cross-channel delivery order
+        /// and the drain boundary's causality cut (posts stamped at or
+        /// past a pass's snapshot wait for the next wake, exactly like
+        /// the worker queue's budget).
+        channel_seq: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        /// Undelivered channel events (staged posts + armed close
+        /// markers), mirrored atomically so `hasPending` can answer
+        /// without taking any channel mutex.
+        channel_pending_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+        /// Scratch a delivered post is copied into so the event's byte
+        /// slice stays valid while `update` runs (recycled per
+        /// delivered channel Msg, the `drain_scratch` discipline).
+        channel_drain_scratch: [max_effect_channel_bytes]u8 = undefined,
         queue_mutex: SpinMutex = .{},
         queue: [max_effect_queue_entries]Entry = undefined,
         queue_head: usize = 0,
@@ -2284,6 +2570,15 @@ pub fn Effects(comptime Msg: type) type {
         pending_image_spill: []PendingImage = &.{},
         pending_image_head: usize = 0,
         pending_image_len: usize = 0,
+        /// Loop-thread-only channel-terminal stage (see
+        /// `PendingChannel` for the non-lossy contract) — the image
+        /// stage's storage discipline exactly: inline until a burst
+        /// outgrows it, geometric spill after, freed when it drains
+        /// empty and at `deinit`.
+        pending_channels: [max_effect_pending_images_inline]PendingChannel = undefined,
+        pending_channel_spill: []PendingChannel = &.{},
+        pending_channel_head: usize = 0,
+        pending_channel_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -2361,6 +2656,29 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            // Close every external-source channel FIRST among the
+            // loop-side teardowns: clearing `open` under each shared
+            // mutex fences the app's posting threads off this struct
+            // (and off the services binding severed below) — after
+            // this loop a post can only read the process-lifetime
+            // header and answer false. Terminal discipline matches the
+            // other families' teardown: staged events are discarded,
+            // no Msg is delivered. The `ChannelShared` headers stay
+            // allocated forever (see `ChannelShared` for the bounded
+            // leak's invariant); only the staging FIFOs free here.
+            for (&self.channel_slots) |*channel_slot| {
+                if (channel_slot.shared) |shared| {
+                    shared.mutex.lock();
+                    shared.open = false;
+                    const staging = shared.staging;
+                    shared.staging = null;
+                    shared.owner = null;
+                    shared.mutex.unlock();
+                    if (staging) |s| process_allocator.destroy(s);
+                }
+                channel_slot.* = .{};
+            }
+            self.channel_pending_count.store(0, .release);
             // Host requests park on the loop thread with no worker to
             // wait for: retire them here so the worker wait below never
             // stalls on one, and any late host answer reports
@@ -2599,6 +2917,13 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_image_head = 0;
             self.pending_image_len = 0;
+            // Undrained staged channel terminals are plain data too.
+            if (self.pending_channel_spill.len > 0) {
+                self.allocator.free(self.pending_channel_spill);
+                self.pending_channel_spill = &.{};
+            }
+            self.pending_channel_head = 0;
+            self.pending_channel_len = 0;
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -3303,6 +3628,169 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_thread = thread;
         }
 
+        /// Open an external-source channel: the public seam for
+        /// app-owned long-lived sources (sockets, file watchers, worker
+        /// threads) to wake the UI loop and produce Msgs WITHOUT timer
+        /// polling — the same completion-queue-plus-wake ride every
+        /// runtime-owned source already takes, made first-class. The
+        /// returned `ChannelHandle` is thread-safe: hand it to the
+        /// source thread and `post(bytes)` away; each accepted post
+        /// delivers exactly one `.data` event Msg through `on_event` on
+        /// the next drain (bytes in drain scratch — copy what the model
+        /// keeps). A channel is LONG-LIVED: it occupies its key from
+        /// open until `closeChannel`'s `.closed` terminal delivers, and
+        /// the key space is the keyed families' shared one — a same-key
+        /// fetch rejects while a channel holds the key, and vice versa.
+        /// Never fails from the caller's view: a duplicate occupied
+        /// key, a full channel table, or an executor that could not
+        /// stage the channel delivers exactly one `.rejected` event on
+        /// the next drain (and the returned handle is dead — posts
+        /// return false). Channel events are journaled as executor
+        /// truth at the drain boundary; under session replay the
+        /// recorded events feed verbatim and the source is NEVER re-run
+        /// — replay needs no source thread at all.
+        pub fn openChannel(self: *Self, options: OpenChannelOptions) ChannelHandle {
+            self.reclaimSlots();
+            const dead: ChannelHandle = .{};
+            // Occupancy is the keyed families' shared admission gate —
+            // validation-class, so the refusal regenerates under
+            // replay (the same windows re-derive there).
+            if (self.keyOccupiedUntilDelivery(options.key)) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return dead;
+            }
+            const slot_index = self.findIdleChannelSlot() orelse {
+                self.rejectChannel(options.key, options.on_event, true);
+                return dead;
+            };
+            const slot = &self.channel_slots[slot_index];
+            // The posting header is process-lifetime storage: created
+            // at the slot's first open, reused forever (see
+            // `ChannelShared`). Failing to stage the channel is NOT
+            // regenerable validation — the replayed open stages its
+            // own and parks the slot, so this terminal journals as
+            // executor truth and feeds (mirroring `loadImage`'s
+            // allocation-failure classification), and the staged
+            // rejection holds the key until it drains.
+            const shared = slot.shared orelse blk: {
+                const created = process_allocator.create(ChannelShared) catch {
+                    self.rejectChannel(options.key, options.on_event, false);
+                    return dead;
+                };
+                created.* = .{};
+                slot.shared = created;
+                break :blk created;
+            };
+            const staging = process_allocator.create(ChannelStaging) catch {
+                self.rejectChannel(options.key, options.on_event, false);
+                return dead;
+            };
+            staging.* = .{};
+            const generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.state = .open;
+            slot.key = options.key;
+            slot.generation = generation;
+            slot.on_event = options.on_event;
+            slot.closed_seq = 0;
+            slot.closed_staged = false;
+            shared.mutex.lock();
+            shared.open = true;
+            shared.generation = generation;
+            shared.max_pending = std.math.clamp(options.max_pending, 1, @as(u32, max_effect_channel_pending));
+            shared.dropped_pending = 0;
+            shared.dropped_total = 0;
+            shared.staging = staging;
+            shared.owner = .{
+                .seq = &self.channel_seq,
+                .pending = &self.channel_pending_count,
+                .services = &self.services,
+            };
+            shared.mutex.unlock();
+            return .{ .shared = shared, .generation = generation };
+        }
+
+        /// The thread-safe posting handle of the OPEN channel with
+        /// `key`, for callers that did not keep `openChannel`'s return
+        /// (an embedder resolving a channel a transpiled core opened).
+        /// Null while no open channel holds the key — including the
+        /// `.closing` window, where posts could no longer land anyway.
+        pub fn channelHandle(self: *Self, key: u64) ?ChannelHandle {
+            for (&self.channel_slots) |*slot| {
+                if (slot.state == .open and slot.key == key) {
+                    return .{ .shared = slot.shared, .generation = slot.generation };
+                }
+            }
+            return null;
+        }
+
+        /// Close the open channel with `key`: posts stop landing
+        /// immediately (the handle answers false), the staged backlog
+        /// flushes in post order, and exactly one terminal `.closed`
+        /// event (final drop totals aboard) delivers and retires the
+        /// key. Unknown keys — and a key already `.closing` — are a
+        /// no-op, `cancelTimer`'s idle rule; and `cancel(key)` is NOT a
+        /// channel's close (channels end the way audio does: through
+        /// their own verb).
+        pub fn closeChannel(self: *Self, key: u64) void {
+            const slot = self.findChannelSlot(key) orelse return;
+            if (slot.state != .open) return;
+            slot.state = .closing;
+            const shared = slot.shared.?;
+            shared.mutex.lock();
+            shared.open = false;
+            shared.mutex.unlock();
+            // Replay mode: the recorded session already journaled this
+            // channel's `.closed` terminal, and feeding that record is
+            // the one delivery — the slot parks `.closing` until then
+            // (the `cancel` discipline).
+            if (self.replay) return;
+            slot.closed_seq = self.channel_seq.fetchAdd(1, .monotonic);
+            slot.closed_staged = true;
+            _ = self.channel_pending_count.fetchAdd(1, .monotonic);
+            self.wakeHost();
+        }
+
+        /// Feed a RECORDED channel event — the session-replay feed
+        /// (and the failure-class test seam): the journaled kind,
+        /// bytes, and drop counts deliver verbatim through the OPEN (or
+        /// `.closing`) channel's `on_event` at the next drain, in queue
+        /// order with every other fed result. `.closed` and `.rejected`
+        /// retire the channel slot at delivery, the same causal instant
+        /// live delivery frees the key. Bytes are clamped to
+        /// `max_effect_channel_bytes` for memory safety only — the
+        /// replay damage gate refuses over-bound records before they
+        /// reach here, and no recorder-produced journal carries one.
+        pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull }!void {
+            const slot_index = blk: {
+                for (&self.channel_slots, 0..) |*slot, index| {
+                    if (slot.state != .idle and slot.key == key) break :blk index;
+                }
+                return error.EffectNotFound;
+            };
+            const slot = &self.channel_slots[slot_index];
+            const staged_len = @min(bytes.len, max_effect_channel_bytes);
+            var entry: Entry = .{
+                .kind = .channel,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = key,
+                .line_len = @intCast(staged_len),
+                .dropped_before = dropped_pending,
+                .dropped_lines = dropped_total,
+                .channel_kind = kind,
+            };
+            @memcpy(entry.line_bytes[0..staged_len], bytes[0..staged_len]);
+            // Everything goes THROUGH the queue (the fed-image
+            // discipline): a full queue back-pressures with
+            // `error.EffectQueueFull` and the replay pump drains and
+            // feeds again, so recorded delivery order survives drain
+            // passes larger than the queue.
+            if (!self.enqueue(&entry)) return error.EffectQueueFull;
+            self.wakeHost();
+        }
+
         /// Put text on the system clipboard through the platform
         /// pasteboard — the same seam the runtime's cmd+C copy uses —
         /// and deliver exactly one terminal Msg with an explicit
@@ -3478,6 +3966,12 @@ pub fn Effects(comptime Msg: type) type {
             // feeds, and the parked fake is what rejects this request
             // there.
             if (self.stagedImageOccupiesKey(options.key)) return self.rejectHost(options.key, options.on_result);
+            // Channel occupancies hold the shared key space the same
+            // way: from open (or a staged executor-truth rejection)
+            // until the terminal delivers, live and replayed alike.
+            if (self.channelOccupiesKey(options.key) or self.stagedChannelOccupiesKey(options.key)) {
+                return self.rejectHost(options.key, options.on_result);
+            }
             const slot_index = blk: {
                 // In flight = running (no answer yet) OR draining with
                 // an undelivered answer: both are replaced, dropping
@@ -4097,6 +4591,8 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hasPending(self: *const Self) bool {
             return self.pending_exit_len > 0 or
                 self.pending_image_len > 0 or
+                self.pending_channel_len > 0 or
+                self.channel_pending_count.load(.acquire) > 0 or
                 self.queue_count.load(.acquire) > 0;
         }
 
@@ -4118,13 +4614,18 @@ pub fn Effects(comptime Msg: type) type {
         /// always has its follow-up wake already scheduled.
         pub const DrainBoundary = struct {
             /// Loop-side pending entries staged before the pass: stamps
-            /// below this deliver (both pending structures share the
-            /// monotonic `pending_seq` stamp).
+            /// below this deliver (the loop-side pending structures
+            /// share the monotonic `pending_seq` stamp).
             pending_before: u64,
             /// Worker-queue entries enqueued before the pass. The queue
             /// is FIFO, so consuming exactly this many dequeues consumes
             /// exactly the pre-existing entries.
             queue_budget: usize,
+            /// Channel posts (and close markers) stamped before the
+            /// pass: `channel_seq` stamps below this deliver. A post
+            /// landing mid-pass waits for the wake it already nudged —
+            /// the same causality cut the other two fields make.
+            channel_before: u64,
         };
 
         /// Snapshot the completion backlog at the start of one drain
@@ -4133,6 +4634,7 @@ pub fn Effects(comptime Msg: type) type {
             return .{
                 .pending_before = self.pending_seq,
                 .queue_budget = self.queue_count.load(.acquire),
+                .channel_before = self.channel_seq.load(.acquire),
             };
         }
 
@@ -4148,6 +4650,7 @@ pub fn Effects(comptime Msg: type) type {
             var unbounded: DrainBoundary = .{
                 .pending_before = std.math.maxInt(u64),
                 .queue_budget = std.math.maxInt(usize),
+                .channel_before = std.math.maxInt(u64),
             };
             return self.takeMsgWithin(&unbounded);
         }
@@ -4291,8 +4794,27 @@ pub fn Effects(comptime Msg: type) type {
                             const image_fn = entry.image_fn orelse continue;
                             return image_fn(entry.result);
                         },
+                        .channel => |entry| {
+                            // The image arm's journal encoding, reused:
+                            // only regenerating admission refusals mark
+                            // themselves with the exit reason — replay
+                            // skips those records (the re-run open
+                            // stages its own); an executor-truth
+                            // rejection keeps `.exited` and feeds.
+                            self.journalNote(.{
+                                .kind = .channel,
+                                .key = entry.event.key,
+                                .channel_kind = entry.event.kind,
+                                .dropped = entry.event.dropped_pending,
+                                .channel_dropped_total = entry.event.dropped_total,
+                                .exit_reason = if (entry.regenerates) .rejected else .exited,
+                            });
+                            const channel_fn = entry.channel_fn orelse continue;
+                            return channel_fn(entry.event);
+                        },
                     }
                 }
+                if (self.takeChannelStagedMsg(boundary.channel_before)) |msg| return msg;
                 if (boundary.queue_budget == 0) return null;
                 if (!self.dequeueInto(&self.drain_scratch)) return null;
                 boundary.queue_budget -= 1;
@@ -4706,8 +5228,122 @@ pub fn Effects(comptime Msg: type) type {
                         const deliver_fn = image_fn orelse continue;
                         return deliver_fn(result);
                     },
+                    .channel => {
+                        // A fed (session-replay / test) channel event:
+                        // `slot_index` names a CHANNEL table slot, so
+                        // the shared `slot`/`cancelled` prelude above
+                        // is meaningless here and unused. The recorded
+                        // kind, bytes, and drop counts deliver
+                        // verbatim; the handler resolves from the live
+                        // slot at delivery (the audio resolve rule).
+                        const channel_slot = &self.channel_slots[entry.slot_index];
+                        if (channel_slot.state == .idle or entry.generation != channel_slot.generation) continue;
+                        const on_event = channel_slot.on_event;
+                        // Terminals retire the slot BEFORE the Msg
+                        // reaches update — the drain-wide discipline:
+                        // the key frees at the same causal instant on
+                        // both sides, so a handler that reopens its
+                        // own key is accepted.
+                        if (entry.channel_kind != .data) retireChannelSlot(channel_slot);
+                        const event: EffectChannelEvent = .{
+                            .key = entry.key,
+                            .kind = entry.channel_kind,
+                            .bytes = entry.line_bytes[0..entry.line_len],
+                            .dropped_pending = entry.dropped_before,
+                            .dropped_total = entry.dropped_lines,
+                        };
+                        self.journalNote(.{
+                            .kind = .channel,
+                            .key = event.key,
+                            .payload = event.bytes,
+                            .channel_kind = event.kind,
+                            .dropped = event.dropped_pending,
+                            .channel_dropped_total = event.dropped_total,
+                        });
+                        const deliver_fn = on_event orelse continue;
+                        return deliver_fn(event);
+                    },
                 }
             }
+        }
+
+        /// Deliver the oldest boundary-eligible LIVE channel event: the
+        /// smallest post-order stamp across every channel's staging
+        /// FIFO, or a `.closing` channel's armed close marker once its
+        /// backlog drained (every staged post is older than the marker
+        /// by construction, so data-before-closed holds per channel and
+        /// cross-channel delivery follows post order). Stamps at or
+        /// past `before` wait for the next wake — the posting thread
+        /// already nudged it (`DrainBoundary` causality). Loop-thread
+        /// only; each pop is a bounded copy under the channel's spin
+        /// mutex into `channel_drain_scratch`, so the delivered slice
+        /// stays valid while `update` runs.
+        fn takeChannelStagedMsg(self: *Self, before: u64) ?Msg {
+            var best_index: ?usize = null;
+            var best_seq: u64 = std.math.maxInt(u64);
+            var best_closed = false;
+            for (&self.channel_slots, 0..) |*slot, index| {
+                if (slot.state == .idle) continue;
+                const shared = slot.shared orelse continue;
+                shared.mutex.lock();
+                var seq: ?u64 = null;
+                var is_closed = false;
+                if (shared.staging) |staging| {
+                    if (staging.len > 0) seq = staging.seqs[staging.head];
+                }
+                shared.mutex.unlock();
+                if (seq == null and slot.state == .closing and slot.closed_staged) {
+                    seq = slot.closed_seq;
+                    is_closed = true;
+                }
+                const candidate = seq orelse continue;
+                if (candidate >= before) continue;
+                if (candidate < best_seq) {
+                    best_seq = candidate;
+                    best_index = index;
+                    best_closed = is_closed;
+                }
+            }
+            const index = best_index orelse return null;
+            const slot = &self.channel_slots[index];
+            const shared = slot.shared.?;
+            const on_event = slot.on_event;
+            var event: EffectChannelEvent = .{ .key = slot.key, .kind = .data };
+            if (best_closed) {
+                slot.closed_staged = false;
+                shared.mutex.lock();
+                event.kind = .closed;
+                event.dropped_pending = shared.dropped_pending;
+                event.dropped_total = shared.dropped_total;
+                shared.dropped_pending = 0;
+                shared.mutex.unlock();
+                // Retire BEFORE the Msg reaches update (the key frees
+                // at delivery, the families' shared instant).
+                retireChannelSlot(slot);
+            } else {
+                shared.mutex.lock();
+                const staging = shared.staging.?;
+                const len = staging.lens[staging.head];
+                @memcpy(self.channel_drain_scratch[0..len], staging.data[staging.head][0..len]);
+                staging.head = (staging.head + 1) % max_effect_channel_pending;
+                staging.len -= 1;
+                event.bytes = self.channel_drain_scratch[0..len];
+                event.dropped_pending = shared.dropped_pending;
+                event.dropped_total = shared.dropped_total;
+                shared.dropped_pending = 0;
+                shared.mutex.unlock();
+            }
+            _ = self.channel_pending_count.fetchSub(1, .monotonic);
+            self.journalNote(.{
+                .kind = .channel,
+                .key = event.key,
+                .payload = event.bytes,
+                .channel_kind = event.kind,
+                .dropped = event.dropped_pending,
+                .channel_dropped_total = event.dropped_total,
+            });
+            const deliver_fn = on_event orelse return null;
+            return deliver_fn(event);
         }
 
         /// Best-effort decode + register of a replayed image record's
@@ -5464,6 +6100,81 @@ pub fn Effects(comptime Msg: type) type {
             });
         }
 
+        /// Stage a refused open's one `.rejected` terminal —
+        /// `rejectImage`'s channel twin, same `regenerates` provenance:
+        /// true for the deterministic admission refusals replay
+        /// re-derives (occupied key, full channel table), false when
+        /// the executor could not stage an otherwise valid channel
+        /// (process-allocator failure the replayed open never
+        /// reproduces — journals as executor truth and feeds, and the
+        /// staged terminal holds the key until it drains).
+        fn rejectChannel(self: *Self, key: u64, channel_fn: ChannelMsgFn, regenerates: bool) void {
+            self.stagePendingChannel(.{
+                .seq = self.nextPendingSeq(),
+                .event = .{ .key = key, .kind = .rejected },
+                .channel_fn = channel_fn,
+                .regenerates = regenerates,
+            });
+        }
+
+        fn findChannelSlot(self: *Self, key: u64) ?*ChannelSlot {
+            for (&self.channel_slots) |*slot| {
+                if (slot.state != .idle and slot.key == key) return slot;
+            }
+            return null;
+        }
+
+        fn findIdleChannelSlot(self: *Self) ?usize {
+            for (&self.channel_slots, 0..) |*slot, index| {
+                if (slot.state == .idle) return index;
+            }
+            return null;
+        }
+
+        /// A channel occupies its key from open through the `.closing`
+        /// flush until the `.closed` terminal delivers — the keyed
+        /// families' posted-but-undelivered window, held by the table
+        /// state instead of a slot marker.
+        fn channelOccupiesKey(self: *Self, key: u64) bool {
+            return self.findChannelSlot(key) != null;
+        }
+
+        /// A staged executor-truth channel rejection occupies its key
+        /// until the drain delivers it — `stagedImageOccupiesKey`'s
+        /// channel twin, with the identical replay-window reasoning
+        /// (see there). Regenerating admission refusals deliberately
+        /// do NOT occupy: both sides refuse and stage identically.
+        fn stagedChannelOccupiesKey(self: *Self, key: u64) bool {
+            const storage = self.pendingChannelStorage();
+            var index: usize = 0;
+            while (index < self.pending_channel_len) : (index += 1) {
+                const entry = &storage[(self.pending_channel_head + index) % storage.len];
+                if (!entry.regenerates and entry.event.key == key) return true;
+            }
+            return false;
+        }
+
+        /// Retire a channel occupancy at terminal delivery: free the
+        /// staging FIFO (posts stopped touching it the moment `open`
+        /// cleared under the mutex — see `ChannelStaging`) and return
+        /// the slot to `.idle`. The `ChannelShared` header stays,
+        /// generation-dead, for the slot's next occupancy. Loop-thread
+        /// only.
+        fn retireChannelSlot(slot: *ChannelSlot) void {
+            if (slot.shared) |shared| {
+                shared.mutex.lock();
+                shared.open = false;
+                const staging = shared.staging;
+                shared.staging = null;
+                shared.owner = null;
+                shared.mutex.unlock();
+                if (staging) |s| process_allocator.destroy(s);
+            }
+            slot.state = .idle;
+            slot.on_event = null;
+            slot.closed_staged = false;
+        }
+
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {
             self.deliverLoopTimer(.{
                 .key = options.key,
@@ -5709,29 +6420,90 @@ pub fn Effects(comptime Msg: type) type {
             return entry;
         }
 
+        /// The channel-terminal stage's current backing storage —
+        /// `pendingImageStorage`'s twin.
+        fn pendingChannelStorage(self: *Self) []PendingChannel {
+            if (self.pending_channel_spill.len > 0) return self.pending_channel_spill;
+            return &self.pending_channels;
+        }
+
+        /// Stage one loop-side channel terminal for the next drain —
+        /// never dropping one (`stagePendingImage`'s discipline and
+        /// growth story, one refused open per staged entry, loud
+        /// refusal on allocation failure for the same
+        /// stranded-issuer reason).
+        fn stagePendingChannel(self: *Self, entry: PendingChannel) void {
+            const storage = self.pendingChannelStorage();
+            if (self.pending_channel_len == storage.len) {
+                const grown = self.allocator.alloc(PendingChannel, storage.len * 2) catch
+                    @panic("effects: out of memory staging a channel terminal - each staged entry is one openChannel call's only terminal and must never be dropped");
+                for (grown[0..self.pending_channel_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_channel_head + index) % storage.len];
+                }
+                if (self.pending_channel_spill.len > 0) self.allocator.free(self.pending_channel_spill);
+                self.pending_channel_spill = grown;
+                self.pending_channel_head = 0;
+            }
+            const active = self.pendingChannelStorage();
+            active[(self.pending_channel_head + self.pending_channel_len) % active.len] = entry;
+            self.pending_channel_len += 1;
+            self.wakeHost();
+        }
+
+        /// Pop the channel stage's head — `takePendingImage`'s twin,
+        /// including the drained-empty spill release.
+        fn takePendingChannel(self: *Self) PendingChannel {
+            const storage = self.pendingChannelStorage();
+            const entry = storage[self.pending_channel_head];
+            self.pending_channel_head = (self.pending_channel_head + 1) % storage.len;
+            self.pending_channel_len -= 1;
+            if (self.pending_channel_len == 0) {
+                self.pending_channel_head = 0;
+                if (self.pending_channel_spill.len > 0) {
+                    self.allocator.free(self.pending_channel_spill);
+                    self.pending_channel_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
         /// Take the next loop-side pending terminal in enqueue order,
-        /// merging the ring and the image stage by their shared stamp
-        /// so splitting the storage never reordered delivery. Entries
-        /// stamped at or past `before` stay staged: they were produced
-        /// during the current drain pass and belong to the next one
-        /// (the `DrainBoundary` causality contract). Both structures
-        /// are FIFO over the monotonic stamp, so refusing the merged
-        /// head refuses everything younger too.
+        /// merging the ring, the image stage, and the channel stage by
+        /// their shared stamp so splitting the storage never reordered
+        /// delivery. Entries stamped at or past `before` stay staged:
+        /// they were produced during the current drain pass and belong
+        /// to the next one (the `DrainBoundary` causality contract).
+        /// All three structures are FIFO over the monotonic stamp, so
+        /// refusing the merged head refuses everything younger too.
         fn takePendingMsg(self: *Self, before: u64) ?PendingMsg {
-            const ring_has = self.pending_exit_len > 0 and
-                self.pending_exit_seqs[self.pending_exit_head] < before;
-            const image_has = self.pending_image_len > 0 and
-                self.pendingImageStorage()[self.pending_image_head].seq < before;
-            if (!ring_has and !image_has) return null;
-            const take_image = if (ring_has and image_has)
-                self.pendingImageStorage()[self.pending_image_head].seq < self.pending_exit_seqs[self.pending_exit_head]
+            const no_seq = std.math.maxInt(u64);
+            const ring_seq: u64 = if (self.pending_exit_len > 0)
+                self.pending_exit_seqs[self.pending_exit_head]
             else
-                image_has;
-            if (take_image) {
+                no_seq;
+            const image_seq: u64 = if (self.pending_image_len > 0)
+                self.pendingImageStorage()[self.pending_image_head].seq
+            else
+                no_seq;
+            const channel_seq_head: u64 = if (self.pending_channel_len > 0)
+                self.pendingChannelStorage()[self.pending_channel_head].seq
+            else
+                no_seq;
+            const min_seq = @min(ring_seq, @min(image_seq, channel_seq_head));
+            if (min_seq == no_seq or min_seq >= before) return null;
+            if (min_seq == image_seq) {
                 const staged = self.takePendingImage();
                 return .{ .image = .{
                     .result = staged.result,
                     .image_fn = staged.image_fn,
+                    .regenerates = staged.regenerates,
+                } };
+            }
+            if (min_seq == channel_seq_head) {
+                const staged = self.takePendingChannel();
+                return .{ .channel = .{
+                    .event = staged.event,
+                    .channel_fn = staged.channel_fn,
                     .regenerates = staged.regenerates,
                 } };
             }
@@ -5772,6 +6544,12 @@ pub fn Effects(comptime Msg: type) type {
             if (self.findActiveSlot(key) != null) return true;
             if (self.findUndeliveredTerminalSlot(key) != null) return true;
             if (self.stagedImageOccupiesKey(key)) return true;
+            // External-source channels share the key space: open until
+            // the `.closed` terminal delivers, plus the staged
+            // executor-truth rejection window (see the channel twins
+            // of the image predicates).
+            if (self.channelOccupiesKey(key)) return true;
+            if (self.stagedChannelOccupiesKey(key)) return true;
             return false;
         }
 

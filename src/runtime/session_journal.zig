@@ -96,8 +96,14 @@ pub const magic = "NSDKSJNL";
 /// content address (`image_blob_hash`/`image_blob_len`) appended to
 /// every effect record — a v6 reader would have called an image
 /// record's kind code corrupt and misparsed the longer layouts, so it
-/// refuses the skew at the preamble instead.
-pub const format_version: u32 = 7;
+/// refuses the skew at the preamble instead; v8 added the `.channel`
+/// effect-result kind (code 12, the external-source channel family)
+/// with its event kind and cumulative drop total appended to every
+/// effect record — a CONSCIOUS break, same reasoning as v7: a v7
+/// reader would have called a channel record's kind code corrupt and
+/// misparsed the longer layouts, so the version-skew refusal at the
+/// preamble is the honest answer for old journals.
+pub const format_version: u32 = 8;
 
 // ------------------------------------------------------------- budgets
 //
@@ -874,6 +880,11 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.image_height);
     try cursor.writeBytes(&record.image_blob_hash);
     try cursor.writeInt(u64, record.image_blob_len);
+    // v8: channel events — the event kind and the occupancy's
+    // cumulative drop total (post bytes ride `payload` inline;
+    // dropped_pending rides the shared `dropped` field).
+    try cursor.writeEnum(record.channel_kind);
+    try cursor.writeInt(u32, record.channel_dropped_total);
     return buffer[0..cursor.len];
 }
 
@@ -912,6 +923,9 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.image_height = try cursor.readInt(u64);
     @memcpy(&record.image_blob_hash, try cursor.readBytes(record.image_blob_hash.len));
     record.image_blob_len = try cursor.readInt(u64);
+    // v8: channel events.
+    record.channel_kind = try cursor.readEnum(runtime_effects.EffectChannelEventKind);
+    record.channel_dropped_total = try cursor.readInt(u32);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1427,6 +1441,35 @@ test "effect codec round-trips payloads and outcomes" {
     const spectrum_decoded = try decodeEffect(spectrum_encoded);
     try testing.expectEqual(runtime_effects.EffectAudioEventKind.spectrum, spectrum_decoded.audio_kind);
     try testing.expectEqualSlices(u8, &spectrum_bands, &spectrum_decoded.audio_bands);
+
+    // v8: channel records carry their event kind and the cumulative
+    // drop total; the post bytes ride the shared payload field INLINE
+    // (never the blob store).
+    const channel_encoded = try encodeEffect(.{
+        .kind = .channel,
+        .key = 88,
+        .payload = "cpu 12.5",
+        .dropped = 2,
+        .channel_kind = .data,
+        .channel_dropped_total = 7,
+    }, &buffer);
+    const channel_decoded = try decodeEffect(channel_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.channel, channel_decoded.kind);
+    try testing.expectEqual(@as(u64, 88), channel_decoded.key);
+    try testing.expectEqualStrings("cpu 12.5", channel_decoded.payload);
+    try testing.expectEqual(runtime_effects.EffectChannelEventKind.data, channel_decoded.channel_kind);
+    try testing.expectEqual(@as(u32, 2), channel_decoded.dropped);
+    try testing.expectEqual(@as(u32, 7), channel_decoded.channel_dropped_total);
+
+    const closed_encoded = try encodeEffect(.{
+        .kind = .channel,
+        .key = 88,
+        .channel_kind = .closed,
+        .channel_dropped_total = 7,
+    }, &buffer);
+    const closed_decoded = try decodeEffect(closed_encoded);
+    try testing.expectEqual(runtime_effects.EffectChannelEventKind.closed, closed_decoded.channel_kind);
+    try testing.expectEqual(@as(usize, 0), closed_decoded.payload.len);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {
@@ -1526,17 +1569,17 @@ test "reader refuses bad magic and version skew" {
     // journaled composition verb code corrupt).
     std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version - 1, .little);
     try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
-    // A concrete v6 journal (the version main ships, without the image
+    // A concrete v7 journal (the version main ships, without the channel
     // fields on effect records) is version skew, never corruption: the
     // preamble gate must fire before any record layout is consulted.
-    var v6_preamble: [preamble_len]u8 = undefined;
-    @memcpy(v6_preamble[0..magic.len], magic);
-    std.mem.writeInt(u32, v6_preamble[magic.len..][0..4], 6, .little);
-    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&v6_preamble));
+    var v7_preamble: [preamble_len]u8 = undefined;
+    @memcpy(v7_preamble[0..magic.len], magic);
+    std.mem.writeInt(u32, v7_preamble[magic.len..][0..4], 7, .little);
+    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&v7_preamble));
     // The teaching names the version this build speaks, so the reader of
     // the error can see the skew rather than suspect file damage.
     const teaching = describeError(error.JournalUnsupportedVersion);
-    try testing.expect(std.mem.indexOf(u8, teaching, "v7") != null);
+    try testing.expect(std.mem.indexOf(u8, teaching, "v8") != null);
     try testing.expect(std.mem.indexOf(u8, teaching, "re-record") != null);
 }
 
