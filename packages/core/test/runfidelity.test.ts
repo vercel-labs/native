@@ -5292,6 +5292,42 @@ export function pickHit(q: P | null): number {
 `,
   },
   {
+    // Sibling-arm flow isolation at runtime: the map arm assigns the outer
+    // narrowed local, the else arm reads it through the narrow — both
+    // runtime branches must match node exactly (a probe-poisoned sibling
+    // would not even compile; a mis-joined kill would read wrong values).
+    name: "ternary arms with a callback assignment run isolated, byte-identically to node",
+    src: `
+export interface P { readonly v: number; }
+export function f(xs: number[], flag: boolean, seed: P | null): number {
+  let q: P | null = seed;
+  if (q === null) return 0;
+  const r = flag ? xs.map((x) => { q = null; return x * 2; }).length : q.v;
+  return r;
+}
+`,
+    node: `
+{
+  const seed = { v: 41 };
+  line("p0", mod.f([1, 2, 3], true, seed));
+  line("p1", mod.f([1, 2, 3], false, seed));
+  line("p2", mod.f([], true, seed));
+  line("p3", mod.f([1, 2, 3], true, null));
+  line("p4", mod.f([1, 2, 3], false, null));
+}
+`,
+    zig: `
+    {
+        const seed = m.P{ .v = 41 };
+        row("p0", m.f(&[_]f64{ 1, 2, 3 }, true, seed));
+        row("p1", m.f(&[_]f64{ 1, 2, 3 }, false, seed));
+        row("p2", m.f(&[_]f64{}, true, seed));
+        row("p3", m.f(&[_]f64{ 1, 2, 3 }, true, null));
+        row("p4", m.f(&[_]f64{ 1, 2, 3 }, false, null));
+    }
+`,
+  },
+  {
     name: "flow-exit guard narrowing in loops runs byte-identically (break, continue, kind guard, post-loop reads)",
     src: `
 export interface NumResult { readonly value: number; readonly next: number; }

@@ -3771,6 +3771,23 @@ export class Emitter {
     this.push(ctx, `};`);
   }
 
+  /// Clone a ctx for a probe or a same-indent sub-emission. ISOLATION LAW:
+  /// the clone shares every mutable flow structure with its parent BY
+  /// REFERENCE — memberSubst, stillOptionalSubst, narrowedUnion, the
+  /// narrowKilled frame stack, the edgeKills stages, and pendingCatchKills
+  /// — it isolates only the output lines. A PROBE (an emission whose lines
+  /// may be discarded to pick a lowering shape) must therefore bracket
+  /// itself with withNarrowScope: a probe that processes an assignment to
+  /// an outer narrowed local (an inline map callback inside a ternary arm)
+  /// would otherwise delete the narrowing for everything emitted after it
+  /// — the SIBLING arm then reads the optional raw, invalid Zig. Sibling
+  /// arms of one expression construct follow the statement-level law: each
+  /// arm probes AND emits from the construct's entry state, and the arms'
+  /// real kills join once after the last arm (applyJoinedNarrowKills).
+  /// Kills a discarded probe stages on the shared edge sets (edgeKills,
+  /// pendingCatchKills) are re-staged identically when the arm re-emits,
+  /// so the sharing stays observationally clean — the narrowing maps and
+  /// kill frames are the state a probe MUST NOT touch.
   private childCtx(ctx: Ctx): Ctx {
     return { ...ctx, lines: [], indent: ctx.indent };
   }
@@ -4140,11 +4157,16 @@ export class Emitter {
     if (ctx.lines.length !== before) this.fail(stmt, "while-condition requiring lowered statements");
     const body = ts.isBlock(stmt.statement) ? stmt.statement.statements : [stmt.statement];
     if (label === null && body.length === 1 && this.isSimpleAssignment(body[0])) {
+      // Probe in a flow scope (see childCtx): taken, the assignment's
+      // kills apply below exactly as a merge would; discarded, the full
+      // body re-emission repeats them.
+      const bodyJoin = new Set<string>();
       const sub = this.childCtx(ctx);
       sub.indent = 0;
-      this.emitStatement(body[0], sub);
+      this.withNarrowScope(ctx, "merge", () => this.emitStatement(body[0], sub), bodyJoin);
       if (sub.lines.length === 1) {
         this.push(ctx, `while (${cond}) ${sub.lines[0].trim()}`);
+        this.applyJoinedNarrowKills(ctx, bodyJoin);
         return;
       }
     }
@@ -4729,8 +4751,13 @@ export class Emitter {
         if (!stmt.elseStatement && single && ts.isReturnStatement(single)) {
           const saved = ctx.memberSubst.get(key);
           ctx.memberSubst.set(key, name);
+          // Probe in a flow scope (see childCtx). Its kills discard both
+          // ways: a lines-free probe processed no statements (nothing can
+          // kill without lowering lines), and the discarded case re-emits
+          // the branch below under the block path's own scope.
           const sub = this.childCtx(ctx);
-          const v = single.expression ? this.emitReturn(single.expression, sub) : null;
+          const v = this.withNarrowScope(ctx, "merge", () =>
+            single.expression ? this.emitReturn(single.expression, sub) : null, new Set());
           ctx.memberSubst.delete(key);
           if (saved !== undefined) ctx.memberSubst.set(key, saved);
           if (sub.lines.length === 0 && v) {
@@ -4791,11 +4818,14 @@ export class Emitter {
     const thenStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
     // Single-return then-branch without else stays on one line when short.
     if (!stmt.elseStatement && thenStmts.length === 1 && ts.isReturnStatement(thenStmts[0])) {
+      // Probe in a flow scope (see childCtx). Its kills discard both ways:
+      // a lines-free probe processed no statements, and the discarded case
+      // re-emits the branch below under the block path's own scope.
       const sub = this.childCtx(ctx);
       const r = thenStmts[0];
-      const v = this.withKindNarrow(posGuard, ctx, () =>
+      const v = this.withNarrowScope(ctx, "merge", () => this.withKindNarrow(posGuard, ctx, () =>
         r.expression ? this.emitReturn(r.expression, sub) : null,
-      );
+      ), new Set());
       const text = this.returnText(ctx, v, r);
       if (sub.lines.length === 0 && condText.length + text.length <= 80) {
         this.push(ctx, `if (${condText}) ${text}`);
@@ -4966,9 +4996,11 @@ export class Emitter {
   private emitElseIf(stmt: ts.IfStatement, ctx: Ctx, join: Set<string>): void {
     // A chained condition that needs lowered statements cannot sit between
     // `}` and `else if`; open a plain else block and start a fresh if inside.
-    // The probe works on a copied name set so it burns no real names.
+    // The probe works on a copied name set so it burns no real names, and
+    // brackets in a flow scope (see childCtx) — both routes below re-emit
+    // the condition for real.
     const probe: Ctx = { ...ctx, lines: [], used: new Set(ctx.used) };
-    this.emitExpr(stmt.expression, probe, { k: "bool" });
+    this.withNarrowScope(ctx, "merge", () => this.emitExpr(stmt.expression, probe, { k: "bool" }), new Set());
     if (probe.lines.length > 0) {
       this.push(ctx, `} else {`);
       const inner = this.nestedCtx(ctx);
@@ -5014,8 +5046,11 @@ export class Emitter {
     const single = unwrapSingle(stmt);
     if (single && ts.isReturnStatement(single)) {
       if (!single.expression) return this.returnText(ctx, null, single);
+      // Probe in a flow scope (see childCtx): a lines-free probe processed
+      // no statements, so the discarded kill set is empty; a lines-bearing
+      // probe is declined and the caller re-emits under its own scope.
       const sub = this.childCtx(ctx);
-      const v = this.emitReturn(single.expression, sub);
+      const v = this.withNarrowScope(ctx, "merge", () => this.emitReturn(single.expression!, sub), new Set());
       if (sub.lines.length === 0) return this.returnText(ctx, v, single);
       return null;
     }
@@ -7107,8 +7142,10 @@ export class Emitter {
         }
         const baseCode = this.emitExpr(expr.expression, ctx).code;
         const cap = this.freshName(ctx, nameHint ?? "elems");
+        // Probe in a flow scope (see childCtx): a lines-free index probe
+        // processed no statements, and a lines-bearing one stops the build.
         const idxCtx = this.childCtx(ctx);
-        const idx = this.emitIndex(expr.argumentExpression, idxCtx);
+        const idx = this.withNarrowScope(ctx, "merge", () => this.emitIndex(expr.argumentExpression, idxCtx), new Set());
         if (idxCtx.lines.length > 0) {
           // JS only evaluates the index when the base is non-null; an index
           // needing its own statements cannot ride the inline capture.
@@ -7579,14 +7616,19 @@ export class Emitter {
       const tT = this.zTypeOfExpr(missTest.target, ctx);
       const armWant =
         expected ? unwrapOptional(expected) : tT.k === "optional" ? tT.inner : undefined;
+      // Both probes bracket in a flow scope (see childCtx): discarded, they
+      // must leave no trace; taken, the miss arm's real kills join onto the
+      // post-expression state below.
+      const fuseJoin = new Set<string>();
       const targetSub = this.childCtx(ctx);
-      const target = this.emitExpr(missTest.target, targetSub).code;
+      const target = this.withNarrowScope(ctx, "merge", () => this.emitExpr(missTest.target, targetSub).code, fuseJoin);
       const altSub = this.childCtx(ctx);
-      const alt = this.emitExpr(expr.whenTrue, altSub, armWant).code;
+      const alt = this.withNarrowScope(ctx, "merge", () => this.emitExpr(expr.whenTrue, altSub, armWant).code, fuseJoin);
       if (altSub.lines.length === 0) {
         // The target is evaluated exactly once; its lowered lines (if any)
         // ride ahead of the orelse like any condition's.
         ctx.lines.push(...targetSub.lines);
+        this.applyJoinedNarrowKills(ctx, fuseJoin);
         return { code: `${target} orelse ${alt}` };
       }
     }
@@ -7652,38 +7694,46 @@ export class Emitter {
             this.withSubsts(guards, ctx, () =>
               this.withKindNarrows(kindGuards, ctx, () => this.emitExpr(e, sub, want).code),
             );
+          // Each arm probes and emits from the ENTRY state, kills joining
+          // after the last arm (see childCtx's isolation law).
+          const probeJoin = new Set<string>();
           const thenSub2 = this.childCtx(ctx);
-          const thenCode = isAnd
+          const thenCode = this.withNarrowScope(ctx, "merge", () => isAnd
             ? emitNarrowed(thenSub2, expr.whenTrue, narrowedExpected)
-            : this.emitExpr(expr.whenTrue, thenSub2, expected ? unwrapOptional(expected) : expected).code;
+            : this.emitExpr(expr.whenTrue, thenSub2, expected ? unwrapOptional(expected) : expected).code, probeJoin);
           const elseSub2 = this.childCtx(ctx);
-          const elseCode = isAnd
+          const elseCode = this.withNarrowScope(ctx, "merge", () => isAnd
             ? this.emitExpr(expr.whenFalse, elseSub2, expected).code
-            : emitNarrowed(elseSub2, expr.whenFalse, expected);
+            : emitNarrowed(elseSub2, expr.whenFalse, expected), probeJoin);
           if (thenSub2.lines.length === 0 && elseSub2.lines.length === 0) {
+            // The probes ARE the emission here: their kills are the join.
+            this.applyJoinedNarrowKills(ctx, probeJoin);
             return { code: `if (${condText}) ${thenCode} else ${elseCode}` };
           }
           // A branch needing lowered statements: re-emit each into a nested
           // block assigning a named temp (the R17b lowering the plain
-          // conditional path uses).
+          // conditional path uses). probeJoin is discarded with the probe
+          // lines — the re-emissions below record the real kills.
+          const chainJoin = new Set<string>();
           const t2 = expected ?? this.zTypeOfExpr(expr, ctx);
           const name = this.freshName(ctx, nameHint ?? "value");
           this.push(ctx, `var ${name}: ${this.table.zigTypeRef(t2)} = undefined;`);
           this.push(ctx, `if (${condText}) {`);
           const nt = this.nestedCtx(ctx);
-          const ntCode = isAnd
+          const ntCode = this.withNarrowScope(ctx, "merge", () => isAnd
             ? emitNarrowed(nt, expr.whenTrue, narrowedExpected)
-            : this.emitExpr(expr.whenTrue, nt, expected ? unwrapOptional(expected) : expected).code;
+            : this.emitExpr(expr.whenTrue, nt, expected ? unwrapOptional(expected) : expected).code, chainJoin);
           nt.lines.push("    ".repeat(nt.indent) + `${name} = ${ntCode};`);
           ctx.lines.push(...nt.lines);
           this.push(ctx, `} else {`);
           const ne = this.nestedCtx(ctx);
-          const neCode = isAnd
+          const neCode = this.withNarrowScope(ctx, "merge", () => isAnd
             ? this.emitExpr(expr.whenFalse, ne, expected).code
-            : emitNarrowed(ne, expr.whenFalse, expected);
+            : emitNarrowed(ne, expr.whenFalse, expected), chainJoin);
           ne.lines.push("    ".repeat(ne.indent) + `${name} = ${neCode};`);
           ctx.lines.push(...ne.lines);
           this.push(ctx, `}`);
+          this.applyJoinedNarrowKills(ctx, chainJoin);
           return { code: name };
         }
       }
@@ -7692,36 +7742,46 @@ export class Emitter {
     // R13c: kind guards narrow the branch TS narrows, in ternaries too.
     const posGuard = this.kindGuardOf(cond);
     const negGuard = this.kindGuardOf(cond, ts.SyntaxKind.ExclamationEqualsEqualsToken);
-    // Branches that need lowered statements (spreads): lower via a named temp.
+    // Branches that need lowered statements (spreads): lower via a named
+    // temp. Each arm probes and emits from the ENTRY state, kills joining
+    // after the last arm (see childCtx's isolation law).
+    const probeJoin = new Set<string>();
     const thenSub = this.childCtx(ctx);
-    const thenV = this.withKindNarrow(posGuard, ctx, () =>
+    const thenV = this.withNarrowScope(ctx, "merge", () => this.withKindNarrow(posGuard, ctx, () =>
       this.emitExpr(expr.whenTrue, thenSub, expected ? unwrapOptional(expected) : expected),
-    );
+    ), probeJoin);
     const elseSub = this.childCtx(ctx);
-    const elseV = this.withKindNarrow(negGuard, ctx, () => this.emitExpr(expr.whenFalse, elseSub, expected));
+    const elseV = this.withNarrowScope(ctx, "merge", () =>
+      this.withKindNarrow(negGuard, ctx, () => this.emitExpr(expr.whenFalse, elseSub, expected)), probeJoin);
     // The condition is evaluated exactly once, so it may lower statements
     // (array-method scans) into the surrounding ctx ahead of the branch.
     const condText = this.emitExpr(cond, ctx, { k: "bool" }).code;
     if (thenSub.lines.length === 0 && elseSub.lines.length === 0) {
+      // The probes ARE the emission here: their kills are the join.
+      this.applyJoinedNarrowKills(ctx, probeJoin);
       return { code: `if (${condText}) ${thenV.code} else ${elseV.code}` };
     }
-    // R17b-style lowering into an assignment target.
+    // R17b-style lowering into an assignment target. probeJoin is discarded
+    // with the probe lines — the re-emissions record the real kills.
+    const join = new Set<string>();
     const t = expected ?? this.zTypeOfExpr(expr, ctx);
     const name = this.freshName(ctx, nameHint ?? "value");
     this.push(ctx, `var ${name}: ${this.table.zigTypeRef(t)} = undefined;`);
     this.push(ctx, `if (${condText}) {`);
     const ts1 = this.nestedCtx(ctx);
-    const v1 = this.withKindNarrow(posGuard, ctx, () =>
+    const v1 = this.withNarrowScope(ctx, "merge", () => this.withKindNarrow(posGuard, ctx, () =>
       this.emitExpr(expr.whenTrue, ts1, expected ? unwrapOptional(expected) : expected),
-    );
+    ), join);
     ts1.lines.push("    ".repeat(ts1.indent) + `${name} = ${v1.code};`);
     ctx.lines.push(...ts1.lines);
     this.push(ctx, `} else {`);
     const ts2 = this.nestedCtx(ctx);
-    const v2 = this.withKindNarrow(negGuard, ctx, () => this.emitExpr(expr.whenFalse, ts2, expected));
+    const v2 = this.withNarrowScope(ctx, "merge", () =>
+      this.withKindNarrow(negGuard, ctx, () => this.emitExpr(expr.whenFalse, ts2, expected)), join);
     ts2.lines.push("    ".repeat(ts2.indent) + `${name} = ${v2.code};`);
     ctx.lines.push(...ts2.lines);
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
     return { code: name };
   }
 
@@ -7756,31 +7816,39 @@ export class Emitter {
     };
     // Probe both arms in throwaway child ctxs: statement-free arms keep
     // the tight expression form (the common case — numbers, tags, field
-    // reads — stays exactly as before).
+    // reads — stays exactly as before). Each arm probes and emits from the
+    // ENTRY state, kills joining after the last arm (see childCtx's
+    // isolation law).
+    const probeJoin = new Set<string>();
     const narrowedSub = this.childCtx(ctx);
-    const narrowedV = emitNarrowedArm(narrowedSub);
+    const narrowedV = this.withNarrowScope(ctx, "merge", () => emitNarrowedArm(narrowedSub), probeJoin);
     const otherSub = this.childCtx(ctx);
-    const otherV = this.emitExpr(otherArm, otherSub, expected).code;
+    const otherV = this.withNarrowScope(ctx, "merge", () => this.emitExpr(otherArm, otherSub, expected).code, probeJoin);
     if (narrowedSub.lines.length === 0 && otherSub.lines.length === 0) {
+      // The probes ARE the emission here: their kills are the join.
+      this.applyJoinedNarrowKills(ctx, probeJoin);
       return { code: `if (${target}) |${cap}| ${narrowedV} else ${otherV}` };
     }
     // R17b-style lowering: re-emit each arm into its own scoped block
     // feeding the temp (the probe lines are discarded — they were never
-    // pushed to ctx).
+    // pushed to ctx, and probeJoin drops with them; the re-emissions
+    // record the real kills).
+    const join = new Set<string>();
     const t = expected ?? this.zTypeOfExpr(expr, ctx);
     const name = this.freshName(ctx, nameHint ?? "value");
     this.push(ctx, `var ${name}: ${this.table.zigTypeRef(t)} = undefined;`);
     this.push(ctx, `if (${target}) |${cap}| {`);
     const ts1 = this.nestedCtx(ctx);
-    const v1 = emitNarrowedArm(ts1);
+    const v1 = this.withNarrowScope(ctx, "merge", () => emitNarrowedArm(ts1), join);
     ts1.lines.push("    ".repeat(ts1.indent) + `${name} = ${v1};`);
     ctx.lines.push(...ts1.lines);
     this.push(ctx, `} else {`);
     const ts2 = this.nestedCtx(ctx);
-    const v2 = this.emitExpr(otherArm, ts2, expected).code;
+    const v2 = this.withNarrowScope(ctx, "merge", () => this.emitExpr(otherArm, ts2, expected).code, join);
     ts2.lines.push("    ".repeat(ts2.indent) + `${name} = ${v2};`);
     ctx.lines.push(...ts2.lines);
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
     return { code: name };
   }
 

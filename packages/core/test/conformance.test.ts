@@ -5451,6 +5451,39 @@ export function pick(q: P | null): number {
 }
 `,
   },
+  {
+    // Ternary arms are ALTERNATIVES: probing/lowering one arm must not
+    // apply its flow effects to the sibling. The map callback here assigns
+    // the outer narrowed local — killing that narrow in shared flow state
+    // stripped the ELSE arm of its unwrap, and the sibling read the raw
+    // optional (invalid Zig). Each arm emits from the entry state; the
+    // kill joins only after both arms.
+    name: "a callback assignment in one ternary arm does not strip the sibling arm's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(xs: number[], flag: boolean, seed: P | null): number {
+  let q: P | null = seed;
+  if (q === null) return 0;
+  const r = flag ? xs.map((x) => { q = null; return x * 2; }).length : q.v;
+  return r;
+}
+`,
+  },
+  {
+    // The capture-lowered (empty-test) ternary flavor of the same law: the
+    // narrowed arm's callback assigns a DIFFERENT outer narrowed local;
+    // the other arm still reads that local through its unwrap.
+    name: "a callback assignment in the narrowed arm does not strip the other arm's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function g(xs: number[], q: P | null, seed: P | null): number {
+  let p: P | null = seed;
+  if (p === null) return 0;
+  const r = q !== null ? xs.map((x) => { p = null; return x + q.v; }).length : p.v;
+  return r;
+}
+`,
+  },
 ];
 
 // Plain lexical blocks are NOT merge boundaries: tsc's narrowing is
