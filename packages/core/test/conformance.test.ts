@@ -8501,6 +8501,65 @@ export function f(a: number, flag: boolean): number {
   },
 ];
 
+// The scrutinee flow-trust scan is position-aware: an arrow or function
+// expression DEFINED after the switch does not exist as a value before it,
+// so its capture-site assignment cannot have run — the flow type stays
+// trustworthy for the exhaustiveness claim. Hoisted function declarations
+// (and shared enclosing loops, whose back edge re-enters the switch) still
+// decline; those directions pin in emitter.test.ts and the runfidelity
+// corpus.
+const scrutineePositionCases: Case[] = [
+  {
+    // The repro: a filter callback after the switch assigns `k`. tsc keeps
+    // the switch exhaustive over the flow type, so the guard branch never
+    // completes and the fall-through `p.v` is typed against the narrow —
+    // declining trust here left `p` optional and the read raw.
+    name: "a callback after the switch keeps the scrutinee's flow trust",
+    src: `
+export type Mode = "a" | "b" | "c";
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, xs: readonly number[]): number {
+  let k: Mode = a > 10 ? "a" : "b";
+  const p = make(a);
+  if (p === null) {
+    switch (k) {
+      case "a": return -1;
+      case "b": return -2;
+    }
+  }
+  return p.v + xs.filter((x) => {
+    k = "c";
+    return x > 0;
+  }).length;
+}
+`,
+  },
+  {
+    // Non-regression: a callback BEFORE the switch still declines trust —
+    // the declared union is consulted and the defaultless switch stays
+    // non-exhaustive (it completes; the fall-through return emits).
+    name: "a callback before the switch still declines the scrutinee's flow trust",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(xs: readonly number[]): number {
+  let k: Mode = "a";
+  const ys = xs.map((x) => {
+    k = "c";
+    return x;
+  });
+  switch (k) {
+    case "a": return 1;
+  }
+  return 3 + ys.length;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -9057,6 +9116,7 @@ const corpus: Case[] = [
   ...finallyStaticExclusionCases,
   ...writeOnlyArmCaptureCases,
   ...staticBranchJoinCases,
+  ...scrutineePositionCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

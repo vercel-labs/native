@@ -3779,11 +3779,14 @@ export class Emitter {
   /// Whether the flow type of this identifier may be trusted for an
   /// exhaustiveness claim: it names a local/param declared in the SAME
   /// enclosing function, and no nested function/callback in that function's
-  /// body assigns it. Locals cannot alias in TypeScript, so the only escape
-  /// hatch from the straight-line CFA is a capture-site assignment — the
-  /// exact hole tsc's optimistic callback model leaves open. Declines when
-  /// the declaration lives in an outer scope (the local IS a capture there)
-  /// or when any nested function contains an assignment or ++/-- on it.
+  /// body assigns it BEFORE the read can execute. Locals cannot alias in
+  /// TypeScript, so the only escape hatch from the straight-line CFA is a
+  /// capture-site assignment — the exact hole tsc's optimistic callback
+  /// model leaves open. Declines when the declaration lives in an outer
+  /// scope (the local IS a capture there) or when any nested function that
+  /// can have RUN before the read (nestedFnRunsBeforeUse: position for
+  /// arrows/function expressions, always for hoisted declarations and
+  /// class members, back edges for shared loops) assigns or ++/--s it.
   private scrutineeFlowTrustable(id: ts.Identifier): boolean {
     const decl = this.tast.declarationOf(id);
     if (!decl || (!ts.isVariableDeclaration(decl) && !ts.isParameter(decl))) return false;
@@ -3803,9 +3806,13 @@ export class Emitter {
     const scope = enclosing(id);
     if (scope !== enclosing(decl)) return false;
     let assignedInNested = false;
-    const visit = (n: ts.Node, nested: boolean): void => {
+    // `root` is the OUTERMOST nested function of the current subtree: the
+    // reach-before-use judgment belongs to it (an arrow inside a hoisted
+    // declaration runs whenever the declaration does, so the inner arrow's
+    // own position proves nothing).
+    const visit = (n: ts.Node, root: ts.Node | null): void => {
       if (assignedInNested) return;
-      const enter = nested || (n !== scope && isFnScope(n));
+      const enter = root ?? (n !== scope && isFnScope(n) ? n : null);
       if (enter) {
         if (
           ts.isBinaryExpression(n) &&
@@ -3813,7 +3820,11 @@ export class Emitter {
           n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
         ) {
           const target = unwrapExpr(n.left);
-          if (ts.isIdentifier(target) && this.tast.declarationOf(target) === decl) {
+          if (
+            ts.isIdentifier(target) &&
+            this.tast.declarationOf(target) === decl &&
+            this.nestedFnRunsBeforeUse(enter, id)
+          ) {
             assignedInNested = true;
             return;
           }
@@ -3823,7 +3834,11 @@ export class Emitter {
           (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
         ) {
           const target = unwrapExpr(n.operand as ts.Expression);
-          if (ts.isIdentifier(target) && this.tast.declarationOf(target) === decl) {
+          if (
+            ts.isIdentifier(target) &&
+            this.tast.declarationOf(target) === decl &&
+            this.nestedFnRunsBeforeUse(enter, id)
+          ) {
             assignedInNested = true;
             return;
           }
@@ -3831,8 +3846,38 @@ export class Emitter {
       }
       ts.forEachChild(n, (c) => visit(c, enter));
     };
-    visit(scope, false);
+    visit(scope, null);
     return !assignedInNested;
+  }
+
+  /// Whether an assignment inside nested function `fn` can have EXECUTED
+  /// before the flow-trusted read at `use`. Labels the position rule with
+  /// JS evaluation semantics:
+  ///   - function DECLARATIONS hoist — they exist from scope start, so an
+  ///     earlier call can run them wherever they sit — and class-member
+  ///     bodies (methods, accessors, constructors) exist from their
+  ///     container's creation: all count regardless of position;
+  ///   - arrow functions and function EXPRESSIONS do not exist as values
+  ///     before their definition evaluates, so one whose definition sits
+  ///     textually after the read cannot have run before it — UNLESS a
+  ///     loop encloses both, whose back edge re-enters the read after the
+  ///     definition evaluated on an earlier iteration. An arrow defined
+  ///     before the read counts even when only a variable holds it
+  ///     (conservative-correct: whether anything calls it is not asked).
+  private nestedFnRunsBeforeUse(fn: ts.Node, use: ts.Identifier): boolean {
+    if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return true;
+    if (fn.getStart() < use.getStart()) return true;
+    for (let cur: ts.Node | undefined = fn.parent; cur && !ts.isSourceFile(cur); cur = cur.parent) {
+      if (ts.isFunctionLike(cur)) break;
+      if (
+        ts.isIterationStatement(cur, false) &&
+        cur.getStart() <= use.getStart() &&
+        use.getEnd() <= cur.getEnd()
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private computeValueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {

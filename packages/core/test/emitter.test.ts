@@ -1795,6 +1795,82 @@ export function f(): number {
   assert.equal(excluded(ifAlias, ifAlias.thenStatement), false);
 });
 
+test("R13d flow trust is position-aware over nested functions", () => {
+  // scrutineeFlowTrustable, all four directions of the reach-before-use
+  // rule. The declining directions use shapes the subset checker gates out
+  // of end-to-end fixtures (a nested function declaration is NS1046), so
+  // they pin here against the raw judgment.
+  const trustAt = (src: string): boolean => {
+    const { emitter, file } = buildEmitter(src);
+    let id: unknown = null;
+    const visit = (n: any): void => {
+      if (ts.isSwitchStatement(n)) id = n.expression;
+      ts.forEachChild(n, visit);
+    };
+    ts.forEachChild(file as any, visit);
+    assert.notEqual(id, null);
+    return (emitter as unknown as { scrutineeFlowTrustable(n: unknown): boolean }).scrutineeFlowTrustable(id);
+  };
+  const wrap = (tail: string): string => `
+type Mode = "a" | "b" | "c";
+export function f(flag: boolean, xs: readonly number[]): number {
+  let k: Mode = flag ? "a" : "b";
+  switch (k) {
+    case "a": return 1;
+    case "b": return 2;
+  }
+  ${tail}
+}
+`;
+  // An arrow defined AFTER the switch does not exist as a value before it:
+  // trust holds.
+  assert.equal(trustAt(wrap(`
+  const bump = (): void => { k = "c"; };
+  bump();
+  return 0;`)), true);
+  // An arrow defined BEFORE the switch counts (whether anything calls it
+  // is not asked): trust declines.
+  assert.equal(trustAt(`
+type Mode = "a" | "b" | "c";
+export function f(flag: boolean): number {
+  let k: Mode = flag ? "a" : "b";
+  const bump = (): void => { k = "c"; };
+  switch (k) {
+    case "a": return 1;
+    case "b": return 2;
+  }
+  return 0;
+}
+`), false);
+  // A function DECLARATION hoists — an earlier call can run it — so it
+  // counts regardless of sitting after the switch: trust declines.
+  assert.equal(trustAt(wrap(`
+  function bump(): void { k = "c"; }
+  return 0;`)), false);
+  // A loop enclosing both lets the later arrow run before a re-entered
+  // switch (the back edge): trust declines.
+  assert.equal(trustAt(`
+type Mode = "a" | "b" | "c";
+export function f(xs: readonly number[]): number {
+  let total = 0;
+  let k: Mode = "a";
+  for (const x of xs) {
+    switch (k) {
+      case "a":
+        total += 1;
+        break;
+    }
+    const ys = [x].map((y) => {
+      k = "c";
+      return y;
+    });
+    total += ys.length;
+  }
+  return total;
+}
+`), false);
+});
+
 test("kernel capacities: default header uses the shared default kernel", () => {
   const zig = emit(`export function f(n: number): number { return n & 1; }`);
   assert.match(zig, /pub const rt = @import\("rt\.zig"\)\.default;/);

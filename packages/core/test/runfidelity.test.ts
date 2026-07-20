@@ -194,6 +194,56 @@ export function condKill(a: number, flag: boolean): number {
     ],
   },
   {
+    name: "a callback after the switch keeps flow trust; one in a shared loop declines",
+    src: `
+export type Mode = "a" | "b" | "c";
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function laterCallback(a: number, xs: readonly number[]): number {
+  let k: Mode = a > 10 ? "a" : "b";
+  const p = make(a);
+  if (p === null) {
+    switch (k) {
+      case "a": return -1;
+      case "b": return -2;
+    }
+  }
+  return p.v + xs.filter((x) => {
+    k = "c";
+    return x > 0;
+  }).length;
+}
+export function loopShared(xs: readonly number[]): number {
+  let total = 0;
+  let k: Mode = "a";
+  for (const x of xs) {
+    switch (k) {
+      case "a":
+        total += 1;
+        break;
+    }
+    const one: number[] = [x];
+    const ys = one.map((y) => {
+      k = "c";
+      return y;
+    });
+    total += ys.length;
+  }
+  return total;
+}
+`,
+    calls: [
+      { fn: "laterCallback", args: [i(20), { t: "nums", v: [1, 2, 3] }] },
+      { fn: "laterCallback", args: [i(5), { t: "nums", v: [1] }] },
+      { fn: "laterCallback", args: [i(-1), { t: "nums", v: [1] }] },
+      { fn: "loopShared", args: [{ t: "nums", v: [1, 2, 3] }] },
+      { fn: "loopShared", args: [{ t: "nums", v: [] }] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }
