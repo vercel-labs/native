@@ -1760,6 +1760,70 @@ export function chained(bytes: Uint8Array, from: number): Uint8Array {
     ],
   },
   {
+    // Sibling arms join their kills: an arm's `p = null` must not strip a
+    // sibling arm (typed from the construct's entry state) of its narrow,
+    // while the joined kill still reaches the post-construct re-check.
+    // Every path through each construct runs on both sides.
+    name: "branch kills join at the construct exit: if/else, else-if chain, switch clauses",
+    src: `
+export type Sel = "kill" | "use" | "skip";
+export function killThenElse(a: number | null, flag: boolean): number {
+  let p: number | null = a;
+  if (p === null) return -1;
+  if (flag) {
+    p = null;
+  } else {
+    return p;
+  }
+  if (p === null) return 0;
+  return p;
+}
+export function killMiddleArm(a: number | null, sel: number): number {
+  let p: number | null = a;
+  if (p === null) return -1;
+  if (sel === 1) {
+    return 1;
+  } else if (sel === 2) {
+    p = null;
+  } else if (sel === 3) {
+    return p;
+  }
+  if (p === null) return 0;
+  return p;
+}
+export function killClause(a: number | null, sel: Sel): number {
+  let p: number | null = a;
+  if (p === null) return -1;
+  switch (sel) {
+    case "kill":
+      p = null;
+      break;
+    case "use":
+      return p;
+    case "skip":
+      break;
+  }
+  if (p === null) return 0;
+  return p;
+}
+`,
+    calls: [
+      { fn: "killThenElse", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "killThenElse", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "killThenElse", args: [i(5), { t: "b", v: true }] },
+      { fn: "killThenElse", args: [i(5), { t: "b", v: false }] },
+      { fn: "killMiddleArm", args: [{ t: "null" }, i(2)] },
+      { fn: "killMiddleArm", args: [i(6), i(1)] },
+      { fn: "killMiddleArm", args: [i(6), i(2)] },
+      { fn: "killMiddleArm", args: [i(6), i(3)] },
+      { fn: "killMiddleArm", args: [i(6), i(4)] },
+      { fn: "killClause", args: [{ t: "null" }, { t: "tag", v: "use" }] },
+      { fn: "killClause", args: [i(7), { t: "tag", v: "kill" }] },
+      { fn: "killClause", args: [i(7), { t: "tag", v: "use" }] },
+      { fn: "killClause", args: [i(7), { t: "tag", v: "skip" }] },
+    ],
+  },
+  {
     name: "module const tables read identically: arrays, records, enums, derived scans",
     src: `
 import { asciiBytes } from "@native-sdk/core";

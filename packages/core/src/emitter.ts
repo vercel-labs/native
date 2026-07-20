@@ -3056,7 +3056,23 @@ export class Emitter {
   /// narrowing maps to their entry snapshot (containment), then re-apply and
   /// merge — or drop, or route to the enclosing try's pending set — the
   /// kills recorded inside (see popNarrowKillFrame).
-  private withNarrowScope<T>(ctx: Ctx, mode: "merge" | "drop" | "exception", emit: () => T): T {
+  ///
+  /// `joinInto` defers merge-class kills for a JOIN instead of applying
+  /// them here: a multi-alternative construct (if/else arms, an else-if
+  /// chain, switch clauses) must emit every alternative from the shared
+  /// ENTRY state — tsc types the arms as alternatives, not a sequence, so
+  /// one arm's kill applied mid-construct would strip a sibling of a
+  /// narrowing tsc keeps there. The caller collects each arm's kills and
+  /// applies the union once via applyJoinedNarrowKills, after the last
+  /// alternative. Only merge-class kills defer: an always-leaving arm
+  /// still drops its kills, a caught-throw-only arm still routes them to
+  /// the enclosing try's pending set — those edges never reach a sibling.
+  private withNarrowScope<T>(
+    ctx: Ctx,
+    mode: "merge" | "drop" | "exception",
+    emit: () => T,
+    joinInto?: Set<string>,
+  ): T {
     const savedSubst = new Map(ctx.memberSubst);
     const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrowed = new Map(ctx.narrowedUnion);
@@ -3070,11 +3086,28 @@ export class Emitter {
       for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
       ctx.narrowedUnion.clear();
       for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
-      this.popNarrowKillFrame(ctx, mode);
+      if (mode === "merge" && joinInto) {
+        for (const key of this.popNarrowKillFrame(ctx, "drop")) joinInto.add(key);
+      } else {
+        this.popNarrowKillFrame(ctx, mode);
+      }
     }
   }
 
-  private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx): void {
+  /// The JOIN of a multi-alternative construct: apply the union of the
+  /// alternatives' merge-class kills to the surviving flow, once, after
+  /// every alternative has emitted from the shared entry state (see
+  /// withNarrowScope's `joinInto`). Same application as a plain merge —
+  /// delete the narrow, propagate the kill one frame outward so enclosing
+  /// exits keep it dead past their restores.
+  private applyJoinedNarrowKills(ctx: Ctx, join: ReadonlySet<string>): void {
+    for (const key of join) {
+      ctx.memberSubst.delete(key);
+      ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
+    }
+  }
+
+  private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx, joinInto?: Set<string>): void {
     // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
     // narrows the statements after it in ITS list, and whatever those
     // statements nest — never code beyond the list. The narrowing maps ride
@@ -3109,7 +3142,7 @@ export class Emitter {
           this.allRoutesLeaveFunction(stmts, { ...env, throwResumes: false })
         ? "exception"
         : "merge";
-    this.withNarrowScope(ctx, mode, () => this.emitStatementList(stmts, ctx));
+    this.withNarrowScope(ctx, mode, () => this.emitStatementList(stmts, ctx), joinInto);
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -3743,6 +3776,24 @@ export class Emitter {
     if (done !== null) this.push(inner, `break :${done};`);
     outer.lines.push(...inner.lines);
     this.push(outer, `}`);
+    // Exception-kills merge: kills travel the same edges control does, and
+    // the routes that fed this set are throws that land in THIS catch — so
+    // they apply at the catch's entry, before its body emits (tsc types
+    // the catch from the state at the throw points: a narrowing an
+    // always-throwing arm killed before throwing is dead inside the
+    // catch). The catch's fallthrough carries them on to the post-try
+    // continuation through the shared maps, alongside the body's
+    // normal-exit kills — which already applied at the body's own merge
+    // just above, so the catch also sees those (tsc-correct too: a
+    // mid-body throw can follow any fall-through assignment). They never
+    // touch the intra-try flow already emitted above. (A branch with any
+    // normal fallthrough merged its kills there instead; a catch whose
+    // every route leaves the function dropped them before this set was
+    // consulted.)
+    for (const key of pendingKills) {
+      ctx.memberSubst.delete(key);
+      ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
+    }
     const catchCtx: Ctx = { ...outer, lines: [] };
     if (cc.variableDeclaration && ts.isIdentifier(cc.variableDeclaration.name)) {
       if (this.identifierUsed(cc.block, cc.variableDeclaration)) {
@@ -3755,18 +3806,6 @@ export class Emitter {
     outer.lines.push(...catchCtx.lines);
     ctx.lines.push(...outer.lines);
     this.push(ctx, `}`);
-    // Exception-kills merge: kills travel the same edges control does. The
-    // routes that fed this set resumed through the catch's fallthrough at
-    // THIS point — the post-try continuation — so they apply to the
-    // post-try narrow state alongside the body's normal-exit kills, and
-    // never to the intra-try flow already emitted above. (A branch with
-    // any normal fallthrough merged its kills there instead; a catch whose
-    // every route leaves the function dropped them before this set was
-    // consulted; the catch block's own kills merged outward just above.)
-    for (const key of pendingKills) {
-      ctx.memberSubst.delete(key);
-      ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
-    }
   }
 
   private emitWhile(stmt: ts.WhileStatement, ctx: Ctx, label: string | null): void {
@@ -4347,21 +4386,23 @@ export class Emitter {
         const key = normalize(exitTest.target);
         const prop = this.emitExpr(exitTest.target, ctx).code;
         const name = this.freshName(ctx, this.narrowHint(exitTest.target));
+        const join = new Set<string>();
         this.push(ctx, `if (${prop}) |${name}| {`);
         const saved = ctx.memberSubst.get(key);
         ctx.memberSubst.set(key, name);
         const sub = this.nestedCtx(ctx);
         const hitBody = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-        this.emitBlockStatements(hitBody, sub);
+        this.emitBlockStatements(hitBody, sub, join);
         ctx.lines.push(...sub.lines);
         ctx.memberSubst.delete(key);
         if (saved !== undefined) ctx.memberSubst.set(key, saved);
         this.push(ctx, `} else {`);
         const esub = this.nestedCtx(ctx);
         const missBody = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
-        this.emitBlockStatements(missBody, esub);
+        this.emitBlockStatements(missBody, esub, join);
         ctx.lines.push(...esub.lines);
         this.push(ctx, `}`);
+        this.applyJoinedNarrowKills(ctx, join);
         // A miss branch that always exits narrows everything AFTER the if
         // too (TS's control-flow narrowing): reads there unwrap through the
         // safety-checked `.?` — provably non-null, the miss path returned.
@@ -4400,12 +4441,13 @@ export class Emitter {
             return;
           }
         }
+        const join = new Set<string>();
         this.push(ctx, `if (${prop}) |${name}| {`);
         const saved = ctx.memberSubst.get(key);
         ctx.memberSubst.set(key, name);
         const sub = this.nestedCtx(ctx);
         const thenBody = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
-        this.emitBlockStatements(thenBody, sub);
+        this.emitBlockStatements(thenBody, sub, join);
         ctx.lines.push(...sub.lines);
         ctx.memberSubst.delete(key);
         if (saved !== undefined) ctx.memberSubst.set(key, saved);
@@ -4413,10 +4455,11 @@ export class Emitter {
           this.push(ctx, `} else {`);
           const esub = this.nestedCtx(ctx);
           const elseBody = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-          this.emitBlockStatements(elseBody, esub);
+          this.emitBlockStatements(elseBody, esub, join);
           ctx.lines.push(...esub.lines);
         }
         this.push(ctx, `}`);
+        this.applyJoinedNarrowKills(ctx, join);
         // An else branch that always exits narrows everything AFTER the if
         // too (the mirror of the R7-dual rule above): only the hit path
         // falls through, so reads there unwrap via the safety-checked `.?`.
@@ -4459,9 +4502,10 @@ export class Emitter {
         return;
       }
     }
+    const join = new Set<string>();
     this.push(ctx, `if (${condText}) {`);
     const sub = this.nestedCtx(ctx);
-    this.withKindNarrow(posGuard, ctx, () => this.emitBlockStatements(thenStmts, sub));
+    this.withKindNarrow(posGuard, ctx, () => this.emitBlockStatements(thenStmts, sub, join));
     ctx.lines.push(...sub.lines);
     if (stmt.elseStatement) {
       if (ts.isIfStatement(stmt.elseStatement)) {
@@ -4469,7 +4513,8 @@ export class Emitter {
         this.push(ctx, `} else ${""}`.trimEnd());
         // Rewrite: emit as `} else if (...) {` by recursing with a marker.
         ctx.lines.pop();
-        this.emitElseIf(stmt.elseStatement, ctx);
+        this.emitElseIf(stmt.elseStatement, ctx, join);
+        this.applyJoinedNarrowKills(ctx, join);
         // This exit path narrows like the common tail below: an exiting
         // empty-test arm at the HEAD of a chain still narrows everything
         // after the whole statement (the else-if arms ride the non-empty
@@ -4480,10 +4525,11 @@ export class Emitter {
       this.push(ctx, `} else {`);
       const esub = this.nestedCtx(ctx);
       const elseStmts = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-      this.withKindNarrow(negGuard, ctx, () => this.emitBlockStatements(elseStmts, esub));
+      this.withKindNarrow(negGuard, ctx, () => this.emitBlockStatements(elseStmts, esub, join));
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
     this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx);
   }
 
@@ -4576,7 +4622,12 @@ export class Emitter {
     return [];
   }
 
-  private emitElseIf(stmt: ts.IfStatement, ctx: Ctx): void {
+  /// Every arm of the chain — each else-if body and the final else — is a
+  /// SIBLING of the head if's then arm: its merge-class kills collect into
+  /// the chain-wide `join` the head applies after the whole statement, so
+  /// no arm emits against a preceding arm's kills (they are alternatives,
+  /// not a sequence).
+  private emitElseIf(stmt: ts.IfStatement, ctx: Ctx, join: Set<string>): void {
     // A chained condition that needs lowered statements cannot sit between
     // `}` and `else if`; open a plain else block and start a fresh if inside.
     // The probe works on a copied name set so it burns no real names.
@@ -4585,7 +4636,10 @@ export class Emitter {
     if (probe.lines.length > 0) {
       this.push(ctx, `} else {`);
       const inner = this.nestedCtx(ctx);
-      this.emitIf(stmt, inner);
+      // The nested if is one arm of the enclosing chain: bracket it in a
+      // flow scope so its narrows stay contained and its kills join with
+      // its siblings' instead of applying mid-chain.
+      this.withNarrowScope(ctx, "merge", () => this.emitIf(stmt, inner), join);
       ctx.lines.push(...inner.lines);
       this.push(ctx, `}`);
       return;
@@ -4594,17 +4648,17 @@ export class Emitter {
     this.push(ctx, `} else if (${condText}) {`);
     const sub = this.nestedCtx(ctx);
     const thenStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
-    this.emitBlockStatements(thenStmts, sub);
+    this.emitBlockStatements(thenStmts, sub, join);
     ctx.lines.push(...sub.lines);
     if (stmt.elseStatement) {
       if (ts.isIfStatement(stmt.elseStatement)) {
-        this.emitElseIf(stmt.elseStatement, ctx);
+        this.emitElseIf(stmt.elseStatement, ctx, join);
         return;
       }
       this.push(ctx, `} else {`);
       const esub = this.nestedCtx(ctx);
       const elseStmts = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-      this.emitBlockStatements(elseStmts, esub);
+      this.emitBlockStatements(elseStmts, esub, join);
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);
@@ -5038,14 +5092,15 @@ export class Emitter {
     const condText = this.emitNullGuardChainUnwrap(conjuncts, op, ctx, guards);
     const kindGuards = this.chainKindGuards(conjuncts, op);
     const thenStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
+    const join = new Set<string>();
     this.push(ctx, `if (${condText}) {`);
     const tSub = this.nestedCtx(ctx);
     if (isAnd) {
       this.withSubsts(guards, ctx, () =>
-        this.withKindNarrows(kindGuards, ctx, () => this.emitBlockStatements(thenStmts, tSub)),
+        this.withKindNarrows(kindGuards, ctx, () => this.emitBlockStatements(thenStmts, tSub, join)),
       );
     } else {
-      this.emitBlockStatements(thenStmts, tSub);
+      this.emitBlockStatements(thenStmts, tSub, join);
     }
     ctx.lines.push(...tSub.lines);
     if (stmt.elseStatement) {
@@ -5054,14 +5109,15 @@ export class Emitter {
       const elseStmts = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
       if (!isAnd) {
         this.withSubsts(guards, ctx, () =>
-          this.withKindNarrows(kindGuards, ctx, () => this.emitBlockStatements(elseStmts, eSub)),
+          this.withKindNarrows(kindGuards, ctx, () => this.emitBlockStatements(elseStmts, eSub, join)),
         );
       } else {
-        this.emitBlockStatements(elseStmts, eSub);
+        this.emitBlockStatements(elseStmts, eSub, join);
       }
       ctx.lines.push(...eSub.lines);
     }
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
     if (exitDual) {
       // `if (x === null || <bad>) return ...;` — the code below runs only
       // with x present, so the unwrap substitutions stay active.
@@ -5320,6 +5376,14 @@ export class Emitter {
     this.push(ctx, `switch (${base}) {`);
     const armCtx = { ...ctx, indent: ctx.indent + 1 };
     const covered = new Set<string>();
+    // Clauses are pure siblings — alternatives from the switch's entry
+    // state, never a sequence: tsc's noFallthroughCasesInSwitch (on in the
+    // subset's program options) rejects a non-empty clause that falls into
+    // the next, and label stacking shares ONE body. So each clause's
+    // merge-class kills join here and apply only after every clause has
+    // emitted (see applyJoinedNarrowKills) — applying them per clause
+    // would strip a later clause of a narrowing tsc keeps there.
+    const join = new Set<string>();
     let sawDefault = false;
     // Label stacking (`case "a": case "b": body`): JS runs the next body
     // for every stacked label, so the labels coalesce into one Zig arm.
@@ -5351,7 +5415,7 @@ export class Emitter {
           continue;
         }
         const sub = this.nestedCtx(armCtx);
-        this.emitBlockStatements(stmts, sub);
+        this.emitBlockStatements(stmts, sub, join);
         const single = sub.lines.length === 1 ? sub.lines[0].trim() : null;
         if (single && (single.startsWith("return ") || single.startsWith("break :")) && single.endsWith(";")) {
           const armText = `else => ${single.slice(0, -1)},`;
@@ -5424,9 +5488,10 @@ export class Emitter {
       for (const [k, v] of savedSubst) ctx.memberSubst.set(k, v);
       ctx.stillOptionalSubst.clear();
       for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
-      // Assignment kills inside the arm stay dead past this restore
-      // (the snapshot would resurrect them; see popNarrowKillFrame).
-      this.popNarrowKillFrame(ctx);
+      // Assignment kills inside the arm join with the sibling clauses'
+      // and apply after the last clause (the snapshot above must not
+      // resurrect them; see applyJoinedNarrowKills).
+      for (const key of this.popNarrowKillFrame(ctx, "drop")) join.add(key);
 
       const labels = [...pending, tag].map((t) => `.${zigId(t)}`).join(", ");
       pending = [];
@@ -5452,6 +5517,7 @@ export class Emitter {
       }
     }
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
   }
 
   /// R13d: a switch over a literal-union VALUE. Member labels become enum or
@@ -5469,6 +5535,9 @@ export class Emitter {
     this.push(ctx, `switch (${base}) {`);
     const armCtx = { ...ctx, indent: ctx.indent + 1 };
     const covered = new Set<string>();
+    // Clauses are siblings (noFallthroughCasesInSwitch; stacked labels
+    // share one body): kills join and apply after the last clause.
+    const join = new Set<string>();
     let pending: string[] = [];
     let sawDefault = false;
     let allExit = true;
@@ -5517,7 +5586,7 @@ export class Emitter {
       const armLabel = label ? [...pending, label].join(", ") : "else";
       pending = [];
       const sub = this.nestedCtx(armCtx);
-      this.emitBlockStatements(stmts, sub);
+      this.emitBlockStatements(stmts, sub, join);
       const single = sub.lines.length === 1 ? sub.lines[0].trim() : null;
       if (single && (single.startsWith("return ") || single.startsWith("break :")) && single.endsWith(";")) {
         const armText = `${armLabel} => ${single.slice(0, -1)},`;
@@ -5544,6 +5613,7 @@ export class Emitter {
       }
     }
     this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
   }
 
   /// R13f: a switch over a PLAIN number/string value lowers to an if/else
@@ -5621,30 +5691,36 @@ export class Emitter {
     }
     // Trailing label-only clauses (and a trailing empty default): JS no-ops.
     const defaultArm = arms.find((a) => a.alsoDefault) ?? null;
+    // The lowered if/else chain's arms are the switch's clauses — siblings
+    // (noFallthroughCasesInSwitch): kills join and apply after the chain.
+    const join = new Set<string>();
     let opened = false;
     for (const arm of arms) {
       if (arm.conds.length === 0) continue; // a pure default arm emits as the else below
       const cond = arm.conds.join(" or ");
       this.push(ctx, `${opened ? "} else " : ""}if (${cond}) {`);
       const sub = this.nestedCtx(ctx);
-      this.emitBlockStatements(arm.stmts, sub);
+      this.emitBlockStatements(arm.stmts, sub, join);
       ctx.lines.push(...sub.lines);
       opened = true;
     }
     if (defaultArm && opened) {
       this.push(ctx, `} else {`);
       const sub = this.nestedCtx(ctx);
-      this.emitBlockStatements(defaultArm.stmts, sub);
+      this.emitBlockStatements(defaultArm.stmts, sub, join);
       ctx.lines.push(...sub.lines);
     } else if (defaultArm) {
       // Every case label was empty-trailing (or none existed): the default
-      // body runs unconditionally.
+      // body runs unconditionally — straight-line flow, so its kills merge
+      // as usual rather than joining with the (nonexistent) other arms.
       const sub = this.childCtx(ctx);
       this.emitBlockStatements(defaultArm.stmts, sub);
       ctx.lines.push(...sub.lines);
+      this.applyJoinedNarrowKills(ctx, join);
       return;
     }
     if (opened) this.push(ctx, `}`);
+    this.applyJoinedNarrowKills(ctx, join);
     if (sawDefault && !defaultArm && clauses.length > 0) {
       // A trailing empty default is a JS no-op; nothing to emit.
     }

@@ -6889,7 +6889,115 @@ export function f(xs: readonly (P | null)[]): readonly number[] {
   },
 ];
 
+// Multi-alternative constructs (if/else arms, else-if chains, switch
+// clauses) JOIN their assignment kills: every arm is an alternative from
+// the construct's ENTRY state — tsc types each one as if no sibling ran —
+// so one arm's kill must not strip a sibling of a narrowing tsc keeps
+// there. The kills apply to the surviving flow only after the last arm.
+const branchKillJoinCases: Case[] = [
+  {
+    // The then arm kills; the else arm is a SIBLING typed from the entry
+    // state (p non-null after the guard), so its read must still unwrap.
+    // A sequential merge deletes the narrow before the else arm emits and
+    // the read hits the bare optional — invalid Zig.
+    name: "a kill in the then arm leaves the else arm's entry narrow intact",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  if (p === null) return -1;
+  if (flag) {
+    p = null;
+  } else {
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // Same join across an else-if chain: the middle arm kills, the last
+    // arm reads — every arm of the chain is a sibling of every other.
+    name: "a kill in a middle else-if arm leaves the last arm's narrow intact",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, sel: number): number {
+  let p: P | null = a;
+  if (p === null) return -1;
+  if (sel === 1) {
+    return 1;
+  } else if (sel === 2) {
+    p = null;
+  } else if (sel === 3) {
+    return p.v;
+  }
+  if (p === null) return 0;
+  return p.v;
+}
+`,
+  },
+  {
+    // Switch clauses are pure siblings (tsc's noFallthroughCasesInSwitch
+    // keeps a non-empty clause from falling into the next): a kill in an
+    // earlier clause must not reach a later clause's reads, and the joined
+    // kill still reaches the post-switch re-check.
+    name: "a kill in one switch clause leaves a later clause's narrow intact",
+    src: `
+export type Msg =
+  | { readonly kind: "kill" }
+  | { readonly kind: "use" }
+  | { readonly kind: "skip" };
+export interface P { readonly v: number; }
+export function f(a: P | null, msg: Msg): number {
+  let p: P | null = a;
+  if (p === null) return -1;
+  switch (msg.kind) {
+    case "kill":
+      p = null;
+      break;
+    case "use":
+      return p.v;
+    case "skip":
+      break;
+  }
+  if (p === null) return 0;
+  return p.v;
+}
+`,
+  },
+  {
+    // Kills travel the edges control does: an always-throwing arm's kill
+    // rides the throw into the catch, so the catch body types from a state
+    // where the narrow is dead (tsc kills anything the try assigns before
+    // a possible throw) and its re-check reads the live slot. The
+    // intra-try flow after the arm keeps the entry narrow.
+    name: "a kill on an always-throwing path is dead inside the catch arm",
+    src: `
+export interface P { readonly v: number; }
+export interface BoomError { readonly kind: "boom"; readonly at: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (flag) { p = null; throw { kind: "boom", at: 0 } as BoomError; }
+    n += p.v;
+  } catch (err) {
+    if (p === null) {
+      n += 1;
+    } else {
+      n += p.v;
+    }
+  }
+  if (p === null) return n;
+  return n + p.v;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
+  ...branchKillJoinCases,
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
