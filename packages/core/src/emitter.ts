@@ -104,10 +104,13 @@ interface Ctx {
   /// A scope whose only in-function routes are throws caught by that try's
   /// catch never falls through into the try body's remaining statements,
   /// so its kills must not merge into intra-try flow; they wait here and
-  /// emitTryCore applies them to the POST-try state, alongside the body's
-  /// normal-exit kills (see popNarrowKillFrame's route form). The throw
-  /// edge is one instance of the general rule; break/continue/lowered-
-  /// return edges stage the same way on edgeKills below.
+  /// emitTryCore hands them to the catch as its ENTRY state (the catch
+  /// body's reads see them), where they ride the catch's own kill-frame
+  /// routing out — post-try on fall-through, the edge stage on a
+  /// break/continue, dropped when every catch route leaves the function
+  /// (see popNarrowKillFrame's route form). The throw edge is one instance
+  /// of the general rule; break/continue/lowered-return edges stage the
+  /// same way on edgeKills below.
   pendingCatchKills?: Set<string> | null;
   /// The enclosing edge-target constructs of the emitted function,
   /// innermost last: loops, switches, labeled blocks, and lifted-callback
@@ -3230,7 +3233,12 @@ export class Emitter {
     return stage.kills;
   }
 
-  private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx, joinInto?: Set<string>): void {
+  private emitBlockStatements(
+    stmts: readonly ts.Statement[],
+    ctx: Ctx,
+    joinInto?: Set<string>,
+    entryKills?: ReadonlySet<string>,
+  ): void {
     // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
     // narrows the statements after it in ITS list, and whatever those
     // statements nest — never code beyond the list. The narrowing maps ride
@@ -3264,10 +3272,26 @@ export class Emitter {
     // fall-through still forces the plain merge (which is a conservative
     // superset — its kills persist into all downstream states, the edge
     // destinations included).
+    // `entryKills` are kills that arrived WITH control (a catch entered on
+    // throw edges that carried them): they widen the list's entry state —
+    // its reads see them — and then ride this frame's routing out, exactly
+    // like a kill the first statement made. Routing is what makes them
+    // land where flow says: a fall-through carries them to the code after
+    // the construct, an escaping break/continue stages them at that edge's
+    // destination, and a list whose every route leaves the function drops
+    // them (no surviving path carries them anywhere).
     this.withNarrowScope(
       ctx,
       leavesFn ? "drop" : this.edgeKillRouting(stmts, env, ctx),
-      () => this.emitStatementList(stmts, ctx),
+      () => {
+        if (entryKills) {
+          for (const key of entryKills) {
+            ctx.memberSubst.delete(key);
+            ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
+          }
+        }
+        this.emitStatementList(stmts, ctx);
+      },
       joinInto,
     );
   }
@@ -4131,24 +4155,22 @@ export class Emitter {
     if (done !== null) this.push(inner, `break :${done};`);
     outer.lines.push(...inner.lines);
     this.push(outer, `}`);
-    // Exception-kills merge: kills travel the same edges control does, and
-    // the routes that fed this set are throws that land in THIS catch — so
-    // they apply at the catch's entry, before its body emits (tsc types
-    // the catch from the state at the throw points: a narrowing an
-    // always-throwing arm killed before throwing is dead inside the
-    // catch). The catch's fallthrough carries them on to the post-try
-    // continuation through the shared maps, alongside the body's
-    // normal-exit kills — which already applied at the body's own merge
-    // just above, so the catch also sees those (tsc-correct too: a
-    // mid-body throw can follow any fall-through assignment). They never
-    // touch the intra-try flow already emitted above. (A branch with any
-    // normal fallthrough merged its kills there instead; a catch whose
-    // every route leaves the function dropped them before this set was
-    // consulted.)
-    for (const key of pendingKills) {
-      ctx.memberSubst.delete(key);
-      ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
-    }
+    // Exception-kills handoff: kills travel the same edges control does,
+    // and the routes that fed this set are throws that land in THIS catch
+    // — so they enter as the catch's INPUT state (tsc types the catch from
+    // the state at the throw points: a narrowing an always-throwing arm
+    // killed before throwing is dead inside the catch) and then follow the
+    // catch's own routes out, via the catch list's kill-frame routing. A
+    // catch that falls through carries them to the post-try continuation;
+    // a catch that breaks/continues stages them at that edge's landing
+    // point; a catch whose every route leaves the function drops them —
+    // the post-try continuation is then reached only by clean paths, where
+    // tsc keeps the narrow, so applying them there unconditionally would
+    // poison the normal fallthrough. The body's normal-exit kills already
+    // applied at the body's own merge just above, so the catch also sees
+    // those (tsc-correct too: a mid-body throw can follow any fall-through
+    // assignment). They never touch the intra-try flow already emitted
+    // above.
     const catchCtx: Ctx = { ...outer, lines: [] };
     if (cc.variableDeclaration && ts.isIdentifier(cc.variableDeclaration.name)) {
       if (this.identifierUsed(cc.block, cc.variableDeclaration)) {
@@ -4157,7 +4179,7 @@ export class Emitter {
         this.push(catchCtx, `const ${ename} = thrown_payload;`);
       }
     }
-    this.emitBlockStatements(cc.block.statements, catchCtx);
+    this.emitBlockStatements(cc.block.statements, catchCtx, undefined, pendingKills);
     outer.lines.push(...catchCtx.lines);
     ctx.lines.push(...outer.lines);
     this.push(ctx, `}`);

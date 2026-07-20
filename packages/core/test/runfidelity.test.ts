@@ -5528,6 +5528,33 @@ export function readsKilled(q: number | null, drop: boolean): number {
       { fn: "readsKilled", args: [i(4), { t: "b", v: false }] },
     ],
   },
+  {
+    // An exception kill rides the catch's break out of the loop: the clean
+    // path's read after the try keeps its narrow, and the killed path
+    // resumes post-loop. Both paths execute deterministically.
+    name: "an exception kill exits through the catch's break, clean path reads narrowed",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function f(q: number | null, fail: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  while (true) {
+    try {
+      if (fail) { p = null; throw { kind: "boom" } as Boom; }
+    } catch {
+      break;
+    }
+    return p + 20;
+  }
+  return -2;
+}
+`,
+    calls: [
+      { fn: "f", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "f", args: [i(3), { t: "b", v: false }] },
+      { fn: "f", args: [i(3), { t: "b", v: true }] },
+    ],
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling

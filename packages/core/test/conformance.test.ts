@@ -7404,6 +7404,104 @@ export function f(q: number | null, r: number | null, s: number | null, flag: bo
   },
 ];
 
+// Kills that ride a throw edge into a catch are the catch's INPUT state,
+// not a post-try constant: the catch body's reads see them, and their
+// propagation OUT follows the catch's own routes. A catch that falls
+// through carries them to the post-try continuation; a catch that
+// breaks/continues stages them at that edge's landing point; a catch whose
+// every route leaves the function drops them — the post-try continuation
+// is then reached only by clean paths, where tsc keeps the narrow.
+const catchRouteKillCases: Case[] = [
+  {
+    // The killed path is throw -> catch -> break -> post-loop; the code
+    // after the try inside the loop is reached only by the clean path, so
+    // its read keeps the narrow (tsc agrees) while the post-loop state
+    // re-checks.
+    name: "an exception kill follows the catch's break to the post-loop state",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function f(q: number | null, fail: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  while (true) {
+    try {
+      if (fail) { p = null; throw { kind: "boom" } as Boom; }
+    } catch {
+      break;
+    }
+    return p + 1;
+  }
+  return -2;
+}
+`,
+  },
+  {
+    // A labeled break out of both loops lands post-OUTER: the reads on the
+    // clean path through both bodies keep the narrow, and only the
+    // post-outer state re-checks.
+    name: "an exception kill follows a labeled break out of nested loops",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function f(q: number | null, limit: number, grid: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let sum: number = 0;
+  outer: for (const r of grid) {
+    for (const x of grid) {
+      try {
+        if (x > limit) { p = null; throw { kind: "boom" } as Boom; }
+      } catch {
+        break outer;
+      }
+      sum += p + x;
+    }
+    sum += p + r;
+  }
+  if (p === null) { return -sum; }
+  return sum + p;
+}
+`,
+  },
+  {
+    // A catch that re-kills the carried key and falls through merges it
+    // once at the post-try state — same destination, no double application.
+    name: "a catch that re-kills the carried key merges it once on fallthrough",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function f(q: number | null, fail: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  try {
+    if (fail) { p = null; throw { kind: "boom" } as Boom; }
+  } catch {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // A catch whose every route returns closes the exception path: the
+    // post-try continuation is reached only by the clean path and its read
+    // keeps the narrow (tsc agrees — no re-check is even legal to require).
+    name: "an exception kill drops with a catch that always returns",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function f(q: number | null, fail: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  try {
+    if (fail) { p = null; throw { kind: "boom" } as Boom; }
+  } catch {
+    return -2;
+  }
+  return p + 1;
+}
+`,
+  },
+];
+
 // A lifted block-body callback whose only return is the trailing statement
 // emits as straight-line statements plus that value. The statement prefix
 // and the trailing expression are ONE flow in tsc — a guard in the prefix
@@ -7779,6 +7877,7 @@ const corpus: Case[] = [
   ...killFallthroughCases,
   ...edgeKillStagingCases,
   ...finallyFlowOrderCases,
+  ...catchRouteKillCases,
   ...callbackTrailingNarrowCases,
   ...textMethodCases,
   ...releaseModeCases,
