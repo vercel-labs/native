@@ -55,6 +55,26 @@ class EmitError extends Error {
   }
 }
 
+/// One enclosing edge-target construct (see Ctx.edgeKills). `label` is the
+/// SOURCE label naming the construct (loopLabel mangling happens at
+/// emission), null for unlabeled ones. An unlabeled `break` binds the
+/// innermost loop-or-switch stage, an unlabeled `continue` the innermost
+/// loop, labeled exits the innermost stage carrying their label, and a
+/// lifted callback's lowered `return` the innermost callback stage.
+interface EdgeKillStage {
+  readonly kind: "loop" | "switch" | "block" | "callback";
+  readonly label: string | null;
+  readonly kills: Set<string>;
+}
+
+/// Where a closing scope's recorded kills go — kills travel the same edges
+/// control does. `merge` applies them to the surviving fall-through flow;
+/// `drop` discards them (every route leaves the emitted function); an array
+/// of destination sets carries them along the scope's non-local edges (the
+/// enclosing try's pending catch set, break/continue target stages, the
+/// lifted callback's stage), each applied where its edge lands.
+type KillRouting = "merge" | "drop" | readonly Set<string>[];
+
 interface Ctx {
   readonly lines: string[];
   indent: number;
@@ -85,8 +105,25 @@ interface Ctx {
   /// catch never falls through into the try body's remaining statements,
   /// so its kills must not merge into intra-try flow; they wait here and
   /// emitTryCore applies them to the POST-try state, alongside the body's
-  /// normal-exit kills (see popNarrowKillFrame's "exception" mode).
+  /// normal-exit kills (see popNarrowKillFrame's route form). The throw
+  /// edge is one instance of the general rule; break/continue/lowered-
+  /// return edges stage the same way on edgeKills below.
   pendingCatchKills?: Set<string> | null;
+  /// The enclosing edge-target constructs of the emitted function,
+  /// innermost last: loops, switches, labeled blocks, and lifted-callback
+  /// value blocks. A scope that exits ONLY along break/continue/lowered-
+  /// return edges stages its kills on the target construct's set
+  /// (popNarrowKillFrame's route form, the sibling of pendingCatchKills),
+  /// and the construct's emitter applies them where those edges land — the
+  /// post-construct state for breaks and callback returns, and for
+  /// continue edges the back-edge join, which the emitter also realizes as
+  /// the post-loop state: the loop-entry model delegates in-body
+  /// next-iteration reads to tsc (the checker rejects a read relying on a
+  /// narrow the back edge kills), so the only emission the kill must still
+  /// reach is the normal-completion exit. Applying a stage records into
+  /// the then-innermost kill frame, so staged kills keep propagating
+  /// outward exactly like merge-class kills.
+  readonly edgeKills: EdgeKillStage[];
   /// decl node -> zig identifier
   readonly names: Map<ts.Node, string>;
   readonly used: Set<string>;
@@ -1012,6 +1049,7 @@ export class Emitter {
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       narrowKilled: [],
+      edgeKills: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1391,6 +1429,7 @@ export class Emitter {
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       narrowKilled: [],
+      edgeKills: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1649,6 +1688,7 @@ export class Emitter {
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       narrowKilled: [],
+      edgeKills: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -1875,6 +1915,7 @@ export class Emitter {
       stillOptionalSubst: new Map(),
       narrowedUnion: new Map(),
       narrowKilled: [],
+      edgeKills: [],
       localTypes: new Map(),
       builders: new Map(),
       retLabel: null,
@@ -3071,17 +3112,21 @@ export class Emitter {
   /// substitution's unwrap spelling (losing it emits a field access on an
   /// optional, not a re-check).
   ///
-  /// `exception` routes the kills to the enclosing try's pending set: the
-  /// scope's only in-function routes are throws that land in that try's
-  /// catch and fall through to the POST-try continuation. Kills travel the
-  /// same edges control does, so they must not poison the intra-try flow
-  /// (tsc keeps its narrows there) — emitTryCore applies them after the
-  /// try instead.
-  private popNarrowKillFrame(ctx: Ctx, mode: "merge" | "drop" | "exception" = "merge"): Set<string> {
+  /// A destination array routes the kills along the scope's non-local
+  /// edges instead: the scope's only in-function routes are caught throws
+  /// and/or escaping break/continue/lowered-return edges, so no path
+  /// carrying the kills reaches THIS merge point either — but each edge
+  /// resumes somewhere in the function, and the kills must be live there.
+  /// Kills travel the same edges control does: they wait in the
+  /// destination sets (the enclosing try's pendingCatchKills, the target
+  /// constructs' edgeKills stages) and the owning emitters apply them
+  /// where the edges land — never mid-flight, where tsc keeps the
+  /// surviving paths' narrows.
+  private popNarrowKillFrame(ctx: Ctx, routing: KillRouting = "merge"): Set<string> {
     const killed = ctx.narrowKilled.pop() ?? new Set<string>();
-    if (mode === "drop") return killed;
-    if (mode === "exception") {
-      for (const key of killed) ctx.pendingCatchKills?.add(key);
+    if (routing === "drop") return killed;
+    if (routing !== "merge") {
+      for (const dest of routing) for (const key of killed) dest.add(key);
       return killed;
     }
     for (const key of killed) ctx.memberSubst.delete(key);
@@ -3103,11 +3148,12 @@ export class Emitter {
   /// narrowing tsc keeps there. The caller collects each arm's kills and
   /// applies the union once via applyJoinedNarrowKills, after the last
   /// alternative. Only merge-class kills defer: an always-leaving arm
-  /// still drops its kills, a caught-throw-only arm still routes them to
-  /// the enclosing try's pending set — those edges never reach a sibling.
+  /// still drops its kills, and an arm whose only in-function routes are
+  /// non-local edges still routes them to those edges' destination sets —
+  /// those edges never reach a sibling.
   private withNarrowScope<T>(
     ctx: Ctx,
-    mode: "merge" | "drop" | "exception",
+    mode: KillRouting,
     emit: () => T,
     joinInto?: Set<string>,
   ): T {
@@ -3145,6 +3191,33 @@ export class Emitter {
     }
   }
 
+  /// Bracket a construct's emission with an edge-kill stage (Ctx.edgeKills):
+  /// scopes inside that exit only along edges bound to this construct stage
+  /// their kills here, and the returned set is what the caller applies at
+  /// the point those edges land — applyJoinedNarrowKills after the closing
+  /// brace for loops, labeled blocks, and callback value blocks; folded
+  /// through the clause join for switches (the two mechanisms share one
+  /// application point, so a kill is neither applied twice mid-construct
+  /// nor dropped between them). The application records into the
+  /// then-innermost kill frame, so a staged kill keeps propagating outward
+  /// — through enclosing joins and post-narrow subtractions — exactly like
+  /// a merge-class kill applied at the same spot.
+  private stagedEdgeKills(
+    ctx: Ctx,
+    kind: EdgeKillStage["kind"],
+    label: string | null,
+    emit: () => void,
+  ): Set<string> {
+    const stage: EdgeKillStage = { kind, label, kills: new Set() };
+    ctx.edgeKills.push(stage);
+    try {
+      emit();
+    } finally {
+      ctx.edgeKills.pop();
+    }
+    return stage.kills;
+  }
+
   private emitBlockStatements(stmts: readonly ts.Statement[], ctx: Ctx, joinInto?: Set<string>): void {
     // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
     // narrows the statements after it in ITS list, and whatever those
@@ -3165,22 +3238,137 @@ export class Emitter {
       throwResumes: ctx.catchResumes === true,
     };
     const leavesFn = this.allRoutesLeaveFunction(stmts, env);
-    // Exception-kills channel: when the list's only in-function routes are
-    // throws the enclosing catch hands back (no fallthrough, break,
-    // continue, or lowered return into the try's remaining statements),
-    // its kills travel the throw edges — to the post-try continuation the
-    // caught throw resumes at — and must not merge into intra-try flow,
-    // where tsc keeps the surviving path's narrows. Re-asking the route
-    // question with those throws treated as leaving isolates exactly this
-    // case: any normal resuming route still forces the plain merge.
-    const mode = leavesFn
-      ? "drop"
-      : env.throwResumes &&
-          ctx.pendingCatchKills != null &&
-          this.allRoutesLeaveFunction(stmts, { ...env, throwResumes: false })
-        ? "exception"
-        : "merge";
-    this.withNarrowScope(ctx, mode, () => this.emitStatementList(stmts, ctx), joinInto);
+    // Edge-kills channel: when the list's only in-function routes are
+    // non-local edges — throws the enclosing catch hands back, escaping
+    // break/continue edges, lowered callback returns — no path carrying
+    // the kills falls through into the statements after this list, so
+    // merging them here would poison flow tsc keeps narrowed (the killing
+    // paths cannot reach it). Kills travel the same edges control does:
+    // each class stages at its destination — the try's pending set for
+    // caught throws, the target construct's stage for break/continue, the
+    // callback stage for lowered returns — and the owning emitter applies
+    // it where the edge lands. Re-asking the route question with every
+    // edge class treated as leaving isolates exactly this case: any true
+    // fall-through still forces the plain merge (which is a conservative
+    // superset — its kills persist into all downstream states, the edge
+    // destinations included).
+    this.withNarrowScope(
+      ctx,
+      leavesFn ? "drop" : this.edgeKillRouting(stmts, env, ctx),
+      () => this.emitStatementList(stmts, ctx),
+      joinInto,
+    );
+  }
+
+  /// The routing for a list that does NOT always leave the function: the
+  /// non-local-edges-only route form when it applies, else "merge". A
+  /// destination that fails to resolve (a caught throw without a pending
+  /// set, an edge whose target construct has no stage) falls back to the
+  /// plain merge — over-merging costs a re-check, never wrong code.
+  private edgeKillRouting(
+    stmts: readonly ts.Statement[],
+    env: { returnLeaves: boolean; throwResumes: boolean },
+    ctx: Ctx,
+  ): KillRouting {
+    if (!this.allRoutesLeaveFunction(stmts, { ...env, edgesLeave: true, throwResumes: false })) {
+      return "merge";
+    }
+    const targets: Set<string>[] = [];
+    if (env.throwResumes && !this.allRoutesLeaveFunction(stmts, { ...env, edgesLeave: true })) {
+      // With edges leaving but caught throws resuming, any remaining
+      // resuming route is a caught throw: this list exits along the
+      // throw edge into the enclosing catch.
+      if (ctx.pendingCatchKills == null) return "merge";
+      targets.push(ctx.pendingCatchKills);
+    }
+    const edges = this.escapingEdgesOf(stmts, env.returnLeaves);
+    const innermost = (pred: (s: EdgeKillStage) => boolean): EdgeKillStage | null => {
+      for (let i = ctx.edgeKills.length - 1; i >= 0; i--) {
+        if (pred(ctx.edgeKills[i])) return ctx.edgeKills[i];
+      }
+      return null;
+    };
+    for (const label of edges.breaks) {
+      const stage = innermost((s) =>
+        label === null ? s.kind === "loop" || s.kind === "switch" : s.label === label,
+      );
+      if (stage === null) return "merge";
+      targets.push(stage.kills);
+    }
+    for (const label of edges.continues) {
+      const stage = innermost((s) => s.kind === "loop" && (label === null || s.label === label));
+      if (stage === null) return "merge";
+      targets.push(stage.kills);
+    }
+    if (edges.callbackReturn) {
+      const stage = innermost((s) => s.kind === "callback");
+      if (stage === null) return "merge";
+      targets.push(stage.kills);
+    }
+    // No resolvable destination at all would leave resuming routes with
+    // nowhere to carry the kills — that only happens when the two route
+    // analyses disagree, so keep the conservative merge.
+    return targets.length > 0 ? targets : "merge";
+  }
+
+  /// The escaping non-local edges out of a statement list: the labels (null
+  /// = unlabeled) of break/continue statements whose target sits at or
+  /// outside the list, and whether any lowered `return` exits it (lifted
+  /// callbacks: returnLeaves is false). Binding mirrors
+  /// allRoutesLeaveFunction's target tracking — a loop binds unlabeled
+  /// break and continue for its subtree, a switch binds unlabeled break, a
+  /// labeled statement binds its label — and callback bodies are theirs
+  /// alone (tsc rejects a break/continue crossing a function boundary;
+  /// their returns are analyzed at their own emission).
+  private escapingEdgesOf(
+    stmts: readonly ts.Statement[],
+    returnLeaves: boolean,
+  ): { breaks: Set<string | null>; continues: Set<string | null>; callbackReturn: boolean } {
+    const breaks = new Set<string | null>();
+    const continues = new Set<string | null>();
+    let callbackReturn = false;
+    interface Bound {
+      readonly labels: ReadonlySet<string>;
+      readonly breakBound: boolean;
+      readonly continueBound: boolean;
+    }
+    const visit = (n: ts.Node, st: Bound): void => {
+      if (ts.isBreakStatement(n)) {
+        if (n.label ? !st.labels.has(n.label.text) : !st.breakBound) breaks.add(n.label?.text ?? null);
+        return;
+      }
+      if (ts.isContinueStatement(n)) {
+        if (n.label ? !st.labels.has(n.label.text) : !st.continueBound) continues.add(n.label?.text ?? null);
+        return;
+      }
+      if (ts.isReturnStatement(n)) {
+        if (!returnLeaves) callbackReturn = true;
+        return;
+      }
+      if (ts.isFunctionDeclaration(n) || ts.isArrowFunction(n) || ts.isFunctionExpression(n)) return;
+      if (ts.isLabeledStatement(n)) {
+        visit(n.statement, { ...st, labels: new Set(st.labels).add(n.label.text) });
+        return;
+      }
+      if (
+        ts.isWhileStatement(n) ||
+        ts.isDoStatement(n) ||
+        ts.isForStatement(n) ||
+        ts.isForOfStatement(n) ||
+        ts.isForInStatement(n)
+      ) {
+        ts.forEachChild(n, (c) => visit(c, { ...st, breakBound: true, continueBound: true }));
+        return;
+      }
+      if (ts.isSwitchStatement(n)) {
+        ts.forEachChild(n, (c) => visit(c, { ...st, breakBound: true }));
+        return;
+      }
+      ts.forEachChild(n, (c) => visit(c, st));
+    };
+    const start: Bound = { labels: new Set(), breakBound: false, continueBound: false };
+    for (const s of stmts) visit(s, start);
+    return { breaks, continues, callbackReturn };
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -3392,9 +3580,16 @@ export class Emitter {
   /// lists (the top list and nested blocks); inside loop bodies, switch
   /// clauses, and inline callbacks a catch's fallthrough re-enters the
   /// construct, so the continuation is treated as resuming there.
+  /// `env.edgesLeave` re-asks the question with escaping break/continue
+  /// edges and lowered returns treated as LEAVING: emitBlockStatements uses
+  /// the difference to isolate lists whose only in-function routes are
+  /// non-local edges (their kills stage at the edges' destinations rather
+  /// than merging — see edgeKillRouting). A leaving return's expression
+  /// still walks: throwing calls inside it ride the throw edges, not the
+  /// return edge.
   private allRoutesLeaveFunction(
     stmts: readonly ts.Statement[],
-    env: { returnLeaves: boolean; throwResumes: boolean },
+    env: { returnLeaves: boolean; throwResumes: boolean; edgesLeave?: boolean },
   ): boolean {
     // `labels` / `breaks` / `continues` carry the targets bound inside the
     // list so far on this path; `throwResumes` is the handler visibility at
@@ -3415,13 +3610,15 @@ export class Emitter {
     const resumes = (n: ts.Node, st: State, tailLeaves: boolean): boolean => {
       const walk = (c: ts.Node): boolean => resumes(c, st, tailLeaves);
       if (ts.isBreakStatement(n)) {
+        if (env.edgesLeave) return false;
         return !st.inCallback && (n.label ? !st.labels.has(n.label.text) : st.breaks === 0);
       }
       if (ts.isContinueStatement(n)) {
+        if (env.edgesLeave) return false;
         return !st.inCallback && (n.label ? !st.labels.has(n.label.text) : st.continues === 0);
       }
       if (ts.isReturnStatement(n)) {
-        if (!st.inCallback && !env.returnLeaves) return true;
+        if (!st.inCallback && !env.returnLeaves && !env.edgesLeave) return true;
         return n.expression !== undefined && walk(n.expression);
       }
       if (ts.isThrowStatement(n)) {
@@ -3572,20 +3769,30 @@ export class Emitter {
       this.emitIf(stmt, ctx);
       return;
     }
+    // Loops (and below, labeled statements and switches) bracket their
+    // emission with an edge-kill stage: kills that ride a break edge bound
+    // here apply to the POST-construct state — the destination the break
+    // resumes at — and kills on a continue edge ride the back edge into
+    // the loop-entry join. The emitter realizes both as the post-loop
+    // application below: the loop-entry model delegates in-body
+    // next-iteration reads to tsc (a read relying on a narrow the back
+    // edge kills is a tsc error the checker already rejected), so the
+    // only remaining state a back-edge kill must reach is the loop's
+    // normal-completion exit — the same post-loop point.
     if (ts.isWhileStatement(stmt)) {
-      this.emitWhile(stmt, ctx, null);
+      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitWhile(stmt, ctx, null)));
       return;
     }
     if (ts.isDoStatement(stmt)) {
-      this.emitDoWhile(stmt, ctx, null);
+      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitDoWhile(stmt, ctx, null)));
       return;
     }
     if (ts.isForStatement(stmt)) {
-      this.emitClassicFor(stmt, ctx, null);
+      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitClassicFor(stmt, ctx, null)));
       return;
     }
     if (ts.isForOfStatement(stmt)) {
-      this.emitForOf(stmt, ctx, null);
+      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitForOf(stmt, ctx, null)));
       return;
     }
     if (ts.isLabeledStatement(stmt)) {
@@ -3598,28 +3805,45 @@ export class Emitter {
       const label = this.labelReferenced(stmt.statement, stmt.label.text)
         ? loopLabel(stmt.label.text)
         : null;
+      // The stage binds by the SOURCE label: a labeled break/continue's
+      // kills must land at this construct's post-state even from deep
+      // inside nested loops (edgeKillRouting resolves labels innermost-
+      // out, so an inner-targeted unlabeled break never binds here).
+      const jsLabel = stmt.label.text;
       const inner = stmt.statement;
       if (ts.isWhileStatement(inner)) {
-        this.emitWhile(inner, ctx, label);
+        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitWhile(inner, ctx, label)));
       } else if (ts.isDoStatement(inner)) {
-        this.emitDoWhile(inner, ctx, label);
+        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitDoWhile(inner, ctx, label)));
       } else if (ts.isForStatement(inner)) {
-        this.emitClassicFor(inner, ctx, label);
+        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitClassicFor(inner, ctx, label)));
       } else if (ts.isForOfStatement(inner)) {
-        this.emitForOf(inner, ctx, label);
+        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitForOf(inner, ctx, label)));
       } else if (label === null) {
         this.emitStatement(inner, ctx);
       } else {
-        this.push(ctx, `${label}: {`);
-        const sub = this.nestedCtx(ctx);
-        this.emitBlockStatements(ts.isBlock(inner) ? inner.statements : [inner], sub);
-        ctx.lines.push(...sub.lines);
-        this.push(ctx, `}`);
+        const kills = this.stagedEdgeKills(ctx, "block", jsLabel, () => {
+          this.push(ctx, `${label}: {`);
+          const sub = this.nestedCtx(ctx);
+          this.emitBlockStatements(ts.isBlock(inner) ? inner.statements : [inner], sub);
+          ctx.lines.push(...sub.lines);
+          this.push(ctx, `}`);
+        });
+        this.applyJoinedNarrowKills(ctx, kills);
       }
       return;
     }
     if (ts.isSwitchStatement(stmt)) {
-      this.emitSwitch(stmt, ctx);
+      // Clause-terminating breaks are stripped before their clause's route
+      // analysis, so their kills ride the sibling JOIN (the switch
+      // emitters' joinInto) to the same post-switch point this stage
+      // applies at — one application, nothing dropped between the two
+      // mechanisms. The stage itself keeps unlabeled-break RESOLUTION
+      // faithful (a break under a switch binds the switch, never a loop
+      // outside it; the mid-clause spellings that would stage here stop
+      // the build at their own emission). Labeled exits out of a labeled
+      // switch bind the wrapping labeled BLOCK's stage instead.
+      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "switch", null, () => this.emitSwitch(stmt, ctx)));
       return;
     }
     if (ts.isExpressionStatement(stmt)) {
@@ -3803,7 +4027,7 @@ export class Emitter {
       throwResumes: ctx.catchResumes === true,
     });
     // Fresh pending set for THIS try: kills routed here rode throw edges
-    // into this catch (popNarrowKillFrame's "exception" mode) and apply at
+    // into this catch (popNarrowKillFrame's route form) and apply at
     // the post-try merge below. A nested try's body re-derives its own set,
     // so kills always land at the same destination the throw route resolves
     // to; the catch block itself inherits the ENCLOSING set through ctx
@@ -8217,7 +8441,7 @@ export class Emitter {
       // runs before the caller continues, so the callback's narrowing never
       // reaches its siblings in the emitted loop body.
       const trailing = last.expression;
-      return this.withNarrowScope(sub, false, () => {
+      return this.withNarrowScope(sub, "merge", () => {
         this.emitStatementList(body.slice(0, -1), sub);
         return this.emitExpr(trailing, sub, expected).code;
       });
@@ -8230,9 +8454,15 @@ export class Emitter {
     inner.cmdReturn = null;
     inner.subReturn = null;
     inner.returnType = expected;
-    this.emitBlockStatements(body, inner);
+    // The callback edge-kill stage: an arm that kills a narrow and then
+    // `return`s exits along the lowered `break :label` edge, whose
+    // destination is the continuation AFTER this value block — so its
+    // kills apply here, once the block closes, and the arm's siblings and
+    // the trailing in-callback flow keep the narrows tsc keeps there.
+    const kills = this.stagedEdgeKills(sub, "callback", null, () => this.emitBlockStatements(body, inner));
     sub.lines.push(...inner.lines);
     this.push(sub, `};`);
+    this.applyJoinedNarrowKills(sub, kills);
     return name;
   }
 

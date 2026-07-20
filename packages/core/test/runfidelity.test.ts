@@ -279,6 +279,36 @@ export function probe(q: number | null, xs: readonly number[]): number {
     ],
   },
   {
+    // A kill+break arm exits the loop, so the fall-through `sum += p` keeps
+    // the narrow (tsc agrees — the killing path cannot reach it) and only
+    // the post-loop state re-checks. The stop rows must accumulate exactly
+    // the pre-break iterations and take the re-check (-sum - 1, dodging the
+    // -0 corner on the stop-first row); the no-stop rows run the whole loop
+    // and keep the narrow past it (sum + p). A kill misrouted onto the
+    // fall-through would not even compile; a dropped one would return
+    // sum + 10 on the stop rows.
+    name: "a kill+break arm's loop sums through the stop and no-stop paths",
+    src: `
+export function tally(vals: readonly number[], limit: number): number {
+  let p: number | null = 10;
+  if (p === null) return -1;
+  let sum: number = 0;
+  for (const v of vals) {
+    if (v > limit) { p = null; break; }
+    sum += p;
+  }
+  if (p === null) return -sum - 1;
+  return sum + p;
+}
+`,
+    calls: [
+      { fn: "tally", args: [{ t: "nums", v: [] }, f(10)] },
+      { fn: "tally", args: [{ t: "nums", v: [1, 2, 3] }, f(10)] },
+      { fn: "tally", args: [{ t: "nums", v: [1, 2, 99, 3] }, f(10)] },
+      { fn: "tally", args: [{ t: "nums", v: [99] }, f(10)] },
+    ],
+  },
+  {
     // A throw caught by a fall-through catch resumes at the `return -2`
     // after the try, so every route through the negative branch leaves the
     // function and the kill drops: the surviving read keeps its narrow and

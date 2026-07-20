@@ -6157,11 +6157,13 @@ export function f(q: number | null, flag: boolean): number {
 // kill applies nowhere — tsc keeps the narrow on the surviving flow, and a
 // read there depends on the substitution's unwrap spelling (a dropped
 // spelling emits a field access or plain read on an optional, not a
-// re-check). Kills on paths that resume inside the function (fall-through,
-// break, continue, a throw caught by an enclosing try) still merge — and
-// they merge where control resumes: a branch whose only in-function route
-// is a caught throw carries its kill to the post-try continuation, never
-// into the try body's remaining statements.
+// re-check). Kills on paths that resume inside the function still apply —
+// and they apply where control resumes: a true fall-through merges; a
+// branch whose only in-function routes are non-local edges stages its kills
+// at each edge's destination instead (a caught throw at the post-try
+// continuation, a break at its target construct's post-state, a continue at
+// the loop's exit join, a lowered callback return after the value block) —
+// never into flow the killing path cannot reach.
 const killFallthroughCases: Case[] = [
   {
     name: "a branch that kills and returns leaves the surviving flow's capture narrow intact",
@@ -6839,6 +6841,238 @@ export function f(q: P | null, flag: boolean): number {
   },
 ];
 
+// Destination-specific kill staging: an arm whose only in-function routes
+// are non-local edges (break, continue, a lowered callback return) applies
+// its kills where those edges LAND — the target construct's post-state, the
+// loop's exit join, the post-value-block continuation — never at the arm's
+// own fall-through merge, a point the killing path cannot reach. tsc keeps
+// the fall-through narrow there, and the reads depend on the unwrap
+// spelling: a misrouted kill emits arithmetic or field access on a bare
+// optional, which Zig rejects.
+const edgeKillStagingCases: Case[] = [
+  {
+    // The core shape: the kill+break arm leaves the loop, so the
+    // fall-through read after it keeps the narrow (tsc agrees — the
+    // killing path cannot reach it), while the POST-loop state is where
+    // the break lands and must re-check.
+    name: "a kill+break arm leaves the loop-body fall-through narrow intact",
+    src: `
+export function tally(vals: readonly number[], limit: number): number {
+  let p: number | null = 10;
+  if (p === null) return -1;
+  let sum: number = 0;
+  for (const v of vals) {
+    if (v > limit) { p = null; break; }
+    sum += p;
+  }
+  if (p === null) return -sum;
+  return sum + p;
+}
+`,
+  },
+  {
+    // An unlabeled break binds the INNER loop: its kill lands post-inner —
+    // the outer body's re-check — while the inner fall-through keeps the
+    // narrow.
+    name: "a nested inner-targeted break stages its kill at the inner loop only",
+    src: `
+export function nested(grid: readonly number[], cols: number): number {
+  let p: number | null = 5;
+  if (p === null) return -1;
+  let sum: number = 0;
+  for (const r of grid) {
+    for (const c of grid) {
+      if (c > cols) { p = null; break; }
+      sum += p;
+    }
+    if (p === null) break;
+    sum += p;
+  }
+  return sum;
+}
+`,
+  },
+  {
+    // A labeled break out of both loops lands post-OUTER: the outer body's
+    // read after the inner loop keeps the narrow (the killing path skipped
+    // it), and only the post-outer state re-checks.
+    name: "a labeled break out of two loops stages its kill post-outer",
+    src: `
+export function labeled(grid: readonly number[], cols: number): number {
+  let p: number | null = 5;
+  if (p === null) return -1;
+  let sum: number = 0;
+  outer: for (const r of grid) {
+    for (const c of grid) {
+      if (c > cols) { p = null; break outer; }
+      sum += p;
+    }
+    sum += p;
+  }
+  if (p === null) return -2;
+  return sum + p;
+}
+`,
+  },
+  {
+    // A continue-edge kill rides the back edge: the fall-through read
+    // after the arm keeps its per-iteration narrow (tsc agrees), the next
+    // iteration re-guards (tsc REQUIRES it — the loop-entry state widens
+    // for back-edge kills, so an unguarded read is TS18047 and never
+    // reaches emission), and the loop's exit join re-checks.
+    name: "a kill+continue arm leaves the same-iteration fall-through narrow intact",
+    src: `
+export function contGood(vals: readonly number[], limit: number): number {
+  let p: number | null = 10;
+  let sum: number = 0;
+  for (const v of vals) {
+    if (p === null) break;
+    sum += p;
+    if (v > limit) { p = null; continue; }
+    sum += p;
+  }
+  if (p === null) return -sum;
+  return sum + p;
+}
+`,
+  },
+  {
+    // Mixed sibling arms route per class: the kill+break arm's kill stages
+    // post-loop (the join never sees it), so the fall-through read past
+    // BOTH arms keeps the narrow — only the loop's own exit re-checks.
+    name: "mixed arms: the kill+break sibling stays out of the join the pure arm feeds",
+    src: `
+export function mixedArms(xs: readonly number[]): number {
+  let p: number | null = 4;
+  if (p === null) return -1;
+  let acc: number = 0;
+  for (const x of xs) {
+    if (x < 0) { p = null; break; }
+    else if (x === 0) { acc += 1; }
+    acc += p;
+  }
+  if (p === null) return acc;
+  return acc + p;
+}
+`,
+  },
+  {
+    // The do-while flavor: the kill+break arm leaves the body, the
+    // fall-through read keeps its narrow, and the trailing loop test plus
+    // the post-loop state see the staged kill.
+    name: "a kill+break arm in a do-while body leaves the fall-through narrow intact",
+    src: `
+export function viaDoWhile(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  let acc: number = 0;
+  do {
+    if (flag) { p = null; break; }
+    acc += p;
+  } while (acc < 10);
+  if (p === null) return acc;
+  return acc + p;
+}
+`,
+  },
+  {
+    // The R7d guarded-condition while: the loop's own chain unwraps q per
+    // iteration while the kill+break arm's kill on ANOTHER local stages
+    // post-loop, keeping the body's fall-through read narrowed.
+    name: "a kill+break under a null-guarded while condition stages past the loop",
+    src: `
+export interface Q { readonly v: number; }
+export function guarded(q0: Q | null, flag: boolean): number {
+  let p: number | null = 3;
+  if (p === null) return -1;
+  let q: Q | null = q0;
+  let acc: number = 0;
+  while (q !== null && q.v > 0) {
+    if (flag) { p = null; break; }
+    acc += p + q.v;
+    q = null;
+  }
+  if (p === null) return acc;
+  return acc + p;
+}
+`,
+  },
+  {
+    // A lowered callback return is an edge to the continuation AFTER the
+    // value block: the kill+return arm leaves the trailing in-callback
+    // read narrowed (tsc agrees), and the post-callback state re-checks.
+    name: "a kill+return arm in a lifted callback leaves the trailing read narrow intact",
+    src: `
+export function viaCallback(vals: readonly number[], limit: number): number {
+  let p: number | null = 7;
+  const mapped = vals.map((v) => {
+    if (p === null) return 0;
+    if (v > limit) { p = null; return 0; }
+    return p + v;
+  });
+  let sum: number = 0;
+  for (const m of mapped) sum += m;
+  if (p === null) return -sum;
+  return sum + p;
+}
+`,
+  },
+  {
+    // Switch reconciliation: the clause-terminating break's kill rides the
+    // sibling JOIN to the post-switch state — applied once, dropped
+    // nowhere — while the LATER clause keeps its entry narrow (sibling
+    // isolation) and the post-switch read re-checks.
+    name: "a switch clause kill+break kills post-switch but not its later siblings",
+    src: `
+export type Tag = "a" | "b" | "c";
+export function viaSwitch(tag: Tag, limit: number): number {
+  let p: number | null = 3;
+  if (p === null) return -1;
+  let out: number = 0;
+  switch (tag) {
+    case "a": {
+      p = null;
+      break;
+    }
+    case "b": {
+      out = p + limit;
+      break;
+    }
+    case "c": {
+      out = p * 2;
+      break;
+    }
+  }
+  if (p === null) return -out;
+  return out + p;
+}
+`,
+  },
+  {
+    // A labeled continue targets the OUTER loop's back edge: the rest of
+    // the outer body keeps its (re-guarded) flow, and both the outer exit
+    // join and the post-loop state re-check. The in-body read after the
+    // inner loop re-guards because tsc widens the outer loop's entry for
+    // the back-edge kill.
+    name: "a labeled continue stages its kill at the outer loop's exit join",
+    src: `
+export function labeledCont(xs: readonly number[]): number {
+  let p: number | null = 6;
+  let acc: number = 0;
+  outer: for (const a of xs) {
+    for (const b of xs) {
+      if (b < 0) { p = null; continue outer; }
+    }
+    if (p === null) return -acc;
+    acc += p + a;
+  }
+  if (p === null) return acc;
+  return acc + p;
+}
+`,
+  },
+];
+
 // A lifted block-body callback whose only return is the trailing statement
 // emits as straight-line statements plus that value. The statement prefix
 // and the trailing expression are ONE flow in tsc — a guard in the prefix
@@ -7212,6 +7446,7 @@ const corpus: Case[] = [
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
   ...killFallthroughCases,
+  ...edgeKillStagingCases,
   ...callbackTrailingNarrowCases,
   ...textMethodCases,
   ...releaseModeCases,

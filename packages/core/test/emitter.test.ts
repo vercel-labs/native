@@ -1003,6 +1003,32 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.ok(result.typeErrors.some((e) => e.includes("tick")), result.typeErrors.join("\n"));
 });
 
+test("the loop-entry model is tsc's: a back-edge kill widens the entry state (tsc-level)", () => {
+  // A continue-edge kill reaches the next iteration through the back
+  // edge, so tsc widens the loop-entry state and rejects an unguarded
+  // read relying on the pre-loop narrow (TS18047). The emitter leans on
+  // exactly this: continue-staged kills only need the loop's EXIT join —
+  // in-body next-iteration reads that would need the back-edge state
+  // never get past the checker.
+  const result = transpile(`
+export function f(vals: readonly number[], limit: number): number {
+  let p: number | null = 10;
+  if (p === null) return -1;
+  let sum: number = 0;
+  for (const v of vals) {
+    if (v > limit) { p = null; continue; }
+    sum += p;
+  }
+  return sum;
+}
+`);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.typeErrors.some((e) => e.includes("TS18047")),
+    result.typeErrors.join("\n") || "expected a possibly-null error",
+  );
+});
+
 test("emit-time verification: unsupported constructs stop the build as NS9001", () => {
   const result = transpile(`
 export function f(xs: readonly number[]): readonly number[] {
