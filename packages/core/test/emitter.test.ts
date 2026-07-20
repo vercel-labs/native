@@ -1676,6 +1676,29 @@ export function f(mode: Mode): number {
   assert.match(zig, /else => unreachable,/);
 });
 
+test("finally reads keep their narrow across tsc-unreachable and callback assignments", () => {
+  // finallyEntryKills counts what tsc's CFA counts: `if (false) p = null`
+  // sits in a branch tsc excludes, and a callback body's assignment never
+  // widens the finally (both probed), so the substituted read survives.
+  const zig = emit(`
+export interface P { readonly v: number; }
+export function f(q: P | null, xs: readonly number[]): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (false) p = null;
+    const ys = xs.map((x) => { p = null; return x; });
+    n += ys.length;
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`);
+  assert.match(zig, /n \+= p\.\?\.v;/);
+});
+
 test("kernel capacities: default header uses the shared default kernel", () => {
   const zig = emit(`export function f(n: number): number { return n & 1; }`);
   assert.match(zig, /pub const rt = @import\("rt\.zig"\)\.default;/);

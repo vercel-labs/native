@@ -97,6 +97,32 @@ export function flowSwitch(nonEmpty: boolean): number {
     ],
   },
   {
+    name: "a statically-false assignment in a try keeps the finally reading the narrow",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function guardedFinally(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (false) p = null;
+    n += 1;
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`,
+    calls: [
+      { fn: "guardedFinally", args: [i(5)] },
+      { fn: "guardedFinally", args: [i(-3)] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }

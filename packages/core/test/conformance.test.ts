@@ -8208,6 +8208,127 @@ export function f(q: number | null, flag: boolean, ab: AB, xs: readonly number[]
   },
 ];
 
+// finallyEntryKills counts exactly the may-assigns tsc's CFA counts. Two
+// pinned exclusions (probed against the checker provider): code under a
+// keyword-literal constant condition tsc treats as unreachable, and nested
+// function/callback bodies (tsc keeps the finally narrowed even when a
+// callback defined in the try assigns the target). Counting either kills a
+// narrow tsc typed the finally's reads with and emits member access on a
+// raw optional — invalid Zig.
+const finallyStaticExclusionCases: Case[] = [
+  {
+    // The repro: `if (false) p = null` is unreachable to tsc, so the
+    // finally still types `p.v` against the narrow — the emitted read must
+    // keep its substitution.
+    name: "an if-false assignment in a try never kills the finally's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (false) p = null;
+    n += 1;
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`,
+  },
+  {
+    // The else of a constant-true if is equally unreachable to tsc.
+    name: "the else of an if-true in a try never kills the finally's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (true) {
+      n += 1;
+    } else {
+      p = null;
+    }
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`,
+  },
+  {
+    // A while-false body never runs under tsc's CFA either.
+    name: "a while-false body in a try never kills the finally's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    while (false) {
+      p = null;
+    }
+    n += 1;
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`,
+  },
+  {
+    // A callback defined in the try assigning the target does not widen
+    // tsc's finally typing (probed — called or not), so the scan must not
+    // descend into nested function bodies.
+    name: "a callback assignment inside a try never kills the finally's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, xs: readonly number[]): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    const ys = xs.map((x) => {
+      p = null;
+      return x;
+    });
+    n += ys.length;
+  } finally {
+    n += p.v;
+  }
+  return n;
+}
+`,
+  },
+  {
+    // Non-regression: a genuinely conditional assignment still widens the
+    // finally (tsc's path-insensitive may-assign), so the finally must
+    // re-guard its read — the kill must still land.
+    name: "a flag-conditional assignment in a try still kills the finally's narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  try {
+    if (flag) p = null;
+    n += 1;
+  } finally {
+    if (p !== null) {
+      n += p.v;
+    }
+  }
+  return n;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8761,6 +8882,7 @@ const corpus: Case[] = [
   ...terminalityGroupingCases,
   ...valueSwitchExhaustivenessCases,
   ...flowTypeSoundnessCases,
+  ...finallyStaticExclusionCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

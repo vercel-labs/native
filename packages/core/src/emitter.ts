@@ -4343,9 +4343,47 @@ export class Emitter {
   /// form when its scope assigns the target (captureServesBranch and the
   /// exit-guard's assignsTarget check), so a capture live here never has
   /// an assignment to survive.
+  ///
+  /// The scan counts exactly the assignments tsc's CFA counts — killing a
+  /// key tsc keeps strips a substitution the finally's reads were typed
+  /// against and emits member access on a raw optional, invalid Zig. Two
+  /// exclusions, both pinned against the checker provider:
+  ///   - code under a KEYWORD-LITERAL constant condition tsc treats as
+  ///     unreachable never counts: `if (false) ...`, the else of
+  ///     `if (true) ...`, a `while (false)` body, and the right side of
+  ///     `false && ...` / `true || ...` all keep the finally narrowed
+  ///     (probed). Only the bare keywords qualify — a `const NEVER = false`
+  ///     alias condition WIDENS under tsc (probed), and it still walks here;
+  ///     the same keyword-only judgment alwaysExits applies to constant-true
+  ///     loops. Anything else (do-while, non-literal conditions) stays on
+  ///     the conservative path-insensitive walk.
+  ///   - nested function/callback bodies never count (the throwsWithin skip
+  ///     idiom): tsc keeps the finally narrowed even when a callback DEFINED
+  ///     in the try assigns the target — called there or not (probed) — so
+  ///     counting those assignments would kill a narrow tsc typed the
+  ///     finally's reads with.
+  /// Real conditional assignments (`if (flag) p = null`) still count: tsc
+  /// widens for any reachable may-assign, whatever the path condition.
   private finallyEntryKills(stmt: ts.TryStatement, ctx: Ctx): Set<string> {
     const kills = new Set<string>();
     const visit = (n: ts.Node): void => {
+      if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n)) return;
+      if (ts.isIfStatement(n)) {
+        if (n.expression.kind === ts.SyntaxKind.FalseKeyword) {
+          if (n.elseStatement) visit(n.elseStatement);
+          return;
+        }
+        if (n.expression.kind === ts.SyntaxKind.TrueKeyword) {
+          visit(n.thenStatement);
+          return;
+        }
+      }
+      if (ts.isWhileStatement(n) && n.expression.kind === ts.SyntaxKind.FalseKeyword) return;
+      if (ts.isBinaryExpression(n)) {
+        const op = n.operatorToken.kind;
+        if (op === ts.SyntaxKind.AmpersandAmpersandToken && n.left.kind === ts.SyntaxKind.FalseKeyword) return;
+        if (op === ts.SyntaxKind.BarBarToken && n.left.kind === ts.SyntaxKind.TrueKeyword) return;
+      }
       if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         const key = this.narrowKey(n.left);
         if (key !== null) {
