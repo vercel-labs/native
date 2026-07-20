@@ -2998,6 +2998,14 @@ export class Emitter {
   private readonly narrowKeyIds = new WeakMap<ts.Declaration, number>();
   private narrowKeyNextId = 1;
 
+  /// Explicit node-scoped keys: a lowering that re-emits one specific
+  /// expression NODE under a capture (the optional-call receiver) can
+  /// register a key for it even when the expression has no canonical
+  /// narrowing key. The key is unique to the node, so it can never match
+  /// a different occurrence — it carries a single node's rewrite, not a
+  /// narrowing fact.
+  private readonly nodeNarrowKeys = new WeakMap<ts.Node, string>();
+
   /// The key an expression narrows/substitutes under: normalized source
   /// text with the base identifier DECLARATION-qualified (`q#3`, member
   /// chains `q#3.v`). Emission FLATTENS plain lexical blocks and callback
@@ -3014,7 +3022,24 @@ export class Emitter {
   /// rewrites the `q!` read. A base the checker cannot resolve keys by
   /// plain text — same behavior as before, and such bases are never
   /// locals.
-  private narrowKey(expr: ts.Node): string {
+  ///
+  /// Element accesses qualify recursively, like property chains — the
+  /// grammar is `base[index]` where the base is this same key and the
+  /// index is a canonical argument form: a literal index canonicalizes by
+  /// VALUE (`xs#3[0]`, so `xs[0]`, `xs[0x0]`, and `xs["0"]` are one key,
+  /// exactly the one element JS reads), and an identifier index qualifies
+  /// by the index's own declaration (`xs#3[i#7]` — a shadowed `i` is a
+  /// different element). Anything non-canonical — a computed index, a
+  /// call — has NO narrowing key: two spellings of `xs[f()]` need not
+  /// read the same element, so nothing may narrow, substitute, or match
+  /// through one. Returning null here is the decline answer every
+  /// consumer honors: no substitution installs, capture gates see no
+  /// read, and the expression's reads stay live optionals. Raw source
+  /// text is never a key — emission flattens lexical blocks, so text
+  /// would let a shadowed declaration's narrow leak onto the outer name.
+  private narrowKey(expr: ts.Node): string | null {
+    const override = this.nodeNarrowKeys.get(expr);
+    if (override !== undefined) return override;
     let e: ts.Node = expr;
     while (
       ts.isParenthesizedExpression(e) ||
@@ -3025,7 +3050,15 @@ export class Emitter {
       e = e.expression;
     }
     if (ts.isPropertyAccessExpression(e)) {
-      return `${this.narrowKey(e.expression)}${e.questionDotToken ? "?." : "."}${e.name.text}`;
+      const base = this.narrowKey(e.expression);
+      return base === null ? null : `${base}${e.questionDotToken ? "?." : "."}${e.name.text}`;
+    }
+    if (ts.isElementAccessExpression(e)) {
+      const base = this.narrowKey(e.expression);
+      if (base === null) return null;
+      const index = this.canonicalIndexKey(e.argumentExpression);
+      if (index === null) return null;
+      return `${base}${e.questionDotToken ? "?." : ""}[${index}]`;
     }
     if (ts.isIdentifier(e)) {
       const decl = this.tast.declarationOf(e);
@@ -3039,7 +3072,33 @@ export class Emitter {
       }
       return e.text;
     }
-    return e.getText().replace(/\s+/g, "");
+    // `this` is one object per member body (arrows keep it), never
+    // shadowable — the keyword is its own key.
+    if (e.kind === ts.SyntaxKind.ThisKeyword) return "this";
+    return null;
+  }
+
+  /// The canonical form of an element-access index, or null when the
+  /// index is not a stable reference to one element (see narrowKey).
+  /// Literals canonicalize by the VALUE JS coerces to a property key —
+  /// a numeric string index is the numeric index (`xs["0"]` is `xs[0]`).
+  private canonicalIndexKey(arg: ts.Expression): string | null {
+    let a: ts.Expression = arg;
+    while (
+      ts.isParenthesizedExpression(a) ||
+      ts.isNonNullExpression(a) ||
+      ts.isAsExpression(a) ||
+      ts.isSatisfiesExpression(a)
+    ) {
+      a = a.expression;
+    }
+    if (ts.isNumericLiteral(a)) return String(Number(a.text));
+    if (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a)) {
+      const n = Number(a.text);
+      return String(n) === a.text ? String(n) : JSON.stringify(a.text);
+    }
+    if (ts.isIdentifier(a)) return this.narrowKey(a);
+    return null;
   }
 
   private identifierUsed(body: ts.Node, decl: ts.Node): boolean {
@@ -4082,11 +4141,13 @@ export class Emitter {
     const visit = (n: ts.Node): void => {
       if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         const key = this.narrowKey(n.left);
-        const subst = ctx.memberSubst.get(key);
-        const empties = this.tast.emptiesOf(n.right);
-        const mayBeEmpty = empties.null || empties.undefined;
-        const survives = subst !== undefined && subst.endsWith(".?") && !mayBeEmpty;
-        if (!survives && (subst !== undefined || mayBeEmpty)) kills.add(key);
+        if (key !== null) {
+          const subst = ctx.memberSubst.get(key);
+          const empties = this.tast.emptiesOf(n.right);
+          const mayBeEmpty = empties.null || empties.undefined;
+          const survives = subst !== undefined && subst.endsWith(".?") && !mayBeEmpty;
+          if (!survives && (subst !== undefined || mayBeEmpty)) kills.add(key);
+        }
       }
       ts.forEachChild(n, visit);
     };
@@ -4502,8 +4563,11 @@ export class Emitter {
           this.push(ctx, `${varKw} ${name} = ${seed.code};`);
           this.push(ctx, `var ${lenVar}: usize = ${name}.len;`);
         }
-        ctx.memberSubst.set(this.narrowKey(decl.name), `${name}[0..${lenVar}]`);
-        ctx.memberSubst.set(`${this.narrowKey(decl.name)}.length`, `@as(i64, @intCast(${lenVar}))`);
+        const declKey = this.narrowKey(decl.name);
+        if (declKey !== null) {
+          ctx.memberSubst.set(declKey, `${name}[0..${lenVar}]`);
+          ctx.memberSubst.set(`${declKey}.length`, `@as(i64, @intCast(${lenVar}))`);
+        }
         return;
       }
       if (sliceT.k === "slice" && ts.isArrayLiteralExpression(init) && init.elements.length === 0) {
@@ -4531,7 +4595,10 @@ export class Emitter {
     if (v.code === name) return; // lowered directly into a named temp
     const annotation = this.varAnnotation(decl, t, reassigned, ctx);
     this.push(ctx, `${kw} ${name}${annotation} = ${v.code};`);
-    if (v.filterLen) ctx.memberSubst.set(`${this.narrowKey(decl.name)}.length`, `@as(i64, @intCast(${v.filterLen}))`);
+    if (v.filterLen) {
+      const declKey = this.narrowKey(decl.name);
+      if (declKey !== null) ctx.memberSubst.set(`${declKey}.length`, `@as(i64, @intCast(${v.filterLen}))`);
+    }
   }
 
   /// R6b: `const { total, done: doneCount } = stats;` — record-field
@@ -4729,7 +4796,8 @@ export class Emitter {
               ctx.lines.push(...sub.lines);
               this.push(ctx, `}`);
             }
-            ctx.memberSubst.set(this.narrowKey(exitTest.target), `${prop}.?`);
+            const exitKey = this.narrowKey(exitTest.target);
+            if (exitKey !== null) ctx.memberSubst.set(exitKey, `${prop}.?`);
             return;
           }
           const name = this.freshName(ctx, this.narrowHint(exitTest.target));
@@ -4746,7 +4814,8 @@ export class Emitter {
             ctx.lines.push(...sub.lines);
             this.push(ctx, `};`);
           }
-          ctx.memberSubst.set(this.narrowKey(exitTest.target), name);
+          const exitKey = this.narrowKey(exitTest.target);
+          if (exitKey !== null) ctx.memberSubst.set(exitKey, name);
           return;
         }
       }
@@ -4763,9 +4832,9 @@ export class Emitter {
       this.branchReadsTarget(stmt.elseStatement, exitTest.target)
     ) {
       const t = this.zTypeOfExpr(exitTest.target, ctx);
-      if (t.k === "optional") {
+      const key = this.narrowKey(exitTest.target);
+      if (t.k === "optional" && key !== null) {
         this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
-        const key = this.narrowKey(exitTest.target);
         const prop = this.emitExpr(exitTest.target, ctx).code;
         const name = this.freshName(ctx, this.narrowHint(exitTest.target));
         const join = new Set<string>();
@@ -4812,9 +4881,9 @@ export class Emitter {
       this.branchReadsTarget(stmt.thenStatement, presentTest.target)
     ) {
       const t = this.zTypeOfExpr(presentTest.target, ctx);
-      if (t.k === "optional") {
+      const key = this.narrowKey(presentTest.target);
+      if (t.k === "optional" && key !== null) {
         this.requireFaithfulEmptyTest(presentTest.target, presentTest.flavor, cond);
-        const key = this.narrowKey(presentTest.target);
         const prop = this.emitExpr(presentTest.target, ctx).code;
         const name = this.freshName(ctx, this.narrowHint(presentTest.target));
         const single = unwrapSingle(stmt.thenStatement);
@@ -4958,9 +5027,10 @@ export class Emitter {
     if (
       postNarrow &&
       (ts.isPropertyAccessExpression(postNarrow.target) || ts.isIdentifier(postNarrow.target)) &&
-      !join.has(this.narrowKey(postNarrow.target)) &&
       this.followingReadsTarget(stmt, postNarrow.target)
     ) {
+      const key = this.narrowKey(postNarrow.target);
+      if (key === null || join.has(key)) return;
       const t = this.zTypeOfExpr(postNarrow.target, ctx);
       const empties = this.tast.emptiesOf(postNarrow.target);
       // The unfaithful-empty spellings keep their R7c teaching on the
@@ -4968,7 +5038,7 @@ export class Emitter {
       const faithful = postNarrow.flavor === "null" ? !empties.undefined : !empties.null;
       if (t.k === "optional" && faithful) {
         const code = this.emitExpr(postNarrow.target, ctx).code;
-        ctx.memberSubst.set(this.narrowKey(postNarrow.target), `${code}.?`);
+        ctx.memberSubst.set(key, `${code}.?`);
       }
     }
   }
@@ -5211,6 +5281,7 @@ export class Emitter {
     if (!arm) return;
     const baseText = this.emitExpr(expr, ctx).code;
     const key = this.narrowKey(expr);
+    if (key === null) return;
     ctx.narrowedUnion.set(key, tag);
     for (const f of arm.fields) {
       const access =
@@ -5286,7 +5357,10 @@ export class Emitter {
   /// spellings (`(box.q)`, `box.q!`) match through the key's own
   /// canonicalization; a longer chain (`box.q.name`) matches via its
   /// inner access on the recursive walk.
-  private anyReadsKey(nodes: readonly ts.Node[], key: string): boolean {
+  private anyReadsKey(nodes: readonly ts.Node[], key: string | null): boolean {
+    // A keyless target (see narrowKey) has no reads to serve: nothing can
+    // be substituted for it, so every gate over it declines.
+    if (key === null) return false;
     let found = false;
     const visit = (n: ts.Node): void => {
       if (found) return;
@@ -5360,9 +5434,10 @@ export class Emitter {
     const rest = conjuncts.slice(1);
     if (rest.length === 0) return emitOne(c0);
     const guard = this.nullGuardOf(c0, op, ctx);
-    if (guard && this.anyReadsTarget(rest, guard.target)) {
+    const guardKey = guard === null ? null : this.narrowKey(guard.target);
+    if (guard && guardKey !== null && this.anyReadsTarget(rest, guard.target)) {
       this.requireFaithfulEmptyTest(guard.target, guard.flavor, c0);
-      const key = this.narrowKey(guard.target);
+      const key = guardKey;
       const prop = this.emitExpr(guard.target, ctx).code;
       const cap = this.freshName(ctx, this.narrowHint(guard.target));
       const saved = ctx.memberSubst.get(key);
@@ -5406,8 +5481,10 @@ export class Emitter {
         const prop = this.emitExpr(guard.target, ctx).code;
         const head = `${prop} ${isAnd ? "!=" : "=="} null`;
         if (rest.length === 0) return head;
-        ctx.memberSubst.set(key, `${prop}.?`);
-        guards.set(key, `${prop}.?`);
+        if (key !== null) {
+          ctx.memberSubst.set(key, `${prop}.?`);
+          guards.set(key, `${prop}.?`);
+        }
         return `${head} ${zop} ${emitChain(rest)}`;
       }
       const head = precedenceParen(c0, zop, this.emitExpr(c0, ctx, { k: "bool" }).code);
@@ -5509,8 +5586,9 @@ export class Emitter {
         // A reassigned local cannot narrow through a capture (the capture
         // goes stale); the unwrap spelling below reads the live variable.
         if (this.assignsTarget(readers, g.target)) break;
-        this.requireFaithfulEmptyTest(g.target, g.flavor, conjuncts[gi]);
         const key = this.narrowKey(g.target);
+        if (key === null) break;
+        this.requireFaithfulEmptyTest(g.target, g.flavor, conjuncts[gi]);
         const prop = this.emitExpr(g.target, ctx).code;
         const cap = this.freshName(ctx, this.narrowHint(g.target));
         caps.push({ key, saved: ctx.memberSubst.get(key) });
@@ -5927,7 +6005,7 @@ export class Emitter {
       const savedSubst = new Map(ctx.memberSubst);
       const savedStillOptional = new Map(ctx.stillOptionalSubst);
       let capture = "";
-      const payloadUsed = arm.fields.some((f) =>
+      const payloadUsed = baseKey !== null && arm.fields.some((f) =>
         this.anyReadsKey(stmts, `${baseKey}.${f.tsName}`),
       );
       if (pending.length > 0 && payloadUsed) {
@@ -6355,18 +6433,18 @@ export class Emitter {
         const t = this.zTypeOfExprClassed(expr.left, ctx);
         const v = this.emitExpr(expr.right, ctx, t, undefined);
         const key = this.narrowKey(expr.left);
-        const hadSubst = ctx.memberSubst.get(key);
-        if (hadSubst !== undefined) ctx.memberSubst.delete(key);
+        const hadSubst = key === null ? undefined : ctx.memberSubst.get(key);
+        if (key !== null && hadSubst !== undefined) ctx.memberSubst.delete(key);
         const target = this.emitExpr(expr.left, ctx).code;
         const empties = this.tast.emptiesOf(expr.right);
         const mayBeEmpty = empties.null || empties.undefined;
-        if (hadSubst !== undefined && hadSubst.endsWith(".?") && !mayBeEmpty) {
+        if (key !== null && hadSubst !== undefined && hadSubst.endsWith(".?") && !mayBeEmpty) {
           // `.?` substitutions read the live variable, so they survive an
           // assignment of a provably non-null value. Capture substitutions
           // would read the stale capture — those stay dropped.
           ctx.memberSubst.set(key, hadSubst);
         }
-        if (!ctx.memberSubst.has(key) && (hadSubst !== undefined || mayBeEmpty)) {
+        if (key !== null && !ctx.memberSubst.has(key) && (hadSubst !== undefined || mayBeEmpty)) {
           // The narrowing died with this assignment (the value may be null
           // again, or the capture went stale). Record the kill so scope
           // exits, whose snapshot restores give containment, do not
@@ -7153,7 +7231,8 @@ export class Emitter {
   }
 
   private emitExprValue(expr: ts.Expression, ctx: Ctx, expected?: ZType, nameHint?: string): Emitted {
-    const subst = ctx.memberSubst.get(this.narrowKey(expr));
+    const substKey = this.narrowKey(expr);
+    const subst = substKey === null ? undefined : ctx.memberSubst.get(substKey);
     if (subst !== undefined) return { code: subst };
 
     if (ts.isParenthesizedExpression(expr)) {
@@ -7285,7 +7364,7 @@ export class Emitter {
 
   private emitPropertyAccess(expr: ts.PropertyAccessExpression, ctx: Ctx): Emitted {
     const key = this.narrowKey(expr);
-    const subst = ctx.memberSubst.get(key);
+    const subst = key === null ? undefined : ctx.memberSubst.get(key);
     if (subst !== undefined) return { code: subst };
     // Layer-3 re-derivation of NS1017 (`Cmd.none` outside the return slot)
     // and NS1025 (its Sub mirror).
@@ -7325,8 +7404,8 @@ export class Emitter {
     if (ts.isOptionalChain(expr)) return this.emitOptionalChain(expr, ctx);
     const prop = expr.name.text;
     if (prop === "length") {
-      const lenKey = `${this.narrowKey(expr.expression)}.length`;
-      const lenSubst = ctx.memberSubst.get(lenKey);
+      const baseLenKey = this.narrowKey(expr.expression);
+      const lenSubst = baseLenKey === null ? undefined : ctx.memberSubst.get(`${baseLenKey}.length`);
       if (lenSubst !== undefined) return { code: lenSubst };
       const baseT = this.zTypeOfExpr(expr.expression, ctx);
       const base = this.emitExpr(expr.expression, ctx);
@@ -7707,7 +7786,8 @@ export class Emitter {
     // `x === null ? A : x` -> `x orelse A` (the `=== undefined` spelling on
     // undefined-flavored values maps the same way, per R7c).
     const missTest = this.emptyTestOf(cond);
-    if (missTest && this.narrowKey(expr.whenFalse) === this.narrowKey(missTest.target)) {
+    const missArmKey = this.narrowKey(expr.whenFalse);
+    if (missTest && missArmKey !== null && missArmKey === this.narrowKey(missTest.target)) {
       this.requireFaithfulEmptyTest(missTest.target, missTest.flavor, cond);
       // Probe both sides in throwaway child ctxs: the fusion only holds
       // when the miss arm is statement-free. An arm that lowers statements
@@ -7905,7 +7985,9 @@ export class Emitter {
     expected: ZType | undefined,
     nameHint: string | undefined,
   ): Emitted {
-    const key = this.narrowKey(targetExpr);
+    // The callers gate on a read of the target (anyReadsTarget), which a
+    // keyless target can never satisfy — the key is present here.
+    const key = this.narrowKey(targetExpr)!;
     const target = this.emitExpr(targetExpr, ctx).code;
     const cap = this.freshName(ctx, this.narrowHint(targetExpr));
     const emitNarrowedArm = (sub: Ctx): string => {
@@ -8594,7 +8676,16 @@ export class Emitter {
     const cap = this.freshName(ctx, hint);
     const sub = this.nestedCtx(ctx);
     sub.memberSubst = new Map(ctx.memberSubst);
-    sub.memberSubst.set(this.narrowKey(recv), cap);
+    // The rewrite targets exactly this receiver NODE (emitCall re-emits
+    // it under the capture). A receiver without a canonical narrowing key
+    // still needs the rewrite, so it gets a node-scoped key — unique to
+    // the node, never a narrowing fact another occurrence could match.
+    let recvKey = this.narrowKey(recv);
+    if (recvKey === null) {
+      recvKey = `@recv#${this.narrowKeyNextId++}`;
+      this.nodeNarrowKeys.set(recv, recvKey);
+    }
+    sub.memberSubst.set(recvKey, cap);
     const inner = this.emitCall(expr, sub, undefined, nameHint);
     const resT = this.zTypeOfExprClassed(expr, sub);
     if (resT.k === "void") this.fail(expr, `optional-chain call .${callee.name.text} without a mapped value type`);
@@ -9456,8 +9547,8 @@ export class Emitter {
     // by their exact replacement).
     if (t.k === "optional") {
       const key = this.narrowKey(expr);
-      const rep = ctx.memberSubst.get(key);
-      if (rep !== undefined && rep !== ctx.stillOptionalSubst.get(key)) return t.inner;
+      const rep = key === null ? undefined : ctx.memberSubst.get(key);
+      if (key !== null && rep !== undefined && rep !== ctx.stillOptionalSubst.get(key)) return t.inner;
     }
     return t;
   }
@@ -9646,7 +9737,9 @@ export class Emitter {
       const hitTest = this.emptyTestOf(expr.condition, ts.SyntaxKind.ExclamationEqualsEqualsToken);
       const narrowedByCond = (arm: ts.Expression, t: ZType, other: ts.Expression): ZType => {
         const test = arm === expr.whenFalse ? missTest : hitTest;
-        if (test === null || t.k !== "optional" || this.narrowKey(arm) !== this.narrowKey(test.target)) return t;
+        if (test === null || t.k !== "optional") return t;
+        const armKey = this.narrowKey(arm);
+        if (armKey === null || armKey !== this.narrowKey(test.target)) return t;
         const otherT = this.zTypeOfExpr(other, ctx);
         return otherT.k === "optional" ? t : t.inner;
       };

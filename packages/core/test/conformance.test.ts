@@ -7867,10 +7867,99 @@ export function f(a: P | null, b: P | null, c: P | null): number {
   },
 ];
 
+const elementAccessKeyCases: Case[] = [
+  {
+    // Element-access narrows key like property chains: base declaration
+    // plus canonical index. With text keys, the inner shadow's guard
+    // capture stayed live past the flattened block and rewrote the outer
+    // read (compiled clean and returned the inner element's value; the
+    // run-fidelity corpus pins the values).
+    name: "a shadowed declaration's element-access narrow dies with its block",
+    src: `
+export interface BoxOpt { readonly b: number | null; }
+export function f(): number {
+  const xs: BoxOpt[] = [{ b: 10 }];
+  let total = 0;
+  {
+    const xs: BoxOpt[] = [{ b: 3 }];
+    if (xs[0].b === null) return -2;
+    total += xs[0].b;
+  }
+  if (xs[0].b === null) return -1;
+  total += xs[0].b;
+  return total;
+}
+`,
+  },
+  {
+    // The chain composes in both directions: a property base under the
+    // element access (`a.rows[0]`) and a property read off the element
+    // (`...[0].b`) — the shadowed base must key its own declaration
+    // through both hops.
+    name: "element-of-property narrows key the base declaration through the chain",
+    src: `
+export interface Row { readonly b: number | null; }
+export interface Grid { readonly rows: readonly Row[]; }
+export function f(a: Grid, c: Grid): number {
+  let total = 0;
+  {
+    const a = c;
+    if (a.rows[0].b === null) return -2;
+    total += a.rows[0].b;
+  }
+  if (a.rows[0].b === null) return -1;
+  total += a.rows[0].b;
+  return total;
+}
+`,
+  },
+  {
+    // An identifier index keys the index's OWN declaration: a shadowed
+    // `i` selects a different element, so the inner narrow must not
+    // serve the outer read.
+    name: "an identifier index keys its declaration, so a shadowed index narrows apart",
+    src: `
+export interface BoxOpt { readonly b: number | null; }
+export function f(): number {
+  const xs: BoxOpt[] = [{ b: 10 }, { b: 3 }];
+  const i = 0;
+  let total = 0;
+  {
+    const i = 1;
+    if (xs[i].b === null) return -2;
+    total += xs[i].b;
+  }
+  if (xs[i].b === null) return -1;
+  total += xs[i].b;
+  return total;
+}
+`,
+  },
+  {
+    // A computed index is not a stable reference to one element, so it
+    // has no narrowing key: the guard stays a plain test and the read
+    // stays a live optional (tsc does not narrow it either).
+    name: "a computed element index declines narrowing; reads stay live optionals",
+    src: `
+export interface BoxOpt { readonly b: number | null; }
+export function f(): number {
+  const xs: BoxOpt[] = [{ b: 10 }, { b: 3 }];
+  let total = 0;
+  if (xs[0 + 1].b !== null) {
+    const v = xs[0 + 1].b;
+    if (v !== null) total += v;
+  }
+  return total;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...branchKillJoinCases,
   ...postNarrowKillSubtractionCases,
   ...shadowedDeclarationCases,
+  ...elementAccessKeyCases,
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,

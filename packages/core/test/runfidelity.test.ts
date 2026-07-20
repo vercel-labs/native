@@ -74,6 +74,39 @@ const f = (v: number | "nan" | "inf" | "-inf" | "-0"): Arg => ({ t: "f", v });
 
 const runCorpus: RunCase[] = [
   {
+    name: "element-access narrows stay with their own declaration across shadowing",
+    src: `
+export interface BoxOpt { readonly b: number | null; }
+export interface BoxNum { readonly b: number; }
+export function shadowedElementRead(): number {
+  const xs: BoxNum[] = [{ b: 10 }];
+  let total = 0;
+  {
+    const xs: BoxOpt[] = [{ b: 3 }];
+    if (xs[0].b === null) return -1;
+    total += xs[0].b;
+  }
+  total += xs[0].b;
+  return total;
+}
+export function guardedOuterAfterShadow(): number {
+  const xs: BoxOpt[] = [{ b: 10 }];
+  let total = 0;
+  if (xs[0].b !== null) {
+    {
+      const xs: BoxOpt[] = [{ b: 3 }];
+      if (xs[0].b !== null) {
+        total += xs[0].b;
+      }
+    }
+    total += xs[0].b;
+  }
+  return total;
+}
+`,
+    calls: [{ fn: "shadowedElementRead", args: [] }, { fn: "guardedOuterAfterShadow", args: [] }],
+  },
+  {
     name: "optional numeric comparisons are null-safe (null equals only null)",
     src: `
 export function isZero(cls: number | null): boolean {
