@@ -302,6 +302,10 @@ export class Emitter {
   private readonly genericNames = new Set<string>();
   private readonly sourceName: string;
   private readonly capacities: KernelCapacities;
+  /// Per-switch memo for the defaultless value-switch exhaustiveness
+  /// consult (alwaysExits re-asks along every kill-routing scan).
+  private switchCoversTypeMemo = new WeakMap<ts.SwitchStatement, boolean>();
+
   /// Computed once at the top of emitModule (before any type emission).
   private helpers: ModelHelper[] = [];
   private unbound: { model: string[]; msg: string[] } = { model: [], msg: [] };
@@ -3650,14 +3654,17 @@ export class Emitter {
       // statement (the ubiquitous clause-terminating `break;` is exactly
       // such a break).
       if (this.bindsBreak(stmt)) return false;
-      // A value switch (R13d) without a default may skip every clause, so
-      // only kind switches (exhaustive by NS1015) and defaulted switches
-      // count as exiting. Exhaustiveness itself is enforced at emission;
-      // here the question is only whether every written clause exits.
+      // A value switch (R13d) without a default may skip every clause —
+      // unless its case labels cover the scrutinee's literal-union type,
+      // in which case tsc's CFA (which is what this predicate mirrors)
+      // treats the switch as always entering a clause. Kind switches are
+      // exhaustive by NS1015; defaulted switches always enter a clause;
+      // everything else consults the type (conservative false when the
+      // scrutinee is not an enumerable literal union).
       const kindSwitch =
         ts.isPropertyAccessExpression(stmt.expression) && stmt.expression.name.text === "kind";
       const hasDefault = stmt.caseBlock.clauses.some((c) => ts.isDefaultClause(c));
-      if (!kindSwitch && !hasDefault) return false;
+      if (!kindSwitch && !hasDefault && !this.valueSwitchCoversScrutineeType(stmt)) return false;
       // Stacked case labels (`case "a": case "b": body`) share one body:
       // JS falls through an empty clause onto the next clause's statements
       // (the switch emitters coalesce the labels into one arm the same
@@ -3690,6 +3697,56 @@ export class Emitter {
       );
     }
     return false;
+  }
+
+  /// Whether a defaultless VALUE switch's case labels cover every member of
+  /// the scrutinee's literal-union type — tsc's own exhaustiveness judgment,
+  /// the one its CFA uses to keep a narrowing past a branch that ends in
+  /// such a switch. Enumerable scrutinees are string/number/boolean literal
+  /// unions ONLY: any wider type, any non-literal member, or any case label
+  /// that is not a literal after wrapper-stripping answers false — the
+  /// conservative side (a false merely merges a kill tsc kept; a wrong true
+  /// would resurrect a dead route). The type consult reads the checker's
+  /// flow type at the scrutinee, exactly what tsc's exhaustiveness check
+  /// sees; alwaysExits stays syntax-only on every other construct, and every
+  /// caller is an emission path where `this.tast` is live, so the capability
+  /// is unconditional. The lowering side of the same claim lives in
+  /// emitValueSwitch: a covered-by-type defaultless switch whose arms all
+  /// exit closes its never-reached fallthrough with `else => unreachable`
+  /// (numeric) or emits no else at all (string enums, already
+  /// Zig-exhaustive), so the terminality claim and the emitted shape agree.
+  private valueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {
+    const memo = this.switchCoversTypeMemo.get(stmt);
+    if (memo !== undefined) return memo;
+    const answer = this.computeValueSwitchCoversScrutineeType(stmt);
+    this.switchCoversTypeMemo.set(stmt, answer);
+    return answer;
+  }
+
+  private computeValueSwitchCoversScrutineeType(stmt: ts.SwitchStatement): boolean {
+    const type = this.tast.typeOf(stmt.expression);
+    const members = type.isUnion() ? type.types : [type];
+    const wanted = new Set<string>();
+    for (const member of members) {
+      if (member.isStringLiteral()) wanted.add(`s:${member.value}`);
+      else if (member.isNumberLiteral()) wanted.add(`n:${member.value}`);
+      else if (member.flags & ts.TypeFlags.BooleanLiteral) {
+        wanted.add(`b:${this.tast.typeToString(member)}`);
+      } else return false;
+    }
+    for (const clause of stmt.caseBlock.clauses) {
+      if (ts.isDefaultClause(clause)) continue;
+      const label = unwrapExpr(clause.expression);
+      if (ts.isStringLiteral(label)) wanted.delete(`s:${label.text}`);
+      else if (label.kind === ts.SyntaxKind.TrueKeyword) wanted.delete("b:true");
+      else if (label.kind === ts.SyntaxKind.FalseKeyword) wanted.delete("b:false");
+      else {
+        const v = this.tast.constEvalNumber(label);
+        if (v === null) return false;
+        wanted.delete(`n:${v}`);
+      }
+    }
+    return wanted.size === 0;
   }
 
   /// Kill-frame drop eligibility: whether EVERY route out of this statement
@@ -6331,14 +6388,20 @@ export class Emitter {
     if (pending.length > 0) this.push(armCtx, `${pending.join(", ")} => {},`);
     if (!sawDefault) {
       const total = t.k === "enum" ? t.members.length : t.values.length;
+      // Coverage of the declared members, or of the checker's (possibly
+      // narrower) flow type at the scrutinee: either proves the fallthrough
+      // arm never runs, and alwaysExits claims terminality off the second,
+      // so the emitted shape must close the path the claim closed.
+      const coveredByType = covered.size === total || this.valueSwitchCoversScrutineeType(stmt);
       if (t.k === "numAlias") {
         // The Zig scrutinee is an integer type, so an else arm is always
         // required. With every member covered by an exiting arm the else is
         // unreachable by the TypeScript types.
-        this.push(armCtx, covered.size === total && allExit ? `else => unreachable,` : `else => {},`);
+        this.push(armCtx, coveredByType && allExit ? `else => unreachable,` : `else => {},`);
       } else if (covered.size < total) {
-        // JS: an uncovered member skips the switch.
-        this.push(armCtx, `else => {},`);
+        // JS: an uncovered member skips the switch; one the TypeScript
+        // types rule out never reaches it.
+        this.push(armCtx, coveredByType && allExit ? `else => unreachable,` : `else => {},`);
       }
     }
     this.push(ctx, `}`);

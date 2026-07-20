@@ -2090,6 +2090,112 @@ export function labeledBlockBreak(q: number | null, flag: boolean, cut: boolean)
     ],
   },
   {
+    // Defaultless value-switch exhaustiveness through live paths: labels
+    // covering the scrutinee's literal union make the killing branch
+    // terminal (the surviving read keeps its narrow), one uncovered member
+    // or a plain-string scrutinee merges the kill to the re-check, and an
+    // exhaustive switch may end a value-returning function — every covered
+    // member and the narrow's value use run identically on both sides.
+    name: "defaultless exhaustive value switches route kills and returns like node",
+    src: `
+export type Mode = "a" | "b" | "c";
+export type Level = 0 | 1 | 2;
+export function coveredExit(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+      case "c":
+        return 20;
+    }
+  }
+  return p + 1;
+}
+export function coveredNumericExit(q: number | null, flag: boolean, lvl: Level): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (lvl) {
+      case 0:
+      case 1:
+        return 10;
+      case 2:
+        return 20;
+    }
+  }
+  return p + 1;
+}
+export function uncoveredMerge(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+export function plainStringMerge(q: number | null, flag: boolean, s: string): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (s) {
+      case "x":
+        return 10;
+      case "y":
+        return 20;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+export function coveredFinal(mode: Mode): number {
+  switch (mode) {
+    case "a":
+    case "b":
+      return 10;
+    case "c":
+      return 20;
+  }
+}
+`,
+    calls: [
+      { fn: "coveredExit", args: [{ t: "null" }, { t: "b", v: false }, { t: "tag", v: "a" }] },
+      { fn: "coveredExit", args: [i(7), { t: "b", v: true }, { t: "tag", v: "a" }] },
+      { fn: "coveredExit", args: [i(7), { t: "b", v: true }, { t: "tag", v: "b" }] },
+      { fn: "coveredExit", args: [i(7), { t: "b", v: true }, { t: "tag", v: "c" }] },
+      { fn: "coveredExit", args: [i(7), { t: "b", v: false }, { t: "tag", v: "c" }] },
+      { fn: "coveredNumericExit", args: [{ t: "null" }, { t: "b", v: false }, i(0)] },
+      { fn: "coveredNumericExit", args: [i(7), { t: "b", v: true }, i(0)] },
+      { fn: "coveredNumericExit", args: [i(7), { t: "b", v: true }, i(1)] },
+      { fn: "coveredNumericExit", args: [i(7), { t: "b", v: true }, i(2)] },
+      { fn: "coveredNumericExit", args: [i(7), { t: "b", v: false }, i(2)] },
+      { fn: "uncoveredMerge", args: [{ t: "null" }, { t: "b", v: true }, { t: "tag", v: "c" }] },
+      { fn: "uncoveredMerge", args: [i(7), { t: "b", v: true }, { t: "tag", v: "a" }] },
+      { fn: "uncoveredMerge", args: [i(7), { t: "b", v: true }, { t: "tag", v: "b" }] },
+      { fn: "uncoveredMerge", args: [i(7), { t: "b", v: true }, { t: "tag", v: "c" }] },
+      { fn: "uncoveredMerge", args: [i(7), { t: "b", v: false }, { t: "tag", v: "c" }] },
+      { fn: "plainStringMerge", args: [{ t: "null" }, { t: "b", v: true }, { t: "str", v: "x" }] },
+      { fn: "plainStringMerge", args: [i(7), { t: "b", v: true }, { t: "str", v: "x" }] },
+      { fn: "plainStringMerge", args: [i(7), { t: "b", v: true }, { t: "str", v: "y" }] },
+      { fn: "plainStringMerge", args: [i(7), { t: "b", v: true }, { t: "str", v: "z" }] },
+      { fn: "plainStringMerge", args: [i(7), { t: "b", v: false }, { t: "str", v: "z" }] },
+      { fn: "coveredFinal", args: [{ t: "tag", v: "a" }] },
+      { fn: "coveredFinal", args: [{ t: "tag", v: "b" }] },
+      { fn: "coveredFinal", args: [{ t: "tag", v: "c" }] },
+    ],
+  },
+  {
     // The post-construct narrow subtracts the arms' kills: a surviving
     // arm's `p = null` means the re-check after the statement reads the
     // live (possibly-null) slot on every path, exactly like node.

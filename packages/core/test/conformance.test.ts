@@ -7906,6 +7906,184 @@ export function f(q: number | null, flag: boolean): number {
   },
 ];
 
+// A value switch without a `default` is still terminal when its case labels
+// cover the scrutinee's literal-union type — tsc's own exhaustiveness
+// judgment, which its CFA uses to keep a narrowing past a branch that ends
+// in such a switch. Reading the defaultless switch as nonterminal merges
+// kills from branches that cannot reach the merge and emits raw optional
+// arithmetic Zig rejects. The consult stays on literal-union scrutinees
+// (string/number/boolean literals) with literal case labels; anything wider
+// keeps the conservative merge. The lowering already closes the
+// never-reached fallthrough (string enums emit a Zig-exhaustive switch with
+// no else; numeric aliases emit `else => unreachable`), so the terminality
+// claim and the emitted shape agree.
+const valueSwitchExhaustivenessCases: Case[] = [
+  {
+    // Every member has its own exiting case: the killing branch never
+    // reaches the merge, so the surviving read keeps its unwrap. Judged
+    // defaultless-therefore-nonterminal, the merged kill emits `p + 1` on
+    // a raw `?f64`.
+    name: "a defaultless value switch covering every union member keeps the branch terminal",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+        return 1;
+      case "b":
+        return 2;
+      case "c":
+        return 3;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // Coverage counts stacked labels through their shared body: a stacked
+    // group plus a separate case covers all three members.
+    name: "exhaustiveness coverage reads stacked labels alongside separate cases",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+      case "c":
+        return 20;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // Non-regression: one member uncovered means the switch may be skipped
+    // entirely — the kill merges and the re-check reads the live slot.
+    name: "a value switch leaving one member uncovered still merges its kill",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(q: number | null, flag: boolean, mode: Mode): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (mode) {
+      case "a":
+      case "b":
+        return 10;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+  {
+    // A plain string scrutinee has no enumerable members: the consult
+    // answers conservatively and the kill merges.
+    name: "a switch on a plain string stays conservative and merges the kill",
+    src: `
+export function f(q: number | null, flag: boolean, s: string): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (s) {
+      case "x":
+        return 10;
+      case "y":
+        return 20;
+    }
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+  },
+  {
+    // Boolean literal unions are enumerable to the exhaustiveness consult
+    // (case true + case false covers `boolean`), but the v1 switch
+    // lowerings have no boolean-scrutinee mapping, so the shape gates at
+    // emission before terminality can matter end to end.
+    name: "a switch on a boolean scrutinee gates at emission",
+    gate: "NS9001",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  switch (flag) {
+    case true:
+      return 1;
+    case false:
+      return 2;
+  }
+}
+`,
+  },
+  {
+    // Numeric literal unions enumerate the same way; the lowering closes
+    // the integer scrutinee's required else arm with `unreachable`.
+    name: "a defaultless numeric-literal-union switch covering every member keeps the branch terminal",
+    src: `
+export type Level = 0 | 1 | 2;
+export function f(q: number | null, flag: boolean, lvl: Level): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    switch (lvl) {
+      case 0:
+      case 1:
+        return 10;
+      case 2:
+        return 20;
+    }
+  }
+  return p + 1;
+}
+`,
+  },
+  {
+    // The emission/terminality agreement case: an exhaustive defaultless
+    // switch as a function's final statement must leave Zig no reachable
+    // missing-return path.
+    name: "an exhaustive defaultless value switch may end a value-returning function",
+    src: `
+export type Mode = "a" | "b" | "c";
+export function f(mode: Mode): number {
+  switch (mode) {
+    case "a":
+    case "b":
+      return 10;
+    case "c":
+      return 20;
+  }
+}
+export type Level = 0 | 1 | 2;
+export function g(lvl: Level): number {
+  switch (lvl) {
+    case 0:
+      return 1;
+    case 1:
+    case 2:
+      return 2;
+  }
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8457,6 +8635,7 @@ const corpus: Case[] = [
   ...callbackTrailingNarrowCases,
   ...doWhileTrailingTestCases,
   ...terminalityGroupingCases,
+  ...valueSwitchExhaustivenessCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,
