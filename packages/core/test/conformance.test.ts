@@ -5310,6 +5310,130 @@ export function f(q: P | null): number {
   },
 ];
 
+// Plain lexical blocks are NOT merge boundaries: tsc's narrowing is
+// flow-based, so a guard inside a fall-through `{ ... }` narrows the
+// statements AFTER the block too (and a kill inside it stays dead there).
+// The emitter flattens such blocks into the enclosing list, which also
+// keeps any unwrap capture lowered inside the block in scope for the
+// post-block reads that rely on it. Merge contexts (if/else arms, loop
+// bodies, labeled blocks) still bracket: narrows established inside them
+// die at their exit.
+const lexicalBlockFlowCases: Case[] = [
+  {
+    // The narrowing must survive the block's end: restoring entry state at
+    // the block exit re-optionalized `p` and the post-block read failed to
+    // compile.
+    name: "a guard inside a plain block narrows the statements after the block",
+    src: `
+export interface P { readonly v: number; }
+export function f(p: P | null): number {
+  { if (p === null) return -1; }
+  return p.v;
+}
+`,
+  },
+  {
+    // The Zig-scope half: the guard's unwrap capture is lowered INSIDE the
+    // TS block, and the post-block reads go through it — flattening is what
+    // keeps that capture in the same Zig scope (the compile is the
+    // assertion).
+    name: "a narrow established in a block is readable after it through its capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  {
+    if (q === null) return -1;
+    if (q.v < 0) return -2;
+  }
+  return q.v + 1;
+}
+`,
+  },
+  {
+    // Containment control: a block inside an if ARM flows through to the
+    // arm's scope, but the arm itself still brackets — the post-arm
+    // re-check must read the LIVE optional, not a leaked capture.
+    name: "a block inside an if arm flows through to the arm; the arm still brackets",
+    src: `
+export interface P { readonly v: number; }
+export function f(p: P | null, c: boolean): number {
+  if (c) {
+    { if (p === null) return -1; }
+    return p.v;
+  }
+  if (p === null) return 0;
+  return p.v + 1;
+}
+`,
+  },
+  {
+    name: "nested plain blocks flow through both boundaries",
+    src: `
+export interface P { readonly v: number; }
+export function f(p: P | null): number {
+  {
+    {
+      if (p === null) return -1;
+    }
+    if (p.v === 7) return 7;
+  }
+  return p.v;
+}
+`,
+  },
+  {
+    // Kills flow through a plain block exactly like narrows do: the killing
+    // assignment sits inside the block and the post-block re-check must
+    // read the live optional.
+    name: "a kill inside a plain block stays dead after the block",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  {
+    if (flag) { p = null; }
+  }
+  if (p === null) return 0;
+  return p;
+}
+`,
+  },
+  {
+    // Flattening must not collide block-local declarations with later
+    // same-named ones: name uniquing is function-wide, so the second `a`
+    // takes a fresh spelling.
+    name: "a block-local const does not collide with a later same-named local",
+    src: `
+export function f(flag: boolean): number {
+  {
+    const a = 1;
+    if (flag) return a;
+  }
+  const a = 2;
+  return a;
+}
+`,
+  },
+  {
+    // A block-scoped alias's guard fuses inside the flattened region; the
+    // outer value stays optional past the block, so the post-block re-check
+    // still reads the live slot.
+    name: "a block-local alias guard leaves the outer optional unnarrowed",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  {
+    const inner = q;
+    if (inner === null) return -1;
+    if (inner.v === 7) return 7;
+  }
+  if (q === null) return 0;
+  return q.v;
+}
+`,
+  },
+];
+
 // Flow-exit guard narrowing: tsc narrows after ANY statement that never
 // falls through — return, break, continue, throw — so a loop's early-exit
 // guard must narrow the remainder of the loop body exactly like an early
@@ -6702,6 +6826,7 @@ const corpus: Case[] = [
   ...streamingCases,
   ...grammarCases,
   ...ternarySpreadArmCases,
+  ...lexicalBlockFlowCases,
 ];
 
 test("corpus: gated cases teach at check time, emit cases transpile clean", () => {

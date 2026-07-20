@@ -3521,11 +3521,22 @@ export class Emitter {
       return;
     }
     if (ts.isBlock(stmt)) {
-      this.push(ctx, `{`);
-      const sub = this.nestedCtx(ctx);
-      this.emitBlockStatements(stmt.statements, sub);
-      ctx.lines.push(...sub.lines);
-      this.push(ctx, `}`);
+      // A plain lexical block is NOT a merge boundary: tsc's narrowing is
+      // flow-based, so a narrow (or kill) established inside a fall-through
+      // block survives into the statements after it. Emission FLATTENS the
+      // block's statements into the enclosing list instead of bracketing
+      // them (no withNarrowScope, no Zig braces): name uniquing is already
+      // function-wide (ctx.used and the decl-keyed ctx.names ride every
+      // nested ctx by reference), so Zig block scope is never load-bearing
+      // for shadowing — and flattening is what keeps a narrowing capture
+      // lowered inside the block (an orelse fusion's const, a `.?` subst's
+      // target) in the same Zig scope as the post-block reads that rely on
+      // it. Merge contexts (if/else arms, loop bodies, switch clauses,
+      // callback and try/catch bodies, labeled blocks) never reach this
+      // case — their emitters unwrap the block and bracket its statement
+      // LIST — so control only ever falls straight through here. Nested
+      // plain blocks flatten recursively.
+      this.emitStatementList(stmt.statements, ctx);
       return;
     }
     if (ts.isBreakStatement(stmt)) {
@@ -4490,13 +4501,22 @@ export class Emitter {
   }
 
   /// The statements after `stmt` in its own list — the scope an early-exit
-  /// guard's narrowing serves.
+  /// guard's narrowing serves. A plain lexical block is no flow boundary
+  /// (emitStatement flattens it), so the walk continues past it: a guard at
+  /// the end of such a block narrows the statements after the BLOCK,
+  /// transitively out through enclosing plain blocks.
   private followingStatementsOf(stmt: ts.Statement): readonly ts.Statement[] {
     const parent = stmt.parent;
     if (ts.isBlock(parent) || ts.isSourceFile(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) {
       const statements = parent.statements;
       const at = statements.indexOf(stmt);
-      if (at >= 0) return statements.slice(at + 1);
+      if (at >= 0) {
+        const rest = statements.slice(at + 1);
+        if (ts.isBlock(parent) && isPlainLexicalBlock(parent)) {
+          return [...rest, ...this.followingStatementsOf(parent)];
+        }
+        return rest;
+      }
     }
     return [];
   }
@@ -9444,6 +9464,20 @@ function escapeZigString(s: string): string {
     else out += ch;
   }
   return out;
+}
+
+/// A block statement sitting directly in a statement list — a plain lexical
+/// block, where control always falls straight through. Everything else a
+/// Block can be (an if/else arm, a loop or callback body, a try/catch
+/// block, a labeled statement's body) is a merge context: control JOINS at
+/// its exit, so narrowing must bracket it there.
+function isPlainLexicalBlock(b: ts.Block): boolean {
+  return (
+    ts.isBlock(b.parent) ||
+    ts.isSourceFile(b.parent) ||
+    ts.isCaseClause(b.parent) ||
+    ts.isDefaultClause(b.parent)
+  );
 }
 
 /// The null LITERAL an expression spells, seen through value-preserving

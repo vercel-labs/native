@@ -311,6 +311,26 @@ export function probe(q: number | null, flag: boolean): number {
     ],
   },
   {
+    // A plain lexical block is no flow boundary: the guard inside it
+    // narrows the post-block read (tsc flows through), and the emitted
+    // capture must be in scope there. Both the miss and hit paths must
+    // return exactly what node returns.
+    name: "a guard inside a plain block narrows the post-block read on both paths",
+    src: `
+export interface P { readonly v: number; }
+export function probe(v: number | null): number {
+  const p: P | null = v === null ? null : { v: v };
+  { if (p === null) return -1; }
+  return p.v;
+}
+`,
+    calls: [
+      { fn: "probe", args: [{ t: "null" }] },
+      { fn: "probe", args: [f(4)] },
+      { fn: "probe", args: [f(-4)] },
+    ],
+  },
+  {
     // A map callback whose only return trails a throw guard lifts as
     // straight-line statements plus the return's expression; the guard's
     // narrowing must still cover that expression (one flow scope), and the
