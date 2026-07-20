@@ -6167,6 +6167,182 @@ export function f(q: number | null, flag: boolean): number {
 }
 `,
   },
+  {
+    // The body's terminal return is not its only route out: the earlier
+    // break escapes the loop carrying the kill, so the post-loop re-check
+    // must read the LIVE optional (tsc types p as number | null there).
+    name: "a mid-list break escapes a loop body whose terminal statement returns",
+    src: `
+export function f(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  for (const x of xs) {
+    if (x < 0) { p = null; break; }
+    return -2;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // Control: a break bound to a loop WHOLLY inside the exiting branch
+    // resumes inside it and is no route out — the branch's kill still
+    // drops, and the surviving read keeps its capture narrow.
+    name: "a break bound to a loop wholly inside an exiting branch is no escape",
+    src: `
+export interface P { readonly v: number; }
+export function f(p0: P | null, xs: readonly number[]): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) {
+      p = null;
+      let acc: number = 0;
+      for (const x of xs) {
+        if (x < 0) { break; }
+        acc = acc + x;
+      }
+      return acc;
+    }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // The continue flavor of the mid-list escape: the loop resumes, then
+    // falls through to the re-check, which needs the live value.
+    name: "a mid-list continue escapes a loop body whose terminal statement returns",
+    src: `
+export function f(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  for (const x of xs) {
+    if (x < 0) { p = null; continue; }
+    return -2;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // A catch that ends in return still has a route back into the
+    // function when a call inside it can throw to an OUTER catch that
+    // falls through — the inner body's kill must reach the outer merge.
+    name: "a throwing call in an exiting catch escapes to an outer fall-through catch",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+function g(flag: boolean): void {
+  if (flag) { throw { kind: "boom" } as Boom; }
+}
+export function f(q: number | null, a: boolean, b: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  try {
+    try {
+      p = null;
+      g(a);
+      return -2;
+    } catch {
+      g(b);
+      return -3;
+    }
+  } catch {
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // Control: when the OUTER catch also always leaves, every escape from
+    // the inner catch's throwing call still exits the function — the inner
+    // body's kill drops and the surviving read keeps its capture narrow.
+    name: "an exiting catch whose throws land in an exiting outer catch still closes the body",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+function g(flag: boolean): void {
+  if (flag) { throw { kind: "boom" } as Boom; }
+}
+export function f(p0: P | null, a: boolean, b: boolean): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) {
+      try {
+        try { p = null; g(a); return -1; } catch { g(b); return -2; }
+      } catch {
+        return -3;
+      }
+    }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // A labeled break out of a labeled block resumes right after the
+    // block — inside the function — so its kill reaches the re-check even
+    // though the block's terminal statement returns.
+    name: "a labeled break out of a labeled block carries its kill past the block",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  outer: {
+    if (flag) { p = null; break outer; }
+    return -2;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // The do-while flavor of the mid-list escape.
+    name: "a mid-list break in a do-while body whose terminal statement returns",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  do {
+    if (flag) { p = null; break; }
+    return -2;
+  } while (flag);
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // Control: clause-terminating breaks bind the switch inside the list,
+    // resume inside it, and are no routes out — the exiting branch's kill
+    // still drops past the terminal return.
+    name: "a switch-bound break inside an exiting branch is no escape",
+    src: `
+export interface P { readonly v: number; }
+export type Mode = "a" | "b";
+export function f(p0: P | null, m: Mode): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) {
+      p = null;
+      let acc: number = 0;
+      switch (m) {
+        case "a": acc = 1; break;
+        case "b": acc = 2; break;
+      }
+      return acc;
+    }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
 ];
 
 // A lifted block-body callback whose only return is the trailing statement

@@ -70,14 +70,14 @@ interface Ctx {
   /// `throw` (or a throwing call) breaks to it; null means the throw
   /// propagates (`return error.Thrown`) to the caller.
   tryLabel?: string | null;
-  /// R20: true while emitting inside a try body whose local catch can fall
-  /// through to the code after the try. In that region ANY statement
-  /// containing a throwing call is an exit — it lands in the catch, and the
-  /// catch fallthrough carries the region's narrowing kills to the try's
-  /// merge point — so terminal-statement kill dropping (emitBlockStatements)
-  /// is unsound and disabled. A catch that itself always leaves the function
-  /// closes that path: no exception route reaches the merge, and the flag
-  /// stays off for its body.
+  /// R20: true while emitting inside a try body whose local catch has some
+  /// route back into the function. There ANY statement containing a
+  /// throwing call is a resuming route — it lands in the catch, and the
+  /// catch's fall-back carries the region's narrowing kills to a merge
+  /// point — so kill dropping (allRoutesLeaveFunction) treats each one as
+  /// a route that does not leave. A catch whose every route leaves the
+  /// function (including its own throws, judged against ITS enclosing
+  /// handler) closes that path, and the flag stays off for its body.
   catchResumes?: boolean;
   /// decl node -> zig identifier
   readonly names: Map<ts.Node, string>;
@@ -3066,24 +3066,14 @@ export class Emitter {
     //
     // Invalidation survives the restore — an assignment inside the block
     // that killed a narrowing (assigned a possibly-null value) must stay
-    // dead past the merge — UNLESS the list always LEAVES the function:
-    // then no path carrying the kills reaches the merge, tsc keeps the
-    // narrow on the surviving flow, and reads there depend on it.
-    // `break`/`continue` never qualify (a break-guarded kill runs and then
-    // control resumes after the loop or switch, where the kill must hold);
-    // a `return` only qualifies where it emits as a real return (inside a
-    // lifted callback it lowers to `break :label`, resuming at the merge);
-    // a `throw` only qualifies where it propagates to the caller (under
-    // ctx.tryLabel it breaks to the enclosing catch instead). And the
-    // terminal statement only speaks for the list at all where no local
-    // catch can resume (ctx.catchResumes): inside a try body whose catch
-    // falls through, any earlier statement's call can throw, land in the
-    // catch, and carry this list's kills to the try's merge.
-    const last = stmts[stmts.length - 1];
-    const leavesFn =
-      last !== undefined &&
-      !ctx.catchResumes &&
-      this.alwaysExits(last, { returnLeaves: ctx.retLabel === null, throwCaught: ctx.tryLabel != null });
+    // dead past the merge — UNLESS every route out of the list leaves the
+    // emitted function (allRoutesLeaveFunction): then no path carrying the
+    // kills reaches the merge, tsc keeps the narrow on the surviving flow,
+    // and reads there depend on it.
+    const leavesFn = this.allRoutesLeaveFunction(stmts, {
+      returnLeaves: ctx.retLabel === null,
+      throwResumes: ctx.catchResumes === true,
+    });
     this.withNarrowScope(ctx, leavesFn, () => this.emitStatementList(stmts, ctx));
   }
 
@@ -3184,40 +3174,31 @@ export class Emitter {
   /// throw, break, and continue all qualify (a break/continue jumps to an
   /// enclosing construct's boundary, never to the next statement in
   /// sequence), so an early-exit guard narrows the remainder of its block
-  /// no matter which exit the guard takes.
-  /// Without `fnExit`: the statement never completes normally (control
-  /// leaves the enclosing CONSTRUCT — return, throw, break, continue).
-  /// With `fnExit`: control always leaves the emitted FUNCTION, the
-  /// stronger question kill-frame drops need. break/continue resume inside
-  /// the function; `returnLeaves` is false where returns lower to labeled
-  /// breaks (lifted callbacks); `throwCaught` is true where a throw breaks
-  /// to an enclosing catch (it flips on when recursion enters a try block
-  /// that has its own catch).
-  private alwaysExits(stmt: ts.Statement, fnExit?: { returnLeaves: boolean; throwCaught: boolean }): boolean {
-    if (ts.isReturnStatement(stmt)) return fnExit ? fnExit.returnLeaves : true;
-    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return fnExit === undefined;
+  /// no matter which exit the guard takes. Kill-frame drops need the
+  /// stronger whole-function question; that is allRoutesLeaveFunction.
+  private alwaysExits(stmt: ts.Statement): boolean {
+    if (ts.isReturnStatement(stmt)) return true;
+    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return true;
     // R20: a throw never falls through (it unwinds to a catch or out of
     // the function), and a try/catch exits when both arms do — any throw
     // mid-try lands in the catch, which exits. NS1058 keeps `finally`
     // from redirecting control flow, so it cannot un-exit either arm.
-    if (ts.isThrowStatement(stmt)) return fnExit ? !fnExit.throwCaught : true;
+    if (ts.isThrowStatement(stmt)) return true;
     if (ts.isTryStatement(stmt)) {
-      const tryFnExit =
-        fnExit && stmt.catchClause !== undefined ? { ...fnExit, throwCaught: true } : fnExit;
-      const tryExits = this.alwaysExits(stmt.tryBlock, tryFnExit);
+      const tryExits = this.alwaysExits(stmt.tryBlock);
       const catchExits =
-        stmt.catchClause === undefined || this.alwaysExits(stmt.catchClause.block, fnExit);
+        stmt.catchClause === undefined || this.alwaysExits(stmt.catchClause.block);
       return tryExits && catchExits;
     }
     if (ts.isBlock(stmt)) {
       const last = stmt.statements[stmt.statements.length - 1];
-      return last !== undefined && this.alwaysExits(last, fnExit);
+      return last !== undefined && this.alwaysExits(last);
     }
     if (ts.isIfStatement(stmt)) {
       return (
         stmt.elseStatement !== undefined &&
-        this.alwaysExits(stmt.thenStatement, fnExit) &&
-        this.alwaysExits(stmt.elseStatement, fnExit)
+        this.alwaysExits(stmt.thenStatement) &&
+        this.alwaysExits(stmt.elseStatement)
       );
     }
     if (ts.isSwitchStatement(stmt)) {
@@ -3238,10 +3219,122 @@ export class Emitter {
         let stmts: readonly ts.Statement[] = c.statements;
         if (stmts.length === 1 && ts.isBlock(stmts[0])) stmts = (stmts[0] as ts.Block).statements;
         const last = stmts[stmts.length - 1];
-        return last !== undefined && this.alwaysExits(last, fnExit);
+        return last !== undefined && this.alwaysExits(last);
       });
     }
     return false;
+  }
+
+  /// Kill-frame drop eligibility: whether EVERY route out of this statement
+  /// list leaves the emitted function. Only then may the list's narrowing
+  /// kills drop (emitBlockStatements) or a catch arm close the exception
+  /// paths over its try body (emitTryCore) — the final statement alone
+  /// cannot answer this, because earlier statements open routes of their
+  /// own. The routes, and when each one resumes in-function instead of
+  /// leaving:
+  ///   - fallthrough off the end of the list — always resumes;
+  ///   - `return` — resumes where returns lower to labeled breaks (lifted
+  ///     callbacks: env.returnLeaves is false);
+  ///   - `break`/`continue` at any nesting depth whose target sits at or
+  ///     outside the list — always resumes (after the target construct,
+  ///     inside the function). One bound to a loop/switch/label WHOLLY
+  ///     inside the list stays inside it and is not a route out, so the
+  ///     walk tracks locally-bound targets, never spellings;
+  ///   - `throw`, or any statement containing a throwing call, whose
+  ///     handler can fall back into the function — the handler is the
+  ///     nearest catch inside the list (asked recursively: does every
+  ///     route out of THAT catch leave, throws escaping it included?),
+  ///     else whatever env.throwResumes says about the surroundings.
+  /// When a route resists classification the answer is false (merge): an
+  /// over-merge costs a narrow tsc would have kept, an under-merge
+  /// resurrects a dead one and emits an unwrap Zig rejects.
+  private allRoutesLeaveFunction(
+    stmts: readonly ts.Statement[],
+    env: { returnLeaves: boolean; throwResumes: boolean },
+  ): boolean {
+    const last = stmts[stmts.length - 1];
+    if (last === undefined || !this.alwaysExits(last)) return false;
+    // `labels` / `breaks` / `continues` carry the targets bound inside the
+    // list so far on this path; `throwResumes` is the handler visibility at
+    // this point (re-derived at every try/catch met on the way down);
+    // `inCallback` marks inline (unlifted) callback bodies, whose returns
+    // are their own but whose throwing calls act at this site.
+    const resumes = (
+      n: ts.Node,
+      labels: ReadonlySet<string>,
+      breaks: number,
+      continues: number,
+      throwResumes: boolean,
+      inCallback: boolean,
+    ): boolean => {
+      const walk = (c: ts.Node): boolean => resumes(c, labels, breaks, continues, throwResumes, inCallback);
+      if (ts.isBreakStatement(n)) {
+        return !inCallback && (n.label ? !labels.has(n.label.text) : breaks === 0);
+      }
+      if (ts.isContinueStatement(n)) {
+        return !inCallback && (n.label ? !labels.has(n.label.text) : continues === 0);
+      }
+      if (ts.isReturnStatement(n)) {
+        if (!inCallback && !env.returnLeaves) return true;
+        return n.expression !== undefined && walk(n.expression);
+      }
+      if (ts.isThrowStatement(n)) {
+        return throwResumes || walk(n.expression);
+      }
+      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && throwResumes) {
+        const target = this.calleeOwnerOf(n);
+        if (target && this.leakingFns.has(target)) return true;
+      }
+      if (ts.isTryStatement(n) && n.catchClause !== undefined) {
+        // Throws in the body land in this catch; they resume iff some
+        // route out of the catch does. The catch itself runs against the
+        // handler visible OUTSIDE this try.
+        const bodyThrowResumes = !this.allRoutesLeaveFunction(n.catchClause.block.statements, {
+          returnLeaves: env.returnLeaves,
+          throwResumes,
+        });
+        return (
+          resumes(n.tryBlock, labels, breaks, continues, bodyThrowResumes, inCallback) ||
+          resumes(n.catchClause.block, labels, breaks, continues, throwResumes, inCallback) ||
+          (n.finallyBlock !== undefined && walk(n.finallyBlock))
+        );
+      }
+      if (ts.isLabeledStatement(n)) {
+        const bound = new Set(labels);
+        bound.add(n.label.text);
+        return resumes(n.statement, bound, breaks, continues, throwResumes, inCallback);
+      }
+      if (
+        ts.isWhileStatement(n) ||
+        ts.isDoStatement(n) ||
+        ts.isForStatement(n) ||
+        ts.isForOfStatement(n) ||
+        ts.isForInStatement(n)
+      ) {
+        // The loop binds unlabeled break/continue for its whole subtree
+        // (heads hold no break/continue — tsc rejects them there).
+        return (
+          ts.forEachChild(n, (c) =>
+            resumes(c, labels, breaks + 1, continues + 1, throwResumes, inCallback) || undefined,
+          ) === true
+        );
+      }
+      if (ts.isSwitchStatement(n)) {
+        return (
+          walk(n.expression) ||
+          resumes(n.caseBlock, labels, breaks + 1, continues, throwResumes, inCallback)
+        );
+      }
+      // Declarations don't run here; lifted callbacks are analyzed at
+      // their own emission (their bodies get a retLabel of their own).
+      if (ts.isFunctionDeclaration(n)) return false;
+      if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
+        if ([...this.hoistedFns.values()].includes(n)) return false;
+        return resumes(n.body, labels, breaks, continues, throwResumes, true);
+      }
+      return ts.forEachChild(n, (c) => walk(c) || undefined) === true;
+    };
+    return !stmts.some((s) => resumes(s, new Set(), 0, 0, env.throwResumes, false));
   }
 
   private emitOrelseFusion(decl: ts.VariableDeclaration, exit: ts.Statement, inner: ZType, ctx: Ctx): void {
@@ -3497,17 +3590,17 @@ export class Emitter {
     this.push(outer, `${body}: {`);
     const inner = this.nestedCtx(outer);
     inner.tryLabel = body;
-    // The body's kills may only drop on terminal-statement evidence when no
-    // exception path can resume past this try: a catch that falls through
-    // re-enters the merge carrying whatever a mid-body throw killed. A
-    // catch that itself always leaves the function closes every such path
-    // (its own throws break to ctx's enclosing catch, hence the throwCaught
-    // question below is asked against ctx, not the body label) — and it
-    // also closes paths from any try nested in this body, so the flag is
-    // overwritten rather than or-ed with the inherited value.
-    inner.catchResumes = !this.alwaysExits(cc.block, {
+    // The body's kills may only drop when no exception path can resume
+    // past this try: a catch that falls through re-enters the merge
+    // carrying whatever a mid-body throw killed. A catch closes every such
+    // path only when EVERY route out of it leaves the function — asked
+    // against ctx, not the body label, because the catch's own throws
+    // break to ctx's enclosing handler — and then it also closes paths
+    // from any try nested in this body, so the flag is overwritten rather
+    // than or-ed with the inherited value.
+    inner.catchResumes = !this.allRoutesLeaveFunction(cc.block.statements, {
       returnLeaves: ctx.retLabel === null,
-      throwCaught: ctx.tryLabel != null,
+      throwResumes: ctx.catchResumes === true,
     });
     this.emitBlockStatements(stmt.tryBlock.statements, inner);
     if (done !== null) this.push(inner, `break :${done};`);

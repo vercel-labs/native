@@ -253,6 +253,32 @@ export function pastLoop(q: number | null, xs: readonly number[]): number {
     ],
   },
   {
+    // A mid-list break escapes its loop carrying the kill even though the
+    // body's terminal statement returns: the post-loop re-check must read
+    // the LIVE optional. A drop keyed on that terminal return would
+    // resurrect the narrow and return q + 1 on the negative-element row
+    // instead of taking the re-check.
+    name: "a break-escaped kill under a terminal loop return drives the post-loop re-check",
+    src: `
+export function probe(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  for (const x of xs) {
+    if (x < 0) { p = null; break; }
+    return -2;
+  }
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+    calls: [
+      { fn: "probe", args: [{ t: "null" }, { t: "nums", v: [] }] },
+      { fn: "probe", args: [f(4), { t: "nums", v: [] }] },
+      { fn: "probe", args: [f(4), { t: "nums", v: [-1] }] },
+      { fn: "probe", args: [f(4), { t: "nums", v: [2, 3] }] },
+    ],
+  },
+  {
     // A map callback whose only return trails a throw guard lifts as
     // straight-line statements plus the return's expression; the guard's
     // narrowing must still cover that expression (one flow scope), and the
