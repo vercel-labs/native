@@ -7955,11 +7955,144 @@ export function f(): number {
   },
 ];
 
+const nonNullReassignCases: Case[] = [
+  {
+    // tsc keeps the target narrowed through a provably non-null
+    // reassignment. A capture would bind unused (every read follows the
+    // assignment), so the branch takes the plain-test form and reads go
+    // through the live slot.
+    name: "a non-null reassignment inside the guarded branch keeps the narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p !== null) {
+    p = { v: 2 };
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // Reads on both sides of the assignment: the early read consumes the
+    // capture, and the substitution transitions to the live-slot spelling
+    // at the assignment so the later read sees the reassigned value.
+    name: "reads before and after a non-null reassignment both stay narrowed",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  let total = 0;
+  if (p !== null) {
+    total += p.v;
+    p = { v: total + 5 };
+    total += p.v;
+  }
+  return total;
+}
+`,
+  },
+  {
+    // All reads follow the assignment (several statements' worth): no
+    // capture may bind, and every read goes through the live slot.
+    name: "a branch whose reads all follow the reassignment binds no capture",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  let total = 0;
+  if (p !== null) {
+    p = { v: 7 };
+    total += p.v;
+    total += p.v;
+  }
+  return total;
+}
+`,
+  },
+  {
+    // A reassignment nested in an inner if: tsc keeps the target
+    // non-null on both paths out of the inner statement (this case's
+    // clean tsc gate pins that), so the read after it must too — the
+    // live-slot spelling is the one form valid on both paths.
+    name: "a conditional non-null reassignment keeps the read after it narrowed",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p !== null) {
+    if (flag) {
+      p = { v: p.v + 10 };
+    }
+    return p.v;
+  }
+  return -1;
+}
+`,
+  },
+  {
+    // The dual arm shape: the else branch holds the narrow and reassigns.
+    name: "a non-null reassignment in the narrowed else arm keeps its reads",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  let p: P | null = q;
+  if (p === null) {
+    return 0;
+  } else {
+    p = { v: 2 };
+    return p.v;
+  }
+}
+`,
+  },
+  {
+    // A loop body that reads and then reassigns: the back edge hands the
+    // reassigned value to the next iteration's read, so the branch takes
+    // the live-slot form for every read.
+    name: "a loop that reassigns the narrowed target reads the live slot",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, n: number): number {
+  let p: P | null = q;
+  let total = 0;
+  if (p !== null) {
+    for (let k = 0; k < n; k++) {
+      total += p.v;
+      p = { v: total };
+    }
+  }
+  return total;
+}
+`,
+  },
+  {
+    // Reassignment to a possibly-null value still kills the narrow —
+    // the read must re-guard, and the re-guard binds its own capture.
+    name: "a possibly-null reassignment still kills the narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null, r: P | null): number {
+  let p: P | null = q;
+  if (p !== null) {
+    p = r;
+    if (p !== null) {
+      return p.v;
+    }
+  }
+  return 0;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...branchKillJoinCases,
   ...postNarrowKillSubtractionCases,
   ...shadowedDeclarationCases,
   ...elementAccessKeyCases,
+  ...nonNullReassignCases,
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,

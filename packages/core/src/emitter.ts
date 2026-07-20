@@ -4134,8 +4134,13 @@ export class Emitter {
   /// control to the finally from between any two statements, so a later
   /// non-null re-assignment does not revive the narrow there. A provably
   /// non-null assignment keeps a live-slot `.?` spelling (it reads the
-  /// variable, never a stale value) but drops a capture, mirroring the
-  /// assignment emitter's own kill rule.
+  /// variable, never a stale value; valid at every interruption point,
+  /// since the slot holds the guarded value before the write and the
+  /// non-null replacement after it). A capture spelling still drops —
+  /// defensively: every capture-binding construct declines the capture
+  /// form when its scope assigns the target (captureServesBranch and the
+  /// exit-guard's assignsTarget check), so a capture live here never has
+  /// an assignment to survive.
   private finallyEntryKills(stmt: ts.TryStatement, ctx: Ctx): Set<string> {
     const kills = new Set<string>();
     const visit = (n: ts.Node): void => {
@@ -4836,23 +4841,43 @@ export class Emitter {
       if (t.k === "optional" && key !== null) {
         this.requireFaithfulEmptyTest(exitTest.target, exitTest.flavor, cond);
         const prop = this.emitExpr(exitTest.target, ctx).code;
-        const name = this.freshName(ctx, this.narrowHint(exitTest.target));
         const join = new Set<string>();
-        this.push(ctx, `if (${prop}) |${name}| {`);
-        const saved = ctx.memberSubst.get(key);
-        ctx.memberSubst.set(key, name);
-        const sub = this.nestedCtx(ctx);
         const hitBody = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-        this.emitBlockStatements(hitBody, sub, join);
-        ctx.lines.push(...sub.lines);
-        ctx.memberSubst.delete(key);
-        if (saved !== undefined) ctx.memberSubst.set(key, saved);
-        this.push(ctx, `} else {`);
-        const esub = this.nestedCtx(ctx);
         const missBody = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
-        this.emitBlockStatements(missBody, esub, join);
-        ctx.lines.push(...esub.lines);
-        this.push(ctx, `}`);
+        // A branch that reassigns the target before any read could
+        // consume a capture takes the plain-test `.?` spelling instead
+        // (see captureServesBranch) — a capture would bind unused or go
+        // stale behind a join.
+        if (this.captureServesBranch(stmt.elseStatement, exitTest.target)) {
+          const name = this.freshName(ctx, this.narrowHint(exitTest.target));
+          this.push(ctx, `if (${prop}) |${name}| {`);
+          const saved = ctx.memberSubst.get(key);
+          ctx.memberSubst.set(key, name);
+          const sub = this.nestedCtx(ctx);
+          this.emitBlockStatements(hitBody, sub, join);
+          ctx.lines.push(...sub.lines);
+          ctx.memberSubst.delete(key);
+          if (saved !== undefined) ctx.memberSubst.set(key, saved);
+          this.push(ctx, `} else {`);
+          const esub = this.nestedCtx(ctx);
+          this.emitBlockStatements(missBody, esub, join);
+          ctx.lines.push(...esub.lines);
+          this.push(ctx, `}`);
+        } else {
+          this.push(ctx, `if (${prop} == null) {`);
+          const esub = this.nestedCtx(ctx);
+          this.emitBlockStatements(missBody, esub, join);
+          ctx.lines.push(...esub.lines);
+          this.push(ctx, `} else {`);
+          const saved = ctx.memberSubst.get(key);
+          ctx.memberSubst.set(key, `${prop}.?`);
+          const sub = this.nestedCtx(ctx);
+          this.emitBlockStatements(hitBody, sub, join);
+          ctx.lines.push(...sub.lines);
+          ctx.memberSubst.delete(key);
+          if (saved !== undefined) ctx.memberSubst.set(key, saved);
+          this.push(ctx, `}`);
+        }
         this.applyJoinedNarrowKills(ctx, join);
         // A miss branch that always exits narrows everything AFTER the if
         // too (TS's control-flow narrowing): reads there unwrap through the
@@ -4885,9 +4910,14 @@ export class Emitter {
       if (t.k === "optional" && key !== null) {
         this.requireFaithfulEmptyTest(presentTest.target, presentTest.flavor, cond);
         const prop = this.emitExpr(presentTest.target, ctx).code;
-        const name = this.freshName(ctx, this.narrowHint(presentTest.target));
+        // A branch that reassigns the target before any read could
+        // consume a capture takes the plain-test `.?` spelling instead
+        // (see captureServesBranch) — a capture would bind unused or go
+        // stale behind a join; `.?` reads always see the live slot.
+        const liveCapture = this.captureServesBranch(stmt.thenStatement, presentTest.target);
+        const name = liveCapture ? this.freshName(ctx, this.narrowHint(presentTest.target)) : `${prop}.?`;
         const single = unwrapSingle(stmt.thenStatement);
-        if (!stmt.elseStatement && single && ts.isReturnStatement(single)) {
+        if (liveCapture && !stmt.elseStatement && single && ts.isReturnStatement(single)) {
           const saved = ctx.memberSubst.get(key);
           ctx.memberSubst.set(key, name);
           // Probe in a flow scope (see childCtx). Its kills discard both
@@ -4905,7 +4935,7 @@ export class Emitter {
           }
         }
         const join = new Set<string>();
-        this.push(ctx, `if (${prop}) |${name}| {`);
+        this.push(ctx, liveCapture ? `if (${prop}) |${name}| {` : `if (${prop} != null) {`);
         const saved = ctx.memberSubst.get(key);
         ctx.memberSubst.set(key, name);
         const sub = this.nestedCtx(ctx);
@@ -5407,6 +5437,49 @@ export class Emitter {
     };
     for (const n of nodes) visit(n);
     return found;
+  }
+
+  /// Whether a guarded branch can bind a Zig CAPTURE for its narrowed
+  /// target. tsc keeps the narrow through a provably non-null
+  /// reassignment, but a capture goes stale there — the assignment
+  /// emitter transitions the substitution to the live-slot `.?` spelling
+  /// — so the capture form only holds when every plain `=` assignment to
+  /// the target sits at the branch's top statement level (straight-line
+  /// flow the transition covers) AND some read precedes the first
+  /// assignment to consume the binding. An assignment inside a nested
+  /// construct (an if arm, a loop body — whose back edge reaches even
+  /// the reads spelled above it) hands the branch to the `.?` spelling
+  /// up front, which is valid for every read the guard dominates. A
+  /// branch that never assigns the target keeps the capture; property
+  /// targets are never assignable.
+  private captureServesBranch(branch: ts.Statement, target: ts.Expression): boolean {
+    if (!ts.isIdentifier(target)) return true;
+    const decl = this.tast.declarationOf(target);
+    if (!decl) return true;
+    const stmts = ts.isBlock(branch) ? branch.statements : [branch];
+    const plainAssignOf = (s: ts.Statement): ts.BinaryExpression | null =>
+      ts.isExpressionStatement(s) &&
+      ts.isBinaryExpression(s.expression) &&
+      s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(s.expression.left) &&
+      this.tast.declarationOf(s.expression.left) === decl
+        ? s.expression
+        : null;
+    let anyAssign = false;
+    let readBeforeAssign = false;
+    for (const s of stmts) {
+      const assign = plainAssignOf(s);
+      if (assign) {
+        // The RHS evaluates before the write, so its reads still consume
+        // the capture.
+        if (!anyAssign && this.identifierRead(assign.right, decl)) readBeforeAssign = true;
+        anyAssign = true;
+        continue;
+      }
+      if (this.assignsTarget([s], target)) return false;
+      if (!anyAssign && this.identifierRead(s, decl)) readBeforeAssign = true;
+    }
+    return anyAssign ? readBeforeAssign : true;
   }
 
   /// True when some conjunct null-guards a target a LATER conjunct reads —
@@ -6440,13 +6513,27 @@ export class Emitter {
         const mayBeEmpty = empties.null || empties.undefined;
         if (key !== null && hadSubst !== undefined && hadSubst.endsWith(".?") && !mayBeEmpty) {
           // `.?` substitutions read the live variable, so they survive an
-          // assignment of a provably non-null value. Capture substitutions
-          // would read the stale capture — those stay dropped.
+          // assignment of a provably non-null value.
           ctx.memberSubst.set(key, hadSubst);
+        } else if (
+          key !== null &&
+          hadSubst !== undefined &&
+          !mayBeEmpty &&
+          hadSubst !== ctx.stillOptionalSubst.get(key) &&
+          this.zTypeOfExpr(expr.left, ctx).k === "optional"
+        ) {
+          // A capture substitution would read the stale capture, but tsc
+          // keeps the target narrowed through a provably non-null
+          // assignment — so the substitution TRANSITIONS to the live-slot
+          // `.?` spelling from this point onward: still narrowed, reads go
+          // through the reassigned slot. (The still-optional renames are
+          // payload aliases, not null-narrows; they have no `.?` form.)
+          ctx.memberSubst.set(key, `${target}.?`);
         }
         if (key !== null && !ctx.memberSubst.has(key) && (hadSubst !== undefined || mayBeEmpty)) {
           // The narrowing died with this assignment (the value may be null
-          // again, or the capture went stale). Record the kill so scope
+          // again, or the substitution has no live-slot form to transition
+          // to). Record the kill so scope
           // exits, whose snapshot restores give containment, do not
           // resurrect it past the merge — and record it even when NO
           // substitution was live: a construct's post-exit narrow

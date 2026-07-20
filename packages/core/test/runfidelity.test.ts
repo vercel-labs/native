@@ -107,6 +107,43 @@ export function guardedOuterAfterShadow(): number {
     calls: [{ fn: "shadowedElementRead", args: [] }, { fn: "guardedOuterAfterShadow", args: [] }],
   },
   {
+    name: "non-null reassignment inside a guarded branch reads the reassigned slot",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function reassignNarrow(a: number): number {
+  let p: P | null = make(a);
+  let total = 0;
+  if (p !== null) {
+    total += p.v;
+    p = { v: total + 5 };
+    total += p.v;
+  }
+  return total;
+}
+export function reassignInBranch(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p !== null) {
+    if (flag) {
+      p = { v: p.v + 10 };
+    }
+    return p.v;
+  }
+  return -1;
+}
+`,
+    calls: [
+      { fn: "reassignNarrow", args: [i(3)] },
+      { fn: "reassignNarrow", args: [i(-1)] },
+      { fn: "reassignInBranch", args: [i(5), { t: "b", v: true }] },
+      { fn: "reassignInBranch", args: [i(5), { t: "b", v: false }] },
+      { fn: "reassignInBranch", args: [i(-2), { t: "b", v: true }] },
+    ],
+  },
+  {
     name: "optional numeric comparisons are null-safe (null equals only null)",
     src: `
 export function isZero(cls: number | null): boolean {
