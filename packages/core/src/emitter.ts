@@ -4406,7 +4406,14 @@ export class Emitter {
         // A miss branch that always exits narrows everything AFTER the if
         // too (TS's control-flow narrowing): reads there unwrap through the
         // safety-checked `.?` — provably non-null, the miss path returned.
-        if (this.alwaysExits(stmt.thenStatement) && this.followingReadsTarget(stmt, exitTest.target)) {
+        // UNLESS the surviving arm killed the target: tsc's post-if state
+        // is the guard-implied narrow MINUS the joined kills, so a killed
+        // key stays dead and the code after re-checks instead.
+        if (
+          !join.has(key) &&
+          this.alwaysExits(stmt.thenStatement) &&
+          this.followingReadsTarget(stmt, exitTest.target)
+        ) {
           ctx.memberSubst.set(key, `${prop}.?`);
         }
         return;
@@ -4462,8 +4469,11 @@ export class Emitter {
         this.applyJoinedNarrowKills(ctx, join);
         // An else branch that always exits narrows everything AFTER the if
         // too (the mirror of the R7-dual rule above): only the hit path
-        // falls through, so reads there unwrap via the safety-checked `.?`.
+        // falls through, so reads there unwrap via the safety-checked `.?`
+        // — unless that hit path killed the target (post-if state is the
+        // narrow minus the joined kills; a killed key re-checks instead).
         if (
+          !join.has(key) &&
           stmt.elseStatement &&
           this.alwaysExits(stmt.elseStatement) &&
           this.followingReadsTarget(stmt, presentTest.target)
@@ -4519,7 +4529,7 @@ export class Emitter {
         // empty-test arm at the HEAD of a chain still narrows everything
         // after the whole statement (the else-if arms ride the non-empty
         // path), and skipping it here left fall-through reads optional.
-        this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx);
+        this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx, join);
         return;
       }
       this.push(ctx, `} else {`);
@@ -4530,7 +4540,7 @@ export class Emitter {
     }
     this.push(ctx, `}`);
     this.applyJoinedNarrowKills(ctx, join);
-    this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx);
+    this.applyPostIfNarrow(stmt, exitTest, presentTest, ctx, join);
   }
 
   /// tsc narrows AFTER an if whose empty-testing arm always exits — only
@@ -4539,12 +4549,18 @@ export class Emitter {
   /// generic leftovers (the miss arm has an else — possibly a whole
   /// else-if chain — or no arm reads the target), so fall-through reads
   /// unwrap via the safety-checked `.?`. Every exit path from emitIf that
-  /// finished emitting the statement must apply this.
+  /// finished emitting the statement must apply this — with the
+  /// statement's just-joined kill set: tsc's post-if state is the
+  /// guard-implied narrow MINUS the arms' kills, so a target a surviving
+  /// arm killed stays dead (installing it anyway would resurrect the
+  /// narrow the join buried, emitting a `.?` read or test against a slot
+  /// that can be null again).
   private applyPostIfNarrow(
     stmt: ts.IfStatement,
     exitTest: { target: ts.Expression; flavor: "null" | "undefined" } | null,
     presentTest: { target: ts.Expression; flavor: "null" | "undefined" } | null,
     ctx: Ctx,
+    join: ReadonlySet<string>,
   ): void {
     const postNarrow =
       (exitTest && this.alwaysExits(stmt.thenStatement) ? exitTest : null) ??
@@ -4552,6 +4568,7 @@ export class Emitter {
     if (
       postNarrow &&
       (ts.isPropertyAccessExpression(postNarrow.target) || ts.isIdentifier(postNarrow.target)) &&
+      !join.has(normalize(postNarrow.target)) &&
       this.followingReadsTarget(stmt, postNarrow.target)
     ) {
       const t = this.zTypeOfExpr(postNarrow.target, ctx);
@@ -4573,15 +4590,44 @@ export class Emitter {
     return "opt";
   }
 
-  /// Whether a guarded branch reads its narrowed target — a Zig capture the
+  /// Whether a guarded branch READS its narrowed target — a Zig capture the
   /// branch never uses would be an unused-capture error, so unread guards
-  /// keep the plain `!= null` comparison instead.
+  /// keep the plain `!= null` comparison instead. A plain assignment's
+  /// TARGET is not a read: the write goes to the raw slot, never the
+  /// capture, so a write-only arm (a pure kill) must decline the capture
+  /// form or the capture binds unused.
   private branchReadsTarget(branch: ts.Statement, target: ts.Expression): boolean {
     if (ts.isIdentifier(target)) {
       const decl = this.tast.declarationOf(target);
-      if (decl) return this.identifierUsed(branch, decl);
+      if (decl) return this.identifierRead(branch, decl);
     }
     return branch.getText().includes(target.getText());
+  }
+
+  /// identifierUsed, minus references that are the bare TARGET of a plain
+  /// `=` assignment (compound assignments and `++`/`--` read the slot and
+  /// still count).
+  private identifierRead(body: ts.Node, decl: ts.Node): boolean {
+    let found = false;
+    const visit = (n: ts.Node): void => {
+      if (found) return;
+      if (
+        ts.isIdentifier(n) &&
+        this.tast.declarationOf(n) === decl &&
+        n.parent !== decl &&
+        !(
+          ts.isBinaryExpression(n.parent) &&
+          n.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          n.parent.left === n
+        )
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(body);
+    return found;
   }
 
   /// Whether any statement AFTER an early-exit guard reads the guarded
@@ -5120,8 +5166,12 @@ export class Emitter {
     this.applyJoinedNarrowKills(ctx, join);
     if (exitDual) {
       // `if (x === null || <bad>) return ...;` — the code below runs only
-      // with x present, so the unwrap substitutions stay active.
-      for (const [k, v] of guards) ctx.memberSubst.set(k, v);
+      // with x present, so the unwrap substitutions stay active — minus
+      // any target the arm killed on a non-leaving exit (a break/continue
+      // route merges its kills; the post-statement state subtracts them).
+      for (const [k, v] of guards) {
+        if (!join.has(k)) ctx.memberSubst.set(k, v);
+      }
     }
     return true;
   }
@@ -5880,17 +5930,23 @@ export class Emitter {
         const hadSubst = ctx.memberSubst.get(key);
         if (hadSubst !== undefined) ctx.memberSubst.delete(key);
         const target = this.emitExpr(expr.left, ctx).code;
-        if (hadSubst !== undefined && hadSubst.endsWith(".?")) {
+        const empties = this.tast.emptiesOf(expr.right);
+        const mayBeEmpty = empties.null || empties.undefined;
+        if (hadSubst !== undefined && hadSubst.endsWith(".?") && !mayBeEmpty) {
           // `.?` substitutions read the live variable, so they survive an
           // assignment of a provably non-null value. Capture substitutions
           // would read the stale capture — those stay dropped.
-          const empties = this.tast.emptiesOf(expr.right);
-          if (!empties.null && !empties.undefined) ctx.memberSubst.set(key, hadSubst);
+          ctx.memberSubst.set(key, hadSubst);
         }
-        if (hadSubst !== undefined && !ctx.memberSubst.has(key)) {
+        if (!ctx.memberSubst.has(key) && (hadSubst !== undefined || mayBeEmpty)) {
           // The narrowing died with this assignment (the value may be null
-          // again). Record the kill so scope exits, whose snapshot restores
-          // give containment, do not resurrect it past the merge.
+          // again, or the capture went stale). Record the kill so scope
+          // exits, whose snapshot restores give containment, do not
+          // resurrect it past the merge — and record it even when NO
+          // substitution was live: a construct's post-exit narrow
+          // (applyPostIfNarrow and kin) subtracts the joined kills, and
+          // tsc buries the guard-implied narrow for every possibly-null
+          // assignment an arm makes, active substitution or not.
           ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
         }
         this.push(ctx, `${target} = ${this.byteStoreNarrowed(expr, v.code, ctx)};`);

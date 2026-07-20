@@ -1824,6 +1824,58 @@ export function killClause(a: number | null, sel: Sel): number {
     ],
   },
   {
+    // The post-construct narrow subtracts the arms' kills: a surviving
+    // arm's `p = null` means the re-check after the statement reads the
+    // live (possibly-null) slot on every path, exactly like node.
+    name: "post-if narrows subtract branch kills: else-if, generic else, capture arms",
+    src: `
+export function killedPostIf(a: number | null, flag: boolean): number {
+  let p: number | null = a;
+  if (p === null) return -1;
+  else if (flag) {
+    p = null;
+  }
+  if (p === null) return 0;
+  return p;
+}
+export function killedGenericElse(a: number | null, flag: boolean): number {
+  let p: number | null = a;
+  let n = 0;
+  if (p === null) {
+    return -1;
+  } else {
+    if (flag) { p = null; }
+    n += 1;
+  }
+  if (p === null) return 100 + n;
+  return p;
+}
+export function killedReadingArm(a: number | null, flag: boolean): number {
+  let p: number | null = a;
+  let n = 0;
+  if (p !== null) {
+    n += p;
+    if (flag) { p = null; }
+  } else {
+    return -1;
+  }
+  if (p === null) return 100 + n;
+  return p;
+}
+`,
+    calls: [
+      { fn: "killedPostIf", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "killedPostIf", args: [i(4), { t: "b", v: true }] },
+      { fn: "killedPostIf", args: [i(4), { t: "b", v: false }] },
+      { fn: "killedGenericElse", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "killedGenericElse", args: [i(4), { t: "b", v: true }] },
+      { fn: "killedGenericElse", args: [i(4), { t: "b", v: false }] },
+      { fn: "killedReadingArm", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "killedReadingArm", args: [i(4), { t: "b", v: true }] },
+      { fn: "killedReadingArm", args: [i(4), { t: "b", v: false }] },
+    ],
+  },
+  {
     name: "module const tables read identically: arrays, records, enums, derived scans",
     src: `
 import { asciiBytes } from "@native-sdk/core";

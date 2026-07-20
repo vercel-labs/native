@@ -6996,8 +6996,118 @@ export function f(a: P | null, flag: boolean): number {
   },
 ];
 
+// tsc's POST-construct narrow is the guard-implied narrow MINUS the arms'
+// kills: an exiting empty-test arm narrows the code after the statement
+// only on the paths that kept the value non-null. A surviving arm that
+// re-assigned null buries the narrow — the post-construct install must
+// subtract the joined kill set or it resurrects a `.?` spelling against a
+// slot that can be null again (a comparison-with-null compile error at the
+// re-check, a wrong unwrap past it).
+const postNarrowKillSubtractionCases: Case[] = [
+  {
+    // The head arm exits (guard-implied narrow); the else-if arm kills.
+    // The post-if state is unnarrowed, so the re-check reads the plain
+    // optional and the read past it unwraps through the re-check.
+    name: "an else-if arm's kill subtracts from the exiting guard's post-if narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  if (p === null) return -1;
+  else if (flag) {
+    p = null;
+  }
+  if (p === null) return 0;
+  return p.v;
+}
+`,
+  },
+  {
+    // Same subtraction on the generic if/else tail: the else arm never
+    // reads the target, so the statement routes through the generic
+    // lowering and its post-if narrow application.
+    name: "a kill in a non-reading else arm subtracts from the post-if narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  let n = 0;
+  if (p === null) {
+    return -1;
+  } else {
+    if (flag) { p = null; }
+    n += 1;
+  }
+  if (p === null) return n;
+  return n + p.v;
+}
+`,
+  },
+  {
+    // The reading else arm takes the capture form; its conditional kill
+    // still subtracts from the miss-exit's post-if narrow.
+    name: "a kill in a reading else arm subtracts from the capture form's post-if narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  let n = 0;
+  if (p === null) {
+    return -1;
+  } else {
+    n += p.v;
+    if (flag) { p = null; }
+  }
+  if (p === null) return n;
+  return n + p.v;
+}
+`,
+  },
+  {
+    // The present-test mirror: the then arm reads (capture form), the
+    // else arm exits, and the then arm's kill subtracts the same way.
+    name: "a kill in the present-test's then arm subtracts from the post-if narrow",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null, flag: boolean): number {
+  let p: P | null = a;
+  let n = 0;
+  if (p !== null) {
+    n += p.v;
+    if (flag) { p = null; }
+  } else {
+    return -1;
+  }
+  if (p === null) return n;
+  return n + p.v;
+}
+`,
+  },
+  {
+    // No kills anywhere: the post-if narrow still installs, and the read
+    // after the statement unwraps without a re-check (non-regression for
+    // the subtraction — an empty kill set must subtract nothing).
+    name: "the post-if narrow still installs when no arm kills the target",
+    src: `
+export interface P { readonly v: number; }
+export function f(a: P | null): number {
+  let n = 0;
+  const p = a;
+  n += 1;
+  if (p === null) {
+    return -1;
+  } else {
+    n += 2;
+  }
+  return n + p.v;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...branchKillJoinCases,
+  ...postNarrowKillSubtractionCases,
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
