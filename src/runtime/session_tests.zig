@@ -1378,6 +1378,7 @@ const ImageSessionMsg = union(enum) {
     load_invalid,
     load_hostless,
     arm_chain,
+    cancel_cover,
     start_chatty,
     fetch_cover,
     spawn_cover,
@@ -1414,6 +1415,10 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
             .on_line = ImageSessionApp.Effects.lineMsg(.line),
         }),
         .arm_chain => model.chain_on_cover = true,
+        // Aimed at the cover's id: against a running load this marks
+        // it cancelled; against a staged start-failure rejection (no
+        // slot exists) it is a no-op and the rejection stands.
+        .cancel_cover => fx.cancel(21),
         // The cover's key from another family: the effect families
         // share one key space, so these collide with image id 21.
         .fetch_cover => fx.fetch(.{ .key = 21, .url = "http://gallery.test/cover.png", .on_response = ImageSessionApp.Effects.responseMsg(.response) }),
@@ -1473,6 +1478,7 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
     if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
     if (std.mem.eql(u8, name, "image.chain")) return .arm_chain;
+    if (std.mem.eql(u8, name, "image.cancel")) return .cancel_cover;
     if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
     if (std.mem.eql(u8, name, "image.fetch-cover")) return .fetch_cover;
     if (std.mem.eql(u8, name, "image.spawn-cover")) return .spawn_cover;
@@ -2075,6 +2081,106 @@ test "a reload inside a start-failure's staged window rejects identically live a
     try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
     try std.testing.expectEqualDeep(recorded.model, app_state.model);
     try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the cancelled-start-failure reference session: the channel
+/// allocator fails at image 21's staged source buffer, so the load is
+/// refused with executor truth (a staged `.rejected`, NO slot claimed)
+/// — then, before the staged terminal drains, the app cancels id 21.
+/// Live, the cancel finds nothing to mark (no slot exists) and is a
+/// no-op: the session delivers and journals `.rejected`. Under replay
+/// the same load PARKS as a running fake slot (the fake executor
+/// never touches the failing seam), so the same cancel finds a slot
+/// to mark — the timing-shifted mark must not rewrite the journaled
+/// terminal when it feeds.
+fn recordCancelledStartFailureSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // The cancel lands while the staged rejection is still
+    // undelivered — the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cancel", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a cancel that lost to a start failure live cannot rewrite the fed rejection under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordCancelledStartFailureSession(gpa, buffer, &store);
+    // Live truth: one terminal, `.rejected` — the cancel was a no-op.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.failed);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    // The start failure's terminal FEEDS (the replayed request parked
+    // instead of failing) — and feeds VERBATIM: the replayed cancel
+    // marked the parked fake slot, but a fed terminal is executor
+    // truth, so the journaled `.rejected` must land untouched.
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
 }
 
 /// Record the queue-saturation reference session: a chatty spawn and

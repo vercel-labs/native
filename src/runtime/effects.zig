@@ -4580,11 +4580,18 @@ pub fn Effects(comptime Msg: type) type {
                         // a zero-length blob on this invariant
                         // (`error.ReplayDamagedRecord`).
                         var journal_bytes: []const u8 = "";
-                        if (cancelled) {
-                            result = .{ .id = entry.key, .outcome = .cancelled };
-                        } else if (entry.image_fed) {
+                        if (entry.image_fed) {
                             // Session replay: the recorded terminal is
-                            // the Msg, verbatim. Re-registration is
+                            // the Msg, verbatim — checked BEFORE the
+                            // cancelled rewrite. A live cancel that won
+                            // journaled `.cancelled` and feeds back as
+                            // such; a live cancel that LOST (a staged
+                            // start-failure rejection has no slot to
+                            // mark, so live delivered `.rejected`) must
+                            // not be resurrected by the replayed
+                            // cancel's mark on the parked fake slot,
+                            // whose timing differs from the live seam.
+                            // Re-registration is
                             // best-effort presentation — a replay host
                             // whose codec cannot decode the recorded
                             // bytes (the null platform decodes only the
@@ -4598,6 +4605,8 @@ pub fn Effects(comptime Msg: type) type {
                             if (result.outcome == .loaded and bytes.len > 0) {
                                 self.registerDrainedImage(entry.key, bytes);
                             }
+                        } else if (cancelled) {
+                            result = .{ .id = entry.key, .outcome = .cancelled };
                         } else if (result.outcome == .loaded) {
                             journal_bytes = bytes;
                             if (self.images) |binding| {
