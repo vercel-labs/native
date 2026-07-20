@@ -830,7 +830,7 @@ pub const EffectResultKind = enum(u8) {
     /// drain — the loaded bytes ARE the effect result — and the session
     /// recorder moves them into the content-addressed blob store,
     /// journaling `image_blob_hash`/`image_blob_len` in their place
-    /// (journal format v6).
+    /// (journal format v7).
     image = 11,
 };
 

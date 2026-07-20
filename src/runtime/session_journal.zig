@@ -81,13 +81,13 @@ pub const magic = "NSDKSJNL";
 /// `pinch_begin`/`pinch_change`/`pinch_end` input kinds (codes 12-14);
 /// v6 added the `hidden` flag to window-frame records (the
 /// `close_policy = .hide` window state — a layout change every v5
-/// reader would misparse) and the `.image` effect-result kind
+/// reader would misparse); v7 added the `.image` effect-result kind
 /// (code 11) with its outcome/dimension fields and the blob-store
 /// content address (`image_blob_hash`/`image_blob_len`) appended to
-/// every effect record — a v5 reader would have called an image
+/// every effect record — a v6 reader would have called an image
 /// record's kind code corrupt and misparsed the longer layouts, so it
 /// refuses the skew at the preamble instead.
-pub const format_version: u32 = 6;
+pub const format_version: u32 = 7;
 
 // ------------------------------------------------------------- budgets
 //
@@ -857,7 +857,7 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
     try cursor.writeBytes(&record.audio_bands);
-    // v6: image terminals — outcome, decoded dimensions, and the blob
+    // v7: image terminals — outcome, decoded dimensions, and the blob
     // store content address of the journaled source bytes.
     try cursor.writeEnum(record.image_outcome);
     try cursor.writeInt(u64, record.image_width);
@@ -896,7 +896,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_buffering = try cursor.readBool(),
     };
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
-    // v6: image terminals.
+    // v7: image terminals.
     record.image_outcome = try cursor.readEnum(runtime_effects.EffectImageOutcome);
     record.image_width = try cursor.readInt(u64);
     record.image_height = try cursor.readInt(u64);
@@ -1516,6 +1516,18 @@ test "reader refuses bad magic and version skew" {
     // journaled composition verb code corrupt).
     std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version - 1, .little);
     try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
+    // A concrete v6 journal (the version main ships, without the image
+    // fields on effect records) is version skew, never corruption: the
+    // preamble gate must fire before any record layout is consulted.
+    var v6_preamble: [preamble_len]u8 = undefined;
+    @memcpy(v6_preamble[0..magic.len], magic);
+    std.mem.writeInt(u32, v6_preamble[magic.len..][0..4], 6, .little);
+    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&v6_preamble));
+    // The teaching names the version this build speaks, so the reader of
+    // the error can see the skew rather than suspect file damage.
+    const teaching = describeError(error.JournalUnsupportedVersion);
+    try testing.expect(std.mem.indexOf(u8, teaching, "v7") != null);
+    try testing.expect(std.mem.indexOf(u8, teaching, "re-record") != null);
 }
 
 test "reader fails loudly on truncation at every boundary" {
