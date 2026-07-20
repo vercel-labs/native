@@ -7552,6 +7552,146 @@ export function f(xs: readonly (P | null)[]): readonly number[] {
   },
 ];
 
+// tsc evaluates a do-while's condition AFTER the body and carries the
+// body's flow state into it: a terminal guard in the body narrows the
+// trailing test. The `while (true)` + trailing-exit-test lowering emits the
+// body list and the lowered `if (!(cond)) break;` inside ONE narrowing
+// scope, restored only at the loop boundary — a restore between them strips
+// the narrow before the read it covers. The first-pass-flag form (a body
+// binding `continue`) instead hoists the test ahead of the body, where the
+// condition reads the live optional: the continue edge carries kills into
+// the test, so tsc widens it there (the bare read is a TS18047 the checker
+// already rejects — pinned in emitter.test.ts).
+const doWhileTrailingTestCases: Case[] = [
+  {
+    // The regression repro: transpile reported success while the emitted
+    // trailing test read the raw `?P`.
+    name: "a terminal guard in a do-while body narrows the trailing test",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null): number {
+  let n = 0;
+  const p: P | null = q;
+  do {
+    if (p === null) return -1;
+    n += p.v;
+    n += 1;
+  } while (p.v > 0 && n < 10);
+  return n;
+}
+`,
+  },
+  {
+    // A capture that serves ONLY the trailing test: the follower walk must
+    // see the condition, or the guard binds no capture and the test reads
+    // the raw optional; and having bound one, the test must use it (an
+    // unused Zig const is a compile error).
+    name: "a do-while guard read only by the trailing test still binds its capture",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null): number {
+  let n = 0;
+  const p: P | null = q;
+  do {
+    if (p === null) return -1;
+    n += 1;
+  } while (p.v > n);
+  return n;
+}
+`,
+  },
+  {
+    // Back-edge semantics: the body-top read on the second iteration
+    // arrives via the back edge, which re-narrowed after the kill — tsc
+    // accepts the join of the pre-loop and end-of-body narrows, and the
+    // live `.?` read keeps the reassigned slot's value. The end-of-body
+    // guard's narrow must still reach the trailing test.
+    name: "a do-while body kill re-narrowed before the trailing test",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null, r: P | null): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  do {
+    n += p.v;
+    p = r;
+    if (p === null) return -1;
+  } while (p.v > 0 && n < 10);
+  return n;
+}
+`,
+  },
+  {
+    // Kill + continue: the continue edge jumps TO the test carrying the
+    // kill, so tsc widens the condition and the lowering must read the
+    // live optional in the hoisted first-pass head.
+    name: "a do-while continue-carried kill leaves the test on the live optional",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null, r: P | null): number {
+  let p: P | null = q;
+  let n = 0;
+  do {
+    if (p === null) return -1;
+    n += p.v;
+    if (n < 3) {
+      p = r;
+      continue;
+    }
+    n += 1;
+  } while (p !== null && p.v > 0 && n < 10);
+  return n;
+}
+`,
+  },
+  {
+    // Kill + break: the break edge SKIPS the test, so the fall-through
+    // narrow stays on the condition, and the kill lands only on the
+    // post-loop state (where the read must re-guard the live optional).
+    name: "a do-while kill+break arm keeps the test narrowed and widens post-loop",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null, r: P | null): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let n = 0;
+  do {
+    n += p.v;
+    if (n > 3) {
+      p = r;
+      break;
+    }
+    n += 1;
+  } while (p.v < 100);
+  return p === null ? -2 : p.v;
+}
+`,
+  },
+  {
+    // Nested do-whiles sharing one narrowed outer target: the inner body
+    // and inner test read the outer guard's capture, and the outer test
+    // still sees it after the inner loop's scope closes.
+    name: "nested do-whiles share a narrowed outer target through both tests",
+    src: `
+export interface P { readonly v: number; }
+export function g(q: P | null): number {
+  const p: P | null = q;
+  let n = 0;
+  do {
+    if (p === null) return -1;
+    let m = 0;
+    do {
+      n += p.v;
+      m += 1;
+    } while (p.v > 0 && m < 2);
+  } while (p.v > n);
+  return n;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8101,6 +8241,7 @@ const corpus: Case[] = [
   ...finallyFlowOrderCases,
   ...catchRouteKillCases,
   ...callbackTrailingNarrowCases,
+  ...doWhileTrailingTestCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

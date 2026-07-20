@@ -3297,6 +3297,7 @@ export class Emitter {
     ctx: Ctx,
     joinInto?: Set<string>,
     entryKills?: ReadonlySet<string>,
+    trailing?: () => void,
   ): void {
     // Narrowing is flow-scoped the way tsc scopes it: an early-exit guard
     // narrows the statements after it in ITS list, and whatever those
@@ -3339,6 +3340,12 @@ export class Emitter {
     // the construct, an escaping break/continue stages them at that edge's
     // destination, and a list whose every route leaves the function drops
     // them (no surviving path carries them anywhere).
+    // `trailing` is emission that tsc types under the list's END state — a
+    // do-while's trailing exit test evaluates after the body, so a terminal
+    // guard in the body narrows it. It runs inside this same scope: a scope
+    // closed between the list and the test would restore the maps before
+    // the read they guard (the callback trailing-return fix, applied to the
+    // loop lowering).
     this.withNarrowScope(
       ctx,
       leavesFn ? "drop" : this.edgeKillRouting(stmts, env, ctx),
@@ -3350,6 +3357,7 @@ export class Emitter {
           }
         }
         this.emitStatementList(stmts, ctx);
+        trailing?.();
       },
       joinInto,
     );
@@ -4325,15 +4333,26 @@ export class Emitter {
     if (!this.bindsContinue(stmt.statement, label)) {
       this.push(ctx, `${head} (true) {`);
       const sub = this.nestedCtx(ctx);
-      this.emitBlockStatements(body, sub);
+      // tsc evaluates the do-while condition AFTER the body and carries the
+      // body's flow state into it — a terminal guard in the body narrows
+      // the trailing test. The body and the lowered `if (!(cond)) break;`
+      // therefore emit inside ONE narrowing scope (the `trailing` hook),
+      // restored only at the loop boundary: a restore between them would
+      // strip the narrow before the read it covers. Iteration-entry state
+      // is not at risk — the test is the last text in the loop body, so
+      // nothing emits under its narrows past the back edge, and the
+      // restore still runs before the post-loop continuation.
       // A body that always exits never reaches the test in JS either; the
       // emitted trailing test would be Zig unreachable-code.
-      if (!this.alwaysExits(stmt.statement)) {
-        const before = sub.lines.length;
-        const cond = this.emitExpr(stmt.expression, sub, { k: "bool" }).code;
-        if (sub.lines.length !== before) this.fail(stmt, "do-while condition requiring lowered statements");
-        this.push(sub, `if (!(${cond})) break;`);
-      }
+      const trailing = this.alwaysExits(stmt.statement)
+        ? undefined
+        : (): void => {
+            const before = sub.lines.length;
+            const cond = this.emitExpr(stmt.expression, sub, { k: "bool" }).code;
+            if (sub.lines.length !== before) this.fail(stmt, "do-while condition requiring lowered statements");
+            this.push(sub, `if (!(${cond})) break;`);
+          };
+      this.emitBlockStatements(body, sub, undefined, undefined, trailing);
       ctx.lines.push(...sub.lines);
       this.push(ctx, `}`);
       return;
@@ -5130,7 +5149,13 @@ export class Emitter {
   /// from `model.nowDurationMs`, and a shadowed spelling in a nested
   /// callback is a different declaration.
   private followingReadsTarget(stmt: ts.IfStatement, target: ts.Expression): boolean {
-    const following = this.followingStatementsOf(stmt);
+    const following: ts.Node[] = [...this.followingStatementsOf(stmt)];
+    // Flow off the end of a do-while body continues INTO the trailing
+    // test (tsc evaluates the condition after the body), and the lowered
+    // `if (!(cond)) break;` emits inside the body's narrowing scope — a
+    // condition read is a read the guard's capture serves.
+    const trailingTest = this.trailingDoWhileTestOf(stmt);
+    if (trailingTest !== null) following.push(trailingTest);
     if (following.length === 0) return false;
     if (ts.isIdentifier(target)) {
       const decl = this.tast.declarationOf(target);
@@ -5158,6 +5183,37 @@ export class Emitter {
       }
     }
     return [];
+  }
+
+  /// The do-while trailing test the flow after `stmt` runs into, when that
+  /// test actually emits inside the body's narrowing scope — i.e. `stmt`
+  /// sits in the body list (transitively through plain lexical blocks) of
+  /// a do-while lowered to the `while (true)` + trailing-exit-test form.
+  /// The first-pass-flag form (a body binding `continue`) hoists the test
+  /// ahead of the body, where a body narrow's capture is out of scope, and
+  /// an always-exiting body emits no test at all — both return null, so a
+  /// guard read only by the condition binds no capture there (an unused
+  /// Zig const is a compile error).
+  private trailingDoWhileTestOf(stmt: ts.Statement): ts.Expression | null {
+    let cur: ts.Statement = stmt;
+    for (;;) {
+      const parent: ts.Node = cur.parent;
+      if (ts.isBlock(parent) && isPlainLexicalBlock(parent)) {
+        cur = parent;
+        continue;
+      }
+      const holder = ts.isBlock(parent) ? parent.parent : parent;
+      if (!ts.isDoStatement(holder)) return null;
+      // Mirror emitStatement's label derivation: the loop's Zig label
+      // exists only when a labeled break/continue references it.
+      const label =
+        ts.isLabeledStatement(holder.parent) && this.labelReferenced(holder, holder.parent.label.text)
+          ? loopLabel(holder.parent.label.text)
+          : null;
+      if (this.bindsContinue(holder.statement, label)) return null;
+      if (this.alwaysExits(holder.statement)) return null;
+      return holder.expression;
+    }
   }
 
   /// Every arm of the chain — each else-if body and the final else — is a

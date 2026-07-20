@@ -1029,6 +1029,62 @@ export function f(vals: readonly number[], limit: number): number {
   );
 });
 
+test("a do-while continue edge carries its kill into the trailing test (tsc-level)", () => {
+  // `continue` in a do-while jumps TO the condition, so the test's state
+  // is the join of the fall-through and every continue edge: a kill on
+  // one continue path widens the target there, and tsc rejects the bare
+  // condition read (TS18047). The emitter leans on this — the hoisted
+  // first-pass head reads the live optional, and any bare-read shape
+  // never gets past the checker.
+  const result = transpile(`
+export interface P { readonly v: number; }
+export function g(q: P | null, r: P | null): number {
+  let p: P | null = q;
+  let n = 0;
+  do {
+    if (p === null) return -1;
+    n += p.v;
+    if (n < 3) {
+      p = r;
+      continue;
+    }
+    n += 1;
+  } while (p.v > 0 && n < 10);
+  return n;
+}
+`);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.typeErrors.some((e) => e.includes("TS18047")),
+    result.typeErrors.join("\n") || "expected a possibly-null error",
+  );
+});
+
+test("a do-while body narrow does not survive the back edge into the body top (tsc-level)", () => {
+  // The body-top state is the join of the pre-loop entry and the back
+  // edge: with a widened pre-loop state, a narrow established later in
+  // the body never reaches the top read of the next iteration — tsc
+  // rejects it on iteration one, and the trailing-test scope must not
+  // leak it into iteration entry either.
+  const result = transpile(`
+export interface P { readonly v: number; }
+export function g(q: P | null): number {
+  const p: P | null = q;
+  let n = 0;
+  do {
+    n += p.v;
+    if (p === null) return -1;
+  } while (p.v > 0 && n < 10);
+  return n;
+}
+`);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.typeErrors.some((e) => e.includes("TS18047")),
+    result.typeErrors.join("\n") || "expected a possibly-null error",
+  );
+});
+
 test("emit-time verification: unsupported constructs stop the build as NS9001", () => {
   const result = transpile(`
 export function f(xs: readonly number[]): readonly number[] {

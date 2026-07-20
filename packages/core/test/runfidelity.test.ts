@@ -272,6 +272,38 @@ export function merge(q: number | null, r: number | null): number {
     ],
   },
   {
+    // A do-while's trailing test evaluates after the body, under the
+    // body's flow state: the terminal guard narrows the test's read, and
+    // the lowered `if (!(cond)) break;` must run it against the guarded
+    // value. Rows drive the null exit, a first pass whose test is
+    // immediately false (zero further iterations), a single-iteration
+    // stop at the limit, and a multi-iteration accumulation — each must
+    // match node byte for byte.
+    name: "a do-while trailing test reads the body-guarded value across iteration counts",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) { return null; }
+  return { v: a };
+}
+export function sumDo(a: number, limit: number): number {
+  const p: P | null = make(a);
+  let n = 0;
+  do {
+    if (p === null) { return -1; }
+    n += p.v;
+  } while (p.v > 0 && n < limit);
+  return n;
+}
+`,
+    calls: [
+      { fn: "sumDo", args: [f(-1), f(10)] },
+      { fn: "sumDo", args: [f(0), f(10)] },
+      { fn: "sumDo", args: [f(3), f(1)] },
+      { fn: "sumDo", args: [f(3), f(10)] },
+    ],
+  },
+  {
     // The exiting arm's kill never reaches the merge (control left the
     // function), so the surviving flag=false read keeps the narrow and
     // returns q + 1; the fall-through arm's kill in the ELSE still drives
