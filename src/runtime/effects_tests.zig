@@ -1612,3 +1612,67 @@ test "an update that respawns the same key from its own exit parks instead of re
     try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
 }
+
+/// Spawn slots carrying a set undelivered-exit marker.
+fn markedExitSlotCount(fx: *StreamEffects) usize {
+    var count: usize = 0;
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .spawn and slot.exit_undelivered) count += 1;
+    }
+    return count;
+}
+
+test "consuming a fed lines exit clears the undelivered-exit marker" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+
+    // Posted but undelivered: the marker holds the slot (and the key).
+    try fx.feedExit(stream_key, 0);
+    try std.testing.expectEqual(@as(usize, 1), markedExitSlotCount(fx));
+
+    // Dequeueing the exit IS its delivery: the drain must clear the
+    // marker when it consumes the exit, or `reclaimSlots` holds the
+    // slot out of `.idle` forever.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+}
+
+test "every delivered lines exit hands its slot back for reuse" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    test_argv = &.{"/nonexistent/native-sdk-effects-test-binary"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    // Each round runs the real worker epilogue end to end (an
+    // unspawnable binary is still worker truth: the worker posts a
+    // `.spawn_failed` exit through the same mark-then-post commit) and
+    // must return its slot. More rounds than the pool has slots proves
+    // delivery frees them: a marker the drain's consume ever missed
+    // would strand its slot in `.draining`, exhaust the pool, and turn
+    // a later round's reason into `.rejected`.
+    const io = std.testing.io;
+    var round: usize = 1;
+    while (round <= effects_mod.max_effects + 1) : (round += 1) {
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        var waited_ms: usize = 0;
+        while (h.app_state.model.exit_count < round) : (waited_ms += 10) {
+            if (waited_ms >= 20_000) return error.TestTimedOut;
+            try h.drainWakes();
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+        try std.testing.expectEqual(round, h.app_state.model.exit_count);
+        try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
+        try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(&h.app_state.effects));
+    }
+}

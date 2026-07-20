@@ -6100,15 +6100,31 @@ pub fn Effects(comptime Msg: type) type {
                 slot.stderr_ring = ctx.stderr_ring;
                 slot.stderr_total = ctx.stderr_total;
             }
+            // Mark-then-post: the `.lines` undelivered-exit marker must
+            // be published BEFORE the exit is consumable. `postExit`'s
+            // enqueue releases the queue mutex the drain's dequeue
+            // acquires, so this write is ordered before any consume —
+            // the drain-side clear always follows this set. Posting
+            // first would let a drain riding another wake consume the
+            // exit (clearing a still-false marker) before the mark
+            // landed, leaving a set marker no terminal can ever clear:
+            // `reclaimSlots` would hold the slot out of `.idle` forever
+            // and the key would never readmit.
+            if (ctx.output_mode != .collect) slot.exit_undelivered = true;
             self.postExit(slot, @intCast(slot_index), generation, io, exit);
             // Park in `.draining` until the drain delivers the exit: a
             // collect slot still owns its stdout buffer (fetch-style),
-            // and a `.lines` slot marks its posted-but-undelivered exit
-            // explicitly — either way the key stays occupied through
-            // the window between this post and the drain, which is
-            // exactly the span session replay keeps the parked fake
-            // occupying (`findUndeliveredTerminalSlot`).
-            if (ctx.output_mode != .collect) slot.exit_undelivered = true;
+            // and a `.lines` slot holds the marker set above — either
+            // way the key stays occupied through the window between the
+            // post and the drain, which is exactly the span session
+            // replay keeps the parked fake occupying
+            // (`findUndeliveredTerminalSlot`). This store must stay
+            // AFTER the post: `reclaimSlots` joins any `.draining`
+            // worker, and `postExit` can park in a full-queue retry
+            // only the loop thread can relieve — staying `.running`
+            // keeps this thread unjoinable until the post lands. It is
+            // also the release the loop's acquire loads pair with, and
+            // the worker's last slot access.
             slot.state.store(.draining, .release);
             self.wakeHost();
         }
