@@ -4532,6 +4532,7 @@ export class Emitter {
     const isAnd = op === ts.SyntaxKind.AmpersandAmpersandToken;
     const zop = isAnd ? "and" : "or";
     const saved = new Map(ctx.memberSubst);
+    this.pushNarrowKillFrame(ctx);
     const emitChain = (conjs: readonly ts.Expression[]): string => {
       const c0 = conjs[0];
       const rest = conjs.slice(1);
@@ -4557,6 +4558,10 @@ export class Emitter {
     const code = emitChain(conjuncts);
     ctx.memberSubst.clear();
     for (const [k, v] of saved) ctx.memberSubst.set(k, v);
+    // A conjunct can smuggle statements in (a block-bodied callback, an
+    // R10b value-position step); an assignment kill made there must stay
+    // dead past this restore (see popNarrowKillFrame).
+    this.popNarrowKillFrame(ctx);
     return code;
   }
 
@@ -4564,11 +4569,15 @@ export class Emitter {
   private withSubsts<T>(guards: ReadonlyMap<string, string>, ctx: Ctx, emit: () => T): T {
     const saved = new Map(ctx.memberSubst);
     for (const [k, v] of guards) ctx.memberSubst.set(k, v);
+    this.pushNarrowKillFrame(ctx);
     try {
       return emit();
     } finally {
       ctx.memberSubst.clear();
       for (const [k, v] of saved) ctx.memberSubst.set(k, v);
+      // Assignment kills inside the scope stay dead past this restore
+      // (the snapshot would resurrect them; see popNarrowKillFrame).
+      this.popNarrowKillFrame(ctx);
     }
   }
 

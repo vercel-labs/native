@@ -5866,6 +5866,59 @@ export function g(q: number | null, msg: Msg): number {
 `,
   },
   {
+    // A compound null guard (`r !== null && r > 0`) routes its branch
+    // emission through the chain-substitution scope, whose own full-map
+    // restore runs AFTER the branch's kill re-apply. Without the kill-frame
+    // bracket on that scope, the kill of p's narrow resurrects at the
+    // restore and the post-merge re-check emits `p.? == null` —
+    // "comparison of 'f64' with null".
+    name: "a kill inside a compound-null-guarded branch stays dead past the merge",
+    src: `
+export function f(q: number | null, r: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  if (r !== null && r > 0) {
+    p = null;
+  } else {}
+  if (p === null) return 0;
+  return p;
+}
+`,
+  },
+  {
+    name: "a kill in the ELSE of a compound-null-guarded if stays dead past the merge",
+    src: `
+export function f(q: number | null, r: number | null): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  if (r !== null && r > 0) {
+    // the guarded path keeps the narrow; the merge must still drop it
+  } else {
+    p = null;
+  }
+  if (p === null) return 0;
+  return p;
+}
+`,
+  },
+  {
+    name: "a compound-guard kill nested inside a kind guard escapes both scopes",
+    src: `
+export type Msg = { readonly kind: "set"; readonly flag: boolean } | { readonly kind: "clear" };
+export function f(q: number | null, r: number | null, msg: Msg): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  if (msg.kind === "set" && msg.flag) {
+    if (r !== null && r > 0) {
+      p = null;
+    }
+  }
+  if (p === null) return 0;
+  return p;
+}
+`,
+  },
+  {
     // The containment half must stay intact: a narrowing ESTABLISHED inside
     // a branch still dies at the branch exit. If it leaked, the post-merge
     // null test would read the narrowed spelling and emit the same

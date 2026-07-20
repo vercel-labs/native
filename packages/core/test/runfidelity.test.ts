@@ -177,6 +177,31 @@ export function merge(q: number | null, flag: boolean): number {
     ],
   },
   {
+    // The compound-guard flavor of the same kill: `r !== null && r > 0`
+    // emits its branch under the chain's `.?` substitutions, and the kill
+    // of p's narrow must survive that scope's restore. A resurrected
+    // narrow would read the pre-branch payload on the (r>0, p killed)
+    // rows (returning q + 1) instead of taking the re-check (returning 0).
+    name: "a kill under a compound null guard drives the post-merge re-check",
+    src: `
+export function merge(q: number | null, r: number | null): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (r !== null && r > 0) {
+    p = null;
+  } else {}
+  if (p === null) { return 0; }
+  return p + 1;
+}
+`,
+    calls: [
+      { fn: "merge", args: [{ t: "null" }, f(1)] },
+      { fn: "merge", args: [f(4), f(1)] },
+      { fn: "merge", args: [f(4), f(-1)] },
+      { fn: "merge", args: [f(4), { t: "null" }] },
+    ],
+  },
+  {
     name: "orelse fusion over a ternary initializer keeps both arms (parenthesized conditional)",
     src: `
 export function low(bytes: Uint8Array): number | null {
