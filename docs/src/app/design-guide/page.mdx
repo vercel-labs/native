@@ -1,0 +1,82 @@
+# Design Guide
+
+Native SDK's design system is a contract between the component engine, the docs,
+the examples, and generated app code. The short version: build the real product
+surface first, use the framework's native widgets, and put visual identity in
+tokens instead of one-off styling.
+
+This page mirrors the repository guide in `DESIGN.md` and turns it into the
+public authoring baseline for Native UI.
+
+## Start with the product
+
+Native-rendered apps should open on the surface the user came for: the editor,
+dashboard, board, browser, player, form, timeline, or game. Avoid splash pages,
+marketing heroes, and decorative landing screens for app workspaces.
+
+A good default structure is a quiet shell: navigation or collection on one
+side, the primary work area in the center, detail and actions where they are
+needed, and a status edge for persistent feedback.
+
+## Pick the right primitive
+
+Use the widget that matches the data and interaction:
+
+- `list` / `list-item` for selectable records and feeds.
+- `table` or `data_grid` for comparison across columns.
+- `chart` for quantitative trends, with axis labels, series labels, and chart
+  semantics.
+- `tree` for nested disclosure.
+- `timeline` and `stepper` for progress through time or stages.
+- `tabs`, `toggle-group`, and `split` for switching or arranging views.
+
+Do not make fake controls out of styled containers. If something behaves like a
+button, checkbox, radio, switch, slider, select, text field, or list row, use
+the matching widget.
+
+## Compose with restraint
+
+Operational software should be easy to scan repeatedly. Prefer stable
+alignment, dense but readable rows, predictable navigation, and clear state over
+ornamental composition. Cards are for repeated standalone items and modal
+content; page structure should use panels, rows, columns, split panes, and
+full-width regions.
+
+Avoid nested cards. A panel or card is a stacking container, so put a single
+`row` or `column` inside when you need flow and `gap`.
+
+## Use tokens for identity
+
+Views should use semantic tokens such as `background`, `surface`, `text`,
+`text_muted`, `accent`, `success`, `warning`, `destructive`, and `info`.
+Raw colors belong in theme packs, token overrides, generated assets, or
+low-level drawing where a token choice has already been made.
+
+Check visual choices in light, dark, and high contrast. Reduced motion should
+keep the same meaning without relying on animation.
+
+## Keep layout honest
+
+Prefer explicit constraints over lucky content fit: widths for fixed columns,
+heights for fixed controls, min-widths for split panes, and `grow` only where
+space can really flex. Text should wrap or elide inside its frame; it should not
+overlap nearby content or paint past the layout the user can reason about.
+
+Keep one control size register per row. `heading` and `display` are text rungs,
+not control sizes.
+
+## Design every state
+
+A finished surface includes empty, loading, disabled, invalid, selected,
+focused, error, and unavailable states. Color is not enough: status, errors,
+progress, and charts need text or semantic equivalents.
+
+Every interactive or informative non-text surface needs a stable accessible
+name. Roles should describe behavior, not styling.
+
+## Verify it
+
+For app work, run `native check` and `native test`. For framework and example
+changes, run the relevant example test or `scripts/gate.sh fast`. When visual
+output changes, review a screenshot, component preview, or pinned reference
+signature before blessing it.

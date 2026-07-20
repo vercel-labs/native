@@ -12,6 +12,10 @@ A native-rendered Native SDK app is a markup view plus Zig logic:
 
 The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` builder view would produce: identical structural widget ids, identical typed handler table. Markup can never mutate state — it binds values and dispatches messages; all logic lives in Zig.
 
+## Design contract
+
+Follow the framework design guide when authoring Native UI: build the real product surface first, use built-in widgets before custom drawing, and put visual identity in `DesignTokens` rather than ad hoc styling. Choose the primitive that matches the data (`list`/`list-item` for selectable records, `table`/`data_grid` for column comparison, `chart` for quantitative trends, `tree` for nested disclosure, `timeline`/`stepper` for progress). Avoid fake controls made from panels, nested cards, ornamental hero screens in apps, and raw colors in views. Every interactive surface needs an accessible name, keyboard behavior, and stable layout under longer text, empty/loading/error states, light/dark/high-contrast themes, and reduced motion.
+
 Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it.
 
 Start a new app with `native init` (zero-config: app.zon + src + assets, the CLI generates the build graph), or copy `examples/habits/` (smallest): change the name/id in app.zon and `assets/` copies verbatim — there are no build files to edit. The `native dev|test|build` verbs drive any app directory shaped this way.

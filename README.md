@@ -118,6 +118,7 @@ The full documentation is at [native-sdk.dev](https://native-sdk.dev).
 - [App Model](https://native-sdk.dev/app-model) — the model/message/update loop, wiring, and hot reload
 - [TypeScript Cores](https://native-sdk.dev/typescript) — the app-core subset, effects, subscriptions, and the node dev loop
 - [Native UI](https://native-sdk.dev/native-ui) — every element, attribute, and pattern in the markup
+- [Design Guide](https://native-sdk.dev/design-guide) — the product and component design contract for native-rendered UI
 - [Components](https://native-sdk.dev/components) — the component catalog
 - [State & Data Flow](https://native-sdk.dev/state) — derive-don't-store, bindings, and text editing
 - [Testing](https://native-sdk.dev/testing) — full-loop UI tests, headless on any machine
