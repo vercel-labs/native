@@ -3265,67 +3265,83 @@ export class Emitter {
   ///     walk tracks locally-bound targets, never spellings;
   ///   - `throw`, or any statement containing a throwing call, whose
   ///     handler can fall back into the function — the handler is the
-  ///     nearest catch inside the list (asked recursively: does every
-  ///     route out of THAT catch leave, throws escaping it included?),
-  ///     else whatever env.throwResumes says about the surroundings.
+  ///     nearest catch inside the list, and the route's destination is
+  ///     that catch PLUS its continuation: a catch that falls through
+  ///     resumes at the statements following its try (transitively out
+  ///     through enclosing blocks), so the route leaves iff every route
+  ///     out of the catch leaves AND that continuation leaves. Outside
+  ///     any local try, whatever env.throwResumes says about the
+  ///     surroundings.
   /// When a route resists classification the answer is false (merge): an
   /// over-merge costs a narrow tsc would have kept, an under-merge
-  /// resurrects a dead one and emits an unwrap Zig rejects.
+  /// resurrects a dead one and emits an unwrap Zig rejects. The
+  /// continuation after a try is known positionally inside statement
+  /// lists (the top list and nested blocks); inside loop bodies, switch
+  /// clauses, and inline callbacks a catch's fallthrough re-enters the
+  /// construct, so the continuation is treated as resuming there.
   private allRoutesLeaveFunction(
     stmts: readonly ts.Statement[],
     env: { returnLeaves: boolean; throwResumes: boolean },
   ): boolean {
-    const last = stmts[stmts.length - 1];
-    if (last === undefined || !this.alwaysExits(last)) return false;
     // `labels` / `breaks` / `continues` carry the targets bound inside the
     // list so far on this path; `throwResumes` is the handler visibility at
     // this point (re-derived at every try/catch met on the way down);
     // `inCallback` marks inline (unlifted) callback bodies, whose returns
     // are their own but whose throwing calls act at this site.
-    const resumes = (
-      n: ts.Node,
-      labels: ReadonlySet<string>,
-      breaks: number,
-      continues: number,
-      throwResumes: boolean,
-      inCallback: boolean,
-    ): boolean => {
-      const walk = (c: ts.Node): boolean => resumes(c, labels, breaks, continues, throwResumes, inCallback);
+    interface State {
+      readonly labels: ReadonlySet<string>;
+      readonly breaks: number;
+      readonly continues: number;
+      readonly throwResumes: boolean;
+      readonly inCallback: boolean;
+    }
+    // `tailLeaves`: whether control falling through past the node (to the
+    // rest of its enclosing list, transitively outward) leaves the
+    // function on every route — the positional continuation a
+    // fallthrough catch hands a caught throw.
+    const resumes = (n: ts.Node, st: State, tailLeaves: boolean): boolean => {
+      const walk = (c: ts.Node): boolean => resumes(c, st, tailLeaves);
       if (ts.isBreakStatement(n)) {
-        return !inCallback && (n.label ? !labels.has(n.label.text) : breaks === 0);
+        return !st.inCallback && (n.label ? !st.labels.has(n.label.text) : st.breaks === 0);
       }
       if (ts.isContinueStatement(n)) {
-        return !inCallback && (n.label ? !labels.has(n.label.text) : continues === 0);
+        return !st.inCallback && (n.label ? !st.labels.has(n.label.text) : st.continues === 0);
       }
       if (ts.isReturnStatement(n)) {
-        if (!inCallback && !env.returnLeaves) return true;
+        if (!st.inCallback && !env.returnLeaves) return true;
         return n.expression !== undefined && walk(n.expression);
       }
       if (ts.isThrowStatement(n)) {
-        return throwResumes || walk(n.expression);
+        return st.throwResumes || walk(n.expression);
       }
-      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && throwResumes) {
+      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && st.throwResumes) {
         const target = this.calleeOwnerOf(n);
         if (target && this.leakingFns.has(target)) return true;
       }
+      if (ts.isBlock(n)) {
+        // A block's own fallthrough continues wherever the block's does,
+        // so its statements scan positionally against the same tail.
+        return scanList(n.statements, st, tailLeaves).resumes;
+      }
       if (ts.isTryStatement(n) && n.catchClause !== undefined) {
-        // Throws in the body land in this catch; they resume iff some
-        // route out of the catch does. The catch itself runs against the
-        // handler visible OUTSIDE this try.
-        const bodyThrowResumes = !this.allRoutesLeaveFunction(n.catchClause.block.statements, {
-          returnLeaves: env.returnLeaves,
-          throwResumes,
-        });
+        // Throws in the body land in this catch, whose destination is the
+        // catch block plus its continuation: a fallthrough catch resumes
+        // at the statements after this try, so the caught throw leaves
+        // iff the catch-then-rest continuation leaves. The catch itself
+        // runs against the handler visible OUTSIDE this try (its own
+        // throws escape to enclosing handlers, never back into it).
+        const catchScan = scanList(n.catchClause.block.statements, st, tailLeaves);
+        const bodyThrowResumes = !catchScan.leaves;
         return (
-          resumes(n.tryBlock, labels, breaks, continues, bodyThrowResumes, inCallback) ||
-          resumes(n.catchClause.block, labels, breaks, continues, throwResumes, inCallback) ||
+          resumes(n.tryBlock, { ...st, throwResumes: bodyThrowResumes }, tailLeaves) ||
+          catchScan.resumes ||
           (n.finallyBlock !== undefined && walk(n.finallyBlock))
         );
       }
       if (ts.isLabeledStatement(n)) {
-        const bound = new Set(labels);
+        const bound = new Set(st.labels);
         bound.add(n.label.text);
-        return resumes(n.statement, bound, breaks, continues, throwResumes, inCallback);
+        return resumes(n.statement, { ...st, labels: bound }, tailLeaves);
       }
       if (
         ts.isWhileStatement(n) ||
@@ -3335,17 +3351,23 @@ export class Emitter {
         ts.isForInStatement(n)
       ) {
         // The loop binds unlabeled break/continue for its whole subtree
-        // (heads hold no break/continue — tsc rejects them there).
+        // (heads hold no break/continue — tsc rejects them there). A
+        // fallthrough inside the body resumes at the back edge, in the
+        // function, so the body scans against a resuming tail.
         return (
           ts.forEachChild(n, (c) =>
-            resumes(c, labels, breaks + 1, continues + 1, throwResumes, inCallback) || undefined,
+            resumes(c, { ...st, breaks: st.breaks + 1, continues: st.continues + 1 }, false) ||
+            undefined,
           ) === true
         );
       }
       if (ts.isSwitchStatement(n)) {
+        // Clause fallthrough resumes at the next clause / after the
+        // switch — in the function — so clauses scan against a resuming
+        // tail too.
         return (
           walk(n.expression) ||
-          resumes(n.caseBlock, labels, breaks + 1, continues, throwResumes, inCallback)
+          resumes(n.caseBlock, { ...st, breaks: st.breaks + 1 }, false)
         );
       }
       // Declarations don't run here; lifted callbacks are analyzed at
@@ -3353,11 +3375,42 @@ export class Emitter {
       if (ts.isFunctionDeclaration(n)) return false;
       if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
         if ([...this.hoistedFns.values()].includes(n)) return false;
-        return resumes(n.body, labels, breaks, continues, throwResumes, true);
+        return resumes(n.body, { ...st, inCallback: true }, false);
       }
       return ts.forEachChild(n, (c) => walk(c) || undefined) === true;
     };
-    return !stmts.some((s) => resumes(s, new Set(), 0, 0, env.throwResumes, false));
+    // One right-to-left pass over a statement list: `resumes` is whether
+    // any route out of any statement resumes in-function (each statement
+    // classified against the continuation after ITS position); `leaves`
+    // is whether control entering the list leaves the function on every
+    // route — no route resumes, and fallthrough (which stops at the first
+    // always-exiting statement) bottoms out in an exit or a leaving tail.
+    // The fallthrough chain deliberately ignores in-list resuming routes:
+    // any such route already forces `resumes`, and every consumer of
+    // `leaves` (the verdict below, a caught throw's continuation) sits
+    // under a scan whose `resumes` it feeds.
+    const scanList = (
+      list: readonly ts.Statement[],
+      st: State,
+      tailLeaves: boolean,
+    ): { leaves: boolean; resumes: boolean } => {
+      let cont = tailLeaves;
+      let any = false;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (resumes(list[i], st, cont)) any = true;
+        cont = this.alwaysExits(list[i]) || cont;
+      }
+      return { leaves: !any && cont, resumes: any };
+    };
+    const start: State = {
+      labels: new Set(),
+      breaks: 0,
+      continues: 0,
+      throwResumes: env.throwResumes,
+      inCallback: false,
+    };
+    // Fallthrough off the end of the whole list always resumes.
+    return scanList(stmts, start, false).leaves;
   }
 
   private emitOrelseFusion(decl: ts.VariableDeclaration, exit: ts.Statement, inner: ZType, ctx: Ctx): void {

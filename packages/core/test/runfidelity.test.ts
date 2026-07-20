@@ -279,6 +279,38 @@ export function probe(q: number | null, xs: readonly number[]): number {
     ],
   },
   {
+    // A throw caught by a fall-through catch resumes at the `return -2`
+    // after the try, so every route through the negative branch leaves the
+    // function and the kill drops: the surviving read keeps its narrow and
+    // returns q + 1. Both the throw and no-throw routes must land on -2
+    // exactly as node does; a merge here would strip the unwrap and not
+    // compile, a wrong drop elsewhere would misroute the re-check rows.
+    name: "a caught throw resuming into a returning tail leaves the surviving narrow intact",
+    src: `
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export function probe(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (p < 0) {
+    try {
+      p = null;
+      if (flag) { throw { kind: "neg", at: 0 } as NegError; }
+    } catch {
+    }
+    return -2;
+  }
+  return p + 1;
+}
+`,
+    calls: [
+      { fn: "probe", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "probe", args: [f(-4), { t: "b", v: true }] },
+      { fn: "probe", args: [f(-4), { t: "b", v: false }] },
+      { fn: "probe", args: [f(4), { t: "b", v: true }] },
+      { fn: "probe", args: [f(4), { t: "b", v: false }] },
+    ],
+  },
+  {
     // A map callback whose only return trails a throw guard lifts as
     // straight-line statements plus the return's expression; the guard's
     // narrowing must still cover that expression (one flow scope), and the

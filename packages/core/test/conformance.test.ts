@@ -6456,6 +6456,80 @@ export function f(q: number | null, flag: boolean, n: number): number {
 }
 `,
   },
+  {
+    // A throw caught by a fall-through catch resumes at the statements
+    // AFTER the try — here a terminal return — so every route through the
+    // branch (throw -> catch -> return; no-throw -> return) leaves the
+    // function. The kill must DROP: tsc keeps the narrow on the surviving
+    // flow, and merging would strip the unwrap off `return p.v`.
+    name: "a caught throw whose fall-through catch resumes into a returning tail still drops",
+    src: `
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) { return -1; }
+  if (p.v < 0) {
+    try {
+      p = null;
+      if (flag) { throw { kind: "neg", at: 0 } as NegError; }
+    } catch {
+    }
+    return -2;
+  }
+  return p.v;
+}
+`,
+  },
+  {
+    // Control for the continuation logic: when the statements after the
+    // try do NOT all leave (a conditional return, then fallthrough), the
+    // caught throw's route reaches the merge and the kill must still
+    // MERGE — the post-branch re-check reads the live slot.
+    name: "a caught throw whose continuation can fall through still merges its kill",
+    src: `
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) { return -1; }
+  if (p.v < 0) {
+    try {
+      p = null;
+      if (flag) { throw { kind: "neg", at: 0 } as NegError; }
+    } catch {
+    }
+    if (flag) { return -2; }
+  }
+  if (p === null) { return 0; }
+  return p.v;
+}
+`,
+  },
+  {
+    // Composition pin: a catch that itself returns closes the throw route
+    // without consulting the continuation, and the no-throw path leaves on
+    // the try's own terminal return — drop either way.
+    name: "a caught throw whose catch returns drops without consulting the continuation",
+    src: `
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export interface P { readonly v: number; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) { return -1; }
+  if (p.v < 0) {
+    try {
+      p = null;
+      if (flag) { throw { kind: "neg", at: 0 } as NegError; }
+    } catch {
+      return -2;
+    }
+    return -3;
+  }
+  return p.v;
+}
+`,
+  },
 ];
 
 // A lifted block-body callback whose only return is the trailing statement
