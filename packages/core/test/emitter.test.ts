@@ -3,7 +3,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { emit, transpile } from "./helpers.ts";
+import { buildEmitter, emit, transpile } from "./helpers.ts";
+import { ts } from "../src/typed_ast.ts";
 
 test("R1 exported const number folds to pub const i64", () => {
   const zig = emit(`export const MAX_TASKS = 64;\nexport function f(n: number): number { return n & MAX_TASKS; }`);
@@ -1717,6 +1718,81 @@ export function reads(q: P | null): number {
   assert.match(zig, /if \(p != null\) \{/);
   assert.doesNotMatch(zig, /if \(p\) \|/);
   assert.match(zig, /if \(q\) \|q_2\| q_2\.v else 0/);
+});
+
+test("kills under a keyword-literal false condition never reach the branch join", () => {
+  // tscExcludedArm at the join layer: `if (false) p = null` emits (Zig
+  // compiles it fine) but contributes no kill, so the fall-through read
+  // keeps the unwrap tsc typed it with. The genuinely conditional kill in
+  // g still joins and the re-guard re-narrows.
+  const zig = emit(`
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (false) p = null;
+  while (false) {
+    p = null;
+  }
+  return p.v;
+}
+export function g(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) p = null;
+  if (p === null) return -2;
+  return p.v;
+}
+`);
+  assert.match(zig, /if \(false\) \{/);
+  assert.match(zig, /while \(false\) p = null;/);
+  assert.match(zig, /return p\.\?\.v;\n\}\n\npub fn g/);
+  assert.match(zig, /const p_2 = p orelse return -2;/);
+});
+
+test("tscExcludedArm: bare keyword-literal arms only; a do-while(false) body counts", () => {
+  // The one shared judgment both the finally scan and the branch joins
+  // consult, pinned direction by direction — including the distinction
+  // that a do-while(false) body RUNS once (the test follows the body), so
+  // it is never excluded, and that a `const NEVER = false` alias condition
+  // widens under tsc, so a reference never excludes.
+  const { emitter, file } = buildEmitter(`
+const NEVER = false;
+export function f(): number {
+  let n = 0;
+  if (false) n += 1;
+  if (true) {
+    n += 2;
+  } else {
+    n += 3;
+  }
+  while (false) {
+    n += 4;
+  }
+  do {
+    n += 5;
+  } while (false);
+  if (NEVER) n += 6;
+  return n;
+}
+`);
+  const excluded = (construct: import("../src/typed_ast.ts").Node, arm: import("../src/typed_ast.ts").Node | undefined): boolean =>
+    (emitter as unknown as { tscExcludedArm(c: unknown, a: unknown): boolean }).tscExcludedArm(construct, arm);
+  const stmts: any[] = [];
+  const fn = (file.statements as readonly any[]).find((s) => s.name?.text === "f");
+  for (const s of fn.body.statements) stmts.push(s);
+  const [, ifFalse, ifTrue, whileFalse, doWhile, ifAlias] = stmts;
+  assert.equal(excluded(ifFalse, ifFalse.thenStatement), true);
+  assert.equal(excluded(ifFalse, ifFalse.elseStatement), false);
+  assert.equal(excluded(ifTrue, ifTrue.elseStatement), true);
+  assert.equal(excluded(ifTrue, ifTrue.thenStatement), false);
+  assert.equal(excluded(whileFalse, whileFalse.statement), true);
+  assert.equal(excluded(doWhile, doWhile.statement), false);
+  assert.equal(excluded(ifAlias, ifAlias.thenStatement), false);
 });
 
 test("kernel capacities: default header uses the shared default kernel", () => {

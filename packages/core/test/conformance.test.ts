@@ -8390,6 +8390,117 @@ export function f(q: P | null, flag: boolean): number {
   },
 ];
 
+// Branch arms tsc's CFA excludes (tscExcludedArm: bare keyword-literal
+// conditions only) contribute NO kills to the branch join — the same
+// judgment the finally-entry scan applies. The arm still emits (Zig
+// compiles `if (false)` fine); only the flow bookkeeping skips it. A kill
+// from such an arm would strip a narrow tsc typed the fall-through reads
+// with, emitting member access on a raw optional — invalid Zig.
+const staticBranchJoinCases: Case[] = [
+  {
+    // The repro: tsc keeps `p` narrowed past `if (false) p = null`, so the
+    // fall-through read must keep its unwrap.
+    name: "an if-false arm's kill never reaches the branch join",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (false) p = null;
+  return p.v;
+}
+`,
+  },
+  {
+    // The else of a constant-true if is equally excluded.
+    name: "an if-true else arm's kill never reaches the branch join",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  let n = 0;
+  if (true) {
+    n += 1;
+  } else {
+    p = null;
+  }
+  return n + p.v;
+}
+`,
+  },
+  {
+    // A while-false body never runs under tsc's CFA.
+    name: "a while-false body's kill never reaches the post-loop state",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  while (false) {
+    p = null;
+  }
+  return p.v;
+}
+`,
+  },
+  {
+    // The distinction: a do-while(false) body runs ONCE (the test follows
+    // the body), so its kill DOES count — tsc widens, the source re-guards,
+    // and the emitted read re-checks. (The kill stays conditional: a
+    // definite `p = null` would leave tsc typing the fall-through read
+    // against `never`.)
+    name: "a do-while-false body's kill still counts (the body runs once)",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  do {
+    if (a > 2) p = null;
+  } while (false);
+  if (p === null) return -2;
+  return p.v;
+}
+`,
+  },
+  {
+    // Non-regression: a genuinely conditional kill still joins (tsc's
+    // path-insensitive may-assign), so the fall-through read re-guards.
+    name: "a flag-conditional kill still reaches the branch join",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function f(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) p = null;
+  if (p === null) return -2;
+  return p.v;
+}
+`,
+  },
+];
+
 // Multi-alternative constructs (if/else arms, else-if chains, switch
 // clauses) JOIN their assignment kills: every arm is an alternative from
 // the construct's ENTRY state — tsc types each one as if no sibling ran —
@@ -8945,6 +9056,7 @@ const corpus: Case[] = [
   ...flowTypeSoundnessCases,
   ...finallyStaticExclusionCases,
   ...writeOnlyArmCaptureCases,
+  ...staticBranchJoinCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

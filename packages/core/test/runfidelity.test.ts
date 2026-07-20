@@ -143,6 +143,57 @@ export function writeOnlyArm(a: number, xs: readonly number[]): number {
     ],
   },
   {
+    name: "kills under keyword-literal false conditions skip the join; do-while(false) still counts",
+    src: `
+export interface P { readonly v: number; }
+function make(a: number): P | null {
+  if (a < 0) return null;
+  return { v: a };
+}
+export function deadIfKill(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (false) p = null;
+  return p.v;
+}
+export function deadWhileKill(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  while (false) {
+    p = null;
+  }
+  return p.v;
+}
+export function doWhileRunsOnce(a: number): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  let n = 0;
+  do {
+    n += 1;
+    if (a > 2) p = null;
+  } while (false);
+  if (p === null) return n + 50;
+  return p.v;
+}
+export function condKill(a: number, flag: boolean): number {
+  let p: P | null = make(a);
+  if (p === null) return -1;
+  if (flag) p = null;
+  if (p === null) return -2;
+  return p.v;
+}
+`,
+    calls: [
+      { fn: "deadIfKill", args: [i(5)] },
+      { fn: "deadIfKill", args: [i(-3)] },
+      { fn: "deadWhileKill", args: [i(7)] },
+      { fn: "doWhileRunsOnce", args: [i(9)] },
+      { fn: "doWhileRunsOnce", args: [i(1)] },
+      { fn: "condKill", args: [i(5), { t: "b", v: true }] },
+      { fn: "condKill", args: [i(5), { t: "b", v: false }] },
+    ],
+  },
+  {
     name: "element-access narrows stay with their own declaration across shadowing",
     src: `
 export interface BoxOpt { readonly b: number | null; }

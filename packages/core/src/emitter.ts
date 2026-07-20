@@ -4110,7 +4110,10 @@ export class Emitter {
     // only remaining state a back-edge kill must reach is the loop's
     // normal-completion exit — the same post-loop point.
     if (ts.isWhileStatement(stmt)) {
-      this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", null, () => this.emitWhile(stmt, ctx, null)));
+      const staged = this.stagedEdgeKills(ctx, "loop", null, () => this.emitWhile(stmt, ctx, null));
+      // A `while (false)` body is tsc-unreachable (tscExcludedArm): kills
+      // its break edges staged here never execute, so they don't apply.
+      this.applyJoinedNarrowKills(ctx, this.tscExcludedArm(stmt, stmt.statement) ? new Set() : staged);
       return;
     }
     if (ts.isDoStatement(stmt)) {
@@ -4142,7 +4145,9 @@ export class Emitter {
       const jsLabel = stmt.label.text;
       const inner = stmt.statement;
       if (ts.isWhileStatement(inner)) {
-        this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitWhile(inner, ctx, label)));
+        const staged = this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitWhile(inner, ctx, label));
+        // Same tsc-unreachable exclusion as the unlabeled while dispatch.
+        this.applyJoinedNarrowKills(ctx, this.tscExcludedArm(inner, inner.statement) ? new Set() : staged);
       } else if (ts.isDoStatement(inner)) {
         this.applyJoinedNarrowKills(ctx, this.stagedEdgeKills(ctx, "loop", jsLabel, () => this.emitDoWhile(inner, ctx, label)));
       } else if (ts.isForStatement(inner)) {
@@ -4330,6 +4335,33 @@ export class Emitter {
     this.emitTryCore(stmt, ctx);
   }
 
+  /// Whether tsc's CFA treats `arm` as statically unreachable inside
+  /// `construct` — the then-arm of `if (false)`, the else-arm of
+  /// `if (true)`, a `while (false)` body. Such an arm contributes NOTHING
+  /// to the flow bookkeeping: no kills at the branch join, no widening of
+  /// a finally's entry narrows (both consumers share this one judgment).
+  /// The arm still EMITS — Zig compiles `if (false)` fine — only the flow
+  /// accounting skips it.
+  ///
+  /// Only the bare `true`/`false` keywords qualify, pinned against the
+  /// checker provider: a `const NEVER = false` alias condition WIDENS
+  /// under tsc, so a reference never excludes. A do-while(false) body is
+  /// never excluded either — the test runs AFTER the body, so the body
+  /// executes once and tsc counts its assignments.
+  private tscExcludedArm(construct: ts.Node, arm: ts.Node | undefined): boolean {
+    if (arm === undefined) return false;
+    if (ts.isIfStatement(construct)) {
+      if (construct.expression.kind === ts.SyntaxKind.FalseKeyword) return arm === construct.thenStatement;
+      if (construct.expression.kind === ts.SyntaxKind.TrueKeyword) return arm === construct.elseStatement;
+      return false;
+    }
+    return (
+      ts.isWhileStatement(construct) &&
+      construct.expression.kind === ts.SyntaxKind.FalseKeyword &&
+      arm === construct.statement
+    );
+  }
+
   /// The narrows dead at a finally block's entry: tsc types a finally from
   /// the pre-try state minus every key the try or catch body may assign
   /// null/undefined to — path-insensitively, because an exception can hand
@@ -4349,7 +4381,8 @@ export class Emitter {
   /// against and emits member access on a raw optional, invalid Zig. Two
   /// exclusions, both pinned against the checker provider:
   ///   - code under a KEYWORD-LITERAL constant condition tsc treats as
-  ///     unreachable never counts: `if (false) ...`, the else of
+  ///     unreachable never counts (tscExcludedArm — the same judgment the
+  ///     branch-join layer applies): `if (false) ...`, the else of
   ///     `if (true) ...`, a `while (false)` body, and the right side of
   ///     `false && ...` / `true || ...` all keep the finally narrowed
   ///     (probed). Only the bare keywords qualify — a `const NEVER = false`
@@ -4369,16 +4402,16 @@ export class Emitter {
     const visit = (n: ts.Node): void => {
       if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n)) return;
       if (ts.isIfStatement(n)) {
-        if (n.expression.kind === ts.SyntaxKind.FalseKeyword) {
+        if (this.tscExcludedArm(n, n.thenStatement)) {
           if (n.elseStatement) visit(n.elseStatement);
           return;
         }
-        if (n.expression.kind === ts.SyntaxKind.TrueKeyword) {
+        if (n.elseStatement && this.tscExcludedArm(n, n.elseStatement)) {
           visit(n.thenStatement);
           return;
         }
       }
-      if (ts.isWhileStatement(n) && n.expression.kind === ts.SyntaxKind.FalseKeyword) return;
+      if (ts.isWhileStatement(n) && this.tscExcludedArm(n, n.statement)) return;
       if (ts.isBinaryExpression(n)) {
         const op = n.operatorToken.kind;
         if (op === ts.SyntaxKind.AmpersandAmpersandToken && n.left.kind === ts.SyntaxKind.FalseKeyword) return;
@@ -4532,6 +4565,11 @@ export class Emitter {
     const cond = this.emitExpr(stmt.expression, ctx, { k: "bool" }).code;
     if (ctx.lines.length !== before) this.fail(stmt, "while-condition requiring lowered statements");
     const body = ts.isBlock(stmt.statement) ? stmt.statement.statements : [stmt.statement];
+    // A `while (false)` body is statically unreachable to tsc's CFA
+    // (tscExcludedArm), so its kills never reach the post-loop state —
+    // merging them would strip a narrow tsc typed the fall-through reads
+    // with. The body still emits; only the flow bookkeeping skips.
+    const deadBody = this.tscExcludedArm(stmt, stmt.statement);
     if (label === null && body.length === 1 && this.isSimpleAssignment(body[0])) {
       // Probe in a flow scope (see childCtx): taken, the assignment's
       // kills apply below exactly as a merge would; discarded, the full
@@ -4542,13 +4580,17 @@ export class Emitter {
       this.withNarrowScope(ctx, "merge", () => this.emitStatement(body[0], sub), bodyJoin);
       if (sub.lines.length === 1) {
         this.push(ctx, `while (${cond}) ${sub.lines[0].trim()}`);
-        this.applyJoinedNarrowKills(ctx, bodyJoin);
+        this.applyJoinedNarrowKills(ctx, deadBody ? new Set() : bodyJoin);
         return;
       }
     }
     this.push(ctx, `${head} (${cond}) {`);
     const sub = this.nestedCtx(ctx);
-    this.emitBlockStatements(body, sub);
+    if (deadBody) {
+      this.withNarrowScope(ctx, "drop", () => this.emitBlockStatements(body, sub));
+    } else {
+      this.emitBlockStatements(body, sub);
+    }
     ctx.lines.push(...sub.lines);
     this.push(ctx, `}`);
   }
@@ -5273,9 +5315,16 @@ export class Emitter {
       }
     }
     const join = new Set<string>();
+    // A tsc-unreachable arm (bare keyword-literal condition — see
+    // tscExcludedArm) still emits, but contributes no kills to the join:
+    // tsc's CFA excludes the arm, so a kill from it would strip a narrow
+    // tsc typed the fall-through reads with (a raw optional read, invalid
+    // Zig). Its kills feed a discarded set instead of the join.
+    const discard = new Set<string>();
     this.push(ctx, `if (${condText}) {`);
     const sub = this.nestedCtx(ctx);
-    this.withKindNarrow(posGuard, ctx, () => this.emitBlockStatements(thenStmts, sub, join));
+    const thenJoin = this.tscExcludedArm(stmt, stmt.thenStatement) ? discard : join;
+    this.withKindNarrow(posGuard, ctx, () => this.emitBlockStatements(thenStmts, sub, thenJoin));
     ctx.lines.push(...sub.lines);
     if (stmt.elseStatement) {
       if (ts.isIfStatement(stmt.elseStatement)) {
@@ -5295,7 +5344,8 @@ export class Emitter {
       this.push(ctx, `} else {`);
       const esub = this.nestedCtx(ctx);
       const elseStmts = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-      this.withKindNarrow(negGuard, ctx, () => this.emitBlockStatements(elseStmts, esub, join));
+      const elseJoin = this.tscExcludedArm(stmt, stmt.elseStatement) ? discard : join;
+      this.withKindNarrow(negGuard, ctx, () => this.emitBlockStatements(elseStmts, esub, elseJoin));
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);
@@ -5496,7 +5546,9 @@ export class Emitter {
     this.push(ctx, `} else if (${condText}) {`);
     const sub = this.nestedCtx(ctx);
     const thenStmts = ts.isBlock(stmt.thenStatement) ? stmt.thenStatement.statements : [stmt.thenStatement];
-    this.emitBlockStatements(thenStmts, sub, join);
+    // tsc-unreachable arms contribute no kills to the chain's join (see
+    // emitIf's discard note; tscExcludedArm).
+    this.emitBlockStatements(thenStmts, sub, this.tscExcludedArm(stmt, stmt.thenStatement) ? new Set() : join);
     ctx.lines.push(...sub.lines);
     if (stmt.elseStatement) {
       if (ts.isIfStatement(stmt.elseStatement)) {
@@ -5506,7 +5558,7 @@ export class Emitter {
       this.push(ctx, `} else {`);
       const esub = this.nestedCtx(ctx);
       const elseStmts = ts.isBlock(stmt.elseStatement) ? stmt.elseStatement.statements : [stmt.elseStatement];
-      this.emitBlockStatements(elseStmts, esub, join);
+      this.emitBlockStatements(elseStmts, esub, this.tscExcludedArm(stmt, stmt.elseStatement) ? new Set() : join);
       ctx.lines.push(...esub.lines);
     }
     this.push(ctx, `}`);

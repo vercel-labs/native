@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { TypedAst, createSubsetProgram } from "../src/typed_ast.ts";
+import { ts, TypedAst, createSubsetProgram } from "../src/typed_ast.ts";
 import { TypeTable } from "../src/types.ts";
 import { SubsetChecker, type CheckResult } from "../src/checker.ts";
 import { IntInference } from "../src/infer.ts";
@@ -68,6 +68,23 @@ export function checkOnly(source: string): CheckResult {
 
 export function ruleIds(result: CheckResult): string[] {
   return [...new Set(result.diagnostics.map((d) => d.id))];
+}
+
+/// An Emitter over an in-memory module WITHOUT emitting — for pinning
+/// internal flow judgments whose interesting inputs the subset checker's
+/// own gates keep out of end-to-end fixtures (nested function
+/// declarations, module-level `let`). The subset check still runs (the
+/// constructor takes its result) but its diagnostics do not gate here.
+export function buildEmitter(source: string): { emitter: Emitter; file: ts.SourceFile } {
+  return withTempModule(source, (entry) => {
+    const program = createSubsetProgram(entry);
+    const tast = new TypedAst(program);
+    const file = program.getSourceFile(entry)!;
+    const table = new TypeTable(tast, file);
+    const checkResult = new SubsetChecker(tast, table, file).check();
+    const infer = new IntInference(tast, table, [file]);
+    return { emitter: new Emitter(tast, table, infer, checkResult, file, path.basename(entry)), file };
+  });
 }
 
 /// Emit Zig for a module that must pass the checker.
