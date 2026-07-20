@@ -5937,10 +5937,151 @@ export function f(q: number | null, flag: boolean): number {
   },
 ];
 
+// The kill merge is flow-sensitive the way tsc is: a branch that kills a
+// narrow and then always LEAVES the function cannot reach the merge, so its
+// kill applies nowhere — tsc keeps the narrow on the surviving flow, and a
+// read there depends on the substitution's unwrap spelling (a dropped
+// spelling emits a field access or plain read on an optional, not a
+// re-check). Kills on paths that resume inside the function (fall-through,
+// break, continue, a throw caught by an enclosing try) still merge.
+const killFallthroughCases: Case[] = [
+  {
+    name: "a branch that kills and returns leaves the surviving flow's capture narrow intact",
+    src: `
+export interface P { readonly v: number; }
+export function f(p0: P | null): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) { p = null; return -1; }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    name: "a branch that kills and returns leaves the surviving flow's orelse narrow intact",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) { p = null; return -2; }
+  return p;
+}
+`,
+  },
+  {
+    name: "a branch that kills and throws (uncaught) leaves the surviving narrow intact",
+    src: `
+export interface P { readonly v: number; }
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export function f(p0: P | null): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) { p = null; throw { kind: "neg", at: 0 } as NegError; }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    name: "a kill two blocks deep on an always-returning path stays off the surviving reads",
+    src: `
+export interface P { readonly v: number; }
+export function f(p0: P | null, a: boolean, b: boolean): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (a) {
+      if (b) { p = null; return -1; }
+      return p.v;
+    }
+    return p.v + 1;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // One arm exits and kills (its kill is unreachable at the merge); the
+    // other falls through and kills (its kill must survive). The post-merge
+    // re-check reads the LIVE slot, so a resurrected narrow here is the
+    // comparison-with-null compile error the invalidation cases pin.
+    name: "mixed arms: the exiting arm's kill drops, the fall-through arm's kill merges",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    return -2;
+  } else {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // `break` leaves the loop, not the function: control resumes right
+    // after it, where the kill must hold for the re-check to compile.
+    name: "a break-guarded kill still reaches the code after the loop",
+    src: `
+export function f(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  for (const x of xs) {
+    if (x < 0) { p = null; break; }
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // `continue` resumes at the next iteration and the loop still falls
+    // through to the code after it, so the kill merges there too.
+    name: "a continue-guarded kill still reaches the code after the loop",
+    src: `
+export function f(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let acc: number = 0;
+  for (const x of xs) {
+    if (x < 0) { p = null; continue; }
+    acc = acc + x;
+  }
+  if (p === null) { return acc; }
+  return p + acc;
+}
+`,
+  },
+  {
+    // A throw under an enclosing try lands in the catch, not out of the
+    // function; control resumes after the try/catch, where p may be null.
+    name: "a kill before a locally-caught throw still reaches past the catch",
+    src: `
+export interface NegError { readonly kind: "neg"; readonly at: number; }
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  try {
+    if (flag) { p = null; throw { kind: "neg", at: 0 } as NegError; }
+  } catch {
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+];
+
 const corpus: Case[] = [
   ...exitGuardNarrowingCases,
   ...kindNarrowRestoreCases,
   ...narrowInvalidationMergeCases,
+  ...killFallthroughCases,
   ...textMethodCases,
   ...releaseModeCases,
   ...completeLangTier2Cases,

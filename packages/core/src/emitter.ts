@@ -94,7 +94,9 @@ interface Ctx {
   /// inside the scope die there — but restoring alone would also resurrect
   /// narrowings an assignment inside the scope killed; re-applying the
   /// frame's deletions after the restore keeps those dead. Frames merge
-  /// outward on pop so an inner branch's kill reaches every enclosing exit.
+  /// outward on pop so an inner branch's kill reaches every enclosing exit
+  /// it can fall through to; a scope that always leaves the function drops
+  /// its kills instead (see popNarrowKillFrame).
   readonly narrowKilled: Set<string>[];
   /// declared/inferred types of locals
   readonly localTypes: Map<ts.Node, ZType>;
@@ -2999,15 +3001,23 @@ export class Emitter {
 
   /// Close the innermost invalidation frame: re-apply its recorded kills to
   /// the just-restored narrowing maps and merge them one frame outward (an
-  /// inner branch's kill must reach every enclosing exit). Deliberately
-  /// conservative: a kill on ANY path inside the scope deletes the narrow at
-  /// the merge point, so a path that kept the value non-null pays a re-check
-  /// — never wrong code. Only memberSubst is touched, mirroring the
-  /// assignment-invalidation path (a stillOptionalSubst entry is inert once
-  /// its memberSubst entry is gone, and narrowedUnion is not what `.?`
-  /// substitutions live in).
-  private popNarrowKillFrame(ctx: Ctx): Set<string> {
+  /// inner branch's kill must reach every enclosing exit it can fall
+  /// through to). A kill on ANY fall-through path inside the scope deletes
+  /// the narrow at the merge point, so a path that kept the value non-null
+  /// pays a re-check — never wrong code. Only memberSubst is touched,
+  /// mirroring the assignment-invalidation path (a stillOptionalSubst entry
+  /// is inert once its memberSubst entry is gone, and narrowedUnion is not
+  /// what `.?` substitutions live in).
+  ///
+  /// `drop` discards the frame's kills instead: the caller has proven the
+  /// scope always leaves the emitted function, so no path carrying those
+  /// kills reaches the merge point — merging them would delete narrowings
+  /// tsc keeps on the surviving flow, and a read there relies on the
+  /// substitution's unwrap spelling (losing it emits a field access on an
+  /// optional, not a re-check).
+  private popNarrowKillFrame(ctx: Ctx, drop = false): Set<string> {
     const killed = ctx.narrowKilled.pop() ?? new Set<string>();
+    if (drop) return killed;
     for (const key of killed) ctx.memberSubst.delete(key);
     const parent = ctx.narrowKilled[ctx.narrowKilled.length - 1];
     if (parent) for (const key of killed) parent.add(key);
@@ -3036,8 +3046,21 @@ export class Emitter {
     // Containment restored; now keep invalidation: an assignment inside the
     // block that killed a narrowing (assigned a possibly-null value) must
     // stay dead past the merge — the snapshot restore above would otherwise
-    // resurrect its `.?` spelling on a value that may be null again.
-    this.popNarrowKillFrame(ctx);
+    // resurrect its `.?` spelling on a value that may be null again. But a
+    // list that always LEAVES the function cannot reach the merge, so its
+    // kills apply nowhere the maps still matter and are dropped: tsc keeps
+    // the narrow on the surviving flow, and reads there depend on it.
+    // `break`/`continue` never qualify (a break-guarded kill runs and then
+    // control resumes after the loop or switch, where the kill must hold);
+    // a `return` only qualifies where it emits as a real return (inside a
+    // lifted callback it lowers to `break :label`, resuming at the merge);
+    // a `throw` only qualifies where it propagates to the caller (under
+    // ctx.tryLabel it breaks to the enclosing catch instead).
+    const last = stmts[stmts.length - 1];
+    const leavesFn =
+      last !== undefined &&
+      this.alwaysExits(last, { returnLeaves: ctx.retLabel === null, throwCaught: ctx.tryLabel != null });
+    this.popNarrowKillFrame(ctx, leavesFn);
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -3138,28 +3161,39 @@ export class Emitter {
   /// enclosing construct's boundary, never to the next statement in
   /// sequence), so an early-exit guard narrows the remainder of its block
   /// no matter which exit the guard takes.
-  private alwaysExits(stmt: ts.Statement): boolean {
-    if (ts.isReturnStatement(stmt)) return true;
-    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return true;
+  /// Without `fnExit`: the statement never completes normally (control
+  /// leaves the enclosing CONSTRUCT — return, throw, break, continue).
+  /// With `fnExit`: control always leaves the emitted FUNCTION, the
+  /// stronger question kill-frame drops need. break/continue resume inside
+  /// the function; `returnLeaves` is false where returns lower to labeled
+  /// breaks (lifted callbacks); `throwCaught` is true where a throw breaks
+  /// to an enclosing catch (it flips on when recursion enters a try block
+  /// that has its own catch).
+  private alwaysExits(stmt: ts.Statement, fnExit?: { returnLeaves: boolean; throwCaught: boolean }): boolean {
+    if (ts.isReturnStatement(stmt)) return fnExit ? fnExit.returnLeaves : true;
+    if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return fnExit === undefined;
     // R20: a throw never falls through (it unwinds to a catch or out of
     // the function), and a try/catch exits when both arms do — any throw
     // mid-try lands in the catch, which exits. NS1058 keeps `finally`
     // from redirecting control flow, so it cannot un-exit either arm.
-    if (ts.isThrowStatement(stmt)) return true;
+    if (ts.isThrowStatement(stmt)) return fnExit ? !fnExit.throwCaught : true;
     if (ts.isTryStatement(stmt)) {
-      const tryExits = this.alwaysExits(stmt.tryBlock);
-      const catchExits = stmt.catchClause === undefined || this.alwaysExits(stmt.catchClause.block);
+      const tryFnExit =
+        fnExit && stmt.catchClause !== undefined ? { ...fnExit, throwCaught: true } : fnExit;
+      const tryExits = this.alwaysExits(stmt.tryBlock, tryFnExit);
+      const catchExits =
+        stmt.catchClause === undefined || this.alwaysExits(stmt.catchClause.block, fnExit);
       return tryExits && catchExits;
     }
     if (ts.isBlock(stmt)) {
       const last = stmt.statements[stmt.statements.length - 1];
-      return last !== undefined && this.alwaysExits(last);
+      return last !== undefined && this.alwaysExits(last, fnExit);
     }
     if (ts.isIfStatement(stmt)) {
       return (
         stmt.elseStatement !== undefined &&
-        this.alwaysExits(stmt.thenStatement) &&
-        this.alwaysExits(stmt.elseStatement)
+        this.alwaysExits(stmt.thenStatement, fnExit) &&
+        this.alwaysExits(stmt.elseStatement, fnExit)
       );
     }
     if (ts.isSwitchStatement(stmt)) {
@@ -3180,7 +3214,7 @@ export class Emitter {
         let stmts: readonly ts.Statement[] = c.statements;
         if (stmts.length === 1 && ts.isBlock(stmts[0])) stmts = (stmts[0] as ts.Block).statements;
         const last = stmts[stmts.length - 1];
-        return last !== undefined && this.alwaysExits(last);
+        return last !== undefined && this.alwaysExits(last, fnExit);
       });
     }
     return false;

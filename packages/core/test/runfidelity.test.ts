@@ -202,6 +202,57 @@ export function merge(q: number | null, r: number | null): number {
     ],
   },
   {
+    // The exiting arm's kill never reaches the merge (control left the
+    // function), so the surviving flag=false read keeps the narrow and
+    // returns q + 1; the fall-through arm's kill in the ELSE still drives
+    // the re-check. A merge that ignored the exit would widen the
+    // surviving read too; a drop that ignored fall-through would misroute
+    // the flag=true-with-else rows past the re-check.
+    name: "an exiting arm's kill stays off the surviving flow; the fall-through arm's still merges",
+    src: `
+export function survive(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) { p = null; return -2; }
+  return p + 1;
+}
+export function mixed(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    return -2;
+  } else {
+    p = null;
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+export function pastLoop(q: number | null, xs: readonly number[]): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let acc: number = 0;
+  for (const x of xs) {
+    if (x < 0) { p = null; break; }
+    acc = acc + x;
+  }
+  if (p === null) { return acc; }
+  return p + acc;
+}
+`,
+    calls: [
+      { fn: "survive", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "survive", args: [f(4), { t: "b", v: true }] },
+      { fn: "survive", args: [f(4), { t: "b", v: false }] },
+      { fn: "mixed", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "mixed", args: [f(4), { t: "b", v: true }] },
+      { fn: "mixed", args: [f(4), { t: "b", v: false }] },
+      { fn: "pastLoop", args: [f(4), { t: "nums", v: [1, 2, -1, 8] }] },
+      { fn: "pastLoop", args: [f(4), { t: "nums", v: [1, 2, 3] }] },
+      { fn: "pastLoop", args: [{ t: "null" }, { t: "nums", v: [1] }] },
+    ],
+  },
+  {
     name: "orelse fusion over a ternary initializer keeps both arms (parenthesized conditional)",
     src: `
 export function low(bytes: Uint8Array): number | null {
