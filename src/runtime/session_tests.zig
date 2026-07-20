@@ -2577,6 +2577,90 @@ fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
     return false;
 }
 
+/// Overwrite the decoded-dimension fields of the first journaled image
+/// record whose outcome matches, in place — `zeroFirstLoadedImageBlobLen`'s
+/// sibling. Per `journal.encodeEffect`, the effect payload ends with
+/// image_width (u64), image_height (u64), image_blob_hash (16 bytes),
+/// image_blob_len (u64), so the dims live 40 and 32 bytes from the end.
+/// Framing and every other field stay valid: only replay's
+/// record-consistency gate can catch the damage. Returns whether a
+/// record was damaged.
+fn patchFirstImageDims(bytes: []u8, outcome: effects_mod.EffectImageOutcome, width: u64, height: u64) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .image or record.image_outcome != outcome) continue;
+        std.mem.writeInt(u64, payload[payload.len - 40 ..][0..8], width, .little);
+        std.mem.writeInt(u64, payload[payload.len - 32 ..][0..8], height, .little);
+        return true;
+    }
+    return false;
+}
+
+/// Record an image session, hand-damage the first record matching
+/// `outcome` to claim `width`x`height`, and replay it with the blob
+/// store present — the shared body of the dimension-damage tests below.
+fn replayWithPatchedImageDims(outcome: effects_mod.EffectImageOutcome, width: u64, height: u64) !session_replay.ReplayReport {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+    _ = try recordImageSession(gpa, buffer, &store);
+
+    try std.testing.expect(patchFirstImageDims(buffer.bytes[0..buffer.len], outcome, width, height));
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    return session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+}
+
+test "an image record claiming .loaded with absurd dimensions refuses replay as damage" {
+    // maxInt width would otherwise ride the fed path into the app's Msg
+    // verbatim (and, on the TS host, into an `@intCast` to an
+    // i64-classed arm field - a safety panic).
+    const result = replayWithPatchedImageDims(.loaded, std.math.maxInt(u64), 5);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming dimensions on a non-loaded outcome refuses replay as damage" {
+    // The recorder writes decoded dimensions only on .loaded; every
+    // other outcome journals 0x0.
+    const result = replayWithPatchedImageDims(.decode_failed, 4, 4);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming .loaded past the pixel budget refuses replay as damage" {
+    // 1024x1024 RGBA8 is 4 MiB - past the registered-image slot bound
+    // a live .loaded can never exceed.
+    const result = replayWithPatchedImageDims(.loaded, 1024, 1024);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record whose claimed pixel count wraps u64 refuses replay as damage" {
+    // 2^32 x 2^32 wraps the u64 pixel product to 0 - the budget check
+    // must not be fooled by the overflow.
+    const result = replayWithPatchedImageDims(.loaded, 1 << 32, 1 << 32);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
 test "an image record claiming .loaded with a zero-length blob refuses replay as damage" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

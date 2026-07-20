@@ -28,6 +28,7 @@
 
 const std = @import("std");
 const canvas = @import("canvas");
+const canvas_limits = @import("canvas_limits.zig");
 const automation_protocol = @import("../automation/protocol.zig");
 const core = @import("core.zig");
 const journal = @import("session_journal.zig");
@@ -55,10 +56,13 @@ pub const ReplayError = error{
     /// A record's fields contradict each other in a way the recorder
     /// can never produce (an image record claiming `.loaded` with a
     /// zero-length blob: the recorder journals `.loaded` only after the
-    /// bytes decoded and registered, and empty bytes cannot decode) —
-    /// the journal is damaged or hand-edited. `JournalCorrupt` is the
-    /// structural sibling (payloads that fail to decode at all); this
-    /// class is for records that decode fine but lie.
+    /// bytes decoded and registered, and empty bytes cannot decode; or
+    /// decoded dimensions the canvas registry would never have accepted
+    /// — zero or over-budget on `.loaded`, nonzero on any other
+    /// outcome) — the journal is damaged or hand-edited.
+    /// `JournalCorrupt` is the structural sibling (payloads that fail
+    /// to decode at all); this class is for records that decode fine
+    /// but lie.
     ReplayDamagedRecord,
 };
 
@@ -191,6 +195,28 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Decoded dimensions obey the recorder the same way: a
+                // live `.loaded` journals only after the canvas registry
+                // accepted the pixels (nonzero width and height, and
+                // width * height * 4 bytes within
+                // `max_registered_canvas_image_pixel_bytes` — the same
+                // bound `registerCanvasImage` enforces), and every other
+                // outcome journals 0x0. Refuse out-of-bound dims HERE:
+                // the fed values flow verbatim into the app's Msg — and,
+                // on the TS core host, through `@intCast` into
+                // i64-classed arm fields, a safety panic on absurd
+                // values — before any decode could disprove them.
+                // `status` needs no twin gate: it is u16 at the journal
+                // codec, in the completion entry, and in
+                // `EffectImageResult`, so every downstream cast
+                // (i64/f64 arm fields) holds by type.
+                if (effect.kind == .image and imageDimsDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: image record for id {d} claims .{s} with dimensions {d}x{d} - a recorded .loaded always carries nonzero decoded dimensions within the registered-image pixel budget and every other outcome records 0x0, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.image_outcome), effect.image_width, effect.image_height },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -306,6 +332,22 @@ fn resolveBlob(
     const bytes = try blob_source.read_fn(blob_source.context, record.image_blob_hash, scratch);
     if (bytes.len != blob_len) return error.BlobCorrupt;
     return bytes;
+}
+
+/// Whether an image record's journaled dimensions contradict what the
+/// recorder can produce (see the gate in `replaySession`): `.loaded`
+/// carries nonzero width and height whose RGBA8 byte size — computed
+/// overflow-checked, a hand-edited product that wraps u64 is damage,
+/// not a small image — fits `registerCanvasImage`'s per-image slot
+/// bound; every other outcome carries 0x0.
+fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
+    if (record.image_outcome != .loaded) {
+        return record.image_width != 0 or record.image_height != 0;
+    }
+    if (record.image_width == 0 or record.image_height == 0) return true;
+    const pixels = std.math.mul(u64, record.image_width, record.image_height) catch return true;
+    const pixel_bytes = std.math.mul(u64, pixels, 4) catch return true;
+    return pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes;
 }
 
 /// Journaled results that regenerate deterministically from the
