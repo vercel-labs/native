@@ -70,6 +70,15 @@ interface Ctx {
   /// `throw` (or a throwing call) breaks to it; null means the throw
   /// propagates (`return error.Thrown`) to the caller.
   tryLabel?: string | null;
+  /// R20: true while emitting inside a try body whose local catch can fall
+  /// through to the code after the try. In that region ANY statement
+  /// containing a throwing call is an exit — it lands in the catch, and the
+  /// catch fallthrough carries the region's narrowing kills to the try's
+  /// merge point — so terminal-statement kill dropping (emitBlockStatements)
+  /// is unsound and disabled. A catch that itself always leaves the function
+  /// closes that path: no exception route reaches the merge, and the flag
+  /// stays off for its body.
+  catchResumes?: boolean;
   /// decl node -> zig identifier
   readonly names: Map<ts.Node, string>;
   readonly used: Set<string>;
@@ -3065,10 +3074,15 @@ export class Emitter {
     // a `return` only qualifies where it emits as a real return (inside a
     // lifted callback it lowers to `break :label`, resuming at the merge);
     // a `throw` only qualifies where it propagates to the caller (under
-    // ctx.tryLabel it breaks to the enclosing catch instead).
+    // ctx.tryLabel it breaks to the enclosing catch instead). And the
+    // terminal statement only speaks for the list at all where no local
+    // catch can resume (ctx.catchResumes): inside a try body whose catch
+    // falls through, any earlier statement's call can throw, land in the
+    // catch, and carry this list's kills to the try's merge.
     const last = stmts[stmts.length - 1];
     const leavesFn =
       last !== undefined &&
+      !ctx.catchResumes &&
       this.alwaysExits(last, { returnLeaves: ctx.retLabel === null, throwCaught: ctx.tryLabel != null });
     this.withNarrowScope(ctx, leavesFn, () => this.emitStatementList(stmts, ctx));
   }
@@ -3450,7 +3464,13 @@ export class Emitter {
   private emitTryCore(stmt: ts.TryStatement, ctx: Ctx): void {
     const cc = stmt.catchClause;
     if (!cc) {
-      // try/finally: throws propagate past this construct (the defer runs).
+      // try/finally: throws propagate past this construct (the defer runs
+      // first) to ctx's handler — the caller when ctx.tryLabel is null, an
+      // enclosing catch otherwise. No catch fallthrough is added HERE, so
+      // kill dropping inherits ctx.tryLabel/ctx.catchResumes unchanged:
+      // the inherited flags already answer for whichever handler a throw
+      // reaches, and a body ending in `return` may still drop its kills
+      // when nothing up the chain can resume past a merge.
       this.push(ctx, `{`);
       const sub = this.nestedCtx(ctx);
       this.emitBlockStatements(stmt.tryBlock.statements, sub);
@@ -3477,6 +3497,18 @@ export class Emitter {
     this.push(outer, `${body}: {`);
     const inner = this.nestedCtx(outer);
     inner.tryLabel = body;
+    // The body's kills may only drop on terminal-statement evidence when no
+    // exception path can resume past this try: a catch that falls through
+    // re-enters the merge carrying whatever a mid-body throw killed. A
+    // catch that itself always leaves the function closes every such path
+    // (its own throws break to ctx's enclosing catch, hence the throwCaught
+    // question below is asked against ctx, not the body label) — and it
+    // also closes paths from any try nested in this body, so the flag is
+    // overwritten rather than or-ed with the inherited value.
+    inner.catchResumes = !this.alwaysExits(cc.block, {
+      returnLeaves: ctx.retLabel === null,
+      throwCaught: ctx.tryLabel != null,
+    });
     this.emitBlockStatements(stmt.tryBlock.statements, inner);
     if (done !== null) this.push(inner, `break :${done};`);
     outer.lines.push(...inner.lines);

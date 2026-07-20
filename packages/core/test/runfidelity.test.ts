@@ -4258,6 +4258,41 @@ export function run(start: number, d: number): number {
     ],
   },
   {
+    // A kill in a try body followed by a throwing call: the exception lands
+    // in the swallowing catch and falls through to the re-check, which must
+    // observe the killed narrow (p IS null there) exactly as node does.
+    name: "exceptions: a try-body kill before a throwing call reaches the post-catch re-check",
+    src: `
+export interface P { readonly v: number; }
+export type Boom = { readonly kind: "boom" } | { readonly kind: "never" };
+function mk(v0: number): P | null {
+  if (v0 < 0) return null;
+  return { v: v0 };
+}
+function g(flag: boolean): void {
+  if (flag) throw { kind: "boom" } as Boom;
+}
+export function f(v0: number, flag: boolean): number {
+  let p: P | null = mk(v0);
+  if (p === null) return -1;
+  try {
+    p = null;
+    g(flag);
+    return -2;
+  } catch {
+  }
+  if (p === null) return 0;
+  return p.v;
+}
+`,
+    calls: [
+      { fn: "f", args: [i(5), { t: "b", v: true }] },
+      { fn: "f", args: [i(5), { t: "b", v: false }] },
+      { fn: "f", args: [i(-1), { t: "b", v: true }] },
+      { fn: "f", args: [i(0), { t: "b", v: true }] },
+    ],
+  },
+  {
     name: "exceptions: number-shaped throws ride the f64 payload slot",
     src: `
 export function g(x: number): number {

@@ -6075,6 +6075,98 @@ export function f(q: number | null, flag: boolean): number {
 }
 `,
   },
+  {
+    // The try body's terminal `return` is not its only exit: the call
+    // before it can throw, land in the catch, and fall through to the
+    // re-check — which must then read the LIVE optional, not a stale
+    // unwrap (tsc types p as P | null here for the same reason).
+    name: "a kill before a throwing call in a try body reaches past a fall-through catch",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+function g(flag: boolean): void {
+  if (flag) { throw { kind: "boom" } as Boom; }
+}
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) { return -1; }
+  try {
+    p = null;
+    g(flag);
+    return -2;
+  } catch {
+  }
+  if (p === null) { return 0; }
+  return p.v;
+}
+`,
+  },
+  {
+    // A catch that always leaves the function closes every exception route
+    // to the merge, so the body's kill drops on its terminal return and the
+    // surviving flow's read keeps its narrow (tsc agrees: no path through
+    // the try/catch reaches `return p.v`).
+    name: "a kill in a try body whose catch always returns stays off the surviving reads",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+function g(flag: boolean): void {
+  if (flag) { throw { kind: "boom" } as Boom; }
+}
+export function f(p0: P | null, flag: boolean): number {
+  let p: P | null = p0;
+  if (p !== null) {
+    if (p.v < 0) {
+      try { p = null; g(flag); return -1; } catch { return -2; }
+    }
+    return p.v;
+  }
+  return 0;
+}
+`,
+  },
+  {
+    // try/finally has no catch fallthrough: a mid-body throw propagates out
+    // of the function (after the finally), so the body's terminal return
+    // still drops its kills and the post-construct read keeps its narrow.
+    name: "a kill in a returning try/finally body stays off the code after it",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let cleanup: number = 0;
+  if (flag) {
+    try {
+      p = null;
+      return -2;
+    } finally {
+      cleanup = 1;
+    }
+  }
+  return p + cleanup;
+}
+`,
+  },
+  {
+    // Control: a kill inside an exiting branch of a try body with NO local
+    // catch behaves exactly like one outside any try — the branch's kill
+    // drops, and the body's later read keeps the surviving narrow.
+    name: "an exiting-branch kill inside a catchless try body still drops",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let acc: number = 0;
+  try {
+    if (flag) { p = null; return -2; }
+    acc = p;
+  } finally {
+    acc = acc + 1;
+  }
+  return acc;
+}
+`,
+  },
 ];
 
 // A lifted block-body callback whose only return is the trailing statement
