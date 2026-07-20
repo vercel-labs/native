@@ -5495,3 +5495,78 @@ export function read(bytes: Uint8Array): number {
   assert.ok(d.message.includes("must be an integer"), "names the conflict");
   assert.ok(d.message.toLowerCase().includes("machine type"), "says why");
 });
+
+// The EventKind validators hold their documented exact-union `state` rule in
+// STOCK tsc, not just in the transpiler's own shape check: `M extends Msgish
+// & ImageEventArm` alone lets a NARROWER state union through (every narrower
+// literal extends the full union), so the validators carry a tuple-wrapped
+// reverse check — [ImageState] extends [M["state"]] — and a missing-member
+// arm resolves to `never`, refusing the un-cast route at type-check time.
+
+test("a narrower image state union fails ImageEventKind in tsc itself", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export type NarrowState = "loaded" | "rejected" | "decode_failed";
+export interface Model { readonly w: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: NarrowState; readonly width: number; readonly height: number; readonly status: number };
+export function initialModel(): Model { return { w: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { path: asciiBytes("a.png") }, { event: "image_done" })];
+    case "image_done": return { ...model, w: msg.width };
+  }
+}
+`);
+  assert.ok(result.typeErrors.length > 0, "tsc must refuse the narrower state union (ImageEventKind resolves it to never)");
+  assert.ok(result.typeErrors.some((e) => e.includes("never")), `the refusal is the never-resolution\n${result.typeErrors.join("\n")}`);
+});
+
+test("the exact fifteen-member image state union still satisfies ImageEventKind in tsc", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${imageMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.imageLoad(7, { path: asciiBytes("a.png") }, { event: "image_done" })];
+${imageTail}
+`);
+  assert.equal(result.typeErrors.length, 0, `tsc errors\n${result.typeErrors.join("\n")}`);
+  assert.equal(result.ok, true, "the exact union must keep transpiling");
+});
+
+test("a narrower audio state union fails AudioEventKind in tsc itself", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export type NarrowState = "loaded" | "position" | "completed" | "failed" | "rejected";
+export interface Model { readonly pos: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "audio_evt"; readonly state: NarrowState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "failed"; readonly why: Uint8Array };
+export function initialModel(): Model { return { pos: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.audioPlay("player", { path: asciiBytes("a.mp3") }, { event: "audio_evt" })];
+    case "audio_evt": return { ...model, pos: msg.positionMs };
+    case "failed": return { ...model, errs: model.errs + 1 };
+  }
+}
+`);
+  assert.ok(result.typeErrors.length > 0, "tsc must refuse the narrower state union (AudioEventKind resolves it to never)");
+  assert.ok(result.typeErrors.some((e) => e.includes("never")), `the refusal is the never-resolution\n${result.typeErrors.join("\n")}`);
+});
+
+test("the exact six-member audio state union still satisfies AudioEventKind in tsc", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${streamMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.audioPlay("player", { path: asciiBytes("a.mp3") }, { event: "audio_evt" })];
+${streamTail}
+`);
+  assert.equal(result.typeErrors.length, 0, `tsc errors\n${result.typeErrors.join("\n")}`);
+  assert.equal(result.ok, true, "the exact union must keep transpiling");
+});

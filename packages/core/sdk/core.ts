@@ -292,12 +292,18 @@ export type AudioEventArm = {
 };
 
 /// The Msg arms an audio event stream may target: arms whose payload is
-/// exactly the six AudioEventArm fields.
+/// exactly the six AudioEventArm fields. The `state` check runs BOTH
+/// directions: the `&` constraint holds the arm's states to AudioState,
+/// and the tuple-wrapped reverse check holds AudioState to the arm's
+/// states — a narrower union would silently drop event states the host
+/// emits, so it is refused here, not discovered at runtime.
 export type AudioEventKind<M extends Msgish> = M extends Msgish
   ? [Exclude<keyof M, "kind">] extends [keyof AudioEventArm]
     ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">]
       ? M extends Msgish & AudioEventArm
-        ? M["kind"]
+        ? [AudioState] extends [M["state"]]
+          ? M["kind"]
+          : never
         : never
       : never
     : never
@@ -354,12 +360,19 @@ export type ImageEventArm = {
 };
 
 /// The Msg arms an image load result may target: arms whose payload is
-/// exactly the five ImageEventArm fields.
+/// exactly the five ImageEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to ImageState, and the tuple-wrapped reverse check
+/// holds ImageState to the arm's states — a narrower union would
+/// silently drop result states the host emits, so it is refused here,
+/// not discovered at runtime.
 export type ImageEventKind<M extends Msgish> = M extends Msgish
   ? [Exclude<keyof M, "kind">] extends [keyof ImageEventArm]
     ? [keyof ImageEventArm] extends [Exclude<keyof M, "kind">]
       ? M extends Msgish & ImageEventArm
-        ? M["kind"]
+        ? [ImageState] extends [M["state"]]
+          ? M["kind"]
+          : never
         : never
       : never
     : never
