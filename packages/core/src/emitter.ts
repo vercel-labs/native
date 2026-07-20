@@ -6862,8 +6862,9 @@ export class Emitter {
     if (op === ts.SyntaxKind.QuestionQuestionToken) {
       // `x ?? null` folds JS undefined and null into one empty value — which
       // is exactly what the native optional already is, so the left side IS
-      // the result (this is also how a `?.` chain value normalizes).
-      if (expr.right.kind === ts.SyntaxKind.NullKeyword) {
+      // the result (this is also how a `?.` chain value normalizes). The
+      // wrapped spellings (`x ?? (null)`) fold identically.
+      if (isNullLiteral(expr.right)) {
         return this.emitExpr(expr.left, ctx, expected);
       }
       // Both sides see the expected type: either may need an enum re-tag.
@@ -8946,8 +8947,8 @@ export class Emitter {
       // A null branch makes the ternary's VALUE optional (`hit === undefined
       // ? null : hit.at` is `?i64`, not `i64`) — dropping it here would type
       // locals non-optional and break every later null test on them.
-      const trueNull = expr.whenTrue.kind === ts.SyntaxKind.NullKeyword;
-      const falseNull = expr.whenFalse.kind === ts.SyntaxKind.NullKeyword;
+      const trueNull = isNullLiteral(expr.whenTrue);
+      const falseNull = isNullLiteral(expr.whenFalse);
       if (trueNull && falseNull) return { k: "void" };
       if (trueNull || falseNull) {
         const t = this.zTypeOfExpr(trueNull ? expr.whenFalse : expr.whenTrue, ctx);
@@ -9443,6 +9444,26 @@ function escapeZigString(s: string): string {
     else out += ch;
   }
   return out;
+}
+
+/// The null LITERAL an expression spells, seen through value-preserving
+/// wrappers: parenthesized and assertion spellings (`(null)`, `((null))`,
+/// `null as P | null`, a non-null-asserted paren) all carry the same runtime
+/// null the bare keyword does, so every null-literal DECISION must look
+/// through them. A wrapped null read as a non-null arm types the ternary
+/// non-optional, and the later guard's unwrap — which the narrowed reads
+/// rely on — is skipped.
+function isNullLiteral(e: ts.Expression): boolean {
+  let n: ts.Expression = e;
+  while (
+    ts.isParenthesizedExpression(n) ||
+    ts.isAsExpression(n) ||
+    ts.isSatisfiesExpression(n) ||
+    ts.isNonNullExpression(n)
+  ) {
+    n = n.expression;
+  }
+  return n.kind === ts.SyntaxKind.NullKeyword;
 }
 
 /// The text key an expression narrows/substitutes under. Parenthesized

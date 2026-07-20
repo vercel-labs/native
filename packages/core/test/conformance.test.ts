@@ -5269,6 +5269,45 @@ export function pick(q: Quote | null, fallback: Quote): number {
 }
 `,
   },
+  {
+    // A parenthesized null ARM is still a null arm: `(null)` must make the
+    // ternary's value optional exactly like the bare `null` spelling.
+    // Reading it as a non-null arm typed the local non-optional, the later
+    // guard's unwrap was skipped, and the field read hit the raw optional.
+    name: "a parenthesized null arm still values the ternary optional",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  const picked = q === null ? (null) : q;
+  if (picked === null) return -1;
+  return picked.v;
+}
+`,
+  },
+  {
+    name: "a parenthesized null arm on the OTHER side values the ternary optional too",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  const picked = q !== null ? q : (null);
+  if (picked === null) return -1;
+  return picked.v;
+}
+`,
+  },
+  {
+    // Doubly wrapped: the null-literal check must recurse through every
+    // paren layer, not peel one.
+    name: "a doubly-parenthesized null arm still values the ternary optional",
+    src: `
+export interface P { readonly v: number; }
+export function f(q: P | null): number {
+  const picked = q === null ? ((null)) : q;
+  if (picked === null) return -1;
+  return picked.v;
+}
+`,
+  },
 ];
 
 // Flow-exit guard narrowing: tsc narrows after ANY statement that never
