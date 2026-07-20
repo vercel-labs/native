@@ -2097,6 +2097,17 @@ pub fn Effects(comptime Msg: type) type {
 
         allocator: std.mem.Allocator,
         executor: EffectExecutor = .real,
+        /// Fake-executor convention: while set, every `loadImage` that
+        /// parks a fake request completes IMMEDIATELY with these bytes
+        /// (through `feedImageBytes`, the full decode→register path) —
+        /// still at `loadImage` time, before the caller's dispatch
+        /// returns. This is the deterministic stand-in for a real
+        /// local-path or cache load finishing before the drain pass
+        /// that spawned it ends: the chained-completion shape the
+        /// drain's causal boundary (`DrainBoundary`) exists for. Test
+        /// seam only; never set under session replay, where journaled
+        /// terminals are the only delivery.
+        fake_instant_image_bytes: ?[]const u8 = null,
         /// Session-record sink: every drain-delivered result is reported
         /// here (loop thread, right before its Msg runs through
         /// `update`). Null outside recording.
@@ -3237,7 +3248,19 @@ pub fn Effects(comptime Msg: type) type {
             slot.fake = self.executor == .fake;
             slot.state.store(.running, .release);
 
-            if (slot.fake) return;
+            if (slot.fake) {
+                // Instant-load convention (see `fake_instant_image_bytes`):
+                // complete the just-parked request before returning, the
+                // deterministic mirror of a real local load racing the
+                // drain pass that issued it. `EffectNotFound` cannot
+                // happen (the slot parked two lines up), and a full
+                // queue outside replay already delivered the loop-side
+                // fallback terminal inside the feed — nothing is lost.
+                if (self.fake_instant_image_bytes) |bytes| {
+                    self.feedImageBytes(options.id, bytes) catch {};
+                }
+                return;
+            }
 
             // Executor-start failures are NOT regenerable validation
             // either: under replay the fake executor parks the request
@@ -4037,12 +4060,65 @@ pub fn Effects(comptime Msg: type) type {
                 self.queue_count.load(.acquire) > 0;
         }
 
+        /// One drain pass's causal boundary: a snapshot of the
+        /// completions that existed when the pass began. The session
+        /// journal's ordering invariant — effect-result records precede
+        /// the event record during whose dispatch they were drained, so
+        /// replaying records in file order feeds each result before the
+        /// event that consumes it — only holds if every result delivered
+        /// during an event's dispatch answers a request that existed
+        /// BEFORE that dispatch. A completion produced during the pass
+        /// itself (an update handler starts a load fast enough to finish
+        /// while the drain is still running) must therefore wait for the
+        /// next wake: delivering it in the same pass would journal a
+        /// result ahead of the event whose dispatch created its request,
+        /// and replay's file-order feed would find no parked request to
+        /// answer. Both producer paths (`enqueue` workers, the loop-side
+        /// pending stages) nudge `wakeHost`, so a deferred completion
+        /// always has its follow-up wake already scheduled.
+        pub const DrainBoundary = struct {
+            /// Loop-side pending entries staged before the pass: stamps
+            /// below this deliver (both pending structures share the
+            /// monotonic `pending_seq` stamp).
+            pending_before: u64,
+            /// Worker-queue entries enqueued before the pass. The queue
+            /// is FIFO, so consuming exactly this many dequeues consumes
+            /// exactly the pre-existing entries.
+            queue_budget: usize,
+        };
+
+        /// Snapshot the completion backlog at the start of one drain
+        /// pass. Loop-thread only, like the drain itself.
+        pub fn drainBoundary(self: *Self) DrainBoundary {
+            return .{
+                .pending_before = self.pending_seq,
+                .queue_budget = self.queue_count.load(.acquire),
+            };
+        }
+
         /// Pop the next completion as a Msg. Loop-thread only. The
         /// returned Msg's line payload stays valid until the next call.
+        /// Unbounded: delivers completions produced while the caller
+        /// drains, too. Runtime drain passes (`UiApp.drainEffects`, the
+        /// ts-core host's `drain`) use `takeMsgWithin` instead so the
+        /// journal's event boundaries stay causal (see `DrainBoundary`);
+        /// this form serves callers that own their delivery timing —
+        /// tests driving the channel directly.
         pub fn takeMsg(self: *Self) ?Msg {
+            var unbounded: DrainBoundary = .{
+                .pending_before = std.math.maxInt(u64),
+                .queue_budget = std.math.maxInt(usize),
+            };
+            return self.takeMsgWithin(&unbounded);
+        }
+
+        /// `takeMsg` bounded to one drain pass: only completions inside
+        /// `boundary` deliver; anything produced after the snapshot
+        /// waits for the wake its producer already nudged.
+        pub fn takeMsgWithin(self: *Self, boundary: *DrainBoundary) ?Msg {
             self.reclaimSlots();
             while (true) {
-                if (self.takePendingMsg()) |pending| {
+                if (self.takePendingMsg(boundary.pending_before)) |pending| {
                     switch (pending) {
                         .exit => |entry| {
                             const exit_fn = entry.exit_fn orelse continue;
@@ -4170,7 +4246,9 @@ pub fn Effects(comptime Msg: type) type {
                         },
                     }
                 }
+                if (boundary.queue_budget == 0) return null;
                 if (!self.dequeueInto(&self.drain_scratch)) return null;
+                boundary.queue_budget -= 1;
                 const entry = &self.drain_scratch;
                 const slot = &self.slots[entry.slot_index];
                 const cancelled = slot.cancelled_generation == entry.generation and entry.generation != 0;
@@ -5485,10 +5563,17 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Take the next loop-side pending terminal in enqueue order,
         /// merging the ring and the image stage by their shared stamp
-        /// so splitting the storage never reordered delivery.
-        fn takePendingMsg(self: *Self) ?PendingMsg {
-            const ring_has = self.pending_exit_len > 0;
-            const image_has = self.pending_image_len > 0;
+        /// so splitting the storage never reordered delivery. Entries
+        /// stamped at or past `before` stay staged: they were produced
+        /// during the current drain pass and belong to the next one
+        /// (the `DrainBoundary` causality contract). Both structures
+        /// are FIFO over the monotonic stamp, so refusing the merged
+        /// head refuses everything younger too.
+        fn takePendingMsg(self: *Self, before: u64) ?PendingMsg {
+            const ring_has = self.pending_exit_len > 0 and
+                self.pending_exit_seqs[self.pending_exit_head] < before;
+            const image_has = self.pending_image_len > 0 and
+                self.pendingImageStorage()[self.pending_image_head].seq < before;
             if (!ring_has and !image_has) return null;
             const take_image = if (ring_has and image_has)
                 self.pendingImageStorage()[self.pending_image_head].seq < self.pending_exit_seqs[self.pending_exit_head]

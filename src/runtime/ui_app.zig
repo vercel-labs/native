@@ -1178,7 +1178,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             var dispatched = false;
-            while (self.effects.takeMsg()) |msg| {
+            // One pass consumes only completions that existed when it
+            // began: a load started by an update handler in THIS pass
+            // that finishes while the pass still runs waits for the wake
+            // its producer already nudged. That keeps the session
+            // journal's event boundaries causal — every result recorded
+            // ahead of this wake's event record answers a request from
+            // an earlier dispatch, so replay's file-order feed always
+            // finds the parked request (see Effects.DrainBoundary).
+            var boundary = self.effects.drainBoundary();
+            while (self.effects.takeMsgWithin(&boundary)) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
             }

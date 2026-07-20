@@ -680,8 +680,14 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Drain every queued effect completion into the core — the
         /// bridge-shaped mirror of `UiApp.drainEffects`' loop. Hosts
         /// that embed the core without a UiApp call this on wake/frame.
+        /// Bounded to the completions that existed at entry, exactly
+        /// like `UiApp.drainEffects`: a completion produced by a
+        /// dispatch inside this pass waits for the wake its producer
+        /// already nudged, keeping the session journal's event
+        /// boundaries causal (see `Effects.DrainBoundary`).
         pub fn drain(fx: *Fx) void {
-            while (fx.takeMsg()) |msg| dispatch(fx, msg);
+            var boundary = fx.drainBoundary();
+            while (fx.takeMsgWithin(&boundary)) |msg| dispatch(fx, msg);
         }
 
         fn dispatchDepth(fx: *Fx, msg: Msg, depth: usize) void {

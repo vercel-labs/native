@@ -1352,6 +1352,11 @@ const ImageSessionModel = struct {
     /// the recorded lines diverges here, not just in pixel state.
     lines_seen: u32 = 0,
     lines_before_image: u32 = 0,
+    /// Armed by `.arm_chain`: the NEXT loaded cover terminal (id 21)
+    /// answers by loading a second image (id 25) from inside its own
+    /// update — the chained-load shape whose fast completion must not
+    /// deliver in the drain pass that issued it.
+    chain_on_cover: bool = false,
 
     fn outcomeName(self: *const ImageSessionModel) []const u8 {
         return self.last_outcome_name[0..self.last_outcome_len];
@@ -1364,6 +1369,7 @@ const ImageSessionMsg = union(enum) {
     load_broken,
     load_invalid,
     load_hostless,
+    arm_chain,
     start_chatty,
     line: effects_mod.EffectLine,
     image: effects_mod.EffectImageResult,
@@ -1395,8 +1401,18 @@ fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *Imag
             .argv = &.{ "chatty", "--emit" },
             .on_line = ImageSessionApp.Effects.lineMsg(.line),
         }),
+        .arm_chain => model.chain_on_cover = true,
         .line => model.lines_seen += 1,
         .image => |result| {
+            // The armed chain: answering the cover's loaded terminal by
+            // starting the NEXT load, from inside update — pure model
+            // logic, so record and replay both issue it at exactly this
+            // dispatch. Whether its completion may be consumed in the
+            // same drain pass is the executor-side question under test.
+            if (model.chain_on_cover and result.id == 21 and result.outcome == .loaded) {
+                model.chain_on_cover = false;
+                fx.loadImage(.{ .id = 25, .path = "art/chained.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) });
+            }
             model.lines_before_image = model.lines_seen;
             model.results += 1;
             switch (result.outcome) {
@@ -1431,6 +1447,7 @@ fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
     if (std.mem.eql(u8, name, "image.broken")) return .load_broken;
     if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
     if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
+    if (std.mem.eql(u8, name, "image.chain")) return .arm_chain;
     if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
     return null;
 }
@@ -1819,6 +1836,139 @@ test "a drain pass larger than the completion queue replays in order with the im
     const replay_registered = harness.runtime.registeredCanvasImage(21) orelse return error.TestExpectedRegisteredImage;
     try std.testing.expectEqual(@as(usize, 6), replay_registered.width);
     try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
+}
+
+/// Record the chained same-wake reference session: the cover load's
+/// terminal (id 21) makes update start a SECOND load (id 25) that
+/// completes while the first wake's drain pass is still running — the
+/// fake executor's instant-load convention, the deterministic mirror of
+/// a real local-path load finishing before the pass ends. The drain's
+/// causal boundary must hold id 25's delivery to the NEXT wake, so the
+/// journal reads [effect 21][wake][effect 25][wake] and replay's
+/// file-order feed always finds the parked request. Without the
+/// boundary the journal reads [effect 21][effect 25][wake] and replay
+/// reaches record 25 before the dispatch that creates its request —
+/// the false `ReplayEffectDivergence` this session exists to pin.
+fn recordChainedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // Arm the instant completion for the load update issues MID-DRAIN:
+    // when the wake below delivers 21's terminal and update starts
+    // load 25, the fake executor completes it before update returns.
+    app_state.effects.fake_instant_image_bytes = png;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    app_state.effects.fake_instant_image_bytes = null;
+    // Id 25's terminal was already queued during the first wake; the
+    // boundary held it, and this wake (its producer's nudge, live)
+    // delivers it.
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Both chained loads decoded and registered in the recording run.
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.results);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.loaded);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(25) != null);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a chained same-wake image load journals causally and replays without false divergence" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordChainedImageSession(gpa, buffer, &store);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    // Without the drain boundary this errors `ReplayEffectDivergence`:
+    // record 25 would precede the wake whose dispatch creates request 25.
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // Same bytes twice = one blob, and both replayed registrations hold
+    // the recorded pixels, offline.
+    try std.testing.expectEqual(@as(usize, 1), store.count);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(25) != null);
+
+    // The journal's event boundaries are causal: no image record may sit
+    // ahead of the event during whose dispatch its request was created.
+    // Concretely, the two image records must be separated by at least
+    // one event record — record 25 lands under the SECOND wake.
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var image_records: usize = 0;
+    var events_between = true;
+    var last_was_image = false;
+    while (try reader.next()) |record| switch (record) {
+        .effect => |effect| {
+            if (effect.kind != .image) continue;
+            image_records += 1;
+            if (last_was_image) events_between = false;
+            last_was_image = true;
+        },
+        .event => last_was_image = false,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), image_records);
+    try std.testing.expect(events_between);
 }
 
 /// Record a session whose single image load passes every loop-side

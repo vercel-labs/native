@@ -40,6 +40,16 @@
 //! that consumes it. Nested dispatches (automation-driven events inside
 //! `frame_requested`) commit innermost-first for the same reason.
 //!
+//! That feed-then-dispatch premise only holds if event boundaries are
+//! CAUSAL: every result journaled ahead of an event must answer a
+//! request issued by some EARLIER dispatch — otherwise the file-order
+//! feed reaches a result whose request does not exist yet and replay
+//! reports a false divergence. The live drain guarantees it: one drain
+//! pass consumes only completions that existed when the pass began
+//! (`Effects.DrainBoundary`), so a load spawned by an update handler
+//! inside the pass — even one fast enough to finish before the pass
+//! ends — delivers, and journals, under the NEXT wake's event record.
+//!
 //! Enum payloads ride as their declaration-order integer values, so
 //! reordering any journaled enum is a format break: bump
 //! `format_version` when one moves.
