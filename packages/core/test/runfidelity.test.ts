@@ -311,6 +311,33 @@ export function probe(q: number | null, flag: boolean): number {
     ],
   },
   {
+    // A caught throw resumes AFTER the try, so the intra-try read keeps its
+    // narrow and the post-try re-check reads the live optional. Both flag
+    // paths — throw-then-catch-then-re-check, and the surviving straight
+    // line — must match node row for row.
+    name: "a caught-throw kill routes past the intra-try read to the post-try re-check",
+    src: `
+export interface Boom { readonly kind: "boom"; }
+export function probe(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) return -1;
+  try {
+    if (flag) { p = null; throw { kind: "boom" } as Boom; }
+    return p + 1;
+  } catch {}
+  if (p === null) return 0;
+  return p + 2;
+}
+`,
+    calls: [
+      { fn: "probe", args: [{ t: "null" }, { t: "b", v: true }] },
+      { fn: "probe", args: [{ t: "null" }, { t: "b", v: false }] },
+      { fn: "probe", args: [f(4), { t: "b", v: true }] },
+      { fn: "probe", args: [f(4), { t: "b", v: false }] },
+      { fn: "probe", args: [f(-4), { t: "b", v: false }] },
+    ],
+  },
+  {
     // A plain lexical block is no flow boundary: the guard inside it
     // narrows the post-block read (tsc flows through), and the emitted
     // capture must be in scope there. Both the miss and hit paths must

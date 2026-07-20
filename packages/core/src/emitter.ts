@@ -79,6 +79,14 @@ interface Ctx {
   /// function (including its own throws, judged against ITS enclosing
   /// handler) closes that path, and the flag stays off for its body.
   catchResumes?: boolean;
+  /// R20: the ENCLOSING try's pending exception kills — kills travel the
+  /// same edges control does (allRoutesLeaveFunction's route destinations).
+  /// A scope whose only in-function routes are throws caught by that try's
+  /// catch never falls through into the try body's remaining statements,
+  /// so its kills must not merge into intra-try flow; they wait here and
+  /// emitTryCore applies them to the POST-try state, alongside the body's
+  /// normal-exit kills (see popNarrowKillFrame's "exception" mode).
+  pendingCatchKills?: Set<string> | null;
   /// decl node -> zig identifier
   readonly names: Map<ts.Node, string>;
   readonly used: Set<string>;
@@ -3024,9 +3032,20 @@ export class Emitter {
   /// tsc keeps on the surviving flow, and a read there relies on the
   /// substitution's unwrap spelling (losing it emits a field access on an
   /// optional, not a re-check).
-  private popNarrowKillFrame(ctx: Ctx, drop = false): Set<string> {
+  ///
+  /// `exception` routes the kills to the enclosing try's pending set: the
+  /// scope's only in-function routes are throws that land in that try's
+  /// catch and fall through to the POST-try continuation. Kills travel the
+  /// same edges control does, so they must not poison the intra-try flow
+  /// (tsc keeps its narrows there) — emitTryCore applies them after the
+  /// try instead.
+  private popNarrowKillFrame(ctx: Ctx, mode: "merge" | "drop" | "exception" = "merge"): Set<string> {
     const killed = ctx.narrowKilled.pop() ?? new Set<string>();
-    if (drop) return killed;
+    if (mode === "drop") return killed;
+    if (mode === "exception") {
+      for (const key of killed) ctx.pendingCatchKills?.add(key);
+      return killed;
+    }
     for (const key of killed) ctx.memberSubst.delete(key);
     const parent = ctx.narrowKilled[ctx.narrowKilled.length - 1];
     if (parent) for (const key of killed) parent.add(key);
@@ -3035,9 +3054,9 @@ export class Emitter {
 
   /// Bracket `emit` in one narrowing flow scope: on exit, restore the three
   /// narrowing maps to their entry snapshot (containment), then re-apply and
-  /// merge — or, when `leavesFn`, drop — the kills recorded inside (see
-  /// popNarrowKillFrame).
-  private withNarrowScope<T>(ctx: Ctx, leavesFn: boolean, emit: () => T): T {
+  /// merge — or drop, or route to the enclosing try's pending set — the
+  /// kills recorded inside (see popNarrowKillFrame).
+  private withNarrowScope<T>(ctx: Ctx, mode: "merge" | "drop" | "exception", emit: () => T): T {
     const savedSubst = new Map(ctx.memberSubst);
     const savedStillOptional = new Map(ctx.stillOptionalSubst);
     const savedNarrowed = new Map(ctx.narrowedUnion);
@@ -3051,7 +3070,7 @@ export class Emitter {
       for (const [k, v] of savedStillOptional) ctx.stillOptionalSubst.set(k, v);
       ctx.narrowedUnion.clear();
       for (const [k, v] of savedNarrowed) ctx.narrowedUnion.set(k, v);
-      this.popNarrowKillFrame(ctx, leavesFn);
+      this.popNarrowKillFrame(ctx, mode);
     }
   }
 
@@ -3070,11 +3089,27 @@ export class Emitter {
     // emitted function (allRoutesLeaveFunction): then no path carrying the
     // kills reaches the merge, tsc keeps the narrow on the surviving flow,
     // and reads there depend on it.
-    const leavesFn = this.allRoutesLeaveFunction(stmts, {
+    const env = {
       returnLeaves: ctx.retLabel === null,
       throwResumes: ctx.catchResumes === true,
-    });
-    this.withNarrowScope(ctx, leavesFn, () => this.emitStatementList(stmts, ctx));
+    };
+    const leavesFn = this.allRoutesLeaveFunction(stmts, env);
+    // Exception-kills channel: when the list's only in-function routes are
+    // throws the enclosing catch hands back (no fallthrough, break,
+    // continue, or lowered return into the try's remaining statements),
+    // its kills travel the throw edges — to the post-try continuation the
+    // caught throw resumes at — and must not merge into intra-try flow,
+    // where tsc keeps the surviving path's narrows. Re-asking the route
+    // question with those throws treated as leaving isolates exactly this
+    // case: any normal resuming route still forces the plain merge.
+    const mode = leavesFn
+      ? "drop"
+      : env.throwResumes &&
+          ctx.pendingCatchKills != null &&
+          this.allRoutesLeaveFunction(stmts, { ...env, throwResumes: false })
+        ? "exception"
+        : "merge";
+    this.withNarrowScope(ctx, mode, () => this.emitStatementList(stmts, ctx));
   }
 
   private emitStatementList(stmts: readonly ts.Statement[], ctx: Ctx): void {
@@ -3696,6 +3731,14 @@ export class Emitter {
       returnLeaves: ctx.retLabel === null,
       throwResumes: ctx.catchResumes === true,
     });
+    // Fresh pending set for THIS try: kills routed here rode throw edges
+    // into this catch (popNarrowKillFrame's "exception" mode) and apply at
+    // the post-try merge below. A nested try's body re-derives its own set,
+    // so kills always land at the same destination the throw route resolves
+    // to; the catch block itself inherits the ENCLOSING set through ctx
+    // (its throws escape outward, never back into this try).
+    const pendingKills = new Set<string>();
+    inner.pendingCatchKills = pendingKills;
     this.emitBlockStatements(stmt.tryBlock.statements, inner);
     if (done !== null) this.push(inner, `break :${done};`);
     outer.lines.push(...inner.lines);
@@ -3712,6 +3755,18 @@ export class Emitter {
     outer.lines.push(...catchCtx.lines);
     ctx.lines.push(...outer.lines);
     this.push(ctx, `}`);
+    // Exception-kills merge: kills travel the same edges control does. The
+    // routes that fed this set resumed through the catch's fallthrough at
+    // THIS point — the post-try continuation — so they apply to the
+    // post-try narrow state alongside the body's normal-exit kills, and
+    // never to the intra-try flow already emitted above. (A branch with
+    // any normal fallthrough merged its kills there instead; a catch whose
+    // every route leaves the function dropped them before this set was
+    // consulted; the catch block's own kills merged outward just above.)
+    for (const key of pendingKills) {
+      ctx.memberSubst.delete(key);
+      ctx.narrowKilled[ctx.narrowKilled.length - 1]?.add(key);
+    }
   }
 
   private emitWhile(stmt: ts.WhileStatement, ctx: Ctx, label: string | null): void {

@@ -6158,7 +6158,10 @@ export function f(q: number | null, flag: boolean): number {
 // read there depends on the substitution's unwrap spelling (a dropped
 // spelling emits a field access or plain read on an optional, not a
 // re-check). Kills on paths that resume inside the function (fall-through,
-// break, continue, a throw caught by an enclosing try) still merge.
+// break, continue, a throw caught by an enclosing try) still merge — and
+// they merge where control resumes: a branch whose only in-function route
+// is a caught throw carries its kill to the post-try continuation, never
+// into the try body's remaining statements.
 const killFallthroughCases: Case[] = [
   {
     name: "a branch that kills and returns leaves the surviving flow's capture narrow intact",
@@ -6269,6 +6272,95 @@ export function f(q: number | null, xs: readonly number[]): number {
   }
   if (p === null) { return acc; }
   return p + acc;
+}
+`,
+  },
+  {
+    // Kills travel the same edges control does: a branch whose only
+    // in-function route is a caught throw resumes at the POST-try
+    // continuation, never at the try body's remaining statements — so the
+    // intra-try read keeps its narrow (tsc agrees) while the post-try
+    // re-check reads the live optional. Merging the kill intra-try
+    // stripped the surviving path's unwrap and the read failed to compile.
+    name: "a caught-throw kill skips the intra-try flow and lands after the try",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  try {
+    if (flag) { p = null; throw { kind: "boom" } as Boom; }
+    return p.v;
+  } catch {}
+  if (p === null) return 0;
+  return p.v + 1;
+}
+`,
+  },
+  {
+    // Control: a branch with BOTH a caught-throw route and a normal
+    // fallthrough still merges intra-try — the fallthrough carries the
+    // kill into the try's remaining statements legitimately.
+    name: "a branch with a caught throw AND fallthrough still merges its kill intra-try",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+export function f(q: P | null, flag: boolean, deep: boolean): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  try {
+    if (flag) { p = null; if (deep) { throw { kind: "boom" } as Boom; } }
+    if (p === null) return -2;
+    return p.v;
+  } catch {}
+  if (p === null) return 0;
+  return p.v + 1;
+}
+`,
+  },
+  {
+    // Nested tries: a throw caught by the INNER catch that falls through
+    // resumes at the inner try's continuation — the kill lands THERE (and
+    // flows outward from that point), while the intra-inner-try read keeps
+    // its narrow.
+    name: "a caught-throw kill in a nested try lands at the inner continuation",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  let acc: number = 0;
+  try {
+    try {
+      if (flag) { p = null; throw { kind: "boom" } as Boom; }
+      acc = p.v;
+    } catch {}
+    if (p === null) { acc = acc - 1; }
+  } catch {}
+  if (p === null) return acc;
+  return p.v + acc;
+}
+`,
+  },
+  {
+    // Control: a kill in the CATCH block itself merges at the post-try
+    // continuation exactly as before the exception-kills channel.
+    name: "a kill in the catch block still reaches the post-try re-check",
+    src: `
+export interface P { readonly v: number; }
+export interface Boom { readonly kind: "boom"; }
+export function f(q: P | null, flag: boolean): number {
+  let p: P | null = q;
+  if (p === null) return -1;
+  try {
+    if (flag) { throw { kind: "boom" } as Boom; }
+  } catch {
+    p = null;
+  }
+  if (p === null) return 0;
+  return p.v;
 }
 `,
   },
