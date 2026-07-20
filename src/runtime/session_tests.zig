@@ -1932,6 +1932,151 @@ test "a spawn inside an image's undelivered window rejects identically live and 
     try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
 }
 
+/// Record the start-failure window reference session: the channel
+/// allocator fails exactly at image 21's staged source buffer, so the
+/// load is refused with executor truth (a NON-regenerating staged
+/// rejection) before any slot is claimed — then, before any drain, a
+/// second dispatch reloads id 21. The reload must reject on BOTH
+/// sides: under replay the failed request allocates its own buffer
+/// and PARKS (the fake executor never touches the failing seam), so
+/// the id is held there until the journaled terminal feeds at the
+/// recorded delivery position — live admission holds it through the
+/// staged window for the same span.
+/// Fails exactly one allocation — the next one matching the staged
+/// image source buffer's distinctive size — and delegates everything
+/// else. `std.testing.FailingAllocator` fails every allocation from
+/// its fail index on, which would take the same dispatch's view
+/// rebuild down with the load; this failure is surgical.
+const ImageBufferFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    armed: bool = false,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *ImageBufferFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        if (self.armed and len == effects_mod.max_effect_image_bytes + 1) {
+            self.armed = false;
+            return null;
+        }
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+fn recordStartFailureWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // NO wake before the reload: the staged rejection is undelivered
+    // when the second load lands — the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a reload inside a start-failure's staged window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordStartFailureWindowSession(gpa, buffer, &store);
+    // The live side delivered two rejections: the start failure's own
+    // terminal (executor truth) and the in-window reload's refusal.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The start failure's terminal FEEDS (the replayed request parked
+    // instead of failing); the reload's refusal regenerates from the
+    // replayed occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
 /// Record the queue-saturation reference session: a chatty spawn and
 /// an image load whose results journal as ONE unbroken run — 64 line
 /// records (the completion queue's whole capacity) followed by the

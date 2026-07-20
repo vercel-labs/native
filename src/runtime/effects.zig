@@ -3226,7 +3226,10 @@ pub fn Effects(comptime Msg: type) type {
             // effect's trick).
             // An allocation failure is NOT regenerable validation: the
             // replayed request allocates its own buffer and parks, so
-            // this terminal must journal as executor truth and feed.
+            // this terminal must journal as executor truth and feed —
+            // and the staged rejection holds the id until it drains
+            // (`stagedImageOccupiesKey`), because replay's parked
+            // request holds it through the same window.
             const buffer = self.allocator.alloc(u8, max_effect_image_bytes + 1) catch {
                 return self.rejectImage(options.id, options.on_result, false);
             };
@@ -3285,7 +3288,10 @@ pub fn Effects(comptime Msg: type) type {
             // Executor-start failures are NOT regenerable validation
             // either: under replay the fake executor parks the request
             // before ever touching io or threads, so these terminals
-            // journal as executor truth and feed.
+            // journal as executor truth and feed. Releasing the slot
+            // here does not free the id — the staged rejection holds
+            // it until the drain delivers (`stagedImageOccupiesKey`),
+            // matching the parked replay request's window.
             const io = self.ensureIo() catch {
                 self.releaseFetchSlot(slot);
                 return self.rejectImage(options.id, options.on_result, false);
@@ -3465,6 +3471,13 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectHost(options.key, options.on_result);
             }
             if (!fake and self.host_calls == null) return self.rejectHost(options.key, options.on_result);
+            // A staged non-regenerating image terminal holds the key
+            // exactly like the slot windows below (see
+            // `stagedImageOccupiesKey`): under replay that image
+            // request is still parked until its journaled terminal
+            // feeds, and the parked fake is what rejects this request
+            // there.
+            if (self.stagedImageOccupiesKey(options.key)) return self.rejectHost(options.key, options.on_result);
             const slot_index = blk: {
                 // In flight = running (no answer yet) OR draining with
                 // an undelivered answer: both are replaced, dropping
@@ -5665,6 +5678,29 @@ pub fn Effects(comptime Msg: type) type {
         fn keyOccupiedUntilDelivery(self: *Self, key: u64) bool {
             if (self.findActiveSlot(key) != null) return true;
             if (self.findUndeliveredTerminalSlot(key) != null) return true;
+            if (self.stagedImageOccupiesKey(key)) return true;
+            return false;
+        }
+
+        /// A staged loop-side image terminal that is executor truth
+        /// (`regenerates = false` — start failures, fake cancels)
+        /// occupies its id until the drain delivers it. Those
+        /// terminals journal as worker truth and FEED under session
+        /// replay, where the request they answer stays parked in its
+        /// slot until the recorded delivery position — so live
+        /// admission must hold the key through the same window, or a
+        /// key accepted here live is one replay rejects. Regenerating
+        /// validation refusals deliberately do NOT occupy: replay
+        /// re-runs the same loop-side validation at the same dispatch,
+        /// so both sides refuse (and stage) identically with the key
+        /// never held on either side.
+        fn stagedImageOccupiesKey(self: *Self, id: u64) bool {
+            const storage = self.pendingImageStorage();
+            var index: usize = 0;
+            while (index < self.pending_image_len) : (index += 1) {
+                const entry = &storage[(self.pending_image_head + index) % storage.len];
+                if (!entry.regenerates and entry.result.id == id) return true;
+            }
             return false;
         }
 

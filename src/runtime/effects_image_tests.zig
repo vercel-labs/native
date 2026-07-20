@@ -1112,3 +1112,121 @@ test "an image terminal still undelivered occupies its id against a spawn of the
     h.app_state.effects.spawn(.{ .key = image_id, .argv = &.{"noop"}, .on_exit = ImageEffects.exitMsg(.spawn_exit) });
     try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingSpawnCount());
 }
+
+/// Fails exactly one allocation — the next one matching the staged
+/// image source buffer's distinctive size — and delegates everything
+/// else. `std.testing.FailingAllocator` fails every allocation from
+/// its fail index on, which would take the same dispatch's view
+/// rebuild down with the load; this failure is surgical.
+const ImageBufferFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    armed: bool = false,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *ImageBufferFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        if (self.armed and len == effects_mod.max_effect_image_bytes + 1) {
+            self.armed = false;
+            return null;
+        }
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "a start-failure rejection holds the id until it drains; a reload inside the window rejects" {
+    // The failing allocator backs the APP (and so the effects
+    // channel): the staged source buffer is loadImage's first and only
+    // channel allocation, drawn before any slot is claimed.
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try std.testing.allocator.create(ImageApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ImageApp.init(failing.allocator(), .{}, .{
+        .name = "effects-image-start-fail",
+        .scene = image_scene,
+        .canvas_label = canvas_label,
+        .update_fx = imageUpdate,
+        .view = imageView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    app_state.effects.executor = .fake;
+    test_id = image_id;
+    test_path = "assets/cover.png";
+    test_url = "";
+    test_cache_path = "";
+    test_expected_bytes = 0;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    test_reload_on_result = false;
+
+    // Fail exactly the staged source buffer's allocation: the load is
+    // refused with executor truth (a non-regenerating staged
+    // rejection) before any slot is claimed, so no request parks.
+    failing.armed = true;
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try std.testing.expect(!failing.armed);
+    try std.testing.expectEqual(@as(usize, 0), app_state.effects.pendingImageLoadCount());
+
+    // A reload inside the staged window must reject: under session
+    // replay the failed request is a parked `.running` fake here (its
+    // journaled terminal feeds at the recorded delivery position — the
+    // replayed request allocates its own buffer and parks), so a live
+    // accept would journal a Msg stream replay rejects.
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), app_state.effects.pendingImageLoadCount());
+
+    // Both staged rejections deliver on the drain, in staging order.
+    while (harness.null_platform.takeWake()) |_| {}
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.result_count);
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.rejected_count);
+
+    // The window ends at delivery: the same id parks and loads.
+    try app_state.dispatch(&harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingImageLoadCount());
+    var encoded_buffer: [2048]u8 = undefined;
+    const encoded = encodePngFixture(&encoded_buffer, 1, 1);
+    try app_state.effects.feedImageBytes(image_id, encoded);
+    while (harness.null_platform.takeWake()) |_| {}
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 3), app_state.model.result_count);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, app_state.model.last.?.outcome);
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.rejected_count);
+}
