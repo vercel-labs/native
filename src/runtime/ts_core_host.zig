@@ -127,6 +127,50 @@
 //!                  the entry: the platform may still speak (soundboard
 //!                  starts the next track from `completed`), and stop
 //!                  is the explicit close.
+//!   image_load  -> `fx.loadImage` keyed by the app's own numeric
+//!                  ImageId (the engine registers the pixels under it,
+//!                  so the bridge holds a small id->tag table rather
+//!                  than minting an engine key). One terminal per load
+//!                  routes the event arm — a five-field record built by
+//!                  field NAME (id/state/width/height/status; `state`'s
+//!                  enum members are matched by member name, and `id`
+//!                  echoes the requested ImageId so concurrent loads
+//!                  sharing one arm stay distinguishable) — and the
+//!                  entry retires on it. A URL record carrying no cache
+//!                  path loads under the engine's conventional
+//!                  content-addressed image cache path when the wiring
+//!                  configured a caches directory (`setImageCacheDir` /
+//!                  `TsUiApp`'s `image_cache_dir`), derived bridge-side
+//!                  from the URL alone like the audio cache. A
+//!                  duplicate LIVE id rejects the new load (the spawn
+//!                  discipline: one load per id, never replaced
+//!                  implicitly), dispatching state "rejected" at the
+//!                  post-cycle boundary with the refused id echoed; ids
+//!                  the wire cannot carry exactly (0, non-integers,
+//!                  2^53 and past — the SDK contract is BELOW 2^53)
+//!                  reject the same way echoing id 0, and so does a
+//!                  17th in-flight load (a full bridge table).
+//!                  Image loads are not the string-keyed cancel's to
+//!                  end (they are keyed by numeric id, not a wire key)
+//!                  — `image_cancel` is their cancel.
+//!   image_cancel-> `fx.cancel(id)` on the live load under the id, if
+//!                  any: the engine's `.cancelled` terminal routes the
+//!                  load's own event arm (state "cancelled") and
+//!                  retires the entry, freeing the id for a fresh load
+//!                  — LOUD, the spawn cancel discipline. An id naming
+//!                  no live load (or one the wire cannot carry exactly)
+//!                  is a no-op, audio_ctl's idle rule.
+//!   image_unregister
+//!               -> `fx.unregisterImage(id)`: free the registry slot
+//!                  under the id — registration's synchronous
+//!                  discipline in reverse, direct registry surgery
+//!                  with no terminal and no Msg. An id with no
+//!                  registration (or one the wire cannot carry
+//!                  exactly) is a no-op, image_cancel's idle rule. It
+//!                  never touches the load table: a load in flight
+//!                  under the id keeps running and its terminal still
+//!                  registers the pixels — cancel the load first to
+//!                  keep the slot free.
 //!   audio_ctl   -> the engine's control verbs (`fx.pauseAudio`/
 //!                  `resumeAudio`/`stopAudio`/`seekAudio`/
 //!                  `setAudioVolume`), gated by the wire key: a verb
@@ -368,6 +412,16 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        /// One in-flight image load, keyed by the app's own numeric
+        /// ImageId (which IS the engine key — the registry id and the
+        /// effect key are one value by design). Retires on its one
+        /// terminal.
+        const ImageEntry = struct {
+            used: bool = false,
+            id: u64 = 0,
+            event_tag: u8 = 0,
+        };
+
         var model_root: *const Model = undefined;
         /// The platform caches directory for URL audio sources, set by
         /// the wiring (`TsUiApp`'s `audio_cache_dir`, or `setAudioCacheDir`
@@ -384,6 +438,14 @@ pub fn TsCoreHost(comptime core: type) type {
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
+        var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
+        /// The platform caches directory for URL image sources, the
+        /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
+        /// `image_cache_dir`): bridge-side derivation of the
+        /// content-addressed cache path, never an env read in update.
+        var image_cache_dir_len: usize = 0;
+        var image_cache_dir_buf: [runtime_effects.max_effect_image_path_bytes]u8 = undefined;
+        var image_cache_path_buf: [runtime_effects.max_effect_image_path_bytes]u8 = undefined;
         var clip_write_counter: u32 = 0;
         /// Set by a result callback whose entry was dropped (replaced
         /// or wire-cancelled): the terminal is journal-visible but must
@@ -405,6 +467,84 @@ pub fn TsCoreHost(comptime core: type) type {
         /// issuing cycle's frame reset, at the same boundary `now`
         /// dispatches use.
         const max_rejects_per_cmd: usize = runtime_effects.max_effects;
+
+        /// An image load the bridge itself refused (duplicate live id,
+        /// an unrepresentable id, a full image table), dispatched as the
+        /// load's event arm with state "rejected" at the same post-cycle
+        /// boundary. `id` echoes the requested ImageId so concurrent
+        /// rejections stay distinguishable — 0 when the wire value is
+        /// not an exactly-carried positive integer, because there is no
+        /// honest integer to echo for one.
+        const ImageReject = struct { tag: u8, id: u64 };
+
+        /// One cycle's staging for bridge-refused image loads. Unlike
+        /// the spawn-reject buffer, the count here is the APP's to
+        /// choose — a `Cmd.batch` of N loads against a full table must
+        /// yield N rejected results, never a crash — so the stage never
+        /// caps at the table size: the inline buffer covers everyday
+        /// command values without touching an allocator, and the first
+        /// overflow spills once into an engine-allocator block sized by
+        /// the wire's own arithmetic bound. Staging exists because the
+        /// command walk cannot dispatch (the wire bytes are frame-arena
+        /// resident, and a nested cycle's frame reset would free them
+        /// mid-walk): rejects are captured during the walk and
+        /// delivered after the issuing cycle's frame reset, at the same
+        /// boundary `now` dispatches use — stack and heap storage both
+        /// survive the nested delivery cycles that boundary runs.
+        const ImageRejectStage = struct {
+            /// Every image_load record occupies at least this many wire
+            /// bytes ([op][id f64][event_tag], three empty long-bytes
+            /// fields, [expected f64]), so a command value of L bytes
+            /// carries at most L / 30 of them — the spill bound needs
+            /// no second record parser to stay in sync with.
+            const min_image_load_record_bytes: usize = 1 + 8 + 1 + 3 * 4 + 8;
+
+            inline_buf: [max_rejects_per_cmd]ImageReject = undefined,
+            spill: []ImageReject = &.{},
+            count: usize = 0,
+            /// The arithmetic ceiling on this cycle's image_load record
+            /// count (and therefore on its rejects).
+            bound: usize,
+            allocator: std.mem.Allocator,
+
+            fn open(fx: *Fx, cmd_len: usize) ImageRejectStage {
+                return .{
+                    .bound = cmd_len / min_image_load_record_bytes,
+                    .allocator = fx.allocator,
+                };
+            }
+
+            fn push(self: *ImageRejectStage, tag: u8, id: u64) void {
+                if (self.count < self.inline_buf.len) {
+                    self.inline_buf[self.count] = .{ .tag = tag, .id = id };
+                    self.count += 1;
+                    return;
+                }
+                if (self.spill.len == 0) {
+                    // First overflow: size by the wire bound once and
+                    // move the inline prefix over — one allocation for
+                    // the whole cycle, and only on cycles that earn it.
+                    self.spill = self.allocator.alloc(ImageReject, self.bound) catch
+                        @panic("ts core host: out of memory staging rejected image loads");
+                    @memcpy(self.spill[0..self.count], &self.inline_buf);
+                }
+                // The wire arithmetic sized the spill: rejects <= loads
+                // <= bound, so the store below can never run past it.
+                std.debug.assert(self.count < self.spill.len);
+                self.spill[self.count] = .{ .tag = tag, .id = id };
+                self.count += 1;
+            }
+
+            fn staged(self: *const ImageRejectStage) []const ImageReject {
+                if (self.spill.len > 0) return self.spill[0..self.count];
+                return self.inline_buf[0..self.count];
+            }
+
+            fn close(self: *ImageRejectStage) void {
+                if (self.spill.len > 0) self.allocator.free(self.spill);
+                self.spill = &.{};
+            }
+        };
 
         /// Install the core: reset the kernel and the bridge tables
         /// (deterministic re-init — the seam session replay relies on),
@@ -434,8 +574,10 @@ pub fn TsCoreHost(comptime core: type) type {
             delays = @splat(.{});
             streams = @splat(.{});
             audio_entry = .{};
+            images = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
+            image_cache_dir_len = 0;
             swallow_next_dispatch = false;
             const initial = core.initialModel();
             model_root = core.commitModelRoot(if (comptime init_returns_cmd) initial.model else initial);
@@ -493,6 +635,33 @@ pub fn TsCoreHost(comptime core: type) type {
             return runtime_effects.audioCachePath(&audio_cache_path_buf, audioCacheDir(), url) catch "";
         }
 
+        /// Configure the caches directory image-cache derivation uses —
+        /// `setAudioCacheDir`'s twin, same wiring-time contract.
+        pub fn setImageCacheDir(dir: []const u8) void {
+            if (dir.len > image_cache_dir_buf.len) {
+                @panic("ts core host: the image cache directory path is longer than the engine's image path bound");
+            }
+            @memcpy(image_cache_dir_buf[0..dir.len], dir);
+            image_cache_dir_len = dir.len;
+        }
+
+        fn imageCacheDir() []const u8 {
+            return image_cache_dir_buf[0..image_cache_dir_len];
+        }
+
+        /// The cache path an image_load record loads under: the
+        /// record's own when it carries one; otherwise, for URL sources
+        /// with a configured caches directory, the engine's
+        /// conventional content-addressed path
+        /// (`<cache_dir>/images/<sha256[..16]>.<ext>` via
+        /// `imageCachePath`) — `effectiveAudioCachePath`'s twin, a
+        /// fixed function of the wire bytes so replay re-derives
+        /// identically.
+        fn effectiveImageCachePath(cache_path: []const u8, url: []const u8) []const u8 {
+            if (cache_path.len > 0 or url.len == 0 or image_cache_dir_len == 0) return cache_path;
+            return runtime_effects.imageCachePath(&image_cache_path_buf, imageCacheDir(), url) catch "";
+        }
+
         /// One full dispatch cycle for `msg`. The `TsUiApp` adapter
         /// wires this to `UiApp.Options.update_fx` (refreshing the
         /// app-held root from `model()` afterwards) so host events and
@@ -511,8 +680,14 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Drain every queued effect completion into the core — the
         /// bridge-shaped mirror of `UiApp.drainEffects`' loop. Hosts
         /// that embed the core without a UiApp call this on wake/frame.
+        /// Bounded to the completions that existed at entry, exactly
+        /// like `UiApp.drainEffects`: a completion produced by a
+        /// dispatch inside this pass waits for the wake its producer
+        /// already nudged, keeping the session journal's event
+        /// boundaries causal (see `Effects.DrainBoundary`).
         pub fn drain(fx: *Fx) void {
-            while (fx.takeMsg()) |msg| dispatch(fx, msg);
+            var boundary = fx.drainBoundary();
+            while (fx.takeMsgWithin(&boundary)) |msg| dispatch(fx, msg);
         }
 
         fn dispatchDepth(fx: *Fx, msg: Msg, depth: usize) void {
@@ -540,7 +715,9 @@ pub fn TsCoreHost(comptime core: type) type {
             var now_count: usize = 0;
             var rejects: [max_rejects_per_cmd]u8 = undefined;
             var reject_count: usize = 0;
-            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count);
+            var image_rejects = ImageRejectStage.open(fx, cmd.len);
+            defer image_rejects.close();
+            runCmd(fx, cmd, &nows, &now_count, &rejects, &reject_count, &image_rejects);
             reconcileTimers(fx);
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
@@ -548,6 +725,14 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             for (rejects[0..reject_count]) |err_tag| {
                 dispatchDepth(fx, msgFromTagBytes(err_tag, "rejected"), depth + 1);
+            }
+            // Bridge-refused image loads (duplicate live id, an
+            // unrepresentable id, a full image table): the event arm's
+            // "rejected" state echoing the refused id, regenerated
+            // deterministically under replay like the spawn rejections
+            // above.
+            for (image_rejects.staged()) |reject| {
+                dispatchDepth(fx, msgFromTagImage(reject.tag, .{ .id = reject.id, .outcome = .rejected }), depth + 1);
             }
         }
 
@@ -562,6 +747,7 @@ pub fn TsCoreHost(comptime core: type) type {
             now_count: *usize,
             rejects: *[max_rejects_per_cmd]u8,
             reject_count: *usize,
+            image_rejects: *ImageRejectStage,
         ) void {
             var at: usize = 0;
             while (at < cmd.len) {
@@ -768,6 +954,32 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // quit_app [op]
                     0x11 => fx.quitApp(),
+                    // image_load [op][id f64 LE][event_tag]
+                    //            [path_len u32 LE][path][url_len u32 LE][url]
+                    //            [cache_len u32 LE][cache][expected f64 LE]
+                    0x12 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const image_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache_path = takeLongBytes(cmd, &at);
+                        const expected_bits = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
+                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, image_rejects);
+                    },
+                    // image_cancel [op][id f64 LE]
+                    0x13 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        runImageCancel(fx, id_value);
+                    },
+                    // image_unregister [op][id f64 LE]
+                    0x14 => {
+                        const id_bits = takeBytes(cmd, &at, 8);
+                        const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
+                        runImageUnregister(fx, id_value);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1028,6 +1240,154 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: an audio event arrived with no open bridge stream");
             }
             return msgFromTagAudio(audio_entry.event_tag, event);
+        }
+
+        /// Issue one image load. The keyed-effect discipline here is
+        /// the SPAWN exception, by the same reasoning: one load per id
+        /// at a time, never replaced implicitly — a duplicate LIVE id
+        /// rejects the new load (event arm, state "rejected", at the
+        /// post-cycle boundary), and so do an id the f64 wire cannot
+        /// honestly carry into the u64 registry (0, negatives,
+        /// fractions, 2^53 and past) and a 17th in-flight load (the table
+        /// mirrors the engine's max_effects slots, whose own exhaustion
+        /// answer is the same rejected result). Everything else the
+        /// engine refuses dynamically (a full registry, a bad source)
+        /// comes back through the entry's own event arm — never silent.
+        fn issueImageLoad(
+            fx: *Fx,
+            id_value: f64,
+            event_tag: u8,
+            image_path: []const u8,
+            url: []const u8,
+            cache_path: []const u8,
+            expected: f64,
+            image_rejects: *ImageRejectStage,
+        ) void {
+            // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
+            // grid steps by 2, so 2^53 is the first value that aliases
+            // a neighbor (2^53 + 1) on the wire — the bridge rejects it
+            // rather than guess which integer the app meant. 2^53 - 1
+            // is the last id every tier carries exactly.
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value < 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) {
+                image_rejects.push(event_tag, 0);
+                return;
+            }
+            const id: u64 = @intFromFloat(id_value);
+            if (findImage(id) != null) {
+                image_rejects.push(event_tag, id);
+                return;
+            }
+            const index = freeImageIndex() orelse {
+                // All 16 entries hold live loads — one gallery screen's
+                // Cmd.batch reaches this. The engine answers its own
+                // slot exhaustion with a dynamic `.rejected` result, and
+                // the audio channel's exhaustion story is a quiet
+                // in-place replace; a full bridge table speaks the same
+                // vocabulary: exactly one rejected result through the
+                // event arm, never a crash — however many loads one
+                // batch stages against it.
+                image_rejects.push(event_tag, id);
+                return;
+            };
+            const entry = &images[index];
+            entry.used = true;
+            entry.id = id;
+            entry.event_tag = event_tag;
+            fx.loadImage(.{
+                .id = id,
+                .path = image_path,
+                .url = url,
+                .cache_path = effectiveImageCachePath(cache_path, url),
+                // The wire carries the app's number; anything that is
+                // not a representable WHOLE byte count — fractional,
+                // out of range, NaN — means "unknown size" (0), the
+                // engine's own default. The integer clause matters:
+                // @intFromFloat would truncate 1.5 to 1, and the cache
+                // would then verify downloads against a size the app
+                // never declared — re-fetching on every launch. The
+                // bound is strictly BELOW 2^53, the id gate's: 2^53 is
+                // the first f64 that aliases a neighbor (2^53 + 1
+                // arrives as the same wire value), so there is no one
+                // honest count to install — it maps to "unknown" with
+                // the fractionals rather than becoming a verification
+                // size every real download misses. 0 is the honest
+                // mapping; the emitter already stops the literal
+                // spellings (NS1030).
+                .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected)
+                    @intFromFloat(expected)
+                else
+                    0,
+                .on_result = imageResultMsg,
+            });
+        }
+
+        fn findImage(id: u64) ?usize {
+            for (&images, 0..) |*entry, index| {
+                if (entry.used and entry.id == id) return index;
+            }
+            return null;
+        }
+
+        fn freeImageIndex() ?usize {
+            for (&images, 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        /// The image_cancel record: end the in-flight load under the
+        /// id, if any, LOUDLY — the engine delivers the load's one
+        /// terminal as `.cancelled`, which routes the entry's own event
+        /// arm through `imageResultMsg` and retires the entry (freeing
+        /// the id for a fresh load), the spawn cancel discipline. An id
+        /// naming no live entry — or one the wire cannot carry exactly,
+        /// which no load could ever park under — is a no-op, the same
+        /// idle no-op audio_ctl keeps: whatever it aimed at is already
+        /// gone. The raw id IS the engine key (image loads never mint a
+        /// bridge namespace), and every bridge key base sits above 2^53,
+        /// so the cancel can never reach another table's slot.
+        fn runImageCancel(fx: *Fx, id_value: f64) void {
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value < 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) return;
+            const id: u64 = @intFromFloat(id_value);
+            if (findImage(id) == null) return;
+            fx.cancel(id);
+        }
+
+        /// The image_unregister record: free the registry slot under
+        /// the id — direct registry surgery, registration's synchronous
+        /// discipline in reverse (no terminal, no Msg; the engine call
+        /// answers a bool the wire has no channel to carry, and a miss
+        /// means whatever it aimed at is already gone — image_cancel's
+        /// idle no-op). The bridge's load table is deliberately NOT
+        /// consulted: unregister targets the REGISTRY, and a load in
+        /// flight under the id is not a registry occupant — its
+        /// terminal registers as usual, re-occupying the id, so an app
+        /// that wants the slot to STAY free cancels the load first. An
+        /// id the wire cannot carry exactly could never have been
+        /// registered through this bridge, so it no-ops the same way.
+        fn runImageUnregister(fx: *Fx, id_value: f64) void {
+            const representable = std.math.isFinite(id_value) and
+                id_value >= 1 and id_value < 9007199254740992.0 and
+                @floor(id_value) == id_value;
+            if (!representable) return;
+            const id: u64 = @intFromFloat(id_value);
+            _ = fx.unregisterImage(id);
+        }
+
+        /// `ImageMsgFn` for image loads: the ONE terminal routes the
+        /// entry's event arm and retires the entry.
+        fn imageResultMsg(result: runtime_effects.EffectImageResult) Msg {
+            const index = findImage(result.id) orelse
+                @panic("ts core host: an image result arrived with no open bridge entry");
+            const entry = &images[index];
+            entry.used = false;
+            return msgFromTagImage(entry.event_tag, result);
         }
 
         /// The wire `cancel` record: first match wins across the four
@@ -1468,6 +1828,67 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: an audio event names a Msg tag outside the union");
+        }
+
+        /// The five-field image result record, matched by field name —
+        /// `audioArmShape`'s twin.
+        fn imageArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 5) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "id") or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
+                    if (f.type != i64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine image outcome,
+        /// matched by member NAME — `audioStateValue`'s twin.
+        fn imageStateValue(comptime E: type, outcome: runtime_effects.EffectImageOutcome) E {
+            const name = @tagName(outcome);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: an image outcome has no member in the result arm's state union - the transpiler's own shape check should have stopped this build");
+        }
+
+        /// Build the five-field image result arm at index `tag` from an
+        /// engine result, by field name. `id` is the requested ImageId
+        /// echoed verbatim (always below 2^53 — the bridge refused
+        /// anything wider — so both number classes carry it exactly).
+        fn msgFromTagImage(tag: u8, result: runtime_effects.EffectImageResult) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime imageArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = imageStateValue(f.type, result.outcome);
+                            } else if (comptime std.mem.eql(u8, f.name, "id")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.id) else @intCast(result.id);
+                            } else if (comptime std.mem.eql(u8, f.name, "width")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.width) else @intCast(result.width);
+                            } else if (comptime std.mem.eql(u8, f.name, "height")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.height) else @intCast(result.height);
+                            } else {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.status) else @intCast(result.status);
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: an image result targets Msg arm '" ++ arm.name ++ "', which is not the five-field image result record");
+                }
+            }
+            @panic("ts core host: an image result names a Msg tag outside the union");
         }
 
         /// Build the Msg arm at index `tag` carrying one number (`now`

@@ -724,3 +724,152 @@ test("streaming ops: wire bytes through the real dispatch cycle", { skip: !hasZi
     fs.rmSync(work, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------------------- images
+
+// Cmd.imageLoad end to end: the numeric-id record against the exact wire
+// layout rt.zig documents, the five-field result arm (the echoed id
+// included) round-tripping as a plain Msg, the source variants (local
+// path, url with cache), and the numeric-id image_cancel and
+// image_unregister records.
+const coreImages = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
+
+export interface Model { readonly cover: number; readonly w: number; readonly h: number; readonly errs: number; }
+
+export type Msg =
+  | { readonly kind: "load" }
+  | { readonly kind: "load_url" }
+  | { readonly kind: "drop" }
+  | { readonly kind: "evict" }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+
+export function initialModel(): Model {
+  return { cover: 0, w: 0, h: 0, errs: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "load": return [model, Cmd.imageLoad(7, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_url": return [model, Cmd.imageLoad(model.cover + 8, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 2048 }, { event: "image_done" })];
+    case "drop": return [model, Cmd.imageCancel(model.cover)];
+    case "evict": return [model, Cmd.imageUnregister(model.cover)];
+    case "image_done":
+      if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height };
+      return { ...model, errs: model.errs + 1 };
+  }
+}
+`;
+
+const harnessImages = `
+const std = @import("std");
+const core = @import("core.zig");
+const rt = core.rt;
+
+var g_model: *const core.Model = undefined;
+
+fn dispatch(msg: core.Msg, log: *std.ArrayList(u8)) []const u8 {
+    const r = core.update(g_model, msg);
+    g_model = core.commitModelRoot(r.model);
+    const start = log.items.len;
+    log.appendSlice(std.testing.allocator, r.cmd) catch @panic("oom");
+    rt.frameReset();
+    return log.items[start..];
+}
+
+fn tagOf(comptime arm: []const u8) u8 {
+    return @intFromEnum(@field(std.meta.Tag(core.Msg), arm));
+}
+
+fn expectLong(bytes: []const u8, at: *usize, expected: []const u8) !void {
+    const len = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, @intCast(expected.len)), len);
+    try std.testing.expectEqualStrings(expected, bytes[at.* + 4 ..][0..expected.len]);
+    at.* += 4 + expected.len;
+}
+
+test "image_load wire records match rt.zig's documented layout" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+
+    rt.resetAll();
+    g_model = core.commitModelRoot(core.initialModel());
+    rt.frameReset();
+
+    // image_load, local path: [0x12][id f64 LE][event_tag][path][url]
+    // [cache][expected f64 LE].
+    const load = dispatch(.load, &log);
+    try std.testing.expectEqual(@as(u8, 0x12), load[0]);
+    try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, load[1..9], .little))));
+    try std.testing.expectEqual(tagOf("image_done"), load[9]);
+    var at: usize = 10;
+    try expectLong(load, &at, "art/cover.png");
+    try expectLong(load, &at, "");
+    try expectLong(load, &at, "");
+    try std.testing.expectEqual(@as(f64, 0), @as(f64, @bitCast(std.mem.readInt(u64, load[at..][0..8], .little))));
+    try std.testing.expectEqual(load.len, at + 8);
+
+    // The result arm round-trips as a plain Msg (the five-field record,
+    // state matched by member name; the echoed id is what the model
+    // adopts on "loaded").
+    _ = dispatch(.{ .image_done = .{ .id = 7, .state = .loaded, .width = 640, .height = 480, .status = 200 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.w), 640), g_model.w);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.h), 480), g_model.h);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.cover), 7), g_model.cover);
+
+    // image_load, url with cache + expected size; the id is a model
+    // EXPRESSION (ids are model data) — 7 + 8 = 15 on the wire.
+    const stream = dispatch(.load_url, &log);
+    try std.testing.expectEqual(@as(u8, 0x12), stream[0]);
+    try std.testing.expectEqual(@as(f64, 15), @as(f64, @bitCast(std.mem.readInt(u64, stream[1..9], .little))));
+    at = 10;
+    try expectLong(stream, &at, "");
+    try expectLong(stream, &at, "https://c.test/a.png");
+    try expectLong(stream, &at, "cache/a.png");
+    try std.testing.expectEqual(@as(f64, 2048), @as(f64, @bitCast(std.mem.readInt(u64, stream[at..][0..8], .little))));
+
+    // A failure class routes the same arm; the model counts it.
+    _ = dispatch(.{ .image_done = .{ .id = 15, .state = .decode_failed, .width = 0, .height = 0, .status = 0 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.errs), 1), g_model.errs);
+
+    // image_cancel: [0x13][id f64 LE] — the id is a model expression
+    // (the adopted cover, 7).
+    const drop = dispatch(.drop, &log);
+    try std.testing.expectEqual(@as(u8, 0x13), drop[0]);
+    try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, drop[1..9], .little))));
+    try std.testing.expectEqual(@as(usize, 9), drop.len);
+
+    // image_unregister: [0x14][id f64 LE] — same one-field body, its own
+    // opcode (registry surgery, not a load verb).
+    const evict = dispatch(.evict, &log);
+    try std.testing.expectEqual(@as(u8, 0x14), evict[0]);
+    try std.testing.expectEqual(@as(f64, 7), @as(f64, @bitCast(std.mem.readInt(u64, evict[1..9], .little))));
+    try std.testing.expectEqual(@as(usize, 9), evict.len);
+}
+`;
+
+test("image loads: wire bytes through the real dispatch cycle", { skip: !hasZig, timeout: 300_000 }, () => {
+  const result = transpile(coreImages);
+  const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
+  assert.equal(result.ok, true, `transpile failed\n${result.typeErrors.join("\n")}\n${details}`);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-effects-images-"));
+  try {
+    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
+    fs.writeFileSync(path.join(work, "core.zig"), result.zig!);
+    fs.writeFileSync(path.join(work, "harness.zig"), harnessImages);
+    try {
+      execFileSync("zig", ["test", "harness.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
+    } catch (e) {
+      const err = e as { stderr?: string; stdout?: string };
+      assert.fail(`image-load harness failed:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
+    }
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});

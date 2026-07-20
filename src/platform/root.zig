@@ -179,6 +179,38 @@ pub const macos = @import("macos/root.zig");
 pub const linux = @import("linux/root.zig");
 pub const windows = @import("windows/root.zig");
 
+/// Install the host image codec for a headless session replay over the
+/// null platform. Replay decode serves JOURNALED bytes only — the
+/// network and the filesystem stay absent — but those bytes must decode
+/// through the SAME codec the recording host used, or replayed loads
+/// drop their pixels and replayed screenshots lose images. Every
+/// desktop host's codec is a context-free bytes-to-pixels call
+/// (CGImageSource / gdk-pixbuf / WIC), so a headless replay serves it
+/// with no window and no run loop. `platform_name` is the build's
+/// platform selection (the app runner's `build_options.platform`,
+/// comptime — arms for other platforms are never analyzed, so the
+/// codec-less test tier links without the host shims). A build with no
+/// host codec ("null") falls back to the null platform's strict
+/// test-PNG decoder — honest but narrow: only the canvas PNG writer's
+/// subset decodes there, and any other recorded format drops its pixels
+/// with the replay diagnostic while the Msg stream still replays
+/// verbatim.
+pub fn installHeadlessImageCodec(
+    comptime platform_name: []const u8,
+    headless_host: *NullPlatform,
+    services: *PlatformServices,
+) void {
+    if (comptime std.mem.eql(u8, platform_name, "macos")) {
+        macos.installHeadlessImageCodec(services);
+    } else if (comptime std.mem.eql(u8, platform_name, "linux")) {
+        linux.installHeadlessImageCodec(services);
+    } else if (comptime std.mem.eql(u8, platform_name, "windows")) {
+        windows.installHeadlessImageCodec(services);
+    } else {
+        headless_host.image_decode = true;
+    }
+}
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("null_platform_tests.zig");

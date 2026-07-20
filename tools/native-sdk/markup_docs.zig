@@ -84,6 +84,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
     .{ .name = "media-surface", .doc = "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers." },
+    .{ .name = "image", .doc = "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). Display-only (presses fall through); size it with width/height or grow (no intrinsic size); label it for screen readers." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -199,7 +200,7 @@ pub const timeline_item_attr_docs = [_]Doc{
 };
 
 pub const avatar_attr_docs = [_]Doc{
-    .{ .name = "image", .doc = "avatar: one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes); 0 renders the initials fallback." },
+    .{ .name = "image", .doc = "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); 0 draws nothing (an avatar falls back to its initials). Required on the image leaf." },
 };
 
 pub const media_surface_attr_docs = [_]Doc{

@@ -701,6 +701,22 @@ const SessionRecordContext = struct {
     }
 };
 
+/// The blob directory beside a session journal: `blobs/` in the
+/// journal's directory — large effect payloads (an image load's source
+/// bytes) live there content-addressed, referenced from journal
+/// records by hash + length (see session_blobs.zig).
+fn sessionBlobStore(io: std.Io, journal_path: []const u8) ?*native_sdk.runtime.SessionBlobDirStore {
+    var dir_buffer: [1024]u8 = undefined;
+    const parent = std.fs.path.dirname(journal_path) orelse ".";
+    const blob_dir = std.fmt.bufPrint(&dir_buffer, "{s}/blobs", .{parent}) catch return null;
+    const store = std.heap.page_allocator.create(native_sdk.runtime.SessionBlobDirStore) catch return null;
+    store.* = native_sdk.runtime.SessionBlobDirStore.init(io, blob_dir) catch {
+        std.heap.page_allocator.destroy(store);
+        return null;
+    };
+    return store;
+}
+
 /// `NATIVE_SDK_SESSION_RECORD=<path>`: create the journal file and a
 /// recorder that streams the session into it from the very first
 /// dispatched event (init determinism needs init-time effect results).
@@ -715,6 +731,7 @@ fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*
     context.* = .{ .io = init.io, .file = file };
     const recorder = std.heap.page_allocator.create(native_sdk.runtime.SessionRecorder) catch return null;
     recorder.* = native_sdk.runtime.SessionRecorder.init(context.sink());
+    if (sessionBlobStore(init.io, path)) |store| recorder.blob_sink = store.sink();
     recorder.begin(native_sdk.runtime.sessionHeaderNow(
         native_sdk.runtime.sessionPlatformName(),
         app_info.app_name,
@@ -769,6 +786,13 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
         null_platform.gpu_surface_scroll_drivers = true;
     }
+    // Replayed image loads decode too: successful `.image` records feed
+    // their journaled blob-store bytes back through decode+register, so
+    // the codec must be the recording host's own or every replayed load
+    // (and every replayed screenshot with an image in it) drops its
+    // pixels. Journaled bytes stay the only input — the codec is a pure
+    // bytes-to-pixels call and the network stays absent.
+    native_sdk.platform.installHeadlessImageCodec(build_options.platform, &null_platform, &replay_platform.services);
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers
@@ -794,7 +818,11 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         !std.mem.eql(u8, value, "0")
     else
         true;
-    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = verify }) catch |err| {
+    const blob_store = sessionBlobStore(init.io, journal_path);
+    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{
+        .verify = verify,
+        .blobs = if (blob_store) |store| store.source() else null,
+    }) catch |err| {
         switch (err) {
             error.JournalBadMagic,
             error.JournalUnsupportedVersion,

@@ -103,6 +103,35 @@
 //                                forget control verbs whose consequences arrive
 //                                on the event stream; aimed at a key with no
 //                                open stream they no-op.
+//   Cmd.imageLoad(id, { path?, url?, cachePath?, expectedBytes? }, { event })
+//                                load an image at runtime by its model-owned
+//                                numeric ImageId (the id markup binds:
+//                                <image image="{id}"/>, avatar likewise): the
+//                                host resolves the source cascade (local path
+//                                first, then a verified cache entry, then the
+//                                network), decodes through the platform codec,
+//                                registers the pixels under the id, and
+//                                dispatches exactly ONE `event` arm (the
+//                                five-field record below, the requested id
+//                                echoed) — state "loaded" with the decoded
+//                                width/height, or one failure class. One load
+//                                per id at a time: a duplicate live id
+//                                dispatches state "rejected".
+//   Cmd.imageCancel(id)          end the in-flight load under the id, if any
+//                                — loud, the spawn discipline: the load's
+//                                event arm delivers state "cancelled" and the
+//                                id frees for a fresh load once it lands. An
+//                                id with no live load no-ops.
+//   Cmd.imageUnregister(id)      free the registry slot under the id: the
+//                                pixels are released, views referencing the
+//                                id draw their fallback, and the slot is
+//                                open for another load. Synchronous registry
+//                                surgery like registration itself — not an
+//                                effect, no Msg follows; an id with no
+//                                registration no-ops. A load IN FLIGHT under
+//                                the id is untouched: its terminal still
+//                                registers — cancel the load first to keep
+//                                the slot free.
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -263,12 +292,87 @@ export type AudioEventArm = {
 };
 
 /// The Msg arms an audio event stream may target: arms whose payload is
-/// exactly the six AudioEventArm fields.
+/// exactly the six AudioEventArm fields. The `state` check runs BOTH
+/// directions: the `&` constraint holds the arm's states to AudioState,
+/// and the tuple-wrapped reverse check holds AudioState to the arm's
+/// states — a narrower union would silently drop event states the host
+/// emits, so it is refused here, not discovered at runtime.
 export type AudioEventKind<M extends Msgish> = M extends Msgish
   ? [Exclude<keyof M, "kind">] extends [keyof AudioEventArm]
     ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">]
       ? M extends Msgish & AudioEventArm
-        ? M["kind"]
+        ? [AudioState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The image load result states, mirroring the engine's outcome vocabulary:
+/// "loaded" means the pixels are registered under the requested id (width and
+/// height carry what the codec decoded); every other state is the failure
+/// class — "rejected" (a refused command: invalid id, no source, a duplicate
+/// live id), "not_found" (missing local file, no url), "io_failed" (a local
+/// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
+/// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
+/// it), "cancelled", "too_large" (source or decoded pixels over budget),
+/// "unsupported" (no platform codec), "decode_failed", "registry_full", and
+/// "alloc_failed" (the host refused the memory the registration needed —
+/// resource exhaustion, not corrupt bytes: the same source may load once
+/// memory frees).
+export type ImageState =
+  | "loaded"
+  | "rejected"
+  | "not_found"
+  | "io_failed"
+  | "connect_failed"
+  | "tls_failed"
+  | "protocol_failed"
+  | "timed_out"
+  | "http_status"
+  | "cancelled"
+  | "too_large"
+  | "unsupported"
+  | "decode_failed"
+  | "registry_full"
+  | "alloc_failed";
+
+/// The payload shape of an image result arm — five fields, matched by NAME
+/// (the AudioEventArm convention). `id` is the requested ImageId echoed
+/// verbatim, so two concurrent loads sharing one event arm stay
+/// distinguishable in `update` (an id the wire cannot carry exactly — 0,
+/// negatives, fractions, 2^53 and past — echoes 0, the no-image sentinel:
+/// there is no honest integer to echo); `state` must be a named
+/// string-literal-union alias carrying exactly the fifteen ImageState
+/// members (any declaration order — the host matches members by name);
+/// `width`/`height` are the decoded pixel dimensions ("loaded" only, 0
+/// otherwise); `status` is the HTTP status for url loads that performed an
+/// exchange, 0 when none occurred (local paths, cache hits) — 0 is signal,
+/// not a missing value: a cache hit is a real "loaded" with no exchange
+/// behind it, so apps can distinguish a network load from a cached one.
+export type ImageEventArm = {
+  readonly id: number;
+  readonly state: ImageState;
+  readonly width: number;
+  readonly height: number;
+  readonly status: number;
+};
+
+/// The Msg arms an image load result may target: arms whose payload is
+/// exactly the five ImageEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to ImageState, and the tuple-wrapped reverse check
+/// holds ImageState to the arm's states — a narrower union would
+/// silently drop result states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type ImageEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageEventArm]
+    ? [keyof ImageEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageEventArm
+        ? [ImageState] extends [M["state"]]
+          ? M["kind"]
+          : never
         : never
       : never
     : never
@@ -348,6 +452,26 @@ export interface AudioSource {
 /// (the six-field AudioEventArm record, matched by field name).
 export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
+}
+
+/// A `Cmd.imageLoad` source: the audio cascade's shape exactly. The local
+/// `path` is tried first; a missing file falls through to `url` (fetched
+/// whole, installed at `cachePath` when given and verified against
+/// `expectedBytes` — 0/omitted means unknown size, existence alone qualifies
+/// a cache entry; omit `cachePath` and the host derives the conventional
+/// content-addressed path when a caches directory is configured). At least
+/// one of path/url must be present.
+export interface ImageSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+/// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
+/// arm (the five-field ImageEventArm record, matched by field name).
+export interface ImageRoute<M extends Msgish> {
+  readonly event: ImageEventKind<M>;
 }
 
 /// The closed HTTP verb set of `Cmd.fetch` (wire value = declaration order).
@@ -448,6 +572,17 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "quit_app" }
+  | {
+      readonly op: "image_load";
+      readonly id: number;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
+  | { readonly op: "image_cancel"; readonly id: number }
+  | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -692,6 +827,58 @@ export const Cmd = {
   /// recording session seals its journal. Fire-and-forget.
   quitApp(): Cmd<never> {
     return { op: "quit_app" };
+  },
+
+  /// Load an image at runtime under the model-owned numeric ImageId your
+  /// markup binds (`<image image="{id}"/>`, `<avatar image="{id}"/>`):
+  /// resolve the source cascade (local path first, then a verified cache
+  /// entry, then the network), decode through the platform codec, register
+  /// the pixels under `id`, and dispatch exactly ONE `event` arm — state
+  /// "loaded" with the decoded width/height, or one failure class, always
+  /// echoing the requested id so concurrent loads sharing the arm stay
+  /// distinguishable. Failure is never silent, and views referencing the
+  /// id repaint on the next
+  /// frame. One load per id at a time: a duplicate live id dispatches state
+  /// "rejected" (finish or re-key instead — ids are model data). Ids are
+  /// positive integers below 2^53 outside the reserved bit-63 namespace;
+  /// 0 is the no-image sentinel and dispatches "rejected".
+  imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M> {
+    return {
+      op: "image_load",
+      id,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
+  },
+
+  /// End the in-flight image load under `id`, if any — LOUDLY: the load's
+  /// one terminal arrives as its own `event` arm with state "cancelled"
+  /// (ending an in-flight load is an observable event, the spawn cancel
+  /// discipline), and the id is free for a fresh load once that terminal
+  /// lands. Aimed at an id with no live load it no-ops (the load it aimed
+  /// at already delivered its terminal). Image loads are keyed by their
+  /// numeric id, so the string-keyed `Cmd.cancel` never touches them —
+  /// this is their cancel, the way `Cmd.audioStop` is audio's.
+  imageCancel(id: number): Cmd<never> {
+    return { op: "image_cancel", id };
+  },
+
+  /// Free the registry slot under `id`: the pixels are released, views
+  /// referencing the id draw their fallback (avatar initials) on the next
+  /// frame, and the slot — one of the registry's 16 — is open for another
+  /// load (the gallery eviction move: unregister the evictee, load the
+  /// newcomer under a fresh id). Like registration itself this is
+  /// synchronous registry surgery, not an effect: no Msg follows, and an
+  /// id with no registration no-ops (whatever it aimed at is already
+  /// gone, `Cmd.imageCancel`'s idle rule). It frees only the CURRENT
+  /// registration — a load IN FLIGHT under the id is untouched and its
+  /// terminal still registers the pixels; to keep the slot free, end the
+  /// load with `Cmd.imageCancel(id)` first.
+  imageUnregister(id: number): Cmd<never> {
+    return { op: "image_unregister", id };
   },
 
   /// Several commands from one dispatch, performed in order.

@@ -1102,6 +1102,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // envMsgs dispatch consumes the queue on the
                     // replayed installing frame (zero env reads).
                     .env => try self.effects.pushReplayEnv(record.stderr_tail, record.payload),
+                    // `.image` records deliver the RECORDED terminal
+                    // verbatim (byte-identical Msg stream on any host)
+                    // and re-register the journaled source bytes —
+                    // resolved from the blob store into `payload` by
+                    // the replayer — best-effort for presentation.
+                    // Loop-side validation rejections never reach here
+                    // (marked by `exit_reason == .rejected`, they
+                    // regenerate and are skipped); a worker-origin
+                    // `.rejected` terminal feeds like any failure class.
+                    .image => try self.effects.feedImageResult(
+                        record.key,
+                        record.image_outcome,
+                        record.image_width,
+                        record.image_height,
+                        record.status,
+                        record.payload,
+                    ),
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every
                     // other audio kind rides the plain shape.
@@ -1161,7 +1178,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             var dispatched = false;
-            while (self.effects.takeMsg()) |msg| {
+            // One pass consumes only completions that existed when it
+            // began: a load started by an update handler in THIS pass
+            // that finishes while the pass still runs waits for the wake
+            // its producer already nudged. That keeps the session
+            // journal's event boundaries causal — every result recorded
+            // ahead of this wake's event record answers a request from
+            // an earlier dispatch, so replay's file-order feed always
+            // finds the parked request (see Effects.DrainBoundary).
+            var boundary = self.effects.drainBoundary();
+            while (self.effects.takeMsgWithin(&boundary)) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
             }

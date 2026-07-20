@@ -21,13 +21,14 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 66), schema.elements.len);
+    try testing.expectEqual(@as(usize, 67), schema.elements.len);
     try testing.expectEqual(@as(usize, 81), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
     // The element table runs through the span composite (64), the
-    // bubble-reactions composite (65), and the media surface (66).
+    // bubble-reactions composite (65), the media surface (66), and the
+    // runtime-image leaf (67).
     try testing.expectEqual(
-        @as(u64, 0x65ed870d5b6e279e),
+        @as(u64, 0x2a68661a562f0565),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -90,7 +91,7 @@ test "registry event scoping names registry elements" {
 test "derived name lists mirror the registry" {
     // The derivations are the vocabulary every consumer reads; hold them
     // to the registry's own predicates.
-    try testing.expectEqual(@as(usize, 54), schema.element_names.len);
+    try testing.expectEqual(@as(usize, 55), schema.element_names.len);
     for (schema.element_names) |name| {
         try testing.expect(schema.elementByName(name).?.rule_hook == null);
     }

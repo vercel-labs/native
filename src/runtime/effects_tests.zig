@@ -1536,3 +1536,156 @@ test "real executor reports unspawnable binaries as spawn_failed" {
     try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.line_count);
 }
+
+test "a spawn exit still undelivered occupies its key against a respawn; delivery frees it" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The fed exit queues the terminal and parks the slot — posted but
+    // undelivered. A respawn of the same key inside that window must
+    // reject: under session replay the first spawn is still a parked
+    // `.running` fake here (its journaled exit feeds at the recorded
+    // delivery position), so a live accept would journal a Msg stream
+    // replay rejects.
+    try fx.feedExit(stream_key, 0);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+
+    // Delivery order: the staged rejection first (loop-side pending),
+    // then the queued exit.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(i32, 0), h.app_state.model.exit_code);
+
+    // The window ends at delivery: the same key spawns again.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+}
+
+/// One-shot flag for the respawn-from-own-exit idiom test below.
+var test_respawn_on_exit: bool = false;
+
+/// `streamUpdate` plus the restart idiom: the exit handler answers its
+/// own terminal by respawning the same key (one-shot).
+fn respawnUpdate(model: *StreamModel, msg: StreamMsg, fx: *StreamEffects) void {
+    if (msg == .done and test_respawn_on_exit) {
+        test_respawn_on_exit = false;
+        model.recordExit(msg.done);
+        fx.spawn(.{
+            .key = stream_key,
+            .argv = test_argv,
+            .on_line = StreamEffects.lineMsg(.line),
+            .on_exit = StreamEffects.exitMsg(.done),
+        });
+        return;
+    }
+    streamUpdate(model, msg, fx);
+}
+
+test "an update that respawns the same key from its own exit parks instead of rejecting" {
+    var h = try Harness.createWith(respawnUpdate);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    test_respawn_on_exit = true;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try fx.feedExit(stream_key, 0);
+
+    // The drain clears the undelivered-exit marker AND retires the slot
+    // BEFORE the terminal Msg reaches update, so the handler's respawn
+    // of its own key is a fresh accepted spawn — the restart idiom must
+    // not regress. (The retire is the loop-side half of the worker's
+    // post-then-store epilogue; on this fed path the slot was already
+    // `.draining`, so the drain's store is an idempotent re-store.)
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(effects_mod.EffectExitReason.exited, h.app_state.model.exit_reason.?);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // The respawned occupancy is a full fresh effect, not a resurrected
+    // slot: its own exit delivers and the cycle restarts cleanly.
+    test_respawn_on_exit = true;
+    try fx.feedExit(stream_key, 7);
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 2), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(i32, 7), h.app_state.model.exit_code);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    test_respawn_on_exit = false;
+}
+
+/// Spawn slots carrying a set undelivered-exit marker.
+fn markedExitSlotCount(fx: *StreamEffects) usize {
+    var count: usize = 0;
+    for (&fx.slots) |*slot| {
+        if (slot.kind == .spawn and slot.exit_undelivered) count += 1;
+    }
+    return count;
+}
+
+test "consuming a fed lines exit clears the undelivered-exit marker" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    test_argv = &.{"worker"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+
+    // Posted but undelivered: the marker holds the slot (and the key).
+    try fx.feedExit(stream_key, 0);
+    try std.testing.expectEqual(@as(usize, 1), markedExitSlotCount(fx));
+
+    // Dequeueing the exit IS its delivery: the drain must clear the
+    // marker when it consumes the exit, or `reclaimSlots` holds the
+    // slot out of `.idle` forever.
+    try h.drainWakes();
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+    try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(fx));
+}
+
+test "every delivered lines exit hands its slot back for reuse" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var h = try Harness.create();
+    defer h.destroy();
+
+    test_argv = &.{"/nonexistent/native-sdk-effects-test-binary"};
+    test_stdin = null;
+    test_max_line_bytes = effects_mod.max_effect_line_bytes;
+    // Each round runs the real worker epilogue end to end (an
+    // unspawnable binary is still worker truth: the worker posts a
+    // `.spawn_failed` exit through the same mark-then-post commit) and
+    // must return its slot. More rounds than the pool has slots proves
+    // delivery frees them: a marker the drain's consume ever missed
+    // would strand its slot in `.draining`, exhaust the pool, and turn
+    // a later round's reason into `.rejected`.
+    const io = std.testing.io;
+    var round: usize = 1;
+    while (round <= effects_mod.max_effects + 1) : (round += 1) {
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        var waited_ms: usize = 0;
+        while (h.app_state.model.exit_count < round) : (waited_ms += 10) {
+            if (waited_ms >= 20_000) return error.TestTimedOut;
+            try h.drainWakes();
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+        try std.testing.expectEqual(round, h.app_state.model.exit_count);
+        try std.testing.expectEqual(effects_mod.EffectExitReason.spawn_failed, h.app_state.model.exit_reason.?);
+        try std.testing.expectEqual(@as(usize, 0), markedExitSlotCount(&h.app_state.effects));
+    }
+}

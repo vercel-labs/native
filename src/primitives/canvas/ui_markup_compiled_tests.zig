@@ -1251,6 +1251,61 @@ test "compiled avatar and media-surface id bindings refuse negative model values
     try testing.expectError(error.OutOfMemory, surface_ui.finalize(surface_node));
 }
 
+// ------------------------------------------------ image leaf id binding
+
+const ImageLeafUi = fixture.ImageLeafUi;
+const ImageLeafInterpreter = markup_view.MarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg);
+const ImageLeafCompiled = canvas.CompiledMarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg, fixture.image_markup_source);
+const ImageLeafNegativeCompiled = canvas.CompiledMarkupView(fixture.ImageLeafModel, fixture.ImageLeafMsg, fixture.image_negative_markup_source);
+
+test "compiled image leaf binding matches the interpreter and the hand-written view" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.ImageLeafModel{ .cover = 42 };
+
+    var view = try ImageLeafInterpreter.init(arena, fixture.image_markup_source);
+    var interpreted_ui = ImageLeafUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = ImageLeafUi.init(arena);
+    const compiled = try compiled_ui.finalize(ImageLeafCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = ImageLeafUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handImageLeafView(&hand_ui, &model));
+
+    try expectSameTree(fixture.ImageLeafMsg, hand, interpreted);
+    try expectSameTree(fixture.ImageLeafMsg, hand, compiled);
+
+    // The field binding and the fn binding both resolve to the
+    // widget's image id at comptime-unrolled access.
+    const cover = compiled.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqual(@as(canvas.ImageId, 43), compiled.root.children[1].image_id);
+
+    // 0 draws nothing in both engines — the not-loaded-yet state.
+    const empty_model = fixture.ImageLeafModel{};
+    var empty_ui = ImageLeafUi.init(arena);
+    const empty = try empty_ui.finalize(ImageLeafCompiled.build(&empty_ui, &empty_model));
+    try testing.expectEqual(@as(canvas.ImageId, 0), empty.root.children[0].image_id);
+}
+
+test "compiled image leaf binding refuses negative model values instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A negative i64 binding into the u64 id seam latches the failed
+    // build (the interpreter's teaching error mirrors it), and
+    // finalize surfaces the failure — never an @intCast trap.
+    var image_ui = ImageLeafUi.init(arena);
+    const image_node = ImageLeafNegativeCompiled.build(&image_ui, &fixture.ImageLeafModel{});
+    try testing.expect(image_ui.failed);
+    try testing.expectError(error.OutOfMemory, image_ui.finalize(image_node));
+}
+
 // ------------------------------------------------------ text wrap parity
 
 const WrapUi = fixture.WrapUi;

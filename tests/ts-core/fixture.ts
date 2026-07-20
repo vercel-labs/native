@@ -12,6 +12,12 @@ import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
 
 export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
 
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
+
 export interface Model {
   readonly polling: boolean;
   readonly ticks: number;
@@ -32,6 +38,31 @@ export interface Model {
   readonly playing: boolean;
   readonly bands: Uint8Array;
   readonly audioEvents: number;
+  readonly cover: number;
+  readonly coverW: number;
+  readonly coverH: number;
+  readonly imageState: ImageState;
+  readonly imageStatus: number;
+  readonly imageResults: number;
+  // The echoed ImageId of the last image result — how concurrent loads
+  // sharing the one event arm stay distinguishable in update.
+  readonly lastImageId: number;
+  // Model-owned dynamic ImageIds: the bridge validates these at
+  // runtime (the emitter's NS1030 gate covers literals only).
+  readonly nextCover: number;
+  readonly topId: number;
+  // Model-owned expectedBytes values the emitter's literal gate never
+  // sees: a fractional count the bridge must map to "unknown size"
+  // (never truncate into a wrong verification size), and a whole one
+  // it must carry through exactly.
+  readonly fracBytes: number;
+  readonly wholeBytes: number;
+  // The expectedBytes wire boundary, model-owned like topId: 2^53 - 1
+  // is the last exactly-carried count, and 2^53 (which 2^53 + 1
+  // aliases on the f64 wire) must map to "unknown size" — there is no
+  // one honest count to verify against.
+  readonly topBytes: number;
+  readonly pastBytes: number;
 }
 
 export type Msg =
@@ -63,7 +94,23 @@ export type Msg =
   | { readonly kind: "pause_music" }
   | { readonly kind: "set_volume" }
   | { readonly kind: "stop_music" }
-  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array };
+  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "show_cover" }
+  | { readonly kind: "show_cover_again" }
+  | { readonly kind: "load_next" }
+  | { readonly kind: "load_top" }
+  | { readonly kind: "load_past" }
+  | { readonly kind: "load_flood" }
+  | { readonly kind: "load_frac" }
+  | { readonly kind: "load_sized" }
+  | { readonly kind: "load_top_bytes" }
+  | { readonly kind: "load_past_bytes" }
+  | { readonly kind: "cancel_cover" }
+  | { readonly kind: "cancel_missing" }
+  | { readonly kind: "evict_first" }
+  | { readonly kind: "evict_cover" }
+  | { readonly kind: "evict_missing" }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -87,6 +134,19 @@ export function initialModel(): [Model, Cmd<Msg>] {
       playing: false,
       bands: new Uint8Array(0),
       audioEvents: 0,
+      cover: 0,
+      coverW: -1,
+      coverH: -1,
+      imageState: "rejected",
+      imageStatus: -1,
+      imageResults: 0,
+      lastImageId: -1,
+      nextCover: 100,
+      topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
+      fracBytes: 1.5,
+      wholeBytes: 4096,
+      topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
+      pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -174,6 +234,106 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         bands: msg.bands,
         audioEvents: model.audioEvents + 1,
       };
+    case "show_cover":
+      // The runtime ImageId the views bind; the model only adopts it
+      // on a loaded result (the store-the-id-on-success discipline).
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png"), url: asciiBytes("https://cdn.test/cover.png") }, { event: "image_done" })];
+    case "show_cover_again":
+      // A duplicate live id: the bridge rejects it (state "rejected")
+      // — one load per id at a time, the spawn discipline.
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_next":
+      // Dynamic ids straight off the model: each dispatch parks one
+      // more in-flight load, so the e2e suite can fill the bridge's
+      // 16-entry image table and prove the 17th answers "rejected"
+      // (never a crash) while the 16 live loads stay healthy.
+      return [{ ...model, nextCover: model.nextCover + 1 }, Cmd.imageLoad(model.nextCover, { path: asciiBytes("art/flood.png") }, { event: "image_done" })];
+    case "load_top":
+      // 2^53 - 1 reaching the bridge as a DYNAMIC value the emitter's
+      // literal gate never sees: the last id every tier carries
+      // exactly, so it must park a live load.
+      return [model, Cmd.imageLoad(model.topId, { path: asciiBytes("art/top.png") }, { event: "image_done" })];
+    case "load_past":
+      // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot
+      // carry exactly. Dynamic values answer "rejected" at runtime, the
+      // runtime twin of the emitter's compile-time literal gate.
+      return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
+    case "load_flood":
+      // Seventeen loads in ONE command value: against a full image
+      // table every one must answer "rejected" at the post-cycle
+      // boundary — one result per load, however many one batch stages.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(200, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(201, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(202, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(203, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(204, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(205, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(206, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(207, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(208, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(209, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(210, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(211, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(212, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(213, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(214, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+      ])];
+    case "load_frac":
+      // A fractional expectedBytes reaching the bridge as a DYNAMIC
+      // value the emitter's literal gate never sees: not a
+      // representable whole byte count, so the bridge hands the engine
+      // "unknown size" (0) — truncating to 1 would make the cache
+      // verify against a size the app never declared.
+      return [model, Cmd.imageLoad(61, { url: asciiBytes("https://cdn.test/frac.png"), cachePath: asciiBytes("cache/frac.png"), expectedBytes: model.fracBytes }, { event: "image_done" })];
+    case "load_sized":
+      // The whole-number control: a dynamic representable count rides
+      // the wire into the engine exactly.
+      return [model, Cmd.imageLoad(62, { url: asciiBytes("https://cdn.test/sized.png"), cachePath: asciiBytes("cache/sized.png"), expectedBytes: model.wholeBytes }, { event: "image_done" })];
+    case "load_top_bytes":
+      // 2^53 - 1 as a DYNAMIC count: the last one the f64 wire carries
+      // exactly, so it must install as the verification size verbatim.
+      return [model, Cmd.imageLoad(63, { url: asciiBytes("https://cdn.test/top.png"), cachePath: asciiBytes("cache/top.png"), expectedBytes: model.topBytes }, { event: "image_done" })];
+    case "load_past_bytes":
+      // 2^53 as a DYNAMIC count — and 2^53 + 1 arrives as this exact
+      // wire value (the f64 grid steps by 2 there), so there is no one
+      // honest count to verify against. The bridge maps it to "unknown
+      // size" (0), joining the fractionals: installing it would make
+      // every real download miss verification and re-fetch on launch.
+      return [model, Cmd.imageLoad(64, { url: asciiBytes("https://cdn.test/past.png"), cachePath: asciiBytes("cache/past.png"), expectedBytes: model.pastBytes }, { event: "image_done" })];
+    case "cancel_cover":
+      // The numeric-id cancel: ends the in-flight load under id 21
+      // loudly (its own event arm delivers state "cancelled") and
+      // frees the id for a same-id retry.
+      return [model, Cmd.imageCancel(21)];
+    case "cancel_missing":
+      // An id with no live load: the documented no-op — no result, no
+      // crash, nothing to report on.
+      return [model, Cmd.imageCancel(555)];
+    case "evict_first":
+      // The gallery eviction move: free the registry slot under the
+      // first dynamic id, so a full 16-slot registry accepts one more
+      // image. Synchronous registry surgery — no result Msg.
+      return [model, Cmd.imageUnregister(100)];
+    case "evict_cover":
+      // Unregister aimed at the cover id — in the e2e it lands both
+      // while a load is IN FLIGHT (a registry miss: no-op, and the
+      // load's terminal still registers) and while the id is
+      // registered under a live reload (the slot frees now, and the
+      // reload's terminal re-registers it).
+      return [model, Cmd.imageUnregister(21)];
+    case "evict_missing":
+      // An id with no registration: the documented no-op — no result,
+      // no crash, nothing to report on.
+      return [model, Cmd.imageUnregister(888)];
+    case "image_done":
+      // The echoed id IS the adopted id — the store-the-id-on-success
+      // discipline reads it off the result instead of hardcoding it.
+      if (msg.state === "loaded")
+        return { ...model, cover: msg.id, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
+      return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
   }
 }
 

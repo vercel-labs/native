@@ -497,7 +497,7 @@ macOS-first, like `resizable = false`: GTK and Win32 hosts keep standard chrome 
 
 Image pixels are runtime-registered resources: the app registers decoded straight-alpha RGBA8 under a caller-chosen `ImageId` (a `u64` kept in the model, effect-key style; 0 is the "no image" sentinel), and `image`, `icon_button`, and `avatar` widgets reference the id. Native SDK bundles no image codecs — encoded bytes (PNG, JPEG, whatever the OS decodes) go through the platform decoder: CGImageSource on macOS and the iOS toolkit host, gdk-pixbuf on GTK, WIC on Windows, BitmapFactory on the Android toolkit host (both mobile hosts register the codec over the embed image service; an embed host without one reports `error.UnsupportedService`).
 
-The fetch-avatar path is one update arm: fetch bytes, decode + register in one call, and write the id into the model only on success — so the avatar renders its initials while the image is loading and keeps them when the fetch or decode failed:
+The first-class load path is `fx.loadImage` (`Cmd.imageLoad` on the TS tier): one effect resolving a local-then-URL source cascade with a content-addressed cache, decoding, registering, and delivering exactly one result Msg — see [Dynamic Images](/dynamic-images) for the whole story, including the byte-identical offline replay guarantee. The registration seam underneath is also callable directly — the hand-rolled fetch-avatar path is one update arm: fetch bytes, decode + register in one call, and write the id into the model only on success — so the avatar renders its initials while the image is loading and keeps them when the fetch or decode failed:
 
 ```zig
 .load => fx.fetch(.{ .key = avatar_key, .url = avatar_url, .on_response = Effects.responseMsg(.fetched) }),
@@ -516,7 +516,9 @@ ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics =
 ```
 
 ```html
-<!-- in markup, avatars bind the same model id; 0 renders the initials -->
+<!-- in markup, image leaves and avatars bind the same model id;
+     0 draws nothing / renders the initials -->
+<image image="{chart_image}" width="120" height="80" label="Chart" />
 <avatar image="{avatar_image}" label="Octocat">OC</avatar>
 ```
 

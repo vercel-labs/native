@@ -701,6 +701,15 @@ fn requestFrame(context: ?*anyopaque) anyerror!void {
     native_sdk_gtk_request_frame(self.host);
 }
 
+/// Headless image codec for session replay: the SAME gdk-pixbuf decode
+/// a live host serves (see `decodeImage` below — a context-free
+/// bytes-to-pixels call, no window, no run loop), so journaled image
+/// bytes re-register the identical pixels under a headless replay on
+/// the same platform.
+pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
+}
+
 /// gdk-pixbuf-backed image decoding (PNG, JPEG, ... — whatever loaders
 /// the system ships) into straight-alpha RGBA8.
 fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {

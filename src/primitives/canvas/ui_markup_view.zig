@@ -398,6 +398,23 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (pane_count != 2) return self.failNode(node, markup.split_children_message);
             }
+            // The image leaf's static shape, mirroring the validator and
+            // the compiled engine's compile error. Without its id binding
+            // the leaf can never draw - statically dead markup, refused
+            // here too so markup that skipped validation (hot reload)
+            // fails the build instead of silently rendering nothing. And
+            // it takes no children at all (icon's leaf policy): checked
+            // on the ORIGINAL node, so an extracted context-menu still
+            // counts as a child exactly like the validator's raw-node
+            // check.
+            if (kind == .image) {
+                if (node.attr("image") == null) {
+                    return self.failNode(node, markup.image_missing_image_message);
+                }
+                if (node.children.len > 0) {
+                    return self.failNode(node, markup.image_children_message);
+                }
+            }
             // The a11y lint's error half: an unnamed interactive control
             // or a misused role ships a view a screen reader user cannot
             // operate, so it fails the build like any other markup
@@ -1567,28 +1584,29 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             };
         }
 
-        /// `image="{binding}"` on avatar: one binding producing a `u64`
-        /// `canvas.ImageId` the app registered at runtime
-        /// (`fx.registerImageBytes`) — the id is model data, never a
-        /// markup literal, and 0 keeps the initials fallback. Scoped to
-        /// avatar; the other image-bearing widgets (image, icon,
-        /// icon-button) stay Zig views.
+        /// `image="{binding}"` on avatar and image: one binding
+        /// producing a `u64` `canvas.ImageId` the app registered at
+        /// runtime (`Cmd.imageLoad`, `fx.loadImage`,
+        /// `fx.registerImageBytes`) — the id is model data, never a
+        /// markup literal, and 0 draws nothing (an avatar keeps its
+        /// initials fallback). The remaining image-bearing widget
+        /// (icon-button) stays a Zig view.
         fn applyImageAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
-            if (!std.mem.eql(u8, node.name, "avatar")) {
-                return self.failVoid(node, markup.avatar_image_element_message);
+            if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                return self.failVoid(node, markup.image_binding_element_message);
             }
             const typed = markup.attrTyped(attribute);
-            if (typed != .binding) return self.failVoid(node, markup.avatar_image_message);
+            if (typed != .binding) return self.failVoid(node, markup.image_binding_message);
             const value = try self.evalBinding(scope, node, typed.binding, true);
             // Range-checked before the u64 cast: expression values are
             // i64, so a signed model field (`image: i64 = -1`) can
             // deliver a negative — the teaching failure, never a trap.
             options.image = switch (value) {
                 .integer => |int| if (int < 0)
-                    return self.failVoid(node, markup.avatar_image_message)
+                    return self.failVoid(node, markup.image_binding_message)
                 else
                     @intCast(int),
-                else => return self.failVoid(node, markup.avatar_image_message),
+                else => return self.failVoid(node, markup.image_binding_message),
             };
         }
 

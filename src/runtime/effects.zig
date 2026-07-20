@@ -64,6 +64,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const canvas = @import("canvas");
+const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const runtime_clock = @import("clock.zig");
 
@@ -120,6 +122,13 @@ pub const max_effect_queue_entries: usize = 64;
 /// that found the queue full). Sized above the slot count so a burst of
 /// rejected spawns in one update still surfaces individually.
 pub const max_effect_pending_exits: usize = 32;
+/// Inline capacity of the loop-side image-terminal stage — the
+/// allocation-free everyday case. Unlike the pending ring the stage
+/// never evicts: a burst past this spills to a heap ring sized by the
+/// burst itself (each staged entry is one `loadImage` call's only
+/// terminal, so storage is bounded by the caller's own call count
+/// between drains).
+pub const max_effect_pending_images_inline: usize = max_effect_pending_exits;
 
 /// Maximum bytes of one fetch's URL.
 pub const max_effect_url_bytes: usize = 2048;
@@ -634,6 +643,155 @@ pub fn audioCachePath(buffer: []u8, cache_dir: []const u8, url: []const u8) ![]c
     return std.fmt.bufPrint(buffer, "{s}/audio/{s}{s}", .{ cache_dir, hex, extension });
 }
 
+/// Derive the conventional cache file path for a URL image source:
+/// `<cache_dir>/images/<hash>.<ext>` — `audioCachePath`'s convention
+/// (first 16 bytes of the URL's SHA-256 in lowercase hex, the extension
+/// kept as a decoder hint) under its own `images/` segment so the two
+/// caches never collide and each clears independently.
+pub fn imageCachePath(buffer: []u8, cache_dir: []const u8, url: []const u8) ![]const u8 {
+    if (cache_dir.len == 0 or url.len == 0) return error.InvalidImageOptions;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(url, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest[0..16].*, .lower);
+    const tail = if (std.mem.lastIndexOfScalar(u8, url, '/')) |slash| url[slash + 1 ..] else url;
+    var extension: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, tail, '.')) |dot| {
+        const candidate = tail[dot..];
+        // A plausible extension only: short, and free of query/fragment
+        // syntax that would smuggle URL machinery into a file name.
+        if (candidate.len <= 8 and std.mem.indexOfAny(u8, candidate, "?#&") == null) {
+            extension = candidate;
+        }
+    }
+    return std.fmt.bufPrint(buffer, "{s}/images/{s}{s}", .{ cache_dir, hex, extension });
+}
+
+/// The temp path one cache install writes before its atomic rename
+/// into `cache_path`. The name must be WRITER-unique, not merely
+/// url-unique or channel-unique: two concurrent loads of the same URL
+/// install toward the same cache path, and a shared temp would let one
+/// writer truncate the other's bytes mid-write — or rename a
+/// half-written file into place. The slot generation alone cannot
+/// carry that uniqueness: it is channel-local, so two Effects channels
+/// in one process — or two app processes sharing the platform cache
+/// directory — can reach the same generation concurrently and collide.
+/// `token` is the install's own random draw (`installImageCache` takes
+/// it from the operation's executor io), unique across channels and
+/// processes alike; the generation stays in the name purely as debris
+/// provenance — a leftover `.partial` names which in-flight operation
+/// a hard crash interrupted. This function stays a pure formatter on
+/// every compile target: the entropy lives with the caller, and no
+/// freestanding build can ever run an install (there is no executor io
+/// and no cache directory there), so no target gate is needed here.
+pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u32, token: u64) ![]const u8 {
+    if (cache_path.len == 0) return error.InvalidImageOptions;
+    return std.fmt.bufPrint(buffer, "{s}.{d}-{x:0>16}.partial", .{ cache_path, generation, token });
+}
+
+/// Longest local path (and cache path) one `loadImage` source may name,
+/// mirroring the file effect's path bound; the URL keeps the fetch
+/// bound (`max_effect_url_bytes`). Longer strings deliver exactly one
+/// `.rejected` image result Msg.
+pub const max_effect_image_path_bytes: usize = max_effect_file_path_bytes;
+
+/// Maximum ENCODED source bytes one `loadImage` accepts — from a local
+/// file, the URL cache, or the network alike. Sized past the decoded
+/// pixel bound (`canvas_limits.max_registered_canvas_image_pixel_bytes`)
+/// by the same 1/4 margin the decode scratch carries: an encoded stream
+/// larger than that cannot decode inside the registered-image budget on
+/// any host, so hauling more bytes would only defer the same
+/// `.too_large` answer. Unlike fetch bodies there is no truncated
+/// delivery — a cut image can never decode, so over-bound sources fail
+/// whole with `.too_large`, never arrive clipped.
+pub const max_effect_image_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes +
+    canvas_limits.max_registered_canvas_image_pixel_bytes / 4;
+
+/// Bytes of an image effect result's content address in the session
+/// journal: the first half of the source bytes' SHA-256, the
+/// `audioCachePath` hashing convention. The journal record carries hash
+/// and length; the bytes themselves live in the session blob store.
+pub const effect_image_blob_hash_len: usize = 16;
+
+/// The terminal outcome of one `loadImage` effect — exactly one Msg per
+/// load, `.loaded` or one failure class, never silence. The classes are
+/// the union of the source stages and the registered-image API's own
+/// errors, so the effect fails with the same vocabulary the direct
+/// `registerCanvasImageBytes` path uses.
+pub const EffectImageOutcome = enum(u8) {
+    /// The pixels are registered under the requested id; `width` and
+    /// `height` report what the platform codec decoded.
+    loaded,
+    /// The request never ran: an invalid id (0, or the reserved
+    /// media-surface namespace), no source at all, an over-bound
+    /// path/url, a non-http(s) url, all slots busy, or a duplicate
+    /// active key.
+    rejected,
+    /// The local path does not exist and no url was given to fall
+    /// through to.
+    not_found,
+    /// The local read failed for any reason but absence (permissions, a
+    /// directory, disk errors). A present-but-unreadable file never
+    /// falls through to the url — retrying a different source would
+    /// mask the real problem, the audio cascade's rule.
+    io_failed,
+    /// DNS, TCP, or the connect phase failed (the fetch taxonomy).
+    connect_failed,
+    /// TLS setup failed.
+    tls_failed,
+    /// The HTTP exchange broke mid-protocol.
+    protocol_failed,
+    /// The whole cascade exceeded the effect timeout.
+    timed_out,
+    /// The server answered with a non-2xx status — carried in
+    /// `EffectImageResult.status`. The body is discarded, never decoded
+    /// (an error page is not an image).
+    http_status,
+    /// `cancel(id)` ended the load before its result was delivered.
+    cancelled,
+    /// The source bytes exceed `max_effect_image_bytes`, or the decoded
+    /// pixels exceed the registered-image slot bound
+    /// (`error.ImageTooLarge`) — one budget class either way.
+    too_large,
+    /// The host has no image codec (`error.UnsupportedService`), or no
+    /// image registry is bound to this channel.
+    unsupported,
+    /// The platform codec could not decode the bytes
+    /// (`error.ImageDecodeFailed`, impossible decoded dimensions).
+    decode_failed,
+    /// Every registered-image slot holds another id
+    /// (`error.ImageRegistryFull`).
+    registry_full,
+    /// The host refused the memory the registration needed
+    /// (`error.OutOfMemory` — the registry slot's lazily allocated
+    /// pixel buffer). The bytes may be perfectly valid: this is
+    /// resource exhaustion, not corruption, so it gets its own class —
+    /// calling it `decode_failed` would tell the app to distrust a
+    /// source that decodes fine on retry. Named for the failing stage
+    /// like its siblings (`io_failed`, `decode_failed`): the
+    /// allocation failed.
+    alloc_failed,
+};
+
+/// Payload for `on_result` Msg constructors of image loads. All plain
+/// data — safe to store in the model (the decoded pixels live in the
+/// runtime's registered-image storage, referenced by id from views).
+pub const EffectImageResult = struct {
+    /// The requested ImageId, echoed verbatim (it doubles as the effect
+    /// key — see `LoadImageOptions.id`).
+    id: u64,
+    outcome: EffectImageOutcome = .loaded,
+    /// Decoded dimensions for `.loaded`; 0 otherwise.
+    width: usize = 0,
+    height: usize = 0,
+    /// The HTTP status for url loads that performed an exchange
+    /// (`.http_status`, and `.loaded` from the network); 0 when none
+    /// occurred — local paths and cache hits. 0 is signal, not a
+    /// missing value: a cache hit is a real `.loaded` with no exchange
+    /// behind it, so apps can distinguish a network load from a cached
+    /// one, and fabricating the origin's status for it would lie.
+    status: u16 = 0,
+};
+
 /// Base platform timer id for fx timers: slot N arms the platform timer
 /// `effect_timer_platform_id_base + N`. Lives in the framework-reserved
 /// id range (`platform.reserved_timer_id_base`) with an `0x00f7_0000`
@@ -676,6 +834,13 @@ pub const EffectResultKind = enum(u8) {
     /// launches with no variables set) re-derive from the launch
     /// configuration exactly as before.
     env = 10,
+    /// One `loadImage` terminal (`EffectImageResult`). The record's
+    /// `payload` carries the ENCODED source bytes as they leave the
+    /// drain — the loaded bytes ARE the effect result — and the session
+    /// recorder moves them into the content-addressed blob store,
+    /// journaling `image_blob_hash`/`image_blob_len` in their place
+    /// (journal format v7).
+    image = 11,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -735,6 +900,19 @@ pub const EffectResultRecord = struct {
     /// the honest non-determinism (a real FFT of real audio) recorded at
     /// the boundary so replay repaints identical bars.
     audio_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+    /// `.image` records: the delivered terminal outcome and the decoded
+    /// dimensions (0 unless `.loaded`); the HTTP status rides the
+    /// shared `status` field (0 when no exchange occurred — local
+    /// paths, cache hits — see `EffectImageResult.status`).
+    image_outcome: EffectImageOutcome = .loaded,
+    image_width: u64 = 0,
+    image_height: u64 = 0,
+    /// `.image` records: the content address of the journaled source
+    /// bytes in the session blob store, filled by the recorder when it
+    /// moves `payload` out of line. All-zero when the terminal carried
+    /// no bytes (source-stage failures).
+    image_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
+    image_blob_len: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -915,6 +1093,42 @@ fn classifyFetchError(err: anyerror) EffectFetchOutcome {
     };
 }
 
+/// Map a registered-image API error onto the image effect's failure
+/// taxonomy — the SAME classes the direct `registerCanvasImageBytes`
+/// path raises, flattened for the one terminal Msg.
+fn classifyImageRegisterError(err: anyerror) EffectImageOutcome {
+    return switch (err) {
+        error.UnsupportedService => .unsupported,
+        error.ImageTooLarge => .too_large,
+        error.ImageRegistryFull => .registry_full,
+        // Resource exhaustion is its own class, never `decode_failed`:
+        // the registry allocates each slot's pixel buffer lazily at its
+        // first registration, and an OOM there says nothing about the
+        // bytes — reporting valid bytes as corrupt would send the app
+        // chasing its source instead of its memory.
+        error.OutOfMemory => .alloc_failed,
+        // Invalid ids are refused at issue time, before any I/O; a
+        // decode that produced impossible dimensions is a decode
+        // failure like any other undecodable stream.
+        error.InvalidImageId => .rejected,
+        else => .decode_failed,
+    };
+}
+
+/// Map a network-phase error of the image cascade onto the image
+/// taxonomy, riding the fetch classifier so the two effects never
+/// disagree about what a DNS failure is called.
+fn classifyImageFetchError(err: anyerror) EffectImageOutcome {
+    return switch (classifyFetchError(err)) {
+        .connect_failed => .connect_failed,
+        .tls_failed => .tls_failed,
+        .timed_out => .timed_out,
+        .cancelled => .cancelled,
+        .rejected => .rejected,
+        .ok, .protocol_failed => .protocol_failed,
+    };
+}
+
 pub fn Effects(comptime Msg: type) type {
     return struct {
         const Self = @This();
@@ -927,6 +1141,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
+        pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
 
         /// Comptime Msg constructor for `on_line`, following
         /// `canvas.Ui(Msg).inputMsg`: `lineMsg(.agent_line)` builds
@@ -1018,6 +1233,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hostMsg(comptime tag: std.meta.Tag(Msg)) HostMsgFn {
             return struct {
                 fn make(result: EffectHostResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_result` of image loads:
+        /// `imageMsg(.cover_loaded)` builds
+        /// `Msg{ .cover_loaded = result }` — the variant's payload type
+        /// must be `native_sdk.EffectImageResult`.
+        pub fn imageMsg(comptime tag: std.meta.Tag(Msg)) ImageMsgFn {
+            return struct {
+                fn make(result: EffectImageResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -1266,6 +1493,63 @@ pub fn Effects(comptime Msg: type) type {
             on_event: ?AudioMsgFn = null,
         };
 
+        pub const LoadImageOptions = struct {
+            /// The ImageId the decoded pixels register under — model-
+            /// owned, chosen by the app, exactly the id `image`/`avatar`
+            /// widgets reference. It doubles as the effect key: image
+            /// loads share the `max_effects` slots and the key space
+            /// with spawns, fetches, and file effects. Id 0 (the
+            /// no-image sentinel) and the reserved media-surface
+            /// namespace (`canvas.media_surface_image_id_bit`) are
+            /// refused with one `.rejected` result, mirroring
+            /// `registerCanvasImage`.
+            id: u64,
+            /// Local file path, tried FIRST — the audio cascade's rule:
+            /// a present-but-missing file falls through to `url` when
+            /// one is given; every other local failure is terminal
+            /// (retrying a different source would mask the real
+            /// problem). Bounded by `max_effect_image_path_bytes`.
+            path: []const u8 = "",
+            /// http(s) source, tried when the local path is absent or
+            /// missing. A verified cache entry at `cache_path` loads
+            /// locally (no network); otherwise the bytes are fetched
+            /// whole and installed into the cache for next time. Empty
+            /// means local-only.
+            url: []const u8 = "",
+            /// Where the URL's bytes are cached, and the cache policy
+            /// in one field: empty disables caching. Derive it with
+            /// `imageCachePath` for the content-addressed convention.
+            /// The fetch writes beside this path and atomically renames
+            /// into place only after the size verifies, so a partial
+            /// download never occupies the cache name.
+            cache_path: []const u8 = "",
+            /// The source's known byte size (from a manifest), the
+            /// cache integrity gate: a cache entry whose size disagrees
+            /// is discarded and re-fetched, and a finished download
+            /// that disagrees is never installed. Zero means "unknown"
+            /// — existence alone then qualifies a cache entry.
+            expected_bytes: u64 = 0,
+            /// Whole-cascade timeout in milliseconds (local probe,
+            /// cache read, and network fetch together); expiry delivers
+            /// the result with outcome `.timed_out`.
+            timeout_ms: u32 = default_effect_fetch_timeout_ms,
+            /// Msg constructor the ONE terminal result flows through.
+            /// Without one the load still runs (and registers on
+            /// success); the app just hears nothing back.
+            on_result: ?ImageMsgFn = null,
+        };
+
+        /// A recorded image-load request, exposed by the fake executor
+        /// for test assertions. Slices point into slot storage and stay
+        /// valid until the result is fed and drained.
+        pub const ImageLoadRequest = struct {
+            id: u64,
+            path: []const u8,
+            url: []const u8,
+            cache_path: []const u8,
+            expected_bytes: u64,
+        };
+
         /// A recorded fx timer, exposed by the fake executor for test
         /// assertions.
         pub const TimerRequest = struct {
@@ -1372,9 +1656,9 @@ pub fn Effects(comptime Msg: type) type {
         /// thereby retires) it.
         const SlotState = enum(u8) { idle, running, done, draining };
 
-        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host };
+        const SlotKind = enum(u8) { spawn, fetch, file, clipboard, host, image };
 
-        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host };
+        const EntryKind = enum(u8) { line, exit, response, file, clipboard, host, image };
 
         const Entry = struct {
             kind: EntryKind = .line,
@@ -1417,12 +1701,27 @@ pub fn Effects(comptime Msg: type) type {
             collect_len: u32 = 0,
             collect_truncated: bool = false,
             stderr_truncated: bool = false,
+            /// `.image` entries: the source stage's outcome (`.loaded`
+            /// means bytes are staged in the slot buffer and the drain
+            /// decodes + registers them; anything else is the terminal
+            /// failure class as-is).
+            image_outcome: EffectImageOutcome = .loaded,
+            /// `.image` entries fed with a RECORDED terminal (session
+            /// replay): the drain delivers the journaled outcome and
+            /// dimensions verbatim — re-registration is best-effort
+            /// presentation, never the Msg source — so a replay host
+            /// whose codec differs from the recording host's still
+            /// replays the identical Msg stream.
+            image_fed: bool = false,
+            image_fed_width: u64 = 0,
+            image_fed_height: u64 = 0,
             line_fn: ?LineMsgFn = null,
             exit_fn: ?ExitMsgFn = null,
             response_fn: ?ResponseMsgFn = null,
             file_fn: ?FileMsgFn = null,
             clipboard_fn: ?ClipboardMsgFn = null,
             host_fn: ?HostMsgFn = null,
+            image_fn: ?ImageMsgFn = null,
             /// `.line` entries whose payload exceeds the inline buffer
             /// (a raised `max_line_bytes` bound): the bytes ride in this
             /// heap allocation instead of `line_bytes`. Owned by the
@@ -1452,6 +1751,20 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            /// Loop-thread image terminals (rejections, fake cancels,
+            /// feed fallbacks) — always payload-free, fully formed at
+            /// enqueue. `regenerates` is true only for pre-executor
+            /// validation refusals: the same deterministic checks in
+            /// `loadImage` refuse again under session replay, so their
+            /// journaled records are skipped rather than fed. Every
+            /// other loop-side terminal — fake cancels, feed fallbacks,
+            /// an executor that could not start the load — is executor
+            /// truth the replayed request cannot reproduce and must be
+            /// fed from the journal. Image terminals never occupy the
+            /// lossy ring itself: they stage in `pending_images` (see
+            /// there for why they must be non-lossy) and take this
+            /// union shape only at drain time, in `takePendingMsg`.
+            image: struct { result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -1468,6 +1781,13 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectHostResult carries none: its terminals are
                     // one-per-request by construction.
                     .host => {},
+                    // Image terminals never enter the ring (they stage
+                    // in the non-lossy `pending_images`), so neither
+                    // overflow arm can ever see one. EffectImageResult
+                    // carries no drop counter to fold a loss into —
+                    // eviction here would silently break the
+                    // exactly-one-terminal-per-load contract.
+                    .image => unreachable,
                 }
             }
 
@@ -1480,8 +1800,30 @@ pub fn Effects(comptime Msg: type) type {
                     .timer => 0,
                     .audio => 0,
                     .host => 0,
+                    // Never in the ring; see `addDropped`.
+                    .image => unreachable,
                 };
             }
+        };
+
+        /// One loop-side image terminal awaiting drain, staged outside
+        /// the shared pending ring. The stage is NON-LOSSY, unlike the
+        /// ring: an image load's contract is exactly one terminal per
+        /// load, `EffectImageResult` carries no drop counter to make a
+        /// loss visible, and loop-side validation rejections are
+        /// unbounded per dispatch — every refused `loadImage` stages
+        /// one entry here before the next drain runs, so ring eviction
+        /// would leave the issuing model waiting forever on a terminal
+        /// that silently vanished. Worker-origin image terminals are
+        /// bounded by the effect slots and ride the completion queue,
+        /// never this stage. `seq` orders staged entries against ring
+        /// entries so the drain preserves enqueue order across both
+        /// structures (`takePendingMsg` merges by it).
+        const PendingImage = struct {
+            seq: u64,
+            result: EffectImageResult,
+            image_fn: ?ImageMsgFn,
+            regenerates: bool,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -1668,6 +2010,17 @@ pub fn Effects(comptime Msg: type) type {
             collect_buffer: ?[]u8 = null,
             collect_len: usize = 0,
             collect_truncated: bool = false,
+            /// A `.lines` spawn's posted-but-undelivered exit marker:
+            /// set alongside the exit entry's enqueue (worker commit or
+            /// feed), cleared by the drain the moment it dequeues the
+            /// generation-matched exit — the delivery instant the other
+            /// families mark by their buffer handoff (`fetch_buffer`,
+            /// `collect_buffer`). While set, the slot parks in
+            /// `.draining` and its key stays occupied
+            /// (`findUndeliveredTerminalSlot`). Written by the worker
+            /// before its `.draining` release store (the worker's last
+            /// slot access); loop-thread only after that.
+            exit_undelivered: bool = false,
             /// Ring of the child's most recent stderr bytes. Written by
             /// the stderr reader (worker-side thread in real mode, loop
             /// thread in fake mode); read only after the child is done.
@@ -1679,6 +2032,22 @@ pub fn Effects(comptime Msg: type) type {
             file_op: EffectFileOp = .read,
             // ---- clipboard-only fields (kind == .clipboard) ----
             clipboard_op: EffectClipboardOp = .write,
+            // ---- image-only fields (kind == .image) ----
+            on_image: ?ImageMsgFn = null,
+            /// The local source path (the URL rides `url_storage`, a
+            /// slot being one occupancy at a time — but path and url
+            /// COEXIST in an image cascade, so the path gets its own
+            /// storage).
+            image_path_storage: [max_effect_image_path_bytes]u8 = undefined,
+            image_path_len: usize = 0,
+            image_cache_storage: [max_effect_image_path_bytes]u8 = undefined,
+            image_cache_len: usize = 0,
+            image_expected_bytes: u64 = 0,
+            /// Terminal source-stage state, written by the image task
+            /// before `fetch_done` (the shared completion latch):
+            /// `.loaded` means encoded bytes are staged in
+            /// `fetch_buffer` for the drain to decode + register.
+            image_outcome: EffectImageOutcome = .loaded,
             // ---- fetch/file fields ----
             /// `.stream` frames the response body into line entries;
             /// `.buffered` delivers it whole on the terminal entry.
@@ -1742,10 +2111,29 @@ pub fn Effects(comptime Msg: type) type {
             fn hostName(slot: *const Slot) []const u8 {
                 return slot.url_storage[0..slot.url_len];
             }
+
+            fn imagePath(slot: *const Slot) []const u8 {
+                return slot.image_path_storage[0..slot.image_path_len];
+            }
+
+            fn imageCache(slot: *const Slot) []const u8 {
+                return slot.image_cache_storage[0..slot.image_cache_len];
+            }
         };
 
         allocator: std.mem.Allocator,
         executor: EffectExecutor = .real,
+        /// Fake-executor convention: while set, every `loadImage` that
+        /// parks a fake request completes IMMEDIATELY with these bytes
+        /// (through `feedImageBytes`, the full decode→register path) —
+        /// still at `loadImage` time, before the caller's dispatch
+        /// returns. This is the deterministic stand-in for a real
+        /// local-path or cache load finishing before the drain pass
+        /// that spawned it ends: the chained-completion shape the
+        /// drain's causal boundary (`DrainBoundary`) exists for. Test
+        /// seam only; never set under session replay, where journaled
+        /// terminals are the only delivery.
+        fake_instant_image_bytes: ?[]const u8 = null,
         /// Session-record sink: every drain-delivered result is reported
         /// here (loop thread, right before its Msg runs through
         /// `update`). Null outside recording.
@@ -1879,8 +2267,23 @@ pub fn Effects(comptime Msg: type) type {
         /// Loop-thread-only ring: spawn/fetch rejections and fake-executor
         /// terminals that found the queue full. Drained before the queue.
         pending_exits: [max_effect_pending_exits]PendingMsg = undefined,
+        /// Enqueue-order stamps for the ring entries (parallel to
+        /// `pending_exits`), so the drain can merge ring entries with
+        /// the separately staged image terminals in original order.
+        pending_exit_seqs: [max_effect_pending_exits]u64 = undefined,
         pending_exit_head: usize = 0,
         pending_exit_len: usize = 0,
+        /// Monotonic enqueue stamp shared by the pending ring and the
+        /// image stage — the drain's merge key.
+        pending_seq: u64 = 0,
+        /// Loop-thread-only image-terminal stage (see `PendingImage`
+        /// for the non-lossy contract). FIFO over `pending_images`
+        /// until a burst outgrows it, then over `pending_image_spill`
+        /// (freed when the stage drains empty, and at `deinit`).
+        pending_images: [max_effect_pending_images_inline]PendingImage = undefined,
+        pending_image_spill: []PendingImage = &.{},
+        pending_image_head: usize = 0,
+        pending_image_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -2188,6 +2591,14 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 self.drain_heap_line = null;
             }
+            // Undrained staged image terminals are plain data — only a
+            // burst's spill ring owns heap.
+            if (self.pending_image_spill.len > 0) {
+                self.allocator.free(self.pending_image_spill);
+                self.pending_image_spill = &.{};
+            }
+            self.pending_image_head = 0;
+            self.pending_image_len = 0;
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -2406,7 +2817,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.max_line_bytes == 0 or options.max_line_bytes > max_effect_line_bytes_ceiling) {
                 return self.reject(options);
             }
-            if (self.findActiveSlot(options.key) != null) return self.reject(options);
+            if (self.keyOccupiedUntilDelivery(options.key)) return self.reject(options);
             const slot_index = self.findIdleSlot() orelse return self.reject(options);
 
             const slot = &self.slots[slot_index];
@@ -2418,6 +2829,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_line = options.on_line;
             slot.on_exit = options.on_exit;
             slot.on_response = null;
+            slot.exit_undelivered = false;
             slot.cancel_requested.store(false, .release);
             // `cancelled_generation` is deliberately NOT reset: entries
             // from a cancelled previous occupant may still sit in the
@@ -2559,7 +2971,7 @@ pub fn Effects(comptime Msg: type) type {
             if (options.max_line_bytes == 0 or options.max_line_bytes > max_effect_line_bytes_ceiling) {
                 return self.rejectFetch(options);
             }
-            if (self.findActiveSlot(options.key) != null) return self.rejectFetch(options);
+            if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectFetch(options);
             const slot_index = self.findIdleSlot() orelse return self.rejectFetch(options);
 
             const slot = &self.slots[slot_index];
@@ -2665,7 +3077,7 @@ pub fn Effects(comptime Msg: type) type {
             if (file_path.len == 0 or file_path.len > max_effect_file_path_bytes) {
                 return self.rejectFile(key, op, on_result);
             }
-            if (self.findActiveSlot(key) != null) return self.rejectFile(key, op, on_result);
+            if (self.keyOccupiedUntilDelivery(key)) return self.rejectFile(key, op, on_result);
             const slot_index = self.findIdleSlot() orelse return self.rejectFile(key, op, on_result);
 
             const slot = &self.slots[slot_index];
@@ -2756,6 +3168,141 @@ pub fn Effects(comptime Msg: type) type {
             slot.worker_thread = thread;
         }
 
+        /// Load an image at runtime — the `Cmd.imageLoad` executor: the
+        /// source cascade (local file first, then a verified cache
+        /// entry, then the network) runs on a worker thread; the bytes
+        /// it produces decode through the platform codec and register
+        /// under `options.id` in the runtime's registered-image storage
+        /// (the `registerCanvasImageBytes` seam — same slot budget,
+        /// same pixel bound, same error classes); and exactly ONE
+        /// terminal Msg follows through `on_result`: `.loaded` with the
+        /// decoded width/height, or one failure class — never a crash,
+        /// never silence. Views referencing the id repaint with the
+        /// pixels on their next frame; `update` stays pure. Decode and
+        /// registration run at drain time on the loop thread (the
+        /// registry and its decode scratch are loop-thread state), so
+        /// the journal records the encoded bytes exactly as the effect
+        /// boundary delivered them and replay re-runs the same
+        /// decode-and-register offline. Never fails from the caller's
+        /// view: requests that cannot run deliver one `.rejected`
+        /// result on the next drain. Image loads share the
+        /// `max_effects` slots and the key space (keyed by `id`) with
+        /// spawns, fetches, and file effects.
+        pub fn loadImage(self: *Self, options: LoadImageOptions) void {
+            self.reclaimSlots();
+            // The same ids `registerCanvasImage` refuses, refused before
+            // any I/O: 0 is the no-image sentinel, and the high bit is
+            // the media-surface texture namespace.
+            const id_invalid = options.id == 0 or (options.id & canvas.media_surface_image_id_bit) != 0;
+            if (id_invalid or
+                (options.path.len == 0 and options.url.len == 0) or
+                options.path.len > max_effect_image_path_bytes or
+                options.cache_path.len > max_effect_image_path_bytes or
+                options.url.len > max_effect_url_bytes)
+            {
+                return self.rejectImage(options.id, options.on_result, true);
+            }
+            if (options.url.len > 0) {
+                const uri = std.Uri.parse(options.url) catch return self.rejectImage(options.id, options.on_result, true);
+                const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+                    std.ascii.eqlIgnoreCase(uri.scheme, "https");
+                if (!scheme_ok) return self.rejectImage(options.id, options.on_result, true);
+            }
+            // Occupied = running (any kind — the key space is shared),
+            // OR any slot in the posted-but-undelivered terminal
+            // window (`keyOccupiedUntilDelivery`). Delivery ends the
+            // window — the drain takes the slot's delivery marker
+            // BEFORE the terminal Msg reaches update — so a handler
+            // that answers its own terminal by reloading the same id
+            // (the gallery-refresh idiom) still parks as a fresh load.
+            if (self.keyOccupiedUntilDelivery(options.id)) {
+                return self.rejectImage(options.id, options.on_result, true);
+            }
+            const slot_index = self.findIdleSlot() orelse return self.rejectImage(options.id, options.on_result, true);
+
+            const slot = &self.slots[slot_index];
+            // One spare byte past the source bound detects over-bound
+            // files and bodies without a stat round trip (the file
+            // effect's trick).
+            // An allocation failure is NOT regenerable validation: the
+            // replayed request allocates its own buffer and parks, so
+            // this terminal must journal as executor truth and feed —
+            // and the staged rejection holds the id until it drains
+            // (`stagedImageOccupiesKey`), because replay's parked
+            // request holds it through the same window.
+            const buffer = self.allocator.alloc(u8, max_effect_image_bytes + 1) catch {
+                return self.rejectImage(options.id, options.on_result, false);
+            };
+            slot.generation = self.next_generation;
+            self.next_generation +%= 1;
+            if (self.next_generation == 0) self.next_generation = 1;
+            slot.key = options.id;
+            slot.kind = .image;
+            slot.on_line = null;
+            slot.on_exit = null;
+            slot.on_response = null;
+            slot.on_file = null;
+            slot.on_image = options.on_result;
+            slot.timeout_ms = options.timeout_ms;
+            slot.cancel_requested.store(false, .release);
+            slot.fetch_done.store(false, .release);
+            // `cancelled_generation` stays sticky, exactly as in `spawn`.
+            slot.dropped_pending = 0;
+            slot.dropped_total = 0;
+            @memcpy(slot.url_storage[0..options.url.len], options.url);
+            slot.url_len = options.url.len;
+            @memcpy(slot.image_path_storage[0..options.path.len], options.path);
+            slot.image_path_len = options.path.len;
+            @memcpy(slot.image_cache_storage[0..options.cache_path.len], options.cache_path);
+            slot.image_cache_len = options.cache_path.len;
+            slot.image_expected_bytes = options.expected_bytes;
+            // Pessimistic default: a task interrupted before it records
+            // a terminal state must never read as a staged success.
+            slot.image_outcome = .io_failed;
+            if (slot.line_buffer) |old| {
+                self.allocator.free(old);
+                slot.line_buffer = null;
+            }
+            if (slot.fetch_buffer) |old| self.allocator.free(old);
+            slot.fetch_buffer = buffer;
+            slot.payload_len = 0;
+            slot.body_len = 0;
+            slot.fetch_status = 0;
+            slot.fake = self.executor == .fake;
+            slot.state.store(.running, .release);
+
+            if (slot.fake) {
+                // Instant-load convention (see `fake_instant_image_bytes`):
+                // complete the just-parked request before returning, the
+                // deterministic mirror of a real local load racing the
+                // drain pass that issued it. `EffectNotFound` cannot
+                // happen (the slot parked two lines up), and a full
+                // queue outside replay already delivered the loop-side
+                // fallback terminal inside the feed — nothing is lost.
+                if (self.fake_instant_image_bytes) |bytes| {
+                    self.feedImageBytes(options.id, bytes) catch {};
+                }
+                return;
+            }
+
+            // Executor-start failures are NOT regenerable validation
+            // either: under replay the fake executor parks the request
+            // before ever touching io or threads, so these terminals
+            // journal as executor truth and feed. Releasing the slot
+            // here does not free the id — the staged rejection holds
+            // it until the drain delivers (`stagedImageOccupiesKey`),
+            // matching the parked replay request's window.
+            const io = self.ensureIo() catch {
+                self.releaseFetchSlot(slot);
+                return self.rejectImage(options.id, options.on_result, false);
+            };
+            const thread = std.Thread.spawn(.{}, imageWorkerMain, .{ self, slot_index, slot.generation, io }) catch {
+                self.releaseFetchSlot(slot);
+                return self.rejectImage(options.id, options.on_result, false);
+            };
+            slot.worker_thread = thread;
+        }
+
         /// Put text on the system clipboard through the platform
         /// pasteboard — the same seam the runtime's cmd+C copy uses —
         /// and deliver exactly one terminal Msg with an explicit
@@ -2794,7 +3341,7 @@ pub fn Effects(comptime Msg: type) type {
             // Services are bound before init_fx/update ever run; a null
             // here means a host without the platform clipboard arm.
             if (!fake and self.services == null) return self.rejectClipboard(key, op, on_result);
-            if (self.findActiveSlot(key) != null) return self.rejectClipboard(key, op, on_result);
+            if (self.keyOccupiedUntilDelivery(key)) return self.rejectClipboard(key, op, on_result);
             const slot_index = self.findIdleSlot() orelse return self.rejectClipboard(key, op, on_result);
 
             const slot = &self.slots[slot_index];
@@ -2924,20 +3471,34 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectHost(options.key, options.on_result);
             }
             if (!fake and self.host_calls == null) return self.rejectHost(options.key, options.on_result);
+            // A staged non-regenerating image terminal holds the key
+            // exactly like the slot windows below (see
+            // `stagedImageOccupiesKey`): under replay that image
+            // request is still parked until its journaled terminal
+            // feeds, and the parked fake is what rejects this request
+            // there.
+            if (self.stagedImageOccupiesKey(options.key)) return self.rejectHost(options.key, options.on_result);
             const slot_index = blk: {
                 // In flight = running (no answer yet) OR draining with
                 // an undelivered answer: both are replaced, dropping
                 // the old result silently (its queued entry dies by
-                // generation mismatch at drain). A running occupancy of
-                // another kind is a key collision and rejects; a
-                // draining one is already terminal — its key is free.
+                // generation mismatch at drain). An occupancy of
+                // another kind is a key collision and rejects — while
+                // running AND through its posted-but-undelivered
+                // terminal window (under session replay that request
+                // is still a parked `.running` fake until its
+                // journaled terminal feeds, so accepting the key here
+                // live would diverge); a drained one is fully
+                // delivered — its key is free.
                 var replaced: ?usize = null;
                 for (&self.slots, 0..) |*slot, index| {
                     const state = slot.state.load(.acquire);
                     if (state != .running and state != .draining) continue;
                     if (slot.key != options.key) continue;
                     if (slot.kind != .host) {
-                        if (state == .running) return self.rejectHost(options.key, options.on_result);
+                        if (state == .running or slotTerminalUndelivered(slot)) {
+                            return self.rejectHost(options.key, options.on_result);
+                        }
                         continue;
                     }
                     // Tell the host first: a late answer for the old
@@ -3090,6 +3651,15 @@ pub fn Effects(comptime Msg: type) type {
                     const key_copy = slot.key;
                     self.releaseFetchSlot(slot);
                     self.deliverLoopClipboard(.{ .key = key_copy, .op = op, .outcome = .cancelled }, clipboard_fn);
+                    return;
+                }
+                if (slot.kind == .image) {
+                    // No cascade ran: retire the slot and surface the
+                    // terminal result now.
+                    const image_fn = slot.on_image;
+                    const key_copy = slot.key;
+                    self.releaseFetchSlot(slot);
+                    self.deliverLoopImage(.{ .id = key_copy, .outcome = .cancelled }, image_fn, false);
                     return;
                 }
                 // No process: retire the slot and surface the exit now.
@@ -3525,15 +4095,70 @@ pub fn Effects(comptime Msg: type) type {
 
         /// True when a drain would dispatch at least one Msg.
         pub fn hasPending(self: *const Self) bool {
-            return self.pending_exit_len > 0 or self.queue_count.load(.acquire) > 0;
+            return self.pending_exit_len > 0 or
+                self.pending_image_len > 0 or
+                self.queue_count.load(.acquire) > 0;
+        }
+
+        /// One drain pass's causal boundary: a snapshot of the
+        /// completions that existed when the pass began. The session
+        /// journal's ordering invariant — effect-result records precede
+        /// the event record during whose dispatch they were drained, so
+        /// replaying records in file order feeds each result before the
+        /// event that consumes it — only holds if every result delivered
+        /// during an event's dispatch answers a request that existed
+        /// BEFORE that dispatch. A completion produced during the pass
+        /// itself (an update handler starts a load fast enough to finish
+        /// while the drain is still running) must therefore wait for the
+        /// next wake: delivering it in the same pass would journal a
+        /// result ahead of the event whose dispatch created its request,
+        /// and replay's file-order feed would find no parked request to
+        /// answer. Both producer paths (`enqueue` workers, the loop-side
+        /// pending stages) nudge `wakeHost`, so a deferred completion
+        /// always has its follow-up wake already scheduled.
+        pub const DrainBoundary = struct {
+            /// Loop-side pending entries staged before the pass: stamps
+            /// below this deliver (both pending structures share the
+            /// monotonic `pending_seq` stamp).
+            pending_before: u64,
+            /// Worker-queue entries enqueued before the pass. The queue
+            /// is FIFO, so consuming exactly this many dequeues consumes
+            /// exactly the pre-existing entries.
+            queue_budget: usize,
+        };
+
+        /// Snapshot the completion backlog at the start of one drain
+        /// pass. Loop-thread only, like the drain itself.
+        pub fn drainBoundary(self: *Self) DrainBoundary {
+            return .{
+                .pending_before = self.pending_seq,
+                .queue_budget = self.queue_count.load(.acquire),
+            };
         }
 
         /// Pop the next completion as a Msg. Loop-thread only. The
         /// returned Msg's line payload stays valid until the next call.
+        /// Unbounded: delivers completions produced while the caller
+        /// drains, too. Runtime drain passes (`UiApp.drainEffects`, the
+        /// ts-core host's `drain`) use `takeMsgWithin` instead so the
+        /// journal's event boundaries stay causal (see `DrainBoundary`);
+        /// this form serves callers that own their delivery timing —
+        /// tests driving the channel directly.
         pub fn takeMsg(self: *Self) ?Msg {
+            var unbounded: DrainBoundary = .{
+                .pending_before = std.math.maxInt(u64),
+                .queue_budget = std.math.maxInt(usize),
+            };
+            return self.takeMsgWithin(&unbounded);
+        }
+
+        /// `takeMsg` bounded to one drain pass: only completions inside
+        /// `boundary` deliver; anything produced after the snapshot
+        /// waits for the wake its producer already nudged.
+        pub fn takeMsgWithin(self: *Self, boundary: *DrainBoundary) ?Msg {
             self.reclaimSlots();
             while (true) {
-                if (self.takePendingMsg()) |pending| {
+                if (self.takePendingMsg(boundary.pending_before)) |pending| {
                     switch (pending) {
                         .exit => |entry| {
                             const exit_fn = entry.exit_fn orelse continue;
@@ -3637,9 +4262,40 @@ pub fn Effects(comptime Msg: type) type {
                             });
                             return event_fn(event);
                         },
+                        .image => |entry| {
+                            // Journal BEFORE the handler gate: a staged
+                            // executor-truth terminal with no handler
+                            // (a fire-and-forget load's start failure)
+                            // still journals, because its record is
+                            // what retires the parked replay-side fake
+                            // (see `deliverLoopImage`). Only the Msg
+                            // depends on the handler.
+                            self.journalNote(.{
+                                .kind = .image,
+                                .key = entry.result.id,
+                                .status = entry.result.status,
+                                .image_outcome = entry.result.outcome,
+                                .image_width = entry.result.width,
+                                .image_height = entry.result.height,
+                                // `.image` journal encoding, the `.host`
+                                // records' convention: ONLY loop-side
+                                // validation refusals — regenerated by
+                                // the same checks under replay — mark
+                                // themselves with the exit reason. Every
+                                // other terminal (including worker-side
+                                // `.rejected`, which rides the slot
+                                // queue, not this ring) keeps `.exited`
+                                // and is fed from the journal.
+                                .exit_reason = if (entry.regenerates) .rejected else .exited,
+                            });
+                            const image_fn = entry.image_fn orelse continue;
+                            return image_fn(entry.result);
+                        },
                     }
                 }
+                if (boundary.queue_budget == 0) return null;
                 if (!self.dequeueInto(&self.drain_scratch)) return null;
+                boundary.queue_budget -= 1;
                 const entry = &self.drain_scratch;
                 const slot = &self.slots[entry.slot_index];
                 const cancelled = slot.cancelled_generation == entry.generation and entry.generation != 0;
@@ -3679,6 +4335,36 @@ pub fn Effects(comptime Msg: type) type {
                         return line_fn(line);
                     },
                     .exit => {
+                        // Dequeueing the occupant's exit IS its delivery
+                        // for key occupancy: clear the `.lines` marker
+                        // before any early-out (absent handler, cancel
+                        // rewrite) so the key frees exactly when the
+                        // terminal reaches — or would have reached —
+                        // update, and a handler that respawns its own
+                        // key parks as a fresh effect. Retire the slot
+                        // in the same stroke (see the `.image` arm's
+                        // race note): the real worker stores `.draining`
+                        // only AFTER posting this exit, so a drain can
+                        // consume it while the slot still reads
+                        // `.running` — and the handler's respawn would
+                        // reject as a duplicate active key. The
+                        // happens-before chain is complete here: the
+                        // worker's mark-then-post publishes the marker
+                        // (and every other slot write) before the entry
+                        // is consumable — the enqueue releases the queue
+                        // mutex this dequeue acquired — so with the
+                        // generations matching, clearing the marker and
+                        // storing `.draining` before the handler leaves
+                        // the key free by the time any update code runs.
+                        // The worker's own store keeps its role (it must
+                        // stay after the post — a `.draining` slot is
+                        // joinable, and the post can park in a
+                        // full-queue retry only the loop can relieve);
+                        // re-storing `.draining` is idempotent.
+                        if (entry.generation == slot.generation) {
+                            slot.exit_undelivered = false;
+                            slot.state.store(.draining, .release);
+                        }
                         // Collect exits own a heap stdout buffer: take it
                         // before any early-out so the slot retires even
                         // when the handler is absent. A mismatched
@@ -3732,6 +4418,13 @@ pub fn Effects(comptime Msg: type) type {
                         // generation means the occupant was already
                         // retired with its own terminal Msg.
                         if (entry.generation != slot.generation) continue;
+                        // Retire the slot BEFORE the terminal reaches
+                        // any handler (the `.image` arm's race note):
+                        // the real worker stores `.draining` only after
+                        // posting this entry, so a same-key fetch from
+                        // the response handler must not find the slot
+                        // still `.running`. Idempotent re-store.
+                        slot.state.store(.draining, .release);
                         // Take body ownership so the slot can be reused
                         // while `update` still reads the slice; the
                         // buffer is freed when the next response drains.
@@ -3771,6 +4464,13 @@ pub fn Effects(comptime Msg: type) type {
                         // `.response`: a mismatched generation means the
                         // occupant was already retired.
                         if (entry.generation != slot.generation) continue;
+                        // Retire the slot BEFORE the terminal reaches
+                        // any handler (the `.image` arm's race note):
+                        // the real worker stores `.draining` only after
+                        // posting this entry, so a same-key file effect
+                        // from the result handler must not find the
+                        // slot still `.running`. Idempotent re-store.
+                        slot.state.store(.draining, .release);
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the bytes.
                         if (self.drain_fetch_body) |old| self.allocator.free(old);
@@ -3805,7 +4505,12 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => {
                         // One terminal per clipboard occupancy, mirroring
                         // `.file`: a mismatched generation means the
-                        // occupant was already retired.
+                        // occupant was already retired. No consumer-side
+                        // `.draining` store is needed here (unlike the
+                        // worker-fed arms): clipboard terminals are
+                        // staged on the loop thread with the store
+                        // sequenced before the enqueue, so this drain
+                        // can never observe the entry ahead of it.
                         if (entry.generation != slot.generation) continue;
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the text.
@@ -3813,7 +4518,6 @@ pub fn Effects(comptime Msg: type) type {
                         self.drain_fetch_body = slot.fetch_buffer;
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
-                        const clipboard_fn = entry.clipboard_fn orelse continue;
                         const text: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
@@ -3828,6 +4532,13 @@ pub fn Effects(comptime Msg: type) type {
                                 .text = text,
                                 .dropped_before = entry.dropped_before,
                             };
+                        // Journal BEFORE the handler gate: a clipboard
+                        // terminal is executor truth (the pasteboard
+                        // ran), so a fire-and-forget write's `.ok` or
+                        // `.failed` must still journal — under session
+                        // replay the request is a parked fake that only
+                        // this record's feed retires. Only the Msg
+                        // depends on the handler.
                         self.journalNote(.{
                             .kind = .clipboard,
                             .key = result.key,
@@ -3836,6 +4547,7 @@ pub fn Effects(comptime Msg: type) type {
                             .clipboard_op = result.op,
                             .clipboard_outcome = result.outcome,
                         });
+                        const clipboard_fn = entry.clipboard_fn orelse continue;
                         return clipboard_fn(result);
                     },
                     .host => {
@@ -3843,7 +4555,14 @@ pub fn Effects(comptime Msg: type) type {
                         // `.response`: a mismatched generation means the
                         // occupant was already retired (replaced or
                         // cancelled — its result drops silently, per the
-                        // request contract).
+                        // request contract). No consumer-side
+                        // `.draining` store is needed here (unlike the
+                        // worker-fed arms): host answers are fed on the
+                        // loop thread with the store sequenced before
+                        // the enqueue — and a same-key host request
+                        // REPLACES an in-flight one rather than
+                        // rejecting, so no handler retry hinges on the
+                        // state either way.
                         if (entry.generation != slot.generation) continue;
                         // Take buffer ownership so the slot can be
                         // reused while `update` still reads the bytes.
@@ -3852,9 +4571,11 @@ pub fn Effects(comptime Msg: type) type {
                         slot.fetch_buffer = null;
                         const payload_len = slot.payload_len;
                         // A cancel that raced the feed (the entry was
-                        // already queued) still drops silently.
+                        // already queued) still drops silently — on
+                        // both sides: live never journals it, and the
+                        // replayed cancel drops the parked fake, so
+                        // neither side has a record to feed.
                         if (cancelled) continue;
-                        const host_fn = entry.host_fn orelse continue;
                         const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
                             buffer[payload_len .. payload_len + entry.line_len]
                         else
@@ -3864,6 +4585,12 @@ pub fn Effects(comptime Msg: type) type {
                             .ok = entry.host_ok,
                             .bytes = bytes,
                         };
+                        // Journal BEFORE the handler gate: a host
+                        // answer is executor truth, so it must journal
+                        // even when no `on_result` route exists — under
+                        // session replay the request is a parked fake
+                        // that only this record's feed retires. Only
+                        // the Msg depends on the handler.
                         self.journalNote(.{
                             .kind = .host,
                             .key = result.key,
@@ -3871,10 +4598,133 @@ pub fn Effects(comptime Msg: type) type {
                             // `.host` journal encoding: route in `code`.
                             .code = @intFromBool(!result.ok),
                         });
+                        const host_fn = entry.host_fn orelse continue;
                         return host_fn(result);
+                    },
+                    .image => {
+                        // One terminal per image occupancy, mirroring
+                        // `.response`: a mismatched generation means the
+                        // occupant was already retired.
+                        if (entry.generation != slot.generation) continue;
+                        // Take buffer ownership so the slot can be
+                        // reused while `update` (and the journal sink)
+                        // still read the bytes.
+                        if (self.drain_fetch_body) |old| self.allocator.free(old);
+                        self.drain_fetch_body = slot.fetch_buffer;
+                        slot.fetch_buffer = null;
+                        // Retire the slot BEFORE the terminal reaches any
+                        // handler. The real worker stores `.draining`
+                        // only AFTER posting this entry, so a drain can
+                        // race ahead of that store and dispatch the
+                        // result while the slot still reads `.running` —
+                        // and an update that reacts to the terminal by
+                        // loading the same id again (reload-after-
+                        // terminal is allowed) would reject as a
+                        // duplicate active key. Storing here makes the
+                        // slot reclaimable by the time any update code
+                        // runs; the worker's own store stays as the
+                        // pre-drain transition (cancel targeting and
+                        // early thread reclaim still key off it), and
+                        // re-storing `.draining` is idempotent.
+                        slot.state.store(.draining, .release);
+                        const image_fn = entry.image_fn;
+                        const bytes: []const u8 = if (self.drain_fetch_body) |buffer|
+                            buffer[0..entry.line_len]
+                        else
+                            "";
+                        var result: EffectImageResult = .{
+                            .id = entry.key,
+                            .outcome = entry.image_outcome,
+                            .status = entry.status,
+                        };
+                        // The journal carries the source bytes whenever
+                        // the cascade delivered them — even when the
+                        // decode below fails, the bytes ARE the effect
+                        // result the boundary produced. RECORD-TIME
+                        // INVARIANT: a journaled `.loaded` always
+                        // carries non-empty bytes, because `.loaded`
+                        // reaches the journal only after
+                        // `register_bytes_fn` decoded and registered
+                        // these exact bytes (a failure rewrites the
+                        // outcome below, and empty bytes cannot decode).
+                        // Session replay refuses `.loaded` records with
+                        // a zero-length blob on this invariant
+                        // (`error.ReplayDamagedRecord`).
+                        var journal_bytes: []const u8 = "";
+                        if (entry.image_fed) {
+                            // Session replay: the recorded terminal is
+                            // the Msg, verbatim — checked BEFORE the
+                            // cancelled rewrite. A live cancel that won
+                            // journaled `.cancelled` and feeds back as
+                            // such; a live cancel that LOST (a staged
+                            // start-failure rejection has no slot to
+                            // mark, so live delivered `.rejected`) must
+                            // not be resurrected by the replayed
+                            // cancel's mark on the parked fake slot,
+                            // whose timing differs from the live seam.
+                            // Re-registration is
+                            // best-effort presentation — a replay host
+                            // whose codec cannot decode the recorded
+                            // bytes (the null platform decodes only the
+                            // strict PNG subset) still replays the
+                            // identical Msg stream; views just render
+                            // without the pixels, and pixel checkpoints
+                            // report the honest difference.
+                            journal_bytes = bytes;
+                            result.width = std.math.cast(usize, entry.image_fed_width) orelse 0;
+                            result.height = std.math.cast(usize, entry.image_fed_height) orelse 0;
+                            if (result.outcome == .loaded and bytes.len > 0) {
+                                self.registerDrainedImage(entry.key, bytes);
+                            }
+                        } else if (cancelled) {
+                            result = .{ .id = entry.key, .outcome = .cancelled };
+                        } else if (result.outcome == .loaded) {
+                            journal_bytes = bytes;
+                            if (self.images) |binding| {
+                                if (binding.register_bytes_fn(binding.context, entry.key, bytes)) |info| {
+                                    result.width = info.width;
+                                    result.height = info.height;
+                                } else |err| {
+                                    result.outcome = classifyImageRegisterError(err);
+                                }
+                            } else {
+                                // No registry bound to this channel:
+                                // nothing can hold the pixels — the
+                                // same class as a host without a codec.
+                                result.outcome = .unsupported;
+                            }
+                        }
+                        self.journalNote(.{
+                            .kind = .image,
+                            .key = result.id,
+                            .payload = journal_bytes,
+                            .status = result.status,
+                            .image_outcome = result.outcome,
+                            .image_width = result.width,
+                            .image_height = result.height,
+                        });
+                        const deliver_fn = image_fn orelse continue;
+                        return deliver_fn(result);
                     },
                 }
             }
+        }
+
+        /// Best-effort decode + register of a replayed image record's
+        /// bytes. Failure is loud (once per process would hide repeats;
+        /// once per failure is a bounded replay-time diagnostic) but
+        /// never steers the Msg stream — the journaled terminal does.
+        fn registerDrainedImage(self: *Self, id: u64, bytes: []const u8) void {
+            const binding = self.images orelse return;
+            _ = binding.register_bytes_fn(binding.context, id, bytes) catch |err| {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "session replay: re-registering image id {d} from the journaled bytes failed ({s}); the Msg stream replays the recorded result, views render without the pixels\n",
+                        .{ id, @errorName(err) },
+                    );
+                }
+                return;
+            };
         }
 
         // --------------------------------------------------- fake executor
@@ -4016,8 +4866,14 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             }
             const delivered = self.enqueue(&entry);
-            slot.state.store(.idle, .release);
-            if (!delivered) {
+            if (delivered) {
+                // Park until the drain takes the exit: the key stays
+                // occupied through the posted-but-undelivered window,
+                // exactly like the real worker's commit.
+                slot.exit_undelivered = true;
+                slot.state.store(.draining, .release);
+            } else {
+                slot.state.store(.idle, .release);
                 self.deliverLoopExit(.{
                     .key = entry.key,
                     .code = code,
@@ -4249,6 +5105,137 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Number of recorded (still-active) fake image-load requests.
+        pub fn pendingImageLoadCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (slot.fake and slot.kind == .image and slot.state.load(.acquire) == .running) count += 1;
+            }
+            return count;
+        }
+
+        /// The `index`-th recorded fake image-load request (slot order).
+        pub fn pendingImageLoadAt(self: *Self, index: usize) ?ImageLoadRequest {
+            var seen: usize = 0;
+            for (&self.slots) |*slot| {
+                if (!(slot.fake and slot.kind == .image and slot.state.load(.acquire) == .running)) continue;
+                if (seen == index) {
+                    return .{
+                        .id = slot.key,
+                        .path = slot.imagePath(),
+                        .url = slot.fetchUrl(),
+                        .cache_path = slot.imageCache(),
+                        .expected_bytes = slot.image_expected_bytes,
+                    };
+                }
+                seen += 1;
+            }
+            return null;
+        }
+
+        /// Feed synthetic ENCODED source bytes to the fake image load
+        /// with `id`, retiring its slot — the test mirror of a real
+        /// cascade that produced bytes: the drain decodes and registers
+        /// them through the bound registry exactly like the real
+        /// executor, so tests exercise the full decode→register→Msg
+        /// path. Bytes over `max_effect_image_bytes` deliver `.too_large`
+        /// without decoding, mirroring the real bound.
+        pub fn feedImageBytes(self: *Self, id: u64, bytes: []const u8) error{ EffectNotFound, EffectQueueFull }!void {
+            const slot_index = self.findActiveFakeSlot(id, .image) orelse return error.EffectNotFound;
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
+            var staged_len: usize = 0;
+            var outcome: EffectImageOutcome = .loaded;
+            if (bytes.len > max_effect_image_bytes) {
+                outcome = .too_large;
+            } else {
+                @memcpy(buffer[0..bytes.len], bytes);
+                staged_len = bytes.len;
+            }
+            slot.body_len = staged_len;
+            try self.finishFedImage(slot, .{
+                .kind = .image,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .line_len = @intCast(staged_len),
+                .status = slot.fetch_status,
+                .image_outcome = outcome,
+                .image_fn = slot.on_image,
+            });
+        }
+
+        /// Feed a RECORDED image terminal — the session-replay feed:
+        /// the journaled outcome, dimensions, and status deliver
+        /// verbatim (the Msg stream must replay byte-identical even on
+        /// a host whose codec differs), and a `.loaded` record's bytes
+        /// re-register best-effort so views repaint the recorded
+        /// pixels. Also the failure-class feed for tests. Under replay
+        /// a full completion queue reports `error.EffectQueueFull`
+        /// with the request still parked — feed again after a drain
+        /// (see `finishFedImage`).
+        pub fn feedImageResult(self: *Self, id: u64, outcome: EffectImageOutcome, width: u64, height: u64, status: u16, bytes: []const u8) error{ EffectNotFound, EffectQueueFull }!void {
+            const slot_index = self.findActiveFakeSlot(id, .image) orelse return error.EffectNotFound;
+            const slot = &self.slots[slot_index];
+            const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
+            const staged_len = @min(bytes.len, max_effect_image_bytes);
+            @memcpy(buffer[0..staged_len], bytes[0..staged_len]);
+            slot.body_len = staged_len;
+            try self.finishFedImage(slot, .{
+                .kind = .image,
+                .slot_index = @intCast(slot_index),
+                .generation = slot.generation,
+                .key = slot.key,
+                .line_len = @intCast(staged_len),
+                .status = status,
+                .image_outcome = outcome,
+                .image_fed = true,
+                .image_fed_width = width,
+                .image_fed_height = height,
+                .image_fn = slot.on_image,
+            });
+        }
+
+        /// Queue a fed image terminal. Under session replay the queue
+        /// is the ONLY path: a full queue back-pressures with
+        /// `error.EffectQueueFull` — the slot returns to `.running`
+        /// exactly as before the feed, bytes still in its buffer — so
+        /// the replay pump can drain the loop and feed again. That is
+        /// the loop-thread mirror of the real worker's `postImage`
+        /// retry: everything goes THROUGH the queue, so the recorded
+        /// bytes and the recorded delivery order both survive a
+        /// recording whose drain pass carried more results than the
+        /// queue holds.
+        ///
+        /// Outside replay (test feeds) a full queue keeps the
+        /// pending-ring fallback: the terminal lands byte-free, and a
+        /// DERIVED `.loaded` (a bytes feed) is rewritten `.rejected`
+        /// there — nothing decoded, nothing registered; a success it
+        /// cannot back would lie. A RECORDED terminal stands verbatim
+        /// (only the best-effort re-registration is lost).
+        fn finishFedImage(self: *Self, slot: *Slot, entry_value: Entry) error{EffectQueueFull}!void {
+            var entry = entry_value;
+            slot.state.store(.draining, .release);
+            if (!self.enqueue(&entry)) {
+                if (self.replay) {
+                    slot.state.store(.running, .release);
+                    return error.EffectQueueFull;
+                }
+                const image_fn = slot.on_image;
+                var outcome = entry.image_outcome;
+                if (outcome == .loaded and !entry.image_fed) outcome = .rejected;
+                self.releaseFetchSlot(slot);
+                self.deliverLoopImage(.{
+                    .id = entry.key,
+                    .outcome = outcome,
+                    .width = std.math.cast(usize, entry.image_fed_width) orelse 0,
+                    .height = std.math.cast(usize, entry.image_fed_height) orelse 0,
+                    .status = entry.status,
+                }, image_fn, false);
+            }
+            self.wakeHost();
+        }
+
         /// Number of parked (still-active) fake host requests.
         pub fn pendingHostCount(self: *Self) usize {
             var count: usize = 0;
@@ -4434,6 +5421,49 @@ pub fn Effects(comptime Msg: type) type {
             self.deliverPending(.{ .clipboard = .{ .result = result, .clipboard_fn = clipboard_fn } });
         }
 
+        /// `regenerates` distinguishes the rejection's provenance for
+        /// the session journal: true for pre-executor validation
+        /// refusals (deterministic — the replayed `loadImage` refuses
+        /// again), false when the executor could not run an otherwise
+        /// valid request (io/thread/buffer failures the replay's fake
+        /// executor never reproduces — those journal as executor truth
+        /// and feed at replay).
+        fn rejectImage(self: *Self, id: u64, image_fn: ?ImageMsgFn, regenerates: bool) void {
+            self.deliverLoopImage(.{
+                .id = id,
+                .outcome = .rejected,
+            }, image_fn, regenerates);
+        }
+
+        /// Queue a terminal image result produced on the loop thread
+        /// (rejections, fake cancels, feed fallbacks) for the next
+        /// drain. No bytes ride here — nothing decodes, nothing
+        /// registers. Staged outside the lossy pending ring: image
+        /// terminals must never evict or be evicted (see
+        /// `PendingImage`).
+        ///
+        /// Only the Msg is gated on the handler. An executor-truth
+        /// terminal (`regenerates = false`) stages even without one:
+        /// it occupies its id through the staged window
+        /// (`stagedImageOccupiesKey`) and journals at drain, because
+        /// under session replay the request it answers is a parked
+        /// fake that ONLY the journaled record's feed retires —
+        /// skipping the stage for a fire-and-forget load would leave
+        /// the id and a slot occupied replay-side forever. A
+        /// handlerless REGENERATING refusal stages nothing: replay
+        /// re-runs the same loop-side validation at the same dispatch
+        /// and refuses identically, so both sides stay symmetric with
+        /// no record, no occupancy, and no Msg.
+        fn deliverLoopImage(self: *Self, result: EffectImageResult, image_fn: ?ImageMsgFn, regenerates: bool) void {
+            if (image_fn == null and regenerates) return;
+            self.stagePendingImage(.{
+                .seq = self.nextPendingSeq(),
+                .result = result,
+                .image_fn = image_fn,
+                .regenerates = regenerates,
+            });
+        }
+
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {
             self.deliverLoopTimer(.{
                 .key = options.key,
@@ -4566,6 +5596,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(buffer);
                 slot.line_buffer = null;
             }
+            slot.exit_undelivered = false;
             slot.state.store(.idle, .release);
         }
 
@@ -4594,8 +5625,12 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Push onto the loop-side pending ring. When the ring is full
         /// the oldest entry is replaced and the replacement carries the
-        /// loss in its drop counter — overflow stays visible.
+        /// loss in its drop counter — overflow stays visible. Image
+        /// terminals never come through here: they carry no drop
+        /// counter to keep an eviction visible, so they stage in the
+        /// non-lossy `pending_images` instead (`stagePendingImage`).
         fn deliverPending(self: *Self, pending: PendingMsg) void {
+            const seq = self.nextPendingSeq();
             if (self.pending_exit_len == max_effect_pending_exits) {
                 const oldest = &self.pending_exits[self.pending_exit_head];
                 self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
@@ -4604,17 +5639,102 @@ pub fn Effects(comptime Msg: type) type {
                 replacement.addDropped(oldest.droppedCount() +| 1);
                 const tail = (self.pending_exit_head + self.pending_exit_len) % max_effect_pending_exits;
                 self.pending_exits[tail] = replacement;
+                self.pending_exit_seqs[tail] = seq;
                 self.pending_exit_len += 1;
             } else {
                 const tail = (self.pending_exit_head + self.pending_exit_len) % max_effect_pending_exits;
                 self.pending_exits[tail] = pending;
+                self.pending_exit_seqs[tail] = seq;
                 self.pending_exit_len += 1;
             }
             self.wakeHost();
         }
 
-        fn takePendingMsg(self: *Self) ?PendingMsg {
-            if (self.pending_exit_len == 0) return null;
+        fn nextPendingSeq(self: *Self) u64 {
+            const seq = self.pending_seq;
+            self.pending_seq += 1;
+            return seq;
+        }
+
+        /// The image stage's current backing storage: the inline buffer
+        /// until a burst outgrows it, the heap ring after.
+        fn pendingImageStorage(self: *Self) []PendingImage {
+            if (self.pending_image_spill.len > 0) return self.pending_image_spill;
+            return &self.pending_images;
+        }
+
+        /// Stage one loop-side image terminal for the next drain —
+        /// never dropping one (the `PendingImage` contract). Growth is
+        /// geometric and earned only by bursts that outgrow the inline
+        /// buffer; each staged entry answers exactly one `loadImage`
+        /// call, so the stage can never grow past the caller's own
+        /// call count between drains. An allocation failure refuses
+        /// LOUDLY: with no counter to fold a loss into and no error
+        /// channel back to the void-returning `loadImage`, dropping
+        /// the entry would strand its issuer forever — a crash names
+        /// the problem, silence never would.
+        fn stagePendingImage(self: *Self, entry: PendingImage) void {
+            const storage = self.pendingImageStorage();
+            if (self.pending_image_len == storage.len) {
+                const grown = self.allocator.alloc(PendingImage, storage.len * 2) catch
+                    @panic("effects: out of memory staging an image terminal - each staged entry is one loadImage call's only terminal and must never be dropped");
+                for (grown[0..self.pending_image_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_image_head + index) % storage.len];
+                }
+                if (self.pending_image_spill.len > 0) self.allocator.free(self.pending_image_spill);
+                self.pending_image_spill = grown;
+                self.pending_image_head = 0;
+            }
+            const active = self.pendingImageStorage();
+            active[(self.pending_image_head + self.pending_image_len) % active.len] = entry;
+            self.pending_image_len += 1;
+            self.wakeHost();
+        }
+
+        /// Pop the image stage's head. Draining empty releases the
+        /// spill: the burst that earned it is over, and the inline
+        /// buffer covers the everyday case again.
+        fn takePendingImage(self: *Self) PendingImage {
+            const storage = self.pendingImageStorage();
+            const entry = storage[self.pending_image_head];
+            self.pending_image_head = (self.pending_image_head + 1) % storage.len;
+            self.pending_image_len -= 1;
+            if (self.pending_image_len == 0) {
+                self.pending_image_head = 0;
+                if (self.pending_image_spill.len > 0) {
+                    self.allocator.free(self.pending_image_spill);
+                    self.pending_image_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
+        /// Take the next loop-side pending terminal in enqueue order,
+        /// merging the ring and the image stage by their shared stamp
+        /// so splitting the storage never reordered delivery. Entries
+        /// stamped at or past `before` stay staged: they were produced
+        /// during the current drain pass and belong to the next one
+        /// (the `DrainBoundary` causality contract). Both structures
+        /// are FIFO over the monotonic stamp, so refusing the merged
+        /// head refuses everything younger too.
+        fn takePendingMsg(self: *Self, before: u64) ?PendingMsg {
+            const ring_has = self.pending_exit_len > 0 and
+                self.pending_exit_seqs[self.pending_exit_head] < before;
+            const image_has = self.pending_image_len > 0 and
+                self.pendingImageStorage()[self.pending_image_head].seq < before;
+            if (!ring_has and !image_has) return null;
+            const take_image = if (ring_has and image_has)
+                self.pendingImageStorage()[self.pending_image_head].seq < self.pending_exit_seqs[self.pending_exit_head]
+            else
+                image_has;
+            if (take_image) {
+                const staged = self.takePendingImage();
+                return .{ .image = .{
+                    .result = staged.result,
+                    .image_fn = staged.image_fn,
+                    .regenerates = staged.regenerates,
+                } };
+            }
             const pending = self.pending_exits[self.pending_exit_head];
             self.pending_exit_head = (self.pending_exit_head + 1) % max_effect_pending_exits;
             self.pending_exit_len -= 1;
@@ -4633,6 +5753,84 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.state.load(.acquire) == .running and slot.key == key) return index;
             }
             return null;
+        }
+
+        /// The shared admission gate for the keyed effect families
+        /// (spawn/fetch/file/clipboard/image — they share the slots
+        /// and one key space): a key is occupied while its effect runs
+        /// AND through the posted-but-undelivered terminal window that
+        /// follows. Under session replay the same request is a parked
+        /// `.running` fake until its journaled terminal feeds at the
+        /// recorded delivery position, so any admission that accepted
+        /// a key live inside that window would journal a Msg stream
+        /// replay rejects (`ReplayEffectDivergence`). Delivery ends
+        /// the window on both sides at the same causal instant — the
+        /// drain retires the slot before the terminal Msg reaches
+        /// update — so reissuing a key from its own terminal handler
+        /// is always accepted.
+        fn keyOccupiedUntilDelivery(self: *Self, key: u64) bool {
+            if (self.findActiveSlot(key) != null) return true;
+            if (self.findUndeliveredTerminalSlot(key) != null) return true;
+            if (self.stagedImageOccupiesKey(key)) return true;
+            return false;
+        }
+
+        /// A staged loop-side image terminal that is executor truth
+        /// (`regenerates = false` — start failures, fake cancels)
+        /// occupies its id until the drain delivers it. Those
+        /// terminals journal as worker truth and FEED under session
+        /// replay, where the request they answer stays parked in its
+        /// slot until the recorded delivery position — so live
+        /// admission must hold the key through the same window, or a
+        /// key accepted here live is one replay rejects. Regenerating
+        /// validation refusals deliberately do NOT occupy: replay
+        /// re-runs the same loop-side validation at the same dispatch,
+        /// so both sides refuse (and stage) identically with the key
+        /// never held on either side.
+        fn stagedImageOccupiesKey(self: *Self, id: u64) bool {
+            const storage = self.pendingImageStorage();
+            var index: usize = 0;
+            while (index < self.pending_image_len) : (index += 1) {
+                const entry = &storage[(self.pending_image_head + index) % storage.len];
+                if (!entry.regenerates and entry.result.id == id) return true;
+            }
+            return false;
+        }
+
+        /// A slot of ANY kind holding `key` whose terminal is posted
+        /// but not yet delivered: state `.draining` with its
+        /// per-family delivery marker still set. Delivery IS the
+        /// marker handoff, derived from how each family's drain
+        /// retires the slot: the drain takes `fetch_buffer` (fetch,
+        /// file, clipboard, host, and image terminals) or
+        /// `collect_buffer` (collect spawns) before the terminal Msg
+        /// reaches update, and clears `exit_undelivered` (`.lines`
+        /// spawns, which own no delivery buffer) at the same instant;
+        /// every loop-side retire (`releaseFetchSlot`,
+        /// `releaseSpawnSlot`) resets the markers too. So a set marker
+        /// under `.draining` means exactly "terminal still pending" —
+        /// the moment update sees the result, the key is free for
+        /// reuse. Loop-thread only: the state load is the acquire
+        /// pairing with the worker's `.draining` release store (the
+        /// worker's last slot access), and the markers are only ever
+        /// cleared on the loop thread.
+        fn findUndeliveredTerminalSlot(self: *Self, key: u64) ?usize {
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.key != key) continue;
+                if (slot.state.load(.acquire) != .draining) continue;
+                if (slotTerminalUndelivered(slot)) return index;
+            }
+            return null;
+        }
+
+        /// The per-family "terminal still pending" predicate for a
+        /// slot already observed `.draining` (see
+        /// `findUndeliveredTerminalSlot` for the marker derivations).
+        fn slotTerminalUndelivered(slot: *const Slot) bool {
+            return switch (slot.kind) {
+                .spawn => slot.collect_buffer != null or slot.exit_undelivered,
+                .fetch, .file, .clipboard, .host, .image => slot.fetch_buffer != null,
+            };
         }
 
         /// The most recent no-longer-running occupant with `key` (done
@@ -4701,13 +5899,16 @@ pub fn Effects(comptime Msg: type) type {
                         joinWorker(slot);
                         slot.state.store(.idle, .release);
                     },
-                    // A draining slot is reusable once the drain took its
-                    // heap buffer (fetch body or collected stdout — the
-                    // terminal Msg was delivered). Its worker is already
-                    // finished either way: retire the thread now.
+                    // A draining slot is reusable once the drain
+                    // delivered its terminal (took the fetch body or
+                    // collected stdout, or cleared a `.lines` exit's
+                    // marker). Its worker is already finished either
+                    // way: retire the thread now.
                     .draining => {
                         joinWorker(slot);
-                        if (slot.fetch_buffer == null and slot.collect_buffer == null) slot.state.store(.idle, .release);
+                        if (slot.fetch_buffer == null and slot.collect_buffer == null and !slot.exit_undelivered) {
+                            slot.state.store(.idle, .release);
+                        }
                     },
                     else => {},
                 }
@@ -4983,10 +6184,32 @@ pub fn Effects(comptime Msg: type) type {
                 slot.stderr_ring = ctx.stderr_ring;
                 slot.stderr_total = ctx.stderr_total;
             }
+            // Mark-then-post: the `.lines` undelivered-exit marker must
+            // be published BEFORE the exit is consumable. `postExit`'s
+            // enqueue releases the queue mutex the drain's dequeue
+            // acquires, so this write is ordered before any consume —
+            // the drain-side clear always follows this set. Posting
+            // first would let a drain riding another wake consume the
+            // exit (clearing a still-false marker) before the mark
+            // landed, leaving a set marker no terminal can ever clear:
+            // `reclaimSlots` would hold the slot out of `.idle` forever
+            // and the key would never readmit.
+            if (ctx.output_mode != .collect) slot.exit_undelivered = true;
             self.postExit(slot, @intCast(slot_index), generation, io, exit);
-            // A collect slot still owns its stdout buffer; park it in
-            // `.draining` until the drain takes the buffer (fetch-style).
-            slot.state.store(if (ctx.output_mode == .collect) .draining else .done, .release);
+            // Park in `.draining` until the drain delivers the exit: a
+            // collect slot still owns its stdout buffer (fetch-style),
+            // and a `.lines` slot holds the marker set above — either
+            // way the key stays occupied through the window between the
+            // post and the drain, which is exactly the span session
+            // replay keeps the parked fake occupying
+            // (`findUndeliveredTerminalSlot`). This store must stay
+            // AFTER the post: `reclaimSlots` joins any `.draining`
+            // worker, and `postExit` can park in a full-queue retry
+            // only the loop thread can relieve — staying `.running`
+            // keeps this thread unjoinable until the post lands. It is
+            // also the release the loop's acquire loads pair with, and
+            // the worker's last slot access.
+            slot.state.store(.draining, .release);
             self.wakeHost();
         }
 
@@ -5569,6 +6792,300 @@ pub fn Effects(comptime Msg: type) type {
             return if (err == error.Canceled) .cancelled else .io_failed;
         }
 
+        // ------------------------------------------------------ image worker
+
+        /// Supervises one image load, mirroring `fetchWorkerMain`: the
+        /// whole source cascade (local probe, cache read, network
+        /// fetch, cache install) runs as ONE cancelable `Io` task,
+        /// polled against `cancel`, `shutdown`, and the effect timeout.
+        /// Unlike bare file effects — which have no deadline at all and
+        /// need the abandon safety net — every blocking phase here is
+        /// deadline-bounded: the timeout (or teardown) cancels the task
+        /// the same way it cancels a fetch exchange, so teardown joins
+        /// image workers unconditionally, exactly like fetch workers.
+        fn imageWorkerMain(self: *Self, slot_index: usize, generation: u32, io: std.Io) void {
+            const slot = &self.slots[slot_index];
+            supervise: {
+                var future = self.startImageExchange(slot, io) catch {
+                    // Same refusal as fetch: an inline cascade would
+                    // evade cancel, the timeout, and teardown's
+                    // unconditional join.
+                    slot.fetch_status = 0;
+                    slot.body_len = 0;
+                    slot.image_outcome = .rejected;
+                    if (self.fetch_start_rejections.fetchAdd(1, .monotonic) == 0) {
+                        std.debug.print(
+                            "effects image: the executor could not start a cancelable load for image id {d}; rejecting the load (an inline cascade would evade cancel, the timeout, and teardown)\n",
+                            .{slot.key},
+                        );
+                    }
+                    break :supervise;
+                };
+                const poll_ms: u64 = 5;
+                var waited_ms: u64 = 0;
+                var timed_out = false;
+                while (true) {
+                    if (slot.fetch_done.load(.acquire)) break;
+                    if (self.shutdown.load(.acquire) or slot.cancel_requested.load(.acquire)) {
+                        future.cancel(io);
+                        break;
+                    }
+                    if (waited_ms >= slot.timeout_ms) {
+                        timed_out = true;
+                        future.cancel(io);
+                        break;
+                    }
+                    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(poll_ms), .awake) catch {};
+                    waited_ms += poll_ms;
+                }
+                future.await(io);
+                if (!slot.fetch_done.load(.acquire)) {
+                    // Interrupted before the task recorded a terminal
+                    // state (never expected — the task always records).
+                    slot.fetch_status = 0;
+                    slot.body_len = 0;
+                    slot.image_outcome = if (timed_out) .timed_out else .cancelled;
+                } else if (timed_out and slot.image_outcome != .loaded) {
+                    // The interruption was the deadline, not the app:
+                    // every non-staged outcome here is the timeout's
+                    // doing. A cascade that staged its bytes before the
+                    // deadline fired stays a delivered `.loaded`.
+                    slot.image_outcome = .timed_out;
+                    slot.fetch_status = 0;
+                    slot.body_len = 0;
+                }
+            }
+            self.postImage(slot, @intCast(slot_index), generation, io);
+            slot.state.store(.draining, .release);
+            self.wakeHost();
+        }
+
+        /// Start the blocking cascade as a cancelable task on the
+        /// executor io — the only way it may run (see
+        /// `startFetchExchange` for the contract). Shares the fetch
+        /// injection switch so tests pin the rejection path.
+        fn startImageExchange(self: *Self, slot: *Slot, io: std.Io) std.Io.ConcurrentError!std.Io.Future(void) {
+            if (!self.fetch_concurrent_start) return error.ConcurrencyUnavailable;
+            return std.Io.concurrent(io, imageTask, .{ self, slot, io });
+        }
+
+        /// The blocking cascade, run as a cancelable task. Always
+        /// records a terminal source-stage state in the slot before
+        /// `fetch_done`.
+        fn imageTask(self: *Self, slot: *Slot, io: std.Io) void {
+            defer slot.fetch_done.store(true, .release);
+            self.runImageLoad(slot, io) catch |err| {
+                slot.body_len = 0;
+                slot.image_outcome = classifyImageFetchError(err);
+            };
+        }
+
+        /// The source cascade, the `playAudio` resolution order made
+        /// byte-producing: local file first (a MISSING file is the one
+        /// local failure that falls through to the url — everything
+        /// else is terminal, because retrying a different source would
+        /// mask the real problem), then a verified cache entry, then
+        /// the network with a cache install behind it. On success the
+        /// encoded bytes sit in the slot buffer with
+        /// `image_outcome == .loaded`; the drain decodes and registers
+        /// them on the loop thread.
+        fn runImageLoad(self: *Self, slot: *Slot, io: std.Io) !void {
+            const buffer = slot.fetch_buffer.?;
+            const cwd = std.Io.Dir.cwd();
+            if (slot.image_path_len > 0) {
+                if (cwd.openFile(io, slot.imagePath(), .{})) |file_value| {
+                    var file = file_value;
+                    defer file.close(io);
+                    const len = file.readPositionalAll(io, buffer, 0) catch |err| {
+                        slot.image_outcome = if (err == error.Canceled) .cancelled else .io_failed;
+                        slot.body_len = 0;
+                        return;
+                    };
+                    if (len > max_effect_image_bytes) {
+                        slot.image_outcome = .too_large;
+                        slot.body_len = 0;
+                        return;
+                    }
+                    slot.body_len = len;
+                    slot.image_outcome = .loaded;
+                    return;
+                } else |err| {
+                    if (err == error.Canceled) {
+                        slot.image_outcome = .cancelled;
+                        slot.body_len = 0;
+                        return;
+                    }
+                    if (err != error.FileNotFound or slot.url_len == 0) {
+                        slot.image_outcome = if (err == error.FileNotFound) .not_found else .io_failed;
+                        slot.body_len = 0;
+                        return;
+                    }
+                    // Missing local file with a url: fall through.
+                }
+            }
+            if (slot.image_cache_len > 0) {
+                // The probe's only error is a spent cancel: terminate
+                // `.cancelled` like the local-probe arm above — never
+                // fall through to a network fetch the cancel can no
+                // longer reach.
+                const cached = self.readImageCache(slot, io, buffer) catch {
+                    slot.image_outcome = .cancelled;
+                    slot.body_len = 0;
+                    return;
+                };
+                if (cached) return;
+            }
+            try self.fetchImageBytes(slot, io, buffer);
+            if (slot.image_outcome == .loaded and slot.image_cache_len > 0) {
+                self.installImageCache(slot, io, buffer[0..slot.body_len]);
+            }
+        }
+
+        /// Probe the cache entry for a url source: it qualifies only
+        /// when readable, within the source bound, and — when the
+        /// caller declared `expected_bytes` — exactly that size (the
+        /// integrity gate). Anything else falls through to the network,
+        /// which refreshes the entry — except a cancel interruption,
+        /// which propagates: cancel delivery is ONE-SHOT (the Canceled
+        /// error return IS the delivery), so treating it as a cache
+        /// miss would consume it and send a cancelled load into the
+        /// network fetch with nothing left to interrupt it.
+        fn readImageCache(self: *Self, slot: *Slot, io: std.Io, buffer: []u8) error{Canceled}!bool {
+            _ = self;
+            const cwd = std.Io.Dir.cwd();
+            var file = cwd.openFile(io, slot.imageCache(), .{}) catch |err|
+                return if (err == error.Canceled) error.Canceled else false;
+            defer file.close(io);
+            const len = file.readPositionalAll(io, buffer, 0) catch |err|
+                return if (err == error.Canceled) error.Canceled else false;
+            if (len == 0 or len > max_effect_image_bytes) return false;
+            if (slot.image_expected_bytes != 0 and len != slot.image_expected_bytes) return false;
+            slot.body_len = len;
+            // `fetch_status` stays 0 on a cache hit: no HTTP exchange
+            // occurred, and 0 says so honestly (the documented
+            // `EffectImageResult.status` contract) — fabricating the
+            // origin's 200 would claim an exchange that never happened.
+            slot.image_outcome = .loaded;
+            return true;
+        }
+
+        /// GET the url whole into the slot buffer, mirroring
+        /// `runFetch`'s exchange discipline. Non-2xx statuses terminate
+        /// as `.http_status` with the body discarded — an error page is
+        /// not an image — and bodies over the source bound terminate
+        /// `.too_large` whole (a cut image can never decode, so there
+        /// is no truncated delivery).
+        fn fetchImageBytes(self: *Self, slot: *Slot, io: std.Io, buffer: []u8) !void {
+            const uri = try std.Uri.parse(slot.fetchUrl());
+            var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
+            defer client.deinit();
+            var request = client.request(.GET, uri, .{
+                .keep_alive = false,
+                .redirect_behavior = @enumFromInt(3),
+            }) catch |err| {
+                // See `runFetch`: an untyped failure here is a connect
+                // failure.
+                if (err == error.Unexpected) return error.ConnectPhaseFailed;
+                return err;
+            };
+            defer request.deinit();
+            try request.sendBodiless();
+            var redirect_buffer: [8 * 1024]u8 = undefined;
+            var response = try request.receiveHead(&redirect_buffer);
+            slot.fetch_status = @intFromEnum(response.head.status);
+            if (response.head.status.class() != .success) {
+                slot.image_outcome = .http_status;
+                slot.body_len = 0;
+                return;
+            }
+            const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+                .identity => &.{},
+                .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
+                .deflate, .gzip => try self.allocator.alloc(u8, std.compress.flate.max_window_len),
+                .compress => return error.UnsupportedCompressionMethod,
+            };
+            defer if (decompress_buffer.len > 0) self.allocator.free(decompress_buffer);
+            var transfer_buffer: [4096]u8 = undefined;
+            var decompress: std.http.Decompress = undefined;
+            const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+            var body_writer = std.Io.Writer.fixed(buffer);
+            var over_bound = false;
+            _ = reader.streamRemaining(&body_writer) catch |err| switch (err) {
+                // The buffer's spare byte filled: the source is over
+                // the bound, whole-failure by policy.
+                error.WriteFailed => over_bound = true,
+                error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
+            };
+            if (over_bound or body_writer.end > max_effect_image_bytes) {
+                slot.image_outcome = .too_large;
+                slot.body_len = 0;
+                return;
+            }
+            slot.body_len = body_writer.end;
+            slot.image_outcome = .loaded;
+        }
+
+        /// Best-effort cache install behind a successful fetch: write
+        /// a writer-unique temp beside the cache path (see
+        /// `imageCachePartialPath` — concurrent installs toward one
+        /// cache path must never share a temp, across channels and
+        /// processes included) and atomically rename into place, and
+        /// only when `expected_bytes` (if declared) verifies — a
+        /// partial or wrong-size download never occupies the cache
+        /// name. Failures cost only the next load a re-fetch, and a
+        /// failed install deletes its own temp so the cache directory
+        /// never accumulates this process's debris; only a hard crash
+        /// mid-install can leave one behind, in the OS-purgeable
+        /// caches directory.
+        fn installImageCache(self: *Self, slot: *Slot, io: std.Io, bytes: []const u8) void {
+            _ = self;
+            if (slot.image_expected_bytes != 0 and bytes.len != slot.image_expected_bytes) return;
+            const cache_path = slot.imageCache();
+            const cwd = std.Io.Dir.cwd();
+            if (std.fs.path.dirname(cache_path)) |parent| {
+                cwd.createDirPath(io, parent) catch return;
+            }
+            // The uniqueness token comes from the operation's own
+            // executor io — the CSPRNG seam every worker already
+            // carries — so the name is unique across channels and
+            // processes, not merely within this channel's generation
+            // counter. Freestanding builds never reach this function
+            // (no executor io exists there to run a worker), so the
+            // entropy source needs no target gate.
+            var token_bytes: [8]u8 = undefined;
+            io.random(&token_bytes);
+            const token = std.mem.readInt(u64, &token_bytes, .little);
+            var partial_buffer: [max_effect_image_path_bytes + 48]u8 = undefined;
+            const partial_path = imageCachePartialPath(&partial_buffer, cache_path, slot.generation, token) catch return;
+            cwd.writeFile(io, .{ .sub_path = partial_path, .data = bytes }) catch {
+                cwd.deleteFile(io, partial_path) catch {};
+                return;
+            };
+            cwd.rename(partial_path, cwd, cache_path, io) catch {
+                cwd.deleteFile(io, partial_path) catch {};
+            };
+        }
+
+        /// The terminal image entry must never be dropped: retry until
+        /// the loop thread drains space, giving up only on shutdown.
+        fn postImage(self: *Self, slot: *Slot, slot_index: u16, generation: u32, io: std.Io) void {
+            var entry: Entry = .{
+                .kind = .image,
+                .slot_index = slot_index,
+                .generation = generation,
+                .key = slot.key,
+                .line_len = @intCast(slot.body_len),
+                .status = slot.fetch_status,
+                .image_outcome = slot.image_outcome,
+                .image_fn = slot.on_image,
+            };
+            while (!self.enqueue(&entry)) {
+                if (self.shutdown.load(.acquire)) return;
+                self.wakeHost();
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+        }
+
         /// The terminal file result must never be dropped: retry until
         /// the loop thread drains space, giving up only on shutdown.
         fn postFile(self: *Self, slot: *Slot, slot_index: u16, generation: u32, io: std.Io, outcome: EffectFileOutcome, read_len: usize) void {
@@ -5621,6 +7138,66 @@ test "effect payload types have documented defaults" {
 test "fx timer platform ids stay inside the reserved range and clear of the markup watch id" {
     try std.testing.expect(effect_timer_platform_id_base >= platform.reserved_timer_id_base);
     try std.testing.expect(effect_timer_platform_id_base + max_effect_timers - 1 < 0xffff_ffff_2e70_a11c);
+}
+
+test "image cache probe propagates a cancel interruption and reads every other failure as a miss" {
+    const TestMsg = union(enum) { result: EffectImageResult };
+    const Channel = Effects(TestMsg);
+    const Fakes = struct {
+        fn openCanceled(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            _ = userdata;
+            _ = dir;
+            _ = sub_path;
+            _ = options;
+            return error.Canceled;
+        }
+        fn openOk(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            _ = userdata;
+            _ = dir;
+            _ = sub_path;
+            _ = options;
+            return .{ .handle = 0, .flags = .{ .nonblocking = false } };
+        }
+        fn readCanceled(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            _ = userdata;
+            _ = file;
+            _ = data;
+            _ = offset;
+            return error.Canceled;
+        }
+        fn closeNoop(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            _ = userdata;
+            _ = files;
+        }
+    };
+
+    var slot: Channel.Slot = .{};
+    const cache_path = "caches/images/probe.png";
+    @memcpy(slot.image_cache_storage[0..cache_path.len], cache_path);
+    slot.image_cache_len = cache_path.len;
+    var buffer: [32]u8 = undefined;
+
+    // Cancel delivery is one-shot: a cancel that interrupts the probe's
+    // open IS the delivery, so the probe must surface it — reading it
+    // as a miss would send the cancelled load into the network fetch
+    // with nothing left to interrupt.
+    var open_cancel_vtable = std.Io.failing.vtable.*;
+    open_cancel_vtable.dirOpenFile = Fakes.openCanceled;
+    const open_cancel_io: std.Io = .{ .userdata = null, .vtable = &open_cancel_vtable };
+    try std.testing.expectError(error.Canceled, Channel.readImageCache(undefined, &slot, open_cancel_io, &buffer));
+
+    // A cancel landing in the positional read, same contract.
+    var read_cancel_vtable = std.Io.failing.vtable.*;
+    read_cancel_vtable.dirOpenFile = Fakes.openOk;
+    read_cancel_vtable.fileReadPositional = Fakes.readCanceled;
+    read_cancel_vtable.fileClose = Fakes.closeNoop;
+    const read_cancel_io: std.Io = .{ .userdata = null, .vtable = &read_cancel_vtable };
+    try std.testing.expectError(error.Canceled, Channel.readImageCache(undefined, &slot, read_cancel_io, &buffer));
+
+    // Every other failure stays an honest miss that falls through to
+    // the network (`std.Io.failing`'s empty filesystem opens report
+    // FileNotFound).
+    try std.testing.expectEqual(false, try Channel.readImageCache(undefined, &slot, std.Io.failing, &buffer));
 }
 
 test "fetch errors map onto the documented taxonomy" {

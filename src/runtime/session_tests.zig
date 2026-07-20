@@ -1330,3 +1330,1664 @@ test "a quit from the app's boot dispatch journals the start turn before the shu
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
 }
+
+// --------------------------------------------- image loads and the blob store
+
+const session_blobs = @import("session_blobs.zig");
+
+const image_canvas_label = "image-session-canvas";
+
+const ImageSessionModel = struct {
+    results: u32 = 0,
+    loaded: u32 = 0,
+    failed: u32 = 0,
+    rejected: u32 = 0,
+    last_width: usize = 0,
+    last_height: usize = 0,
+    last_outcome_name: [24]u8 = @splat(' '),
+    last_outcome_len: usize = 0,
+    /// Chatty-subprocess line counter, plus its value at the moment
+    /// each image terminal lands: the pair makes delivery ORDER a
+    /// model fact — a replay that reorders an image terminal around
+    /// the recorded lines diverges here, not just in pixel state.
+    lines_seen: u32 = 0,
+    lines_before_image: u32 = 0,
+    /// Armed by `.arm_chain`: the NEXT loaded cover terminal (id 21)
+    /// answers by loading a second image (id 25) from inside its own
+    /// update — the chained-load shape whose fast completion must not
+    /// deliver in the drain pass that issued it.
+    chain_on_cover: bool = false,
+    /// Cross-family same-key probes (the fetch and spawn arms below
+    /// reuse the cover's key 21): terminal counts with rejections
+    /// tallied separately, view-pinned so the fingerprint checkpoints
+    /// hold the whole Msg stream, rejections included.
+    responses: u32 = 0,
+    responses_rejected: u32 = 0,
+    exits: u32 = 0,
+    exits_rejected: u32 = 0,
+    files: u32 = 0,
+    /// Armed by `.arm_fetch_chain` / `.arm_file_chain`: the NEXT
+    /// terminal of that family answers by reissuing the SAME key from
+    /// inside its own update (one-shot) — the poll/reload idiom whose
+    /// acceptance must hold identically live and under replay.
+    chain_next_fetch: bool = false,
+    chain_next_file: bool = false,
+
+    fn outcomeName(self: *const ImageSessionModel) []const u8 {
+        return self.last_outcome_name[0..self.last_outcome_len];
+    }
+};
+
+const ImageSessionMsg = union(enum) {
+    load_cover,
+    load_cover_ff,
+    load_cover_again,
+    load_broken,
+    load_invalid,
+    load_hostless,
+    arm_chain,
+    arm_fetch_chain,
+    arm_file_chain,
+    cancel_cover,
+    start_chatty,
+    fetch_cover,
+    spawn_cover,
+    read_note,
+    line: effects_mod.EffectLine,
+    image: effects_mod.EffectImageResult,
+    response: effects_mod.EffectResponse,
+    exit: effects_mod.EffectExit,
+    file: effects_mod.EffectFileResult,
+};
+
+const ImageSessionApp = ui_app_mod.UiApp(ImageSessionModel, ImageSessionMsg);
+
+fn imageSessionUpdate(model: *ImageSessionModel, msg: ImageSessionMsg, fx: *ImageSessionApp.Effects) void {
+    switch (msg) {
+        .load_cover => fx.loadImage(.{ .id = 21, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // The cover load with NO handler — fire-and-forget. Its
+        // terminal delivers no Msg, but an executor-truth terminal
+        // (a start failure) must still journal and occupy the id
+        // through its staged window, exactly like the handled form.
+        .load_cover_ff => fx.loadImage(.{ .id = 21, .path = "art/cover.png", .on_result = null }),
+        // A second id over the SAME bytes: the journal's blob store
+        // must hold ONE blob for both records.
+        .load_cover_again => fx.loadImage(.{ .id = 22, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        .load_broken => fx.loadImage(.{ .id = 23, .path = "art/broken.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // Id 0 is refused loop-side: a `.rejected` record that must
+        // REGENERATE under replay rather than feed.
+        .load_invalid => fx.loadImage(.{ .id = 0, .path = "art/cover.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // A URL that PASSES loop-side validation ("http:hostless"
+        // parses with an http scheme) and is refused INSIDE the worker
+        // (`std.http` cannot build a request without a host — no
+        // network is ever touched): a `.rejected` terminal that is
+        // worker truth, so its journaled record must FEED under replay
+        // rather than be mistaken for regenerable validation.
+        .load_hostless => fx.loadImage(.{ .id = 24, .url = "http:hostless", .on_result = ImageSessionApp.Effects.imageMsg(.image) }),
+        // The chatty subprocess whose line results share the
+        // completion queue with the image terminal.
+        .start_chatty => fx.spawn(.{
+            .key = 31,
+            .argv = &.{ "chatty", "--emit" },
+            .on_line = ImageSessionApp.Effects.lineMsg(.line),
+        }),
+        .arm_chain => model.chain_on_cover = true,
+        .arm_fetch_chain => model.chain_next_fetch = true,
+        .arm_file_chain => model.chain_next_file = true,
+        // A file read on its own key (26 — never colliding with the
+        // image/fetch/spawn probes above).
+        .read_note => fx.readFile(.{ .key = 26, .path = "notes/session.txt", .on_result = ImageSessionApp.Effects.fileMsg(.file) }),
+        // Aimed at the cover's id: against a running load this marks
+        // it cancelled; against a staged start-failure rejection (no
+        // slot exists) it is a no-op and the rejection stands.
+        .cancel_cover => fx.cancel(21),
+        // The cover's key from another family: the effect families
+        // share one key space, so these collide with image id 21.
+        .fetch_cover => fx.fetch(.{ .key = 21, .url = "http://gallery.test/cover.png", .on_response = ImageSessionApp.Effects.responseMsg(.response) }),
+        .spawn_cover => fx.spawn(.{ .key = 21, .argv = &.{"refresh-cover"}, .on_exit = ImageSessionApp.Effects.exitMsg(.exit) }),
+        .line => model.lines_seen += 1,
+        .response => |response| {
+            model.responses += 1;
+            if (response.outcome == .rejected) model.responses_rejected += 1;
+            // The armed poll idiom: answer the cover fetch's terminal
+            // by refetching the SAME key from inside update. Pure
+            // model logic, so record and replay both issue it at
+            // exactly this dispatch — acceptance is the executor-side
+            // agreement under test.
+            if (model.chain_next_fetch and response.key == 21) {
+                model.chain_next_fetch = false;
+                fx.fetch(.{ .key = 21, .url = "http://gallery.test/cover.png", .on_response = ImageSessionApp.Effects.responseMsg(.response) });
+            }
+        },
+        .exit => |exit| {
+            model.exits += 1;
+            if (exit.reason == .rejected) model.exits_rejected += 1;
+        },
+        .file => |result| {
+            model.files += 1;
+            // The armed reload idiom, the fetch chain's file twin.
+            if (model.chain_next_file and result.key == 26) {
+                model.chain_next_file = false;
+                fx.readFile(.{ .key = 26, .path = "notes/session.txt", .on_result = ImageSessionApp.Effects.fileMsg(.file) });
+            }
+        },
+        .image => |result| {
+            // The armed chain: answering the cover's loaded terminal by
+            // starting the NEXT load, from inside update — pure model
+            // logic, so record and replay both issue it at exactly this
+            // dispatch. Whether its completion may be consumed in the
+            // same drain pass is the executor-side question under test.
+            if (model.chain_on_cover and result.id == 21 and result.outcome == .loaded) {
+                model.chain_on_cover = false;
+                fx.loadImage(.{ .id = 25, .path = "art/chained.png", .on_result = ImageSessionApp.Effects.imageMsg(.image) });
+            }
+            model.lines_before_image = model.lines_seen;
+            model.results += 1;
+            switch (result.outcome) {
+                .loaded => model.loaded += 1,
+                .rejected => model.rejected += 1,
+                else => model.failed += 1,
+            }
+            model.last_width = result.width;
+            model.last_height = result.height;
+            const name = @tagName(result.outcome);
+            const len = @min(name.len, model.last_outcome_name.len);
+            @memcpy(model.last_outcome_name[0..len], name[0..len]);
+            model.last_outcome_len = len;
+        },
+    }
+}
+
+fn imageSessionView(ui: *ImageSessionApp.Ui, model: *const ImageSessionModel) ImageSessionApp.Ui.Node {
+    // The semantic tree carries the image-derived model state, so the
+    // fingerprint checkpoints PIN the Msg stream: a replay that
+    // delivered different outcomes or dimensions mismatches here.
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.text(.{}, ui.fmt("{d} results, {d} loaded, {d} failed, {d} rejected", .{ model.results, model.loaded, model.failed, model.rejected })),
+        ui.text(.{}, ui.fmt("last {s} {d}x{d}", .{ model.outcomeName(), model.last_width, model.last_height })),
+        ui.text(.{}, ui.fmt("{d} lines, {d} before image", .{ model.lines_seen, model.lines_before_image })),
+        ui.text(.{}, ui.fmt("{d}/{d} responses, {d}/{d} exits rejected", .{ model.responses_rejected, model.responses, model.exits_rejected, model.exits })),
+        ui.text(.{}, ui.fmt("{d} files", .{model.files})),
+    });
+}
+
+fn imageSessionCommand(name: []const u8) ?ImageSessionMsg {
+    if (std.mem.eql(u8, name, "image.cover")) return .load_cover;
+    if (std.mem.eql(u8, name, "image.cover-ff")) return .load_cover_ff;
+    if (std.mem.eql(u8, name, "image.again")) return .load_cover_again;
+    if (std.mem.eql(u8, name, "image.broken")) return .load_broken;
+    if (std.mem.eql(u8, name, "image.invalid")) return .load_invalid;
+    if (std.mem.eql(u8, name, "image.hostless")) return .load_hostless;
+    if (std.mem.eql(u8, name, "image.chain")) return .arm_chain;
+    if (std.mem.eql(u8, name, "image.fetch-chain")) return .arm_fetch_chain;
+    if (std.mem.eql(u8, name, "image.file-chain")) return .arm_file_chain;
+    if (std.mem.eql(u8, name, "image.read-note")) return .read_note;
+    if (std.mem.eql(u8, name, "image.cancel")) return .cancel_cover;
+    if (std.mem.eql(u8, name, "image.chatty")) return .start_chatty;
+    if (std.mem.eql(u8, name, "image.fetch-cover")) return .fetch_cover;
+    if (std.mem.eql(u8, name, "image.spawn-cover")) return .spawn_cover;
+    return null;
+}
+
+const image_session_views = [_]app_manifest.ShellView{
+    .{ .label = image_canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const image_session_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Image Session",
+    .width = 400,
+    .height = 300,
+    .views = &image_session_views,
+}};
+const image_session_scene: app_manifest.ShellConfig = .{ .windows = &image_session_windows };
+
+fn imageSessionOptions() ImageSessionApp.Options {
+    return .{
+        .name = "image-session-demo",
+        .scene = image_session_scene,
+        .canvas_label = image_canvas_label,
+        .update_fx = imageSessionUpdate,
+        .view = imageSessionView,
+        .on_command = imageSessionCommand,
+    };
+}
+
+fn imageSessionPng(buffer: []u8) []const u8 {
+    var pixels: [6 * 5 * 4]u8 = undefined;
+    var seed: u8 = 23;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 31 +% 7;
+    }
+    var writer = std.Io.Writer.fixed(buffer);
+    canvas.png.writeRgba8(&writer, 6, 5, &pixels) catch unreachable;
+    return writer.buffered();
+}
+
+const RecordedImageSession = struct {
+    model: ImageSessionModel,
+    fingerprint: u64,
+};
+
+/// Record the image reference session: two loads of the same bytes
+/// (one blob, two records), one decode failure (its bytes journal
+/// too), and one loop-side rejection (regenerates at replay).
+fn recordImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.again", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(22, png);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.broken", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(23, "these bytes are no image");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.invalid", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Both decoded loads are live in the recording runtime.
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(22) != null);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "image loads record into the blob store (deduplicated) and replay byte-identical, offline" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordImageSession(gpa, buffer, &store);
+    try std.testing.expectEqual(@as(u32, 4), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.loaded);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.failed);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+
+    // Same bytes twice = ONE blob; the broken bytes are a second.
+    try std.testing.expectEqual(@as(usize, 2), store.count);
+    try std.testing.expectEqual(@as(usize, 1), store.dedup_hits);
+
+    // Replay into a fresh app: the journal plus the blob store are the
+    // WHOLE world — no files are read (the fake paths never existed),
+    // no network is touched, and every fingerprint checkpoint matches.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    // NO manual decoder enablement here: the replay side installs its
+    // decode seam through the SAME call `runSessionReplay` makes, in
+    // the arm this codec-less test tier reaches (the strict test-PNG
+    // fallback). Replay tests once flipped `image_decode` by hand while
+    // the production runner installed no decoder at all — this test
+    // holds the runner's construction path itself to the re-register
+    // proof below.
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // Two loaded terminals and the decode failure feed; the rejection
+    // regenerates from the same loop-side validation.
+    try std.testing.expectEqual(@as(u64, 3), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+
+    // The replayed runtime re-registered the recorded bytes: the
+    // pixels are drawable offline, straight from the blob store.
+    const replay_registered = harness.runtime.registeredCanvasImage(21).?;
+    try std.testing.expectEqual(@as(usize, 6), replay_registered.width);
+    try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(22) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(23) == null);
+}
+
+/// Record the undelivered-window reference session: load id 21, feed
+/// its bytes (terminal queued, slot `.draining`, delivery still
+/// ahead), then — before any drain — an UNRELATED dispatch loads id
+/// 21 again. That reload must reject on BOTH sides: under replay the
+/// first request is still a parked `.running` fake at that dispatch
+/// (its recorded terminal feeds at the journaled delivery position),
+/// so a live executor that accepted the reload would journal a
+/// different Msg stream than replay derives — accepted live, rejected
+/// replayed, with the extra regenerated rejection diverging the model.
+fn recordWindowReloadSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // NO wake between the feed and the next command: the terminal is
+    // queued but undelivered when the reload dispatch lands — the
+    // window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a reload inside the undelivered terminal window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordWindowReloadSession(gpa, buffer, &store);
+    // The live side already rejected the in-window reload: one loaded
+    // terminal for the first request, one rejection for the reload.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The loaded terminal feeds; the in-window rejection regenerates
+    // from the replayed duplicate check itself — the agreement pin.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the cross-family window reference session: a FETCH of key 21
+/// completes (terminal queued, slot `.draining`, delivery still ahead),
+/// then — before any drain — a dispatch loads IMAGE id 21. The families
+/// share one key space, so that load must reject on BOTH sides: under
+/// replay the fetch is still a parked `.running` fake at that dispatch
+/// (its recorded response feeds at the journaled delivery position),
+/// and the parked fake is what rejects the image load there.
+fn recordCrossFamilyWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-cover", .window_id = 1 } });
+    try app_state.effects.feedResponse(21, 200, "cover-bytes");
+    // NO wake between the feed and the next command: the fetch terminal
+    // is queued but undelivered when the image load lands.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "an image load inside another family's undelivered window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordCrossFamilyWindowSession(gpa, buffer, &store);
+    // The live side already rejected the in-window image load: one ok
+    // response for the fetch, one regenerable rejection for the load.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.responses);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.responses_rejected);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The response feeds; the in-window image rejection regenerates
+    // from the replayed cross-family occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// The mirror of `recordCrossFamilyWindowSession`: IMAGE id 21 completes
+/// (terminal queued, undelivered), then — before any drain — a dispatch
+/// SPAWNS key 21. The spawn must reject on both sides for the same
+/// reason: under replay the image request is still a parked `.running`
+/// fake until its recorded terminal feeds.
+fn recordSpawnInImageWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // NO wake between the feed and the next command: the image terminal
+    // is queued but undelivered when the spawn lands.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.spawn-cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a spawn inside an image's undelivered window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordSpawnInImageWindowSession(gpa, buffer, &store);
+    // The live side already rejected the in-window spawn: one loaded
+    // image terminal, one regenerable spawn rejection.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.exits);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.exits_rejected);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The loaded terminal feeds; the in-window spawn rejection
+    // regenerates from the replayed occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the start-failure window reference session: the channel
+/// allocator fails exactly at image 21's staged source buffer, so the
+/// load is refused with executor truth (a NON-regenerating staged
+/// rejection) before any slot is claimed — then, before any drain, a
+/// second dispatch reloads id 21. The reload must reject on BOTH
+/// sides: under replay the failed request allocates its own buffer
+/// and PARKS (the fake executor never touches the failing seam), so
+/// the id is held there until the journaled terminal feeds at the
+/// recorded delivery position — live admission holds it through the
+/// staged window for the same span.
+/// Fails exactly one allocation — the next one matching the staged
+/// image source buffer's distinctive size — and delegates everything
+/// else. `std.testing.FailingAllocator` fails every allocation from
+/// its fail index on, which would take the same dispatch's view
+/// rebuild down with the load; this failure is surgical.
+const ImageBufferFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    armed: bool = false,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *ImageBufferFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        if (self.armed and len == effects_mod.max_effect_image_bytes + 1) {
+            self.armed = false;
+            return null;
+        }
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ImageBufferFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+fn recordStartFailureWindowSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // NO wake before the reload: the staged rejection is undelivered
+    // when the second load lands — the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a reload inside a start-failure's staged window rejects identically live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordStartFailureWindowSession(gpa, buffer, &store);
+    // The live side delivered two rejections: the start failure's own
+    // terminal (executor truth) and the in-window reload's refusal.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The start failure's terminal FEEDS (the replayed request parked
+    // instead of failing); the reload's refusal regenerates from the
+    // replayed occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the cancelled-start-failure reference session: the channel
+/// allocator fails at image 21's staged source buffer, so the load is
+/// refused with executor truth (a staged `.rejected`, NO slot claimed)
+/// — then, before the staged terminal drains, the app cancels id 21.
+/// Live, the cancel finds nothing to mark (no slot exists) and is a
+/// no-op: the session delivers and journals `.rejected`. Under replay
+/// the same load PARKS as a running fake slot (the fake executor
+/// never touches the failing seam), so the same cancel finds a slot
+/// to mark — the timing-shifted mark must not rewrite the journaled
+/// terminal when it feeds.
+fn recordCancelledStartFailureSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // The cancel lands while the staged rejection is still
+    // undelivered — the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cancel", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a cancel that lost to a start failure live cannot rewrite the fed rejection under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordCancelledStartFailureSession(gpa, buffer, &store);
+    // Live truth: one terminal, `.rejected` — the cancel was a no-op.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.failed);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    // The start failure's terminal FEEDS (the replayed request parked
+    // instead of failing) — and feeds VERBATIM: the replayed cancel
+    // marked the parked fake slot, but a fed terminal is executor
+    // truth, so the journaled `.rejected` must land untouched.
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+}
+
+/// Record the fire-and-forget start-failure reference session: the
+/// channel allocator fails at image 21's staged source buffer inside
+/// a load that carries NO handler. The failure is executor truth, so
+/// it must journal and hold the id through its staged window even
+/// though no Msg will ever deliver from it: under replay the same
+/// load allocates its own buffer and PARKS (the fake executor never
+/// touches the failing seam), and ONLY the journaled terminal's feed
+/// retires that parked fake — with no record, the id and a slot stay
+/// occupied replay-side forever and the post-drain reload diverges.
+fn recordFireAndForgetStartFailureSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    var failing: ImageBufferFailingAllocator = .{ .backing = std.heap.page_allocator };
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(failing.allocator(), .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fail exactly the staged source buffer's allocation inside the
+    // handlerless loadImage this dispatch issues.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover-ff", .window_id = 1 } });
+    try std.testing.expect(!failing.armed);
+    // NO wake yet: a HANDLED reload inside the staged window must
+    // reject — the silent failure's occupancy, the window under test.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // The window ended at the drain: the same id parks and loads.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    var png_buffer: [4096]u8 = undefined;
+    try app_state.effects.feedImageBytes(21, imageSessionPng(&png_buffer));
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a fire-and-forget start failure journals and replays: the parked fake retires with no Msg" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordFireAndForgetStartFailureSession(gpa, buffer, &store);
+    // Live truth: the fire-and-forget terminal delivered NO Msg — the
+    // model saw only the in-window reload's rejection and the
+    // post-drain reload's load.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.loaded);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // The fire-and-forget terminal FEEDS (retiring the parked fake,
+    // delivering no Msg through its absent handler), and so does the
+    // post-drain load; the in-window rejection regenerates from the
+    // replayed occupancy check itself.
+    try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the handler-retry reference session: a fetch terminal whose
+/// handler refetches the SAME key from inside update, and a file
+/// terminal whose handler rereads its key the same way. Delivery
+/// retires the slot BEFORE the terminal Msg reaches update on both
+/// sides — the recording's drain and the replay's fed drain — so the
+/// retry parks as a fresh effect on both, and its own terminal feeds
+/// at the recorded position.
+fn recordHandlerRetrySession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Fetch: terminal delivered, handler refetches key 21 — accepted.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.fetch-cover", .window_id = 1 } });
+    try app_state.effects.feedResponse(21, 200, "cover-v1");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingFetchCount());
+    try app_state.effects.feedResponse(21, 200, "cover-v2");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // File: terminal delivered, handler rereads key 26 — accepted.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.file-chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.read-note", .window_id = 1 } });
+    try app_state.effects.feedFileResult(26, .ok, "note-v1");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqual(@as(usize, 1), app_state.effects.pendingFileCount());
+    try app_state.effects.feedFileResult(26, .ok, "note-v2");
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a same-key retry from a fetch or file terminal handler is accepted live and under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordHandlerRetrySession(gpa, buffer, &store);
+    // Live truth: both retries were accepted — two responses and two
+    // file results, no rejections anywhere.
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.responses);
+    try std.testing.expectEqual(@as(u32, 0), recorded.model.responses_rejected);
+    try std.testing.expectEqual(@as(u32, 2), recorded.model.files);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // All four terminals are executor truth and feed; the replayed
+    // retries park fresh (delivery retired the slot before the handler
+    // ran) and their feeds retire them in turn — nothing regenerates.
+    try std.testing.expectEqual(@as(u64, 4), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// Record the queue-saturation reference session: a chatty spawn and
+/// an image load whose results journal as ONE unbroken run — 64 line
+/// records (the completion queue's whole capacity) followed by the
+/// loaded image terminal. Results journal in delivery order, so a
+/// LIVE recording reaches this shape whenever workers refill the
+/// queue while the loop drains one pass. The fake executor feeds from
+/// the loop thread and cannot overfill a single pass, so the first 32
+/// lines drain through a wake whose EVENT record is withheld (the
+/// runtime's recorder hook is cleared for exactly that dispatch; the
+/// drained results still journal through the channel's bound journal)
+/// — splicing two drain passes into the one run a live recorder
+/// writes. Replay must then fit 65 consecutive feeds through the
+/// 64-entry queue without losing the image bytes or reordering the
+/// image terminal around the lines.
+fn recordSaturatedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.chatty", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+
+    var line_buffer: [16]u8 = undefined;
+    var index: u32 = 0;
+    while (index < 32) : (index += 1) {
+        try app_state.effects.feedLine(31, try std.fmt.bufPrint(&line_buffer, "line-{d}", .{index}));
+    }
+    // The spliced drain: results journal, the wake event does not.
+    harness.runtime.options.session_recorder = null;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    harness.runtime.options.session_recorder = recorder;
+
+    while (index < 64) : (index += 1) {
+        try app_state.effects.feedLine(31, try std.fmt.bufPrint(&line_buffer, "line-{d}", .{index}));
+    }
+    var png_buffer: [4096]u8 = undefined;
+    try app_state.effects.feedImageBytes(21, imageSessionPng(&png_buffer));
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // The recording itself saw every line BEFORE the image terminal,
+    // with the decoded pixels registered.
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_seen);
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_before_image);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a drain pass larger than the completion queue replays in order with the image bytes intact" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordSaturatedImageSession(gpa, buffer, &store);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    // Every one of the run's 65 records fed — 64 lines plus the image
+    // terminal — with nothing skipped and nothing dropped.
+    try std.testing.expectEqual(@as(u64, 65), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    // Delivery ORDER survived saturation: the image terminal applied
+    // after all 64 recorded lines, exactly as recorded.
+    try std.testing.expectEqual(@as(u32, 64), app_state.model.lines_before_image);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // The recorded bytes survived saturation: the replayed runtime
+    // re-registered the journaled pixels, drawable offline.
+    const replay_registered = harness.runtime.registeredCanvasImage(21) orelse return error.TestExpectedRegisteredImage;
+    try std.testing.expectEqual(@as(usize, 6), replay_registered.width);
+    try std.testing.expectEqual(@as(usize, 5), replay_registered.height);
+}
+
+/// Record the chained same-wake reference session: the cover load's
+/// terminal (id 21) makes update start a SECOND load (id 25) that
+/// completes while the first wake's drain pass is still running — the
+/// fake executor's instant-load convention, the deterministic mirror of
+/// a real local-path load finishing before the pass ends. The drain's
+/// causal boundary must hold id 25's delivery to the NEXT wake, so the
+/// journal reads [effect 21][wake][effect 25][wake] and replay's
+/// file-order feed always finds the parked request. Without the
+/// boundary the journal reads [effect 21][effect 25][wake] and replay
+/// reaches record 25 before the dispatch that creates its request —
+/// the false `ReplayEffectDivergence` this session exists to pin.
+fn recordChainedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *session_blobs.MemoryBlobStore) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.blob_sink = store.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var png_buffer: [4096]u8 = undefined;
+    const png = imageSessionPng(&png_buffer);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.chain", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.cover", .window_id = 1 } });
+    try app_state.effects.feedImageBytes(21, png);
+    // Arm the instant completion for the load update issues MID-DRAIN:
+    // when the wake below delivers 21's terminal and update starts
+    // load 25, the fake executor completes it before update returns.
+    app_state.effects.fake_instant_image_bytes = png;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    app_state.effects.fake_instant_image_bytes = null;
+    // Id 25's terminal was already queued during the first wake; the
+    // boundary held it, and this wake (its producer's nudge, live)
+    // delivers it.
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Both chained loads decoded and registered in the recording run.
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.results);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.loaded);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(25) != null);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a chained same-wake image load journals causally and replays without false divergence" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+
+    const recorded = try recordChainedImageSession(gpa, buffer, &store);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    platform.installHeadlessImageCodec("null", &harness.null_platform, &harness.runtime.options.platform.services);
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    // Without the drain boundary this errors `ReplayEffectDivergence`:
+    // record 25 would precede the wake whose dispatch creates request 25.
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    try std.testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // Same bytes twice = one blob, and both replayed registrations hold
+    // the recorded pixels, offline.
+    try std.testing.expectEqual(@as(usize, 1), store.count);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(21) != null);
+    try std.testing.expect(harness.runtime.registeredCanvasImage(25) != null);
+
+    // The journal's event boundaries are causal: no image record may sit
+    // ahead of the event during whose dispatch its request was created.
+    // Concretely, the two image records must be separated by at least
+    // one event record — record 25 lands under the SECOND wake.
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var image_records: usize = 0;
+    var events_between = true;
+    var last_was_image = false;
+    while (try reader.next()) |record| switch (record) {
+        .effect => |effect| {
+            if (effect.kind != .image) continue;
+            image_records += 1;
+            if (last_was_image) events_between = false;
+            last_was_image = true;
+        },
+        .event => last_was_image = false,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), image_records);
+    try std.testing.expect(events_between);
+}
+
+/// Record a session whose single image load passes every loop-side
+/// check and is refused by the REAL executor's worker: "http:hostless"
+/// parses with an http scheme (the loop's whole validation) but has no
+/// host, so building the request fails inside the worker before any
+/// connection is attempted — a `.rejected` terminal with worker
+/// provenance. The recording therefore holds a rejected image record
+/// that the replayed `loadImage` can NOT regenerate (the fake executor
+/// parks the request), which replay must feed from the journal.
+fn recordWorkerRejectedImageSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedImageSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = image_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "image.hostless", .window_id = 1 } });
+    // The real worker delivers asynchronously: pump its wake nudges
+    // into `.wake` dispatches (each journals like any platform event)
+    // until the terminal Msg lands.
+    const io = std.testing.io;
+    var waited_ms: usize = 0;
+    while (app_state.model.results < 1) : (waited_ms += 10) {
+        if (waited_ms >= 20_000) return error.TestTimedOut;
+        var nudged = false;
+        while (harness.null_platform.takeWake()) |_| nudged = true;
+        if (nudged) try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a worker-refused image load journals as executor truth and feeds under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordWorkerRejectedImageSession(gpa, buffer);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.results);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.rejected);
+
+    // Replay offline into a fresh app: the journaled rejected terminal
+    // is worker truth — the fake executor parks the replayed request,
+    // so the record must FEED (never skip) for the Msg to be delivered
+    // at all. No blob store is needed: a rejection carries no bytes.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified > 0);
+    try std.testing.expectEqual(@as(u64, 1), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try std.testing.expectEqualDeep(recorded.model, app_state.model);
+    try std.testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+test "a journal referencing blobs refuses to replay without its blob store" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+    _ = try recordImageSession(gpa, buffer, &store);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+    });
+    try std.testing.expectError(error.ReplayMissingBlob, result);
+}
+
+/// Zero the `image_blob_len` field — the LAST eight bytes of the effect
+/// payload, see `journal.encodeEffect` — of the first journaled
+/// `.loaded` image record, in place. Framing and every other field stay
+/// valid, so the journal reader decodes the record fine: only replay's
+/// record-consistency gate can catch the damage. Returns whether a
+/// record was damaged.
+fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .image or record.image_outcome != .loaded or record.image_blob_len == 0) continue;
+        @memset(payload[payload.len - 8 ..], 0);
+        return true;
+    }
+    return false;
+}
+
+/// Overwrite the decoded-dimension fields of the first journaled image
+/// record whose outcome matches, in place — `zeroFirstLoadedImageBlobLen`'s
+/// sibling. Per `journal.encodeEffect`, the effect payload ends with
+/// image_width (u64), image_height (u64), image_blob_hash (16 bytes),
+/// image_blob_len (u64), so the dims live 40 and 32 bytes from the end.
+/// Framing and every other field stay valid: only replay's
+/// record-consistency gate can catch the damage. Returns whether a
+/// record was damaged.
+fn patchFirstImageDims(bytes: []u8, outcome: effects_mod.EffectImageOutcome, width: u64, height: u64) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .image or record.image_outcome != outcome) continue;
+        std.mem.writeInt(u64, payload[payload.len - 40 ..][0..8], width, .little);
+        std.mem.writeInt(u64, payload[payload.len - 32 ..][0..8], height, .little);
+        return true;
+    }
+    return false;
+}
+
+/// Record an image session, hand-damage the first record matching
+/// `outcome` to claim `width`x`height`, and replay it with the blob
+/// store present — the shared body of the dimension-damage tests below.
+fn replayWithPatchedImageDims(outcome: effects_mod.EffectImageOutcome, width: u64, height: u64) !session_replay.ReplayReport {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+    _ = try recordImageSession(gpa, buffer, &store);
+
+    try std.testing.expect(patchFirstImageDims(buffer.bytes[0..buffer.len], outcome, width, height));
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    return session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+}
+
+test "an image record claiming .loaded with absurd dimensions refuses replay as damage" {
+    // maxInt width would otherwise ride the fed path into the app's Msg
+    // verbatim (and, on the TS host, into an `@intCast` to an
+    // i64-classed arm field - a safety panic).
+    const result = replayWithPatchedImageDims(.loaded, std.math.maxInt(u64), 5);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming dimensions on a non-loaded outcome refuses replay as damage" {
+    // The recorder writes decoded dimensions only on .loaded; every
+    // other outcome journals 0x0.
+    const result = replayWithPatchedImageDims(.decode_failed, 4, 4);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming .loaded past the pixel budget refuses replay as damage" {
+    // 1024x1024 RGBA8 is 4 MiB - past the registered-image slot bound
+    // a live .loaded can never exceed.
+    const result = replayWithPatchedImageDims(.loaded, 1024, 1024);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record whose claimed pixel count wraps u64 refuses replay as damage" {
+    // 2^32 x 2^32 wraps the u64 pixel product to 0 - the budget check
+    // must not be fooled by the overflow.
+    const result = replayWithPatchedImageDims(.loaded, 1 << 32, 1 << 32);
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an image record claiming .loaded with a zero-length blob refuses replay as damage" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    var store = session_blobs.MemoryBlobStore.init(gpa);
+    defer store.deinit();
+    _ = try recordImageSession(gpa, buffer, &store);
+
+    // Hand-damage the journal: a `.loaded` image record now claims a
+    // zero-length blob. A recorder can never produce this (it journals
+    // `.loaded` only after the bytes decoded and registered), so replay
+    // must refuse the record as damage — with the blob store PRESENT
+    // and intact, proving the refusal is the record-consistency gate,
+    // not `ReplayMissingBlob`, and never a silent pixel-less "loaded".
+    try std.testing.expect(zeroFirstLoadedImageBlobLen(buffer.bytes[0..buffer.len]));
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.image_decode = true;
+    const app_state = try gpa.create(ImageSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ImageSessionApp.init(std.heap.page_allocator, .{}, imageSessionOptions());
+    defer app_state.deinit();
+
+    const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+        .blobs = store.source(),
+    });
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "recording an image result without a blob store fails the journal loudly" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "image-session-demo" });
+    recorder.recordEffect(.{ .kind = .image, .key = 21, .payload = "encoded bytes", .image_outcome = .loaded });
+    try std.testing.expect(recorder.failed);
+    _ = gpa;
+}
+
+test "image effect records round-trip the blob address through the journal codec" {
+    var buffer: [4096]u8 = undefined;
+    var hash: [effects_mod.effect_image_blob_hash_len]u8 = undefined;
+    for (&hash, 0..) |*byte, index| byte.* = @intCast(index * 3 + 1);
+    const encoded = try journal.encodeEffect(.{
+        .kind = .image,
+        .key = 21,
+        .status = 200,
+        .image_outcome = .loaded,
+        .image_width = 640,
+        .image_height = 480,
+        .image_blob_hash = hash,
+        .image_blob_len = 12_345,
+    }, &buffer);
+    const decoded = try journal.decodeEffect(encoded);
+    try std.testing.expectEqual(effects_mod.EffectResultKind.image, decoded.kind);
+    try std.testing.expectEqual(@as(u64, 21), decoded.key);
+    try std.testing.expectEqual(@as(u16, 200), decoded.status);
+    try std.testing.expectEqual(effects_mod.EffectImageOutcome.loaded, decoded.image_outcome);
+    try std.testing.expectEqual(@as(u64, 640), decoded.image_width);
+    try std.testing.expectEqual(@as(u64, 480), decoded.image_height);
+    try std.testing.expectEqualSlices(u8, &hash, &decoded.image_blob_hash);
+    try std.testing.expectEqual(@as(u64, 12_345), decoded.image_blob_len);
+}

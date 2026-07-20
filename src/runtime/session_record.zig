@@ -25,6 +25,7 @@ const platform = @import("../platform/root.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_effects = @import("effects.zig");
 const journal = @import("session_journal.zig");
+const session_blobs = @import("session_blobs.zig");
 
 pub const Header = journal.Header;
 
@@ -37,6 +38,13 @@ pub const RecorderSink = struct {
 
 pub const SessionRecorder = struct {
     sink: RecorderSink,
+    /// Where large effect payloads go out of line (`blobs/` beside the
+    /// journal, content-addressed — see session_blobs.zig). Bound by
+    /// the owner alongside the sink; null means no blob storage, and
+    /// the first effect result that NEEDS one (an image load's source
+    /// bytes) fails the recording loudly rather than journaling a
+    /// record replay could never resolve.
+    blob_sink: ?session_blobs.SessionBlobSink = null,
     began: bool = false,
     finished: bool = false,
     failed: bool = false,
@@ -185,10 +193,27 @@ pub const SessionRecorder = struct {
     }
 
     /// Record one drained effect result (the `Effects.bindJournal`
-    /// callback target).
+    /// callback target). Image results carry their ENCODED source
+    /// bytes in `payload`; those move into the content-addressed blob
+    /// store at this moment — effect-result time — and the journal
+    /// record keeps only the address and length, so records stay small
+    /// and identical payloads share one blob.
     pub fn recordEffect(self: *SessionRecorder, record: runtime_effects.EffectResultRecord) void {
         if (!self.began or self.failed or self.finished) return;
-        const payload = journal.encodeEffect(record, &self.effect_buffer) catch {
+        var journaled = record;
+        if (record.kind == .image and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("an image effect result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.image_blob_hash = hash;
+            journaled.image_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        const payload = journal.encodeEffect(journaled, &self.effect_buffer) catch {
             return self.fail("an effect result exceeded max_session_record_bytes");
         };
         self.writeRecord(.effect, payload);

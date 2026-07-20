@@ -140,6 +140,7 @@ const MAX_SPAWN_ARGV = 16;
 const MAX_SPAWN_ARGV_BYTES = 2048;
 const MAX_SPAWN_STDIN_BYTES = 4096;
 const MAX_AUDIO_PATH_BYTES = 1024;
+const MAX_IMAGE_PATH_BYTES = 1024;
 
 /// The closed `Cmd.fetch` verb set, wire value = position.
 const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -148,6 +149,15 @@ const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
 /// engine's event vocabulary, matched by member NAME (declaration order is
 /// the app's own).
 const AUDIO_STATES = ["loaded", "position", "completed", "failed", "rejected", "spectrum"];
+
+/// The image load result states an event arm's `state` union must carry —
+/// the engine's outcome vocabulary, matched by member NAME (declaration
+/// order is the app's own).
+const IMAGE_STATES = [
+  "loaded", "rejected", "not_found", "io_failed", "connect_failed", "tls_failed",
+  "protocol_failed", "timed_out", "http_status", "cancelled", "too_large",
+  "unsupported", "decode_failed", "registry_full", "alloc_failed",
+];
 
 /// Names the emitted module's own fixtures occupy (header helpers + commit
 /// machinery): module-level claims and function locals unique around them.
@@ -2161,6 +2171,37 @@ export class Emitter {
       if (method === "audioPlay") {
         return this.emitAudioPlayCmd(e, ctx);
       }
+      if (method === "imageLoad") {
+        return this.emitImageLoadCmd(e, ctx);
+      }
+      if (method === "imageCancel") {
+        const idArg = e.arguments[0];
+        if (!idArg) this.fail(e, "`Cmd.imageCancel` id (the model-owned numeric ImageId)", "NS1027");
+        // The same literal gate as imageLoad: an id no load could ever
+        // park under has nothing to cancel — stop the build instead of
+        // shipping a certain runtime no-op. Dynamic ids stay the host's
+        // (an unknown id is the documented no-op).
+        const idLiteral = this.numberLiteralValue(idArg);
+        if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+          this.fail(idArg, `\`Cmd.imageCancel\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
+        }
+        const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
+        return `rt.cmdImageCancel(${id})`;
+      }
+      if (method === "imageUnregister") {
+        const idArg = e.arguments[0];
+        if (!idArg) this.fail(e, "`Cmd.imageUnregister` id (the model-owned numeric ImageId)", "NS1027");
+        // The same literal gate as imageLoad/imageCancel: an id no load
+        // could ever register under has nothing to unregister — stop the
+        // build instead of shipping a certain runtime no-op. Dynamic ids
+        // stay the host's (an unregistered id is the documented no-op).
+        const idLiteral = this.numberLiteralValue(idArg);
+        if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+          this.fail(idArg, `\`Cmd.imageUnregister\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
+        }
+        const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
+        return `rt.cmdImageUnregister(${id})`;
+      }
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
@@ -2188,7 +2229,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");
@@ -2463,6 +2504,144 @@ export class Emitter {
     if (!event) this.fail(route, `\`Cmd.audioPlay\` routing without an \`event\` arm`, "NS1027");
     const tag = this.audioEventArmTag(event, ctx);
     return `rt.cmdAudioPlay("${escapeZigString(keyArg.text)}", ${tag}, ${audio_path}, ${url}, ${cache_path}, ${expected})`;
+  }
+
+  /// `Cmd.imageLoad(id, source, route)`: the app's numeric ImageId (any
+  /// number expression — ids are model data), an inline
+  /// `{ path?, url?, cachePath?, expectedBytes? }` source (at least one of
+  /// path/url), and the `{ event }` routing whose arm carries the five
+  /// SDK-fixed image result fields.
+  private emitImageLoadCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const idArg = e.arguments[0];
+    if (!idArg) this.fail(e, "`Cmd.imageLoad` id (the model-owned numeric ImageId)", "NS1027");
+    // A compile-time-known id the engine is certain to refuse stops the
+    // build; dynamic ids stay the host's to validate through the
+    // "rejected" result state. The bound is strictly BELOW 2^53
+    // (Number.isSafeInteger for a positive value): 2^53 itself is the
+    // first f64 that aliases a neighbor (2^53 + 1), so the host rejects
+    // it too rather than guess which integer the app meant.
+    const idLiteral = this.numberLiteralValue(idArg);
+    if (idLiteral !== null && !(Number.isSafeInteger(idLiteral) && idLiteral >= 1)) {
+      this.fail(idArg, `\`Cmd.imageLoad\` id ${idLiteral} is not a positive integer ImageId below 2^53`, "NS1030");
+    }
+    const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
+
+    let source = e.arguments[1];
+    while (source && (ts.isParenthesizedExpression(source) || ts.isAsExpression(source) || ts.isSatisfiesExpression(source))) source = source.expression;
+    if (!source || !ts.isObjectLiteralExpression(source)) {
+      this.fail(
+        e.arguments[1] ?? e,
+        `\`Cmd.imageLoad\` takes an inline \`{ path?, url?, cachePath?, expectedBytes? }\` source object`,
+        "NS1029",
+      );
+    }
+    let image_path = '""';
+    let url = '""';
+    let cache_path = '""';
+    let expected = "0";
+    let has_source = false;
+    for (const p of source.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.imageLoad\` source member \`${p.getText()}\` is not a plain property`, "NS1029");
+      }
+      const name = p.name.text;
+      if (name === "path") {
+        image_path = this.effectBytesArg(e, p.initializer, "Cmd.imageLoad path", MAX_IMAGE_PATH_BYTES, ctx);
+        has_source = true;
+      } else if (name === "url") {
+        url = this.effectBytesArg(e, p.initializer, "Cmd.imageLoad url", MAX_URL_BYTES, ctx);
+        has_source = true;
+      } else if (name === "cachePath") {
+        cache_path = this.effectBytesArg(e, p.initializer, "Cmd.imageLoad cachePath", MAX_IMAGE_PATH_BYTES, ctx);
+      } else if (name === "expectedBytes") {
+        // A byte count is a whole number: file sizes have no fractional
+        // bytes, and a fractional value would truncate on the host into
+        // a size the app never declared — cache verification against
+        // the wrong size re-downloads on every launch. The bound is the
+        // id gate's (Number.isSafeInteger): past 2^53 the f64 wire
+        // cannot carry the count exactly. Dynamic values stay the
+        // host's, which maps unrepresentable counts to "unknown size".
+        const literal = this.numberLiteralValue(p.initializer);
+        if (literal !== null && !(Number.isSafeInteger(literal) && literal >= 0)) {
+          this.fail(p.initializer, `\`Cmd.imageLoad\` expectedBytes ${literal} is not a whole-number byte count below 2^53`, "NS1030");
+        }
+        expected = this.emitExpr(p.initializer, ctx, { k: "f64" }).code;
+      } else {
+        this.fail(p, `\`Cmd.imageLoad\` source member \`${name}\``, "NS1029");
+      }
+    }
+    if (!has_source) {
+      this.fail(source, `\`Cmd.imageLoad\` source without a \`path\` or a \`url\` — nothing could load`, "NS1029");
+    }
+
+    let route = e.arguments[2];
+    while (route && (ts.isParenthesizedExpression(route) || ts.isAsExpression(route) || ts.isSatisfiesExpression(route))) route = route.expression;
+    if (!route || !ts.isObjectLiteralExpression(route)) {
+      this.fail(e.arguments[2] ?? e, `\`Cmd.imageLoad\` routing is an inline \`{ event }\` object`, "NS1027");
+    }
+    let event: ts.StringLiteral | null = null;
+    for (const p of route.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.imageLoad\` routing member \`${p.getText()}\` is not a plain property`, "NS1027");
+      }
+      let v: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+      if (p.name.text !== "event") {
+        this.fail(p, `\`Cmd.imageLoad\` routing member \`${p.name.text}\``, "NS1027");
+      }
+      if (!ts.isStringLiteral(v)) {
+        this.fail(p.initializer, `\`Cmd.imageLoad\` event arm is not a string literal`, "NS1027");
+      }
+      event = v;
+    }
+    if (!event) this.fail(route, `\`Cmd.imageLoad\` routing without an \`event\` arm`, "NS1027");
+    const tag = this.imageEventArmTag(event, ctx);
+    return `rt.cmdImageLoad(${id}, ${tag}, ${image_path}, ${url}, ${cache_path}, ${expected})`;
+  }
+
+  /// Resolve the image result arm: exactly the five SDK-fixed fields,
+  /// matched by NAME — id (a number: the requested ImageId echoed
+  /// verbatim), state (a named literal-union alias carrying exactly the
+  /// fifteen image states, any order), width/height/status (numbers).
+  private imageEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const unionName = ctx.cmdReturn!.msgUnion;
+    const info = this.table.unions.get(unionName);
+    if (!info) this.fail(arg, `unknown union ${unionName}`);
+    const arm = info.arms.find((a) => a.tag === arg.text);
+    if (!arm) {
+      this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
+    }
+    const shape =
+      "the five image result fields — id: number (the echoed ImageId), state (a named alias of exactly " +
+      IMAGE_STATES.map((s) => `"${s}"`).join(" | ") +
+      "), width: number, height: number, status: number";
+    const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const id = fieldsByName.get("id");
+    const state = fieldsByName.get("state");
+    const width = fieldsByName.get("width");
+    const height = fieldsByName.get("height");
+    const status = fieldsByName.get("status");
+    const stateOk =
+      state !== undefined &&
+      state.type.k === "enum" &&
+      state.type.members.length === IMAGE_STATES.length &&
+      IMAGE_STATES.every((s) => state.type.k === "enum" && state.type.members.includes(s));
+    const matches =
+      arm.fields.length === 5 &&
+      stateOk &&
+      id !== undefined &&
+      isNumber(id.type.k) &&
+      width !== undefined &&
+      isNumber(width.type.k) &&
+      height !== undefined &&
+      isNumber(height.type.k) &&
+      status !== undefined &&
+      isNumber(status.type.k);
+    if (!matches) {
+      this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
+    }
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
   }
 
   /// Resolve the audio event arm: exactly the six SDK-fixed fields, matched

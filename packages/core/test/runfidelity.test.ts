@@ -3149,6 +3149,117 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 `,
   },
   {
+    name: "image loads under the virtual host: the numeric-id record, one terminal per load, failure classes",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
+export interface Model {
+  readonly cover: number; readonly w: number; readonly h: number;
+  readonly errs: number; readonly lastStatus: number; readonly state: ImageState;
+}
+export type Msg =
+  | { readonly kind: "load" }
+  | { readonly kind: "load_url" }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+export function initialModel(): Model {
+  return { cover: 0, w: 0, h: 0, errs: 0, lastStatus: 0, state: "rejected" };
+}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "load": return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_url": return [model, Cmd.imageLoad(model.cover + 1, { url: asciiBytes("https://c.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 4096 }, { event: "image_done" })];
+    case "image_done":
+      if (msg.state === "loaded") return { ...model, cover: msg.id, w: msg.width, h: msg.height, state: msg.state, lastStatus: msg.status };
+      return { ...model, errs: model.errs + 1, state: msg.state, lastStatus: msg.status };
+  }
+}
+`,
+    node: `
+{
+  const kinds = ["load", "load_url", "image_done"];
+  const te = new TextEncoder();
+  // Mirrors of the image_load wire record (rt.zig).
+  const long = (b) => [b.length & 255, (b.length >> 8) & 255, (b.length >> 16) & 255, (b.length >>> 24) & 255, ...b];
+  const f64le = (v) => { const dv = new DataView(new ArrayBuffer(8)); dv.setFloat64(0, v, true); const out = []; for (let i = 0; i < 8; i++) out.push(dv.getUint8(i)); return out; };
+  const enc = (cmd) => {
+    if (cmd.op === "none") return [];
+    if (cmd.op === "image_load") {
+      return [0x12, ...f64le(cmd.id), kinds.indexOf(cmd.eventKind), ...long(Array.from(cmd.path)), ...long(Array.from(cmd.url)), ...long(Array.from(cmd.cachePath)), ...f64le(cmd.expectedBytes)];
+    }
+    return cmd.cmds.flatMap(enc);
+  };
+  const step = (model, msg) => { const r = mod.update(model, msg); return Array.isArray(r) ? [r[0], Uint8Array.from(enc(r[1]))] : [r, new Uint8Array(0)]; };
+  // The virtual host reads the record's routing tag off the wire:
+  // [op][id f64][event_tag].
+  const imageTag = (bytes) => bytes[9];
+  let model = mod.initialModel();
+  let cmd;
+
+  [model, cmd] = step(model, { kind: "load" });
+  line("i0", cmd);
+  const evTag = imageTag(cmd);
+  const done = (id, state, width, height, status) => ({ kind: kinds[evTag], id, state, width, height, status });
+  [model, cmd] = step(model, done(21, "loaded", 640, 480, 0));
+  line("i1", model.w);
+  line("i2", model.h);
+  line("i3", model.state);
+
+  // The id expression rides the wire; a url load fails with its class
+  // and the status carried through.
+  [model, cmd] = step(model, { kind: "load_url" });
+  line("i4", cmd);
+  [model, cmd] = step(model, done(22, "http_status", 0, 0, 404));
+  line("i5", model.errs);
+  line("i6", model.lastStatus);
+  line("i7", model.state);
+  [model, cmd] = step(model, { kind: "load_url" });
+  [model, cmd] = step(model, done(22, "decode_failed", 0, 0, 200));
+  line("i8", model.errs);
+  line("i9", model.state);
+}
+`,
+    zig: `
+    {
+        const Host = struct {
+            fn imageTag(bytes: []const u8) u8 {
+                return bytes[9];
+            }
+        };
+        const image_tag: u8 = @intFromEnum(std.meta.Tag(m.Msg).image_done);
+        var model = m.initialModel();
+
+        var r = m.update(model, .load);
+        model = r.model;
+        row("i0", r.cmd);
+        const ev_tag = Host.imageTag(r.cmd);
+        r = m.update(model, if (ev_tag == image_tag) m.Msg{ .image_done = .{ .id = 21, .state = .loaded, .width = 640, .height = 480, .status = 0 } } else m.Msg{ .image_done = .{ .id = 0, .state = .rejected, .width = 0, .height = 0, .status = 0 } });
+        model = r.model;
+        row("i1", model.w);
+        row("i2", model.h);
+        row("i3", model.state);
+
+        r = m.update(model, .load_url);
+        model = r.model;
+        row("i4", r.cmd);
+        r = m.update(model, .{ .image_done = .{ .id = 22, .state = .http_status, .width = 0, .height = 0, .status = 404 } });
+        model = r.model;
+        row("i5", model.errs);
+        row("i6", model.lastStatus);
+        row("i7", model.state);
+        r = m.update(model, .load_url);
+        model = r.model;
+        r = m.update(model, .{ .image_done = .{ .id = 22, .state = .decode_failed, .width = 0, .height = 0, .status = 200 } });
+        model = r.model;
+        row("i8", model.errs);
+        row("i9", model.state);
+    }
+`,
+  },
+  {
     name: "declared text-input mirror union: payload arms, stacked verbs, byte-splice reducer",
     src: `
 export type TextCaretDirection = "previous" | "next" | "previous_word" | "next_word" | "start" | "end";

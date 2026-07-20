@@ -1193,7 +1193,7 @@ const Checker = struct {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const resolved = try self.resolveBinding(node, expression.binding, true);
-                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.avatar_image_message);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.image_binding_message);
                 continue;
             }
             if (std.mem.eql(u8, attribute.name, "surface")) {

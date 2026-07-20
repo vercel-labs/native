@@ -111,6 +111,12 @@ pub fn TsUiApp(comptime core: type) type {
             /// read from the environment inside update). Empty disables
             /// derivation: URL playback still works, it just re-streams.
             audio_cache_dir: []const u8 = "",
+            /// Platform caches directory for URL image loads —
+            /// `audio_cache_dir`'s twin for `Cmd.imageLoad`: a URL
+            /// record with no cachePath loads under the conventional
+            /// content-addressed path in this directory. Empty disables
+            /// derivation: URL loads still work, they just re-fetch.
+            image_cache_dir: []const u8 = "",
             /// Images registered at install, before the first view build
             /// (see `BootImage`). The slices must outlive install (the
             /// wiring reads them into launch-lifetime buffers).
@@ -156,6 +162,7 @@ pub fn TsUiApp(comptime core: type) type {
 
         fn applyCoreOptions(core_options: CoreOptions) void {
             Host.setAudioCacheDir(core_options.audio_cache_dir);
+            Host.setImageCacheDir(core_options.image_cache_dir);
             boot_images_store = core_options.boot_images;
             env_values_store = core_options.env_values;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {

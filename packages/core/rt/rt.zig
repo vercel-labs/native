@@ -1054,13 +1054,21 @@ pub fn Kernel(comptime opts: Options) type {
         //   audio_ctl  [op 0x0F][key_len u8][key bytes][verb u8][value f64 LE]
         //   window_show [op 0x10][label_len u8][label bytes]
         //   quit_app   [op 0x11]
+        //   image_load [op 0x12][id f64 LE][event_tag u8]
+        //              [path_len u32 LE][path][url_len u32 LE][url]
+        //              [cache_len u32 LE][cache_path][expected_bytes f64 LE]
+        //   image_cancel [op 0x13][id f64 LE]
+        //   image_unregister [op 0x14][id f64 LE]
         //
         // v2 is additive over v1: the 0x01-0x03 records are byte-identical to v1,
         // so a v1 effect log replays under a v2 reader unchanged. The named-op
         // records 0x07-0x0C are additive within v2 the same way, and so are the
         // streaming records 0x0D-0x0F: no existing record's bytes change, new
         // opcodes only. v3 appends the window-verb records 0x10-0x11 under the
-        // same rule: every v2 record is byte-identical, new opcodes only.
+        // same rule, and the image records 0x12-0x14 are additive within v3
+        // the same way: every existing record is byte-identical, new opcodes
+        // only (a host predating an opcode refuses it loudly, naming this
+        // version).
         //
         // `method` is the closed HTTP verb set in declaration order of `CmdFetchMethod`
         // (GET 0, POST 1, PUT 2, DELETE 3, PATCH 4, HEAD 5). `timeout_ms` 0 means
@@ -1171,6 +1179,54 @@ pub fn Kernel(comptime opts: Options) type {
         //               magnitudes, all zeros outside `.spectrum` events).
         //               Failure is never silent: an unplayable source is one
         //               `.failed` event, a refused command one `.rejected`.
+        //   image_load  a routed one-shot image load, keyed by the app's own
+        //               numeric ImageId (`id`, an f64-carried positive integer
+        //               — the SAME model-owned id markup binds via
+        //               <image image="{id}"/> / <avatar image="{id}"/>):
+        //               resolve the source cascade (local `path` first, then a
+        //               verified cache entry at `cache_path`, then `url` —
+        //               audio_play's resolution order; `expected_bytes` is the
+        //               cache integrity gate, 0 = unknown), decode through the
+        //               platform codec, register the pixels under the id, and
+        //               dispatch exactly ONE `event_tag` arm — a five-field
+        //               record built by name: `id` (a number, the requested
+        //               ImageId echoed verbatim so concurrent loads sharing
+        //               one arm stay distinguishable; an id the wire cannot
+        //               carry exactly echoes 0), `state` (an enum whose
+        //               members are exactly the fifteen image outcome names,
+        //               matched by member NAME), width and height (numbers,
+        //               the decoded dimensions on "loaded"), and status
+        //               (number, the HTTP status for url loads that
+        //               performed an exchange; 0 when none occurred —
+        //               local paths, cache hits — so a cached "loaded"
+        //               is distinguishable from a network one). One load
+        //               per id at a time: a duplicate live id dispatches
+        //               "rejected" (the spawn discipline — a load in flight
+        //               is never replaced implicitly).
+        //   image_cancel end the in-flight load under `id`, if any, LOUDLY:
+        //               the load's one terminal arrives as its own event arm
+        //               with state "cancelled" (ending an in-flight load is
+        //               an observable event, spawn's cancel discipline), and
+        //               the id is free for a fresh load once that terminal
+        //               lands. Aimed at an id with no live load — or one the
+        //               wire cannot carry exactly — it is a no-op, the same
+        //               idle no-op audio_ctl keeps: whatever it aimed at is
+        //               already gone. Image loads are keyed by their numeric
+        //               id, so the string-keyed `cancel` record never
+        //               touches them.
+        //   image_unregister
+        //               free the registry slot under `id`: the pixels are
+        //               released, views referencing the id draw their
+        //               fallback on the next frame, and the slot is open
+        //               for another load. Registration's own discipline in
+        //               reverse — synchronous registry surgery, NOT an
+        //               effect: no Msg follows, and an id with no
+        //               registration (or one the wire cannot carry
+        //               exactly) is a no-op, image_cancel's idle rule. It
+        //               frees only the CURRENT registration: a load in
+        //               flight under the id is untouched and its terminal
+        //               still registers — cancel the load first to keep
+        //               the slot free.
         //   audio_ctl   drive the open stream's playback in place, by verb
         //               (`CmdAudioVerb` declaration order): pause 0, resume
         //               1, stop 2, seek 3 (`value` = position ms), volume 4
@@ -1248,6 +1304,9 @@ pub fn Kernel(comptime opts: Options) type {
             audio_ctl = 0x0F,
             window_show = 0x10,
             quit_app = 0x11,
+            image_load = 0x12,
+            image_cancel = 0x13,
+            image_unregister = 0x14,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1547,6 +1606,43 @@ pub fn Kernel(comptime opts: Options) type {
         pub fn cmdQuitApp() Cmd {
             const out = frameAlloc(u8, 1);
             out[0] = @intFromEnum(CmdOp.quit_app);
+            return out;
+        }
+
+        pub fn cmdImageLoad(
+            id: f64,
+            event_tag: u8,
+            path: []const u8,
+            url: []const u8,
+            cache_path: []const u8,
+            expected_bytes: f64,
+        ) Cmd {
+            std.debug.assert(path.len <= std.math.maxInt(u32));
+            std.debug.assert(url.len <= std.math.maxInt(u32));
+            std.debug.assert(cache_path.len <= std.math.maxInt(u32));
+            const out = frameAlloc(u8, 1 + 8 + 1 + 4 + path.len + 4 + url.len + 4 + cache_path.len + 8);
+            out[0] = @intFromEnum(CmdOp.image_load);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
+            out[9] = event_tag;
+            var off: usize = 10;
+            off = writeLongBytes(out, off, path);
+            off = writeLongBytes(out, off, url);
+            off = writeLongBytes(out, off, cache_path);
+            std.mem.writeInt(u64, out[off..][0..8], @bitCast(expected_bytes), .little);
+            return out;
+        }
+
+        pub fn cmdImageCancel(id: f64) Cmd {
+            const out = frameAlloc(u8, 1 + 8);
+            out[0] = @intFromEnum(CmdOp.image_cancel);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
+            return out;
+        }
+
+        pub fn cmdImageUnregister(id: f64) Cmd {
+            const out = frameAlloc(u8, 1 + 8);
+            out[0] = @intFromEnum(CmdOp.image_unregister);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
             return out;
         }
 

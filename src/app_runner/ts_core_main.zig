@@ -136,6 +136,10 @@ pub fn main(init: std.process.Init) !void {
     // heap-allocates and constructs in place, so neither rides the stack.
     const app_state = try Adapter.create(std.heap.page_allocator, .{
         .audio_cache_dir = audio_cache_dir,
+        // Image loads share the same launch-resolved caches directory:
+        // the bridge keys the two caches into their own segments
+        // (audio/ and images/), so one directory serves both.
+        .image_cache_dir = audio_cache_dir,
         .boot_images = boot_images_buffer[0..boot_image_count],
         .env_values = env_values_buffer[0..env_value_count],
     }, options);
