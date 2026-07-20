@@ -3497,6 +3497,21 @@ const imageTail = `
 }
 `;
 
+const channelMsg = `
+export type ChannelState = "data" | "closed" | "rejected";
+export interface Model { readonly seen: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "chan_event"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { seen: 0, errs: 0 }; }
+`;
+
+const channelTail = `
+    case "chan_event": return msg.state === "data" ? { ...model, seen: model.seen + 1 } : { ...model, errs: model.errs + 1 };
+  }
+}
+`;
+
 // Slice E: grammar-completeness round — the new statement/operator/
 // declaration mappings in REALISTIC combinations (the minimal per-production
 // pins live in grammar_matrix.test.ts), plus the new teaching gates.
@@ -4055,6 +4070,76 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.imageLoad(7, { url: asciiBytes("https://cdn.test/a.png"), cachePath: asciiBytes("cache/a.png"), expectedBytes: 4096 }, { event: "image_done" })];
 ${imageTail}
+`,
+  },
+  {
+    name: "channelOpen and channelClose emit in their documented shapes (literal and model-expression keys)",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${channelMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.channelOpen(41, { event: "chan_event" })];
+      if (msg.which === 1) return [model, Cmd.channelOpen(model.seen + 100, { event: "chan_event" })];
+      return [model, Cmd.channelClose(41)];
+${channelTail}
+`,
+  },
+  {
+    name: "a channel event arm whose state union misses a member is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, type ChannelEventKind } from "@native-sdk/core";
+export type NarrowState = "data" | "closed";
+export interface Model { readonly seen: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "chan_event"; readonly key: number; readonly state: NarrowState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { seen: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.channelOpen(41, { event: "chan_event" as ChannelEventKind<Msg> })];
+    case "chan_event": return { ...model, seen: model.seen + 1 };
+  }
+}
+`,
+  },
+  {
+    name: "a channel event arm with a wrong field shape is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, type ChannelEventKind } from "@native-sdk/core";
+${channelMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.channelOpen(41, { event: "go" as ChannelEventKind<Msg> })];
+${channelTail}
+`,
+  },
+  {
+    name: "a channel key literal the engine must refuse stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${channelMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.channelOpen(0, { event: "chan_event" })];
+${channelTail}
+`,
+  },
+  {
+    // 2^53 aliases 2^53 + 1 in f64 — the image id gate's bound, shared.
+    name: "a channel key literal of 2^53 stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${channelMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.channelClose(9007199254740992)];
+${channelTail}
 `,
   },
   {

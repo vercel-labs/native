@@ -1059,13 +1059,16 @@ pub fn Kernel(comptime opts: Options) type {
         //              [cache_len u32 LE][cache_path][expected_bytes f64 LE]
         //   image_cancel [op 0x13][id f64 LE]
         //   image_unregister [op 0x14][id f64 LE]
+        //   channel_open [op 0x15][key f64 LE][event_tag u8]
+        //   channel_close [op 0x16][key f64 LE]
         //
         // v2 is additive over v1: the 0x01-0x03 records are byte-identical to v1,
         // so a v1 effect log replays under a v2 reader unchanged. The named-op
         // records 0x07-0x0C are additive within v2 the same way, and so are the
         // streaming records 0x0D-0x0F: no existing record's bytes change, new
         // opcodes only. v3 appends the window-verb records 0x10-0x11 under the
-        // same rule, and the image records 0x12-0x14 are additive within v3
+        // same rule, and the image records 0x12-0x14 and channel records
+        // 0x15-0x16 are additive within v3
         // the same way: every existing record is byte-identical, new opcodes
         // only (a host predating an opcode refuses it loudly, naming this
         // version).
@@ -1227,6 +1230,41 @@ pub fn Kernel(comptime opts: Options) type {
         //               flight under the id is untouched and its terminal
         //               still registers — cancel the load first to keep
         //               the slot free.
+        //   channel_open open an EXTERNAL-SOURCE CHANNEL, keyed by the app's
+        //               own numeric key (`key`, an f64-carried positive
+        //               integer below 2^53 — the image records' id
+        //               convention): the host stages a long-lived,
+        //               thread-safe posting seam its NATIVE side feeds
+        //               (embedders and platform-services extensions post
+        //               bytes from their own threads; transpiled cores are
+        //               single-threaded and never post — they open, close,
+        //               and receive). Every channel event then dispatches
+        //               the `event_tag` arm — a five-field record built by
+        //               name: `key` (a number, the channel key echoed so
+        //               concurrent channels sharing one arm stay
+        //               distinguishable; a key the wire cannot carry exactly
+        //               echoes 0), `state` (an enum whose members are
+        //               exactly data/closed/rejected, matched by member
+        //               NAME), `bytes` (the post's payload; empty outside
+        //               "data" events), and `droppedPending`/`droppedTotal`
+        //               (numbers — the honest back-pressure counters: posts
+        //               refused since the previous event, and over the
+        //               channel's whole life). The entry is non-retiring
+        //               the spawn way: "data" events flow across dispatches
+        //               until the one "closed" terminal (channel_close) —
+        //               or a "rejected" terminal for an open the host
+        //               refused (duplicate live key, full table, occupied
+        //               engine key) — retires it. One channel per key at a
+        //               time, never replaced implicitly.
+        //   channel_close close the open channel under `key`, if any:
+        //               staged posts flush, exactly one "closed" event
+        //               (final drop totals aboard) dispatches the entry's
+        //               own event arm, and the key frees. A key naming no
+        //               open channel — or one the wire cannot carry exactly
+        //               — is a no-op, audio_ctl's idle rule. Channels are
+        //               keyed by their numeric key, so the string-keyed
+        //               `cancel` record never touches them — this is their
+        //               close, the way audio_ctl stop is audio's.
         //   audio_ctl   drive the open stream's playback in place, by verb
         //               (`CmdAudioVerb` declaration order): pause 0, resume
         //               1, stop 2, seek 3 (`value` = position ms), volume 4
@@ -1307,6 +1345,8 @@ pub fn Kernel(comptime opts: Options) type {
             image_load = 0x12,
             image_cancel = 0x13,
             image_unregister = 0x14,
+            channel_open = 0x15,
+            channel_close = 0x16,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1643,6 +1683,21 @@ pub fn Kernel(comptime opts: Options) type {
             const out = frameAlloc(u8, 1 + 8);
             out[0] = @intFromEnum(CmdOp.image_unregister);
             std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
+            return out;
+        }
+
+        pub fn cmdChannelOpen(key: f64, event_tag: u8) Cmd {
+            const out = frameAlloc(u8, 1 + 8 + 1);
+            out[0] = @intFromEnum(CmdOp.channel_open);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
+            out[9] = event_tag;
+            return out;
+        }
+
+        pub fn cmdChannelClose(key: f64) Cmd {
+            const out = frameAlloc(u8, 1 + 8);
+            out[0] = @intFromEnum(CmdOp.channel_close);
+            std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
             return out;
         }
 

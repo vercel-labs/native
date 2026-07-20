@@ -236,6 +236,11 @@ const IMAGE_STATES = [
   "unsupported", "decode_failed", "registry_full", "alloc_failed",
 ];
 
+/// The external-source channel event states an event arm's `state`
+/// union must carry — the engine's vocabulary, matched by member NAME
+/// (declaration order is the app's own).
+const CHANNEL_STATES = ["data", "closed", "rejected"];
+
 /// Names the emitted module's own fixtures occupy (header helpers + commit
 /// machinery): module-level claims and function locals unique around them.
 const emittedFixtureNames = [
@@ -2295,6 +2300,23 @@ export class Emitter {
         const id = this.emitExpr(idArg, ctx, { k: "f64" }).code;
         return `rt.cmdImageUnregister(${id})`;
       }
+      if (method === "channelOpen") {
+        return this.emitChannelOpenCmd(e, ctx);
+      }
+      if (method === "channelClose") {
+        const keyArg = e.arguments[0];
+        if (!keyArg) this.fail(e, "`Cmd.channelClose` key (the app's numeric channel key)", "NS1027");
+        // The same literal gate as imageCancel: a key no channel could
+        // ever open under has nothing to close — stop the build instead
+        // of shipping a certain runtime no-op. Dynamic keys stay the
+        // host's (an unknown key is the documented no-op).
+        const keyLiteral = this.numberLiteralValue(keyArg);
+        if (keyLiteral !== null && !(Number.isSafeInteger(keyLiteral) && keyLiteral >= 1)) {
+          this.fail(keyArg, `\`Cmd.channelClose\` key ${keyLiteral} is not a positive integer channel key below 2^53`, "NS1030");
+        }
+        const key = this.emitExpr(keyArg, ctx, { k: "f64" }).code;
+        return `rt.cmdChannelClose(${key})`;
+      }
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
@@ -2322,7 +2344,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");
@@ -2731,6 +2753,93 @@ export class Emitter {
       isNumber(height.type.k) &&
       status !== undefined &&
       isNumber(status.type.k);
+    if (!matches) {
+      this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
+    }
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
+  }
+
+  /// `Cmd.channelOpen(key, route)`: the app's numeric channel key (any
+  /// number expression — keys are model data) and the `{ event }` routing
+  /// whose arm carries the five SDK-fixed channel event fields.
+  private emitChannelOpenCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const keyArg = e.arguments[0];
+    if (!keyArg) this.fail(e, "`Cmd.channelOpen` key (the app's numeric channel key)", "NS1027");
+    // The image-id literal gate: a compile-time-known key the host is
+    // certain to refuse stops the build; dynamic keys stay the host's
+    // to validate through the "rejected" event state. Strictly BELOW
+    // 2^53 — the first f64 that aliases a neighbor on the wire.
+    const keyLiteral = this.numberLiteralValue(keyArg);
+    if (keyLiteral !== null && !(Number.isSafeInteger(keyLiteral) && keyLiteral >= 1)) {
+      this.fail(keyArg, `\`Cmd.channelOpen\` key ${keyLiteral} is not a positive integer channel key below 2^53`, "NS1030");
+    }
+    const key = this.emitExpr(keyArg, ctx, { k: "f64" }).code;
+
+    let route = e.arguments[1];
+    while (route && (ts.isParenthesizedExpression(route) || ts.isAsExpression(route) || ts.isSatisfiesExpression(route))) route = route.expression;
+    if (!route || !ts.isObjectLiteralExpression(route)) {
+      this.fail(e.arguments[1] ?? e, `\`Cmd.channelOpen\` routing is an inline \`{ event }\` object`, "NS1027");
+    }
+    let event: ts.StringLiteral | null = null;
+    for (const p of route.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.channelOpen\` routing member \`${p.getText()}\` is not a plain property`, "NS1027");
+      }
+      let v: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+      if (p.name.text !== "event") {
+        this.fail(p, `\`Cmd.channelOpen\` routing member \`${p.name.text}\``, "NS1027");
+      }
+      if (!ts.isStringLiteral(v)) {
+        this.fail(p.initializer, `\`Cmd.channelOpen\` event arm is not a string literal`, "NS1027");
+      }
+      event = v;
+    }
+    if (!event) this.fail(route, `\`Cmd.channelOpen\` routing without an \`event\` arm`, "NS1027");
+    const tag = this.channelEventArmTag(event, ctx);
+    return `rt.cmdChannelOpen(${key}, ${tag})`;
+  }
+
+  /// Resolve the channel event arm: exactly the five SDK-fixed fields,
+  /// matched by NAME — key (a number: the channel key echoed verbatim),
+  /// state (a named literal-union alias carrying exactly the three
+  /// channel states, any order), bytes (the post payload),
+  /// droppedPending/droppedTotal (numbers).
+  private channelEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const unionName = ctx.cmdReturn!.msgUnion;
+    const info = this.table.unions.get(unionName);
+    if (!info) this.fail(arg, `unknown union ${unionName}`);
+    const arm = info.arms.find((a) => a.tag === arg.text);
+    if (!arm) {
+      this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
+    }
+    const shape =
+      "the five channel event fields — key: number (the echoed channel key), state (a named alias of exactly " +
+      CHANNEL_STATES.map((s) => `"${s}"`).join(" | ") +
+      "), bytes: Uint8Array, droppedPending: number, droppedTotal: number";
+    const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const key = fieldsByName.get("key");
+    const state = fieldsByName.get("state");
+    const bytes = fieldsByName.get("bytes");
+    const droppedPending = fieldsByName.get("droppedPending");
+    const droppedTotal = fieldsByName.get("droppedTotal");
+    const stateOk =
+      state !== undefined &&
+      state.type.k === "enum" &&
+      state.type.members.length === CHANNEL_STATES.length &&
+      CHANNEL_STATES.every((s) => state.type.k === "enum" && state.type.members.includes(s));
+    const matches =
+      arm.fields.length === 5 &&
+      stateOk &&
+      key !== undefined &&
+      isNumber(key.type.k) &&
+      bytes !== undefined &&
+      bytes.type.k === "bytes" &&
+      droppedPending !== undefined &&
+      isNumber(droppedPending.type.k) &&
+      droppedTotal !== undefined &&
+      isNumber(droppedTotal.type.k);
     if (!matches) {
       this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
     }

@@ -67,6 +67,10 @@ const mini_core = struct {
     /// matches members by NAME, so the app's declaration order is free.
     pub const AudioState = enum { spectrum, loaded, completed, position, rejected, failed };
 
+    /// The channel event states, shuffled off the engine order for the
+    /// same by-NAME matching proof.
+    pub const ChannelState = enum { rejected, data, closed };
+
     pub const Model = struct {
         polling: bool,
         fast: bool,
@@ -91,6 +95,13 @@ const mini_core = struct {
         buffering: bool,
         bands: []const u8,
         audio_events: i64,
+        // Channel event mirrors.
+        chan_state: ChannelState,
+        chan_key: f64,
+        chan_bytes: []const u8,
+        chan_dropped_pending: f64,
+        chan_dropped_total: f64,
+        chan_events: i64,
     };
 
     pub const Msg = union(enum) {
@@ -147,6 +158,16 @@ const mini_core = struct {
         drop_paste, // 42: cancel "paste" (silent clip_read drop)
         open_win, // 43: window_show "player" (the tray Open consequence)
         quit_app, // 44: quit_app (the tray Quit consequence)
+        open_chan, // 45: channel_open key 41 -> chan_evt
+        close_chan, // 46: channel_close key 41
+        chan_evt: struct { // 47: the five-field channel event arm (the
+            // emitted shape — payload fields keep their TS names)
+            key: f64,
+            state: ChannelState,
+            bytes: []const u8,
+            droppedPending: f64,
+            droppedTotal: f64,
+        },
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -182,6 +203,12 @@ const mini_core = struct {
                 .buffering = false,
                 .bands = "",
                 .audio_events = 0,
+                .chan_state = .closed,
+                .chan_key = -1,
+                .chan_bytes = "",
+                .chan_dropped_pending = -1,
+                .chan_dropped_total = -1,
+                .chan_events = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -326,6 +353,18 @@ const mini_core = struct {
             .drop_paste => return .{ .model = model, .cmd = cmdCancel("paste") },
             .open_win => return .{ .model = model, .cmd = cmdWindowShow("player") },
             .quit_app => return .{ .model = model, .cmd = cmdQuitApp() },
+            .open_chan => return .{ .model = model, .cmd = cmdChannelOpen(41, 47) },
+            .close_chan => return .{ .model = model, .cmd = cmdChannelClose(41) },
+            .chan_evt => |event| {
+                const out = frameCreate(model.*);
+                out.chan_state = event.state;
+                out.chan_key = event.key;
+                out.chan_bytes = event.bytes;
+                out.chan_dropped_pending = event.droppedPending;
+                out.chan_dropped_total = event.droppedTotal;
+                out.chan_events = model.chan_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -343,6 +382,7 @@ const mini_core = struct {
         out[0].last_line = commitBytes(next.last_line);
         out[0].output = commitBytes(next.output);
         out[0].bands = commitBytes(next.bands);
+        out[0].chan_bytes = commitBytes(next.chan_bytes);
         return &out[0];
     }
 
@@ -539,6 +579,21 @@ const mini_core = struct {
     fn cmdQuitApp() []const u8 {
         const out = rt.frameAlloc(u8, 1);
         out[0] = 0x11;
+        return out;
+    }
+
+    fn cmdChannelOpen(key: f64, event_tag: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 8 + 1);
+        out[0] = 0x15;
+        std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
+        out[9] = event_tag;
+        return out;
+    }
+
+    fn cmdChannelClose(key: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 8);
+        out[0] = 0x16;
+        std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
         return out;
     }
 
@@ -1446,4 +1501,46 @@ test "window verbs bridge to the effects channel's label-addressed verbs" {
     // Fire-and-forget: neither verb parked a keyed effect or dispatched
     // a result Msg of its own — only init's boot request is pending.
     try std.testing.expectEqual(boot_pending, fx.pendingHostCount());
+}
+
+test "a channel opens, posts route the five-field arm by name, and close retires the key" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // channel_open decodes onto fx.openChannel under the raw numeric
+    // key; the native side resolves the thread-safe posting handle —
+    // exactly what an embedder does.
+    Host.dispatch(fx, .open_chan);
+    const handle = fx.channelHandle(41) orelse return error.TestExpectedHandle;
+    try std.testing.expect(handle.post("cpu 42%"));
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().chan_events);
+    try std.testing.expectEqual(mini_core.ChannelState.data, Host.model().chan_state);
+    try std.testing.expectEqual(@as(f64, 41), Host.model().chan_key);
+    try std.testing.expectEqualStrings("cpu 42%", Host.model().chan_bytes);
+    try std.testing.expectEqual(@as(f64, 0), Host.model().chan_dropped_total);
+
+    // A duplicate LIVE key rejects the new open at the post-cycle
+    // boundary, echoing the refused key; the live channel is untouched.
+    Host.dispatch(fx, .open_chan);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().chan_events);
+    try std.testing.expectEqual(mini_core.ChannelState.rejected, Host.model().chan_state);
+    try std.testing.expectEqual(@as(f64, 41), Host.model().chan_key);
+    try std.testing.expect(fx.channelHandle(41) != null);
+
+    // close: the staged post flushes ahead of the one closed terminal,
+    // which retires the entry and kills the handle.
+    try std.testing.expect(handle.post("last reading"));
+    Host.dispatch(fx, .close_chan);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 4), Host.model().chan_events);
+    try std.testing.expectEqual(mini_core.ChannelState.closed, Host.model().chan_state);
+    try std.testing.expect(!handle.post("too late"));
+    try std.testing.expect(fx.channelHandle(41) == null);
+
+    // The key is free again: a fresh open lands with no rejection.
+    Host.dispatch(fx, .open_chan);
+    try std.testing.expectEqual(@as(i64, 4), Host.model().chan_events);
+    try std.testing.expect(fx.channelHandle(41) != null);
 }

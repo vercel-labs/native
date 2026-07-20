@@ -873,3 +873,120 @@ test("image loads: wire bytes through the real dispatch cycle", { skip: !hasZig,
     fs.rmSync(work, { recursive: true, force: true });
   }
 });
+
+// ----------------------------------------------------------------- channels
+
+// Cmd.channelOpen/channelClose end to end: the numeric-key records
+// against the exact wire layout rt.zig documents, and the five-field
+// event arm (echoed key, state by member name, post bytes, and the
+// honest drop counters) round-tripping as a plain Msg.
+const coreChannels = `
+import { Cmd } from "@native-sdk/core";
+
+export type ChannelState = "data" | "closed" | "rejected";
+
+export interface Model { readonly seen: number; readonly drops: number; readonly closed: number; }
+
+export type Msg =
+  | { readonly kind: "open" }
+  | { readonly kind: "open_expr" }
+  | { readonly kind: "close" }
+  | { readonly kind: "chan_event"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+
+export function initialModel(): Model {
+  return { seen: 0, drops: 0, closed: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "open": return [model, Cmd.channelOpen(41, { event: "chan_event" })];
+    case "open_expr": return [model, Cmd.channelOpen(model.seen + 90, { event: "chan_event" })];
+    case "close": return [model, Cmd.channelClose(41)];
+    case "chan_event":
+      if (msg.state === "closed") return { ...model, closed: model.closed + 1, drops: msg.droppedTotal };
+      if (msg.state === "data") return { ...model, seen: model.seen + 1, drops: msg.droppedTotal };
+      return model;
+  }
+}
+`;
+
+const harnessChannels = `
+const std = @import("std");
+const core = @import("core.zig");
+const rt = core.rt;
+
+var g_model: *const core.Model = undefined;
+
+fn dispatch(msg: core.Msg, log: *std.ArrayList(u8)) []const u8 {
+    const r = core.update(g_model, msg);
+    g_model = core.commitModelRoot(r.model);
+    const start = log.items.len;
+    log.appendSlice(std.testing.allocator, r.cmd) catch @panic("oom");
+    rt.frameReset();
+    return log.items[start..];
+}
+
+fn tagOf(comptime arm: []const u8) u8 {
+    return @intFromEnum(@field(std.meta.Tag(core.Msg), arm));
+}
+
+test "channel wire records match rt.zig's documented layout" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+
+    rt.resetAll();
+    g_model = core.commitModelRoot(core.initialModel());
+    rt.frameReset();
+
+    // channel_open: [0x15][key f64 LE][event_tag].
+    const open = dispatch(.open, &log);
+    try std.testing.expectEqual(@as(u8, 0x15), open[0]);
+    try std.testing.expectEqual(@as(f64, 41), @as(f64, @bitCast(std.mem.readInt(u64, open[1..9], .little))));
+    try std.testing.expectEqual(tagOf("chan_event"), open[9]);
+    try std.testing.expectEqual(@as(usize, 10), open.len);
+
+    // The event arm round-trips as a plain Msg (five fields, state by
+    // member name; the drop counters land in the model).
+    var payload: [7]u8 = undefined;
+    @memcpy(&payload, "cpu 42%");
+    _ = dispatch(.{ .chan_event = .{ .key = 41, .state = .data, .bytes = &payload, .droppedPending = 1, .droppedTotal = 3 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.seen), 1), g_model.seen);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.drops), 3), g_model.drops);
+
+    // channel_open with a model-expression key (keys are model data):
+    // 1 + 90 = 91 on the wire.
+    const open_expr = dispatch(.open_expr, &log);
+    try std.testing.expectEqual(@as(u8, 0x15), open_expr[0]);
+    try std.testing.expectEqual(@as(f64, 91), @as(f64, @bitCast(std.mem.readInt(u64, open_expr[1..9], .little))));
+
+    // The closed terminal routes the same arm with the final totals.
+    _ = dispatch(.{ .chan_event = .{ .key = 41, .state = .closed, .bytes = "", .droppedPending = 0, .droppedTotal = 3 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.closed), 1), g_model.closed);
+
+    // channel_close: [0x16][key f64 LE].
+    const close = dispatch(.close, &log);
+    try std.testing.expectEqual(@as(u8, 0x16), close[0]);
+    try std.testing.expectEqual(@as(f64, 41), @as(f64, @bitCast(std.mem.readInt(u64, close[1..9], .little))));
+    try std.testing.expectEqual(@as(usize, 9), close.len);
+}
+`;
+
+test("channels: wire bytes through the real dispatch cycle", { skip: !hasZig, timeout: 300_000 }, () => {
+  const result = transpile(coreChannels);
+  const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
+  assert.equal(result.ok, true, `transpile failed\n${result.typeErrors.join("\n")}\n${details}`);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-effects-channels-"));
+  try {
+    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
+    fs.writeFileSync(path.join(work, "core.zig"), result.zig!);
+    fs.writeFileSync(path.join(work, "harness.zig"), harnessChannels);
+    try {
+      execFileSync("zig", ["test", "harness.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
+    } catch (e) {
+      const err = e as { stderr?: string; stdout?: string };
+      assert.fail(`channel harness failed:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
+    }
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});

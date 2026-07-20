@@ -132,6 +132,31 @@
 //                                the id is untouched: its terminal still
 //                                registers — cancel the load first to keep
 //                                the slot free.
+//   Cmd.channelOpen(key, { event })
+//                                open an EXTERNAL-SOURCE CHANNEL under the
+//                                app's numeric key: the host stages a
+//                                long-lived, thread-safe posting seam its
+//                                NATIVE side feeds — embedders and
+//                                platform-services extensions post bytes
+//                                from their own threads (sockets, watchers,
+//                                workers), and each accepted post arrives as
+//                                one "data" event through the `event` arm
+//                                (the five-field record below) with the
+//                                honest back-pressure counters aboard. The
+//                                TS tier opens, closes, and receives;
+//                                POSTING is not a TS verb — transpiled cores
+//                                are single-threaded by design, so the
+//                                posting handle lives on the native side
+//                                (`Effects.channelHandle(key)`). One channel
+//                                per key at a time: a duplicate live key
+//                                dispatches state "rejected". No timer
+//                                polling anywhere: the source wakes the
+//                                loop itself.
+//   Cmd.channelClose(key)        close the open channel under the key, if
+//                                any: staged posts flush, exactly one
+//                                "closed" event (final drop totals)
+//                                dispatches the event arm, and the key
+//                                frees. A key with no open channel no-ops.
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -378,6 +403,58 @@ export type ImageEventKind<M extends Msgish> = M extends Msgish
     : never
   : never;
 
+/// The external-source channel event states, mirroring the engine's
+/// vocabulary: "data" is one delivered post from the native side's
+/// thread-safe handle; "closed" is the exactly-one terminal
+/// `Cmd.channelClose` produces (final drop totals aboard); "rejected" is
+/// the exactly-one terminal of a refused open (duplicate live key, a
+/// full channel table, an occupied engine key).
+export type ChannelState = "data" | "closed" | "rejected";
+
+/// The payload shape of a channel event arm — five fields, matched by
+/// NAME (the AudioEventArm convention). `key` is the channel key echoed
+/// verbatim, so concurrent channels sharing one arm stay
+/// distinguishable (a key the wire cannot carry exactly echoes 0);
+/// `state` must be a named string-literal-union alias carrying exactly
+/// the three ChannelState members (any declaration order — the host
+/// matches members by name); `bytes` is the post's payload ("data"
+/// events only, empty otherwise); `droppedPending`/`droppedTotal` are
+/// the back-pressure counters — posts the native side's handle refused
+/// since the previous delivered event, and over the channel's whole
+/// life. Never silent drops: the counters ride every event.
+export type ChannelEventArm = {
+  readonly key: number;
+  readonly state: ChannelState;
+  readonly bytes: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+/// The Msg arms a channel event stream may target: arms whose payload is
+/// exactly the five ChannelEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to ChannelState, and the tuple-wrapped reverse check
+/// holds ChannelState to the arm's states — a narrower union would
+/// silently drop event states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type ChannelEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ChannelEventArm]
+    ? [keyof ChannelEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ChannelEventArm
+        ? [ChannelState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// `Cmd.channelOpen` routing: every channel event dispatches the `event`
+/// arm (the five-field ChannelEventArm record, matched by field name).
+export interface ChannelRoute<M extends Msgish> {
+  readonly event: ChannelEventKind<M>;
+}
+
 /// One field of a host record payload; see hostRecordBytes for the encoding.
 export type HostScalar = number | boolean | Uint8Array;
 
@@ -583,6 +660,8 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
+  | { readonly op: "channel_close"; readonly key: number }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -879,6 +958,39 @@ export const Cmd = {
   /// load with `Cmd.imageCancel(id)` first.
   imageUnregister(id: number): Cmd<never> {
     return { op: "image_unregister", id };
+  },
+
+  /// Open an external-source channel under your numeric `key`: the
+  /// host stages a long-lived, thread-safe posting seam its NATIVE
+  /// side feeds — an embedder or platform-services extension resolves
+  /// the handle (`Effects.channelHandle(key)`) and posts bytes from
+  /// its own threads (a socket reader, a file watcher, a worker), and
+  /// each accepted post arrives as one "data" event through the
+  /// `event` arm, waking the loop itself — no timer polling anywhere.
+  /// POSTING is deliberately not a TS verb: transpiled cores are
+  /// single-threaded, so the TS tier opens, closes, and receives while
+  /// the native side feeds. Back-pressure is part of the contract:
+  /// refused posts count into `droppedPending`/`droppedTotal` on the
+  /// next delivered event, never silence. One channel per key at a
+  /// time — a duplicate live key dispatches state "rejected" — and the
+  /// key shares the engine's effect-key space (a same-key fetch is
+  /// blocked while the channel lives). Keys are positive integers
+  /// below 2^53; the events are journaled at the effect boundary, so
+  /// recorded sessions replay the whole stream offline with no source
+  /// thread at all.
+  channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
+    return { op: "channel_open", key, eventKind: route.event };
+  },
+
+  /// Close the open channel under `key`: posts stop landing, the
+  /// staged backlog flushes, and exactly one "closed" event (final
+  /// drop totals aboard) dispatches the event arm — then the key is
+  /// free again. A key with no open channel no-ops. Channels are keyed
+  /// by their numeric key, so the string-keyed `Cmd.cancel` never
+  /// touches them — this is their close, the way `Cmd.audioStop` is
+  /// audio's.
+  channelClose(key: number): Cmd<never> {
+    return { op: "channel_close", key };
   },
 
   /// Several commands from one dispatch, performed in order.
