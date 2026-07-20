@@ -5018,6 +5018,34 @@ export function total(n: number): number {
       { fn: "total", args: [i(0)] },
     ],
   },
+  {
+    // A kill sealed behind an infinite loop never reaches the merge, so the
+    // post-merge read keeps the pre-branch narrow. The loop terminates by
+    // returning (a bare `while (true) {}` cannot execute under either
+    // driver), so both the sealed branch and the surviving flow run.
+    name: "a kill inside an infinite loop that leaves by return stays off the surviving read",
+    src: `
+export function f(q: number | null, flag: boolean, n: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  let i: number = n;
+  if (flag) {
+    p = null;
+    while (true) {
+      if (i > 0) { return i * 10; }
+      i = i + 1;
+    }
+  }
+  return p + 2;
+}
+`,
+    calls: [
+      { fn: "f", args: [{ t: "null" }, { t: "b", v: false }, i(0)] },
+      { fn: "f", args: [f(3), { t: "b", v: true }, i(5)] },
+      { fn: "f", args: [f(3), { t: "b", v: true }, i(-2)] },
+      { fn: "f", args: [f(3), { t: "b", v: false }, i(9)] },
+    ],
+  },
 ];
 
 // ------------------------------------------------------------ arg spelling

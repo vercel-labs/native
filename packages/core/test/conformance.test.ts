@@ -6343,6 +6343,119 @@ export function f(p0: P | null, m: Mode): number {
 }
 `,
   },
+  {
+    // tsc treats `while (true)` without a break bound to it as never
+    // completing: the killing branch never reaches the merge, so the
+    // post-merge read keeps the pre-branch narrow. The kill must DROP —
+    // merging it resurrects the optional and the read emits optional
+    // arithmetic Zig rejects. (Zig agrees the loop is noreturn, so the
+    // branch body emits as-is.)
+    name: "a kill sealed behind while(true) never reaches the merge",
+    src: `
+export function f(q: number | null, flag: boolean, bump: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    while (true) {}
+  }
+  return p + bump;
+}
+`,
+  },
+  {
+    // The classic-for spelling of the same seal. The subset's classic-for
+    // mapping requires init/cond/increment, so the literal-true condition
+    // is the emittable spelling of an infinite for loop (`for (;;)` stops
+    // at NS9001 before narrowing matters).
+    name: "a kill sealed behind a literal-true classic for never reaches the merge",
+    src: `
+export function f(q: number | null, flag: boolean, bump: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    for (let i = 0; true; i += 1) {}
+  }
+  return p + bump;
+}
+`,
+  },
+  {
+    // The do-while spelling: the body runs before the first test, but a
+    // literal-true test with no bound break still never lets the loop
+    // complete.
+    name: "a kill sealed behind do-while(true) never reaches the merge",
+    src: `
+export function f(q: number | null, flag: boolean, bump: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    do {} while (true);
+  }
+  return p + bump;
+}
+`,
+  },
+  {
+    // A break bound to the loop makes its end reachable: the killing
+    // branch DOES reach the merge, so the kill must still merge and the
+    // post-loop re-check reads the live slot.
+    name: "a break bound to an infinite loop carries the kill past it",
+    src: `
+export function f(q: number | null, flag: boolean): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    while (true) {
+      if (flag) { break; }
+    }
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
+  {
+    // A return inside the infinite loop leaves the function without
+    // completing the loop: the branch still counts as function-leaving,
+    // so its kill drops and the surviving flow keeps the narrow.
+    name: "a return nested in an infinite loop still makes the branch leave the function",
+    src: `
+export function f(q: number | null, flag: boolean, n: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    while (true) {
+      if (n > 0) { return n; }
+    }
+  }
+  return p + 2;
+}
+`,
+  },
+  {
+    // Guard against over-recognition: a non-literal-true condition can be
+    // false on entry, the loop completes, and the kill reaches the merge —
+    // the re-check must read the live slot.
+    name: "a while over a non-literal condition is never terminal",
+    src: `
+export function f(q: number | null, flag: boolean, n: number): number {
+  let p: number | null = q;
+  if (p === null) { return -1; }
+  if (flag) {
+    p = null;
+    let i: number = n;
+    while (i > 0) { i = i - 1; }
+  }
+  if (p === null) { return 0; }
+  return p;
+}
+`,
+  },
 ];
 
 // A lifted block-body callback whose only return is the trailing statement

@@ -3174,8 +3174,12 @@ export class Emitter {
   /// throw, break, and continue all qualify (a break/continue jumps to an
   /// enclosing construct's boundary, never to the next statement in
   /// sequence), so an early-exit guard narrows the remainder of its block
-  /// no matter which exit the guard takes. Kill-frame drops need the
-  /// stronger whole-function question; that is allRoutesLeaveFunction.
+  /// no matter which exit the guard takes. A constant-true loop that no
+  /// break binds qualifies too: it never completes normally, so tsc treats
+  /// the statement after it as unreachable (and Zig types such a loop
+  /// noreturn — the two terminality judgments must stay aligned).
+  /// Kill-frame drops need the stronger whole-function question; that is
+  /// allRoutesLeaveFunction.
   private alwaysExits(stmt: ts.Statement): boolean {
     if (ts.isReturnStatement(stmt)) return true;
     if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) return true;
@@ -3199,6 +3203,25 @@ export class Emitter {
         stmt.elseStatement !== undefined &&
         this.alwaysExits(stmt.thenStatement) &&
         this.alwaysExits(stmt.elseStatement)
+      );
+    }
+    // A constant-true loop with no break bound to it never completes
+    // normally, so the statement after it is unreachable — tsc's CFA types
+    // post-loop code off the paths that never get there. The recognition
+    // mirrors tsc's scope for our subset: the literal `true` keyword (and
+    // the omitted / literal-true `for` condition) only, never arbitrary
+    // constant-foldable expressions. Returns and throws inside the loop
+    // leave the function without completing the loop, so they don't make
+    // its end reachable (allRoutesLeaveFunction classifies them as routes
+    // of their own); `continue` stays inside. Only a break bound to the
+    // loop resumes right after it.
+    if (ts.isWhileStatement(stmt) || ts.isDoStatement(stmt)) {
+      return stmt.expression.kind === ts.SyntaxKind.TrueKeyword && !this.bindsBreak(stmt);
+    }
+    if (ts.isForStatement(stmt)) {
+      return (
+        (stmt.condition === undefined || stmt.condition.kind === ts.SyntaxKind.TrueKeyword) &&
+        !this.bindsBreak(stmt)
       );
     }
     if (ts.isSwitchStatement(stmt)) {
@@ -3784,13 +3807,16 @@ export class Emitter {
     return false;
   }
 
-  /// Whether a `break` inside this switch's clauses binds the switch
-  /// itself: an unlabeled one outside any nested loop or switch, or a
-  /// labeled one naming a label wrapped directly around this switch. Such
-  /// a break resumes right AFTER the switch — the switch falls through.
+  /// Whether a `break` inside this switch's clauses (or this loop's body)
+  /// binds the switch/loop itself: an unlabeled one outside any nested
+  /// loop or switch, or a labeled one naming a label wrapped directly
+  /// around this statement. Such a break resumes right AFTER the
+  /// statement — the switch/loop falls through.
   /// (A break inside a callback cannot reach out — tsc rejects it — so
   /// function boundaries need no special casing, same as bindsContinue.)
-  private bindsBreak(stmt: ts.SwitchStatement): boolean {
+  private bindsBreak(
+    stmt: ts.SwitchStatement | ts.WhileStatement | ts.DoStatement | ts.ForStatement,
+  ): boolean {
     const wrappingLabels = new Set<string>();
     let p: ts.Node | undefined = stmt.parent;
     while (p && ts.isLabeledStatement(p)) {
@@ -3818,7 +3844,13 @@ export class Emitter {
         ts.isSwitchStatement(n);
       ts.forEachChild(n, (c) => visit(c, nested));
     };
-    ts.forEachChild(stmt.caseBlock, (c) => visit(c, false));
+    if (ts.isSwitchStatement(stmt)) {
+      ts.forEachChild(stmt.caseBlock, (c) => visit(c, false));
+    } else {
+      // Loop heads hold no break (tsc rejects one there); only the body
+      // can bind this loop.
+      visit(stmt.statement, false);
+    }
     return found;
   }
 
@@ -7859,6 +7891,14 @@ export class Emitter {
       );
     }
     const body = cb.body.statements;
+    // Every exit is terminal (a constant-true loop, or throws) with no
+    // `return v` anywhere: tsc types the body `never`, but the labeled
+    // value block below would carry a label no `break` uses — a Zig
+    // compile error — and a callback that can never produce its value has
+    // no useful emission anyway.
+    if (!body.some((s) => containsReturn(s))) {
+      this.fail(cb, "a callback none of whose paths returns a value (every path loops forever or throws)");
+    }
     const last = body[body.length - 1];
     const earlyReturns = body.slice(0, -1).some((s) => containsReturn(s));
     if (last && ts.isReturnStatement(last) && last.expression && !earlyReturns) {
