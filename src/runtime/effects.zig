@@ -1944,6 +1944,48 @@ pub fn Effects(comptime Msg: type) type {
         /// it, the families' shared discipline.
         const ChannelSlotState = enum(u8) { idle, open, closing };
 
+        /// The pending-order reservation a replay-parked open holds —
+        /// mixed-provenance rejection order. Live, an open REFUSED as
+        /// executor truth stages its `.rejected` in the pending stage
+        /// AT DISPATCH, so it delivers before every pending entry
+        /// staged after it (a younger regenerating refusal, an image
+        /// rejection — the stages share one `pending_seq`). Under
+        /// replay the same open parks instead and its journaled
+        /// terminal arrives through the feed; fed through the
+        /// completion queue it would deliver AFTER every pending entry
+        /// of the pass — younger regenerating refusals included — and
+        /// invert the recorded order. Every park therefore consumes
+        /// one `pending_seq` stamp at dispatch (the exact position a
+        /// live refusal would have staged at), and the feed resolves
+        /// what the stamp meant:
+        ///
+        /// - A fed park-retiring `.rejected` proves the open was
+        ///   REFUSED live: the terminal delivers through the pending
+        ///   stage at the park's stamp, restoring the live order. The
+        ///   feed always lands in time — results journal BEFORE the
+        ///   event whose dispatch delivered them (the recorder stages
+        ///   the event and commits on exit), so the replay pump feeds
+        ///   the refusal before it dispatches the event whose drain
+        ///   pass serves it alongside the younger entries.
+        /// - Any other fed kind proves the open was ACCEPTED live: an
+        ///   accepted open delivered nothing at its dispatch — no
+        ///   pending entry existed — so the stamp is vacated unused
+        ///   and the event rides the completion queue like every fed
+        ///   result. Which case a park is only becomes knowable at the
+        ///   first feed, which is why the stamp is unconditional; an
+        ///   unused stamp costs one skipped seq value, and only
+        ///   relative order ever matters.
+        const ParkOrderState = enum(u8) {
+            /// Not a replay park (live slots, retired slots).
+            none,
+            /// Stamped at the parked open's dispatch; no feed has
+            /// resolved it yet.
+            reserved,
+            /// Resolved: the refusal reclaimed the stamp, or the first
+            /// fed event proved the open was accepted live.
+            vacated,
+        };
+
         const ChannelSlot = struct {
             state: ChannelSlotState = .idle,
             key: u64 = 0,
@@ -1963,6 +2005,12 @@ pub fn Effects(comptime Msg: type) type {
             /// set under session replay — there the journaled `.closed`
             /// record is the one delivery (`feedChannelEvent`).
             closed_staged: bool = false,
+            /// Session replay only: the pending-order stamp this parked
+            /// open reserved at dispatch (see `ParkOrderState`).
+            park_seq: u64 = 0,
+            /// Session replay only: whether `park_seq` still reserves
+            /// its pending-order slot.
+            park_state: ParkOrderState = .none,
         };
 
         /// The single audio playback channel — one player is the whole
@@ -2181,7 +2229,10 @@ pub fn Effects(comptime Msg: type) type {
             /// re-derive under replay and are skipped; an executor
             /// that could not stage the channel is executor truth and
             /// feeds.
-            channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool },
+            /// `retire_slot`/`retire_generation`: a fed park-retiring
+            /// `.rejected` names the parked channel-table slot it
+            /// retires at delivery (see `PendingChannel`).
+            channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool, retire_slot: ?usize = null, retire_generation: u32 = 0 },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -2259,6 +2310,21 @@ pub fn Effects(comptime Msg: type) type {
             event: EffectChannelEvent,
             channel_fn: ?ChannelMsgFn,
             regenerates: bool,
+            /// Set for a fed park-retiring `.rejected` (session replay):
+            /// the channel-table slot whose parked occupancy this staged
+            /// terminal retires at delivery — the live instant the pop
+            /// releases the staged refusal's reservation. `seq` is then
+            /// the park's dispatch-time stamp, which can be OLDER than
+            /// already-staged entries, so `stagePendingChannel` inserts
+            /// in seq order. The parked slot itself holds the key and
+            /// the table capacity through the staged window, so retire
+            /// entries are skipped by `stagedChannelOccupiesKey` and
+            /// `stagedChannelReservationCount` (counting both would
+            /// double-book against live).
+            retire_slot: ?usize = null,
+            /// Generation gate for `retire_slot`, the fed-terminal
+            /// discipline.
+            retire_generation: u32 = 0,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -3900,6 +3966,13 @@ pub fn Effects(comptime Msg: type) type {
                 slot.on_event = options.on_event;
                 slot.closed_seq = 0;
                 slot.closed_staged = false;
+                // Reserve the pending-order slot a live executor-truth
+                // refusal of THIS open would have staged at — stamped
+                // unconditionally, because refusal-vs-accepted is only
+                // knowable when the journaled feed arrives (see
+                // `ParkOrderState` for the full resolution story).
+                slot.park_seq = self.nextPendingSeq();
+                slot.park_state = .reserved;
                 return dead;
             }
             // The posting header is process-lifetime storage: created
@@ -3933,6 +4006,8 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_event = options.on_event;
             slot.closed_seq = 0;
             slot.closed_staged = false;
+            slot.park_seq = 0;
+            slot.park_state = .none;
             shared.mutex.lock();
             shared.open = true;
             shared.generation = generation;
@@ -4026,6 +4101,36 @@ pub fn Effects(comptime Msg: type) type {
                 return error.EffectNotFound;
             };
             const slot = &self.channel_slots[slot_index];
+            // A replay-parked open resolves its pending-order
+            // reservation from the feed's evidence (`ParkOrderState`):
+            // the journaled REFUSAL reclaims the stamp — it delivers
+            // through the pending stage at the park's dispatch-time
+            // seq, exactly where live staged it, never through the
+            // completion queue the drain serves later — and any other
+            // kind proves the open was accepted live (an accepted open
+            // staged nothing at dispatch), so the reservation vacates
+            // and the event rides the queue like every fed result.
+            if (slot.park_state != .none) {
+                if (kind == .rejected) {
+                    const park_seq = slot.park_seq;
+                    slot.park_state = .vacated;
+                    self.stagePendingChannel(.{
+                        .seq = park_seq,
+                        .event = .{
+                            .key = key,
+                            .kind = .rejected,
+                            .dropped_pending = dropped_pending,
+                            .dropped_total = dropped_total,
+                        },
+                        .channel_fn = slot.on_event,
+                        .regenerates = false,
+                        .retire_slot = slot_index,
+                        .retire_generation = slot.generation,
+                    });
+                    return;
+                }
+                slot.park_state = .vacated;
+            }
             const staged_len = @min(bytes.len, max_effect_channel_bytes);
             var entry: Entry = .{
                 .kind = .channel,
@@ -5072,6 +5177,19 @@ pub fn Effects(comptime Msg: type) type {
                             return image_fn(entry.result);
                         },
                         .channel => |entry| {
+                            // A fed park-retiring rejection frees its
+                            // parked slot BEFORE the Msg reaches update
+                            // — the same causal instant the live pop
+                            // released the staged refusal's key and
+                            // table reservation, so a handler that
+                            // opens a channel sees the same table on
+                            // both sides.
+                            if (entry.retire_slot) |slot_index| {
+                                const parked = &self.channel_slots[slot_index];
+                                if (parked.state != .idle and parked.generation == entry.retire_generation) {
+                                    retireChannelSlot(parked);
+                                }
+                            }
                             // The image arm's journal encoding, reused:
                             // only regenerating admission refusals mark
                             // themselves with the exit reason — replay
@@ -6433,7 +6551,10 @@ pub fn Effects(comptime Msg: type) type {
             var index: usize = 0;
             while (index < self.pending_channel_len) : (index += 1) {
                 const entry = &storage[(self.pending_channel_head + index) % storage.len];
-                if (!entry.regenerates) count += 1;
+                // A fed park-retiring rejection reserves nothing: its
+                // parked slot still counts against the table until the
+                // entry delivers and retires it (see `PendingChannel`).
+                if (!entry.regenerates and entry.retire_slot == null) count += 1;
             }
             return count;
         }
@@ -6456,7 +6577,10 @@ pub fn Effects(comptime Msg: type) type {
             var index: usize = 0;
             while (index < self.pending_channel_len) : (index += 1) {
                 const entry = &storage[(self.pending_channel_head + index) % storage.len];
-                if (!entry.regenerates and entry.event.key == key) return true;
+                // A fed park-retiring rejection holds no key of its
+                // own: the parked slot occupies the key until the
+                // entry delivers and retires it (see `PendingChannel`).
+                if (!entry.regenerates and entry.retire_slot == null and entry.event.key == key) return true;
             }
             return false;
         }
@@ -6484,6 +6608,8 @@ pub fn Effects(comptime Msg: type) type {
             slot.state = .idle;
             slot.on_event = null;
             slot.closed_staged = false;
+            slot.park_seq = 0;
+            slot.park_state = .none;
         }
 
         fn rejectTimer(self: *Self, options: StartTimerOptions) void {
@@ -6756,7 +6882,19 @@ pub fn Effects(comptime Msg: type) type {
                 self.pending_channel_head = 0;
             }
             const active = self.pendingChannelStorage();
-            active[(self.pending_channel_head + self.pending_channel_len) % active.len] = entry;
+            // Insert in seq order: dispatch-time staging appends (the
+            // stamps are monotonic, so the scan breaks immediately),
+            // but a fed park-retiring rejection carries its park's
+            // OLDER stamp and belongs ahead of entries staged after
+            // the parked dispatch — the merge in `takePendingMsg`
+            // requires every stage to be FIFO over the shared stamp.
+            var index = self.pending_channel_len;
+            while (index > 0) : (index -= 1) {
+                const prev = active[(self.pending_channel_head + index - 1) % active.len];
+                if (prev.seq <= entry.seq) break;
+                active[(self.pending_channel_head + index) % active.len] = prev;
+            }
+            active[(self.pending_channel_head + index) % active.len] = entry;
             self.pending_channel_len += 1;
             self.wakeHost();
         }
@@ -6816,6 +6954,8 @@ pub fn Effects(comptime Msg: type) type {
                     .event = staged.event,
                     .channel_fn = staged.channel_fn,
                     .regenerates = staged.regenerates,
+                    .retire_slot = staged.retire_slot,
+                    .retire_generation = staged.retire_generation,
                 } };
             }
             const pending = self.pending_exits[self.pending_exit_head];

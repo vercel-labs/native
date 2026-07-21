@@ -1463,6 +1463,363 @@ fn recordCapacitySession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Record
     };
 }
 
+// ---------------- replay ordering: mixed rejection provenance
+//
+// One staged window can hold BOTH rejection provenances: an
+// alloc-failed open's executor-truth `.rejected` (journals `.exited`
+// and FEEDS at replay) followed by a regenerating refusal (occupied
+// key, full table — re-derived at the replayed dispatch). Live
+// delivers them through the pending stage's FIFO in dispatch order.
+// Replay must deliver the same order even though the executor-truth
+// terminal arrives through the feed, not the re-run dispatch — the
+// parked open reserves its ordering slot at dispatch and the fed
+// refusal reclaims it.
+
+const mixed_key_base: u64 = 810;
+const mixed_fail_key: u64 = mixed_key_base + 7;
+const mixed_full_key: u64 = mixed_key_base + 8;
+const mixed_chain_key: u64 = mixed_key_base + 9;
+
+/// When set, a delivered `.rejected` for `mixed_full_key` opens the
+/// chain channel from inside the handler — the state-divergence probe:
+/// live, the executor-truth rejection has already drained (its
+/// reservation released, and under replay its parked slot retired)
+/// when this handler runs, so the chain open is ACCEPTED on both
+/// sides; a replay that inverts the two rejections runs this handler
+/// while the alloc-failed open still parks a slot, and the chain open
+/// answers table-full instead — a Msg stream and a journal the
+/// recording never produced.
+var mixed_chain_enabled = false;
+
+const MixedRejectionModel = struct {
+    data_events: u32 = 0,
+    closed_events: u32 = 0,
+    rejected_events: u32 = 0,
+    /// Order-sensitive digest folding every delivered event's key and
+    /// kind: two rejections delivered in swapped order diverge here
+    /// even though every per-kind count agrees.
+    order_digest: u64 = 0,
+
+    fn record(model: *MixedRejectionModel, event: effects_mod.EffectChannelEvent) void {
+        switch (event.kind) {
+            .data => model.data_events += 1,
+            .closed => model.closed_events += 1,
+            .rejected => model.rejected_events += 1,
+        }
+        var fold: [9]u8 = undefined;
+        std.mem.writeInt(u64, fold[0..8], event.key, .little);
+        fold[8] = @intFromEnum(event.kind);
+        model.order_digest = std.hash.Wyhash.hash(model.order_digest, &fold);
+    }
+};
+
+const MixedMsg = union(enum) {
+    open: u64,
+    close: u64,
+    event: effects_mod.EffectChannelEvent,
+};
+
+const MixedApp = ui_app_mod.UiApp(MixedRejectionModel, MixedMsg);
+
+fn mixedUpdate(model: *MixedRejectionModel, msg: MixedMsg, fx: *MixedApp.Effects) void {
+    switch (msg) {
+        .open => |key| _ = fx.openChannel(.{ .key = key, .on_event = MixedApp.Effects.channelMsg(.event) }),
+        .close => |key| fx.closeChannel(key),
+        .event => |event| {
+            model.record(event);
+            if (mixed_chain_enabled and event.kind == .rejected and event.key == mixed_full_key) {
+                _ = fx.openChannel(.{ .key = mixed_chain_key, .on_event = MixedApp.Effects.channelMsg(.event) });
+            }
+        },
+    }
+}
+
+fn mixedView(ui: *MixedApp.Ui, model: *const MixedRejectionModel) MixedApp.Ui.Node {
+    // The order digest rides the semantic tree so the fingerprint
+    // checkpoints pin DELIVERY ORDER, not just per-kind counts.
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.text(.{}, ui.fmt("{d} data, {d} closed, {d} rejected", .{ model.data_events, model.closed_events, model.rejected_events })),
+        ui.text(.{}, ui.fmt("order {x}", .{model.order_digest})),
+    });
+}
+
+/// "mixr.open-N" / "mixr.close-N" for a single digit N: key
+/// `mixed_key_base + N`.
+fn mixedCommand(name: []const u8) ?MixedMsg {
+    const open_prefix = "mixr.open-";
+    const close_prefix = "mixr.close-";
+    if (std.mem.startsWith(u8, name, open_prefix) and name.len == open_prefix.len + 1) {
+        return .{ .open = mixed_key_base + (name[open_prefix.len] - '0') };
+    }
+    if (std.mem.startsWith(u8, name, close_prefix) and name.len == close_prefix.len + 1) {
+        return .{ .close = mixed_key_base + (name[close_prefix.len] - '0') };
+    }
+    return null;
+}
+
+fn mixedOptions() MixedApp.Options {
+    return .{
+        .name = "channel-mixed-rejections",
+        .scene = channel_session_scene,
+        .canvas_label = channel_canvas_label,
+        .update_fx = mixedUpdate,
+        .view = mixedView,
+        .on_command = mixedCommand,
+    };
+}
+
+const RecordedMixedSession = struct {
+    model: MixedRejectionModel,
+    fingerprint: u64,
+};
+
+fn mixedHarnessStart(harness: *core.TestHarness(), app: core.App) !void {
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = channel_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+}
+
+/// Record the mixed-provenance reference session: seven live opens,
+/// one alloc-failed open (executor truth, feeds at replay), and —
+/// inside the same staged window — one table-full open (regenerating,
+/// re-derived at replay). Live delivers the two rejections in
+/// dispatch order: alloc-failed first, table-full second.
+fn recordMixedSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, chain: bool) !RecordedMixedSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "channel-mixed-rejections", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(MixedApp);
+    defer gpa.destroy(app_state);
+    app_state.* = MixedApp.init(std.heap.page_allocator, .{}, mixedOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    app_state.effects.channel_storage_allocator = failing.allocator();
+    const app = app_state.app();
+
+    try mixedHarnessStart(harness, app);
+
+    var name_buffer: [16]u8 = undefined;
+    var index: u64 = 0;
+    while (index < 7) : (index += 1) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", index), .window_id = 1 } });
+    }
+    // The alloc-failed open: executor truth, staged at dispatch.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", 7), .window_id = 1 } });
+    try testing.expect(!failing.armed);
+    // The table-full open, in the same staged window: 7 slots + 1
+    // reservation exhaust the table, so this refusal is regenerating.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", 8), .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 2), app_state.model.rejected_events);
+
+    // Close the live channels (and the chain channel when the second
+    // rejection's handler opened it).
+    index = 0;
+    while (index < 7) : (index += 1) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "close", index), .window_id = 1 } });
+    }
+    if (chain) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "close", 9), .window_id = 1 } });
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+fn mixedCommandName(buffer: []u8, comptime verb: []const u8, index: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "mixr." ++ verb ++ "-{d}", .{index}) catch unreachable;
+}
+
+fn replayMixedSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, app_state: *MixedApp, harness: *core.TestHarness()) !session_replay.ReplayReport {
+    harness.null_platform.gpu_surfaces = true;
+    app_state.* = MixedApp.init(std.heap.page_allocator, .{}, mixedOptions());
+    _ = gpa;
+    return session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+}
+
+test "mixed executor-truth and regenerating channel rejections replay in live delivery order" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    mixed_chain_enabled = false;
+
+    const recorded = try recordMixedSession(gpa, buffer, false);
+    // Live delivery order pinned independently: the alloc-failed open's
+    // rejection first (staged at its dispatch), the table-full open's
+    // second — the pending stage's FIFO.
+    var expected: MixedRejectionModel = .{};
+    expected.record(.{ .key = mixed_fail_key, .kind = .rejected });
+    expected.record(.{ .key = mixed_full_key, .kind = .rejected });
+    var close_index: u64 = 0;
+    while (close_index < 7) : (close_index += 1) {
+        expected.record(.{ .key = mixed_key_base + close_index, .kind = .closed });
+    }
+    try testing.expectEqual(expected.order_digest, recorded.model.order_digest);
+    try testing.expectEqual(@as(u32, 7), recorded.model.closed_events);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    const app_state = try gpa.create(MixedApp);
+    defer gpa.destroy(app_state);
+    const report = try replayMixedSession(gpa, buffer, app_state, harness);
+    defer app_state.deinit();
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // The alloc-failed rejection and seven closed terminals feed; the
+    // table-full rejection regenerates.
+    try testing.expectEqual(@as(u64, 8), report.effects_fed);
+    try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+/// The valid reversed mixed ordering. A table-full refusal cannot
+/// precede an executor-truth one inside a single staged window — the
+/// table's idle-minus-reservations margin only ever shrinks as the
+/// window's opens claim slots and executor-truth refusals add
+/// reservations, and an alloc-fail needs the margin positive while
+/// table-full needs it non-positive — so the regenerating-first shape
+/// uses the OTHER regenerating refusal, the duplicate key.
+fn recordReversedMixedSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedMixedSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "channel-mixed-rejections", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(MixedApp);
+    defer gpa.destroy(app_state);
+    app_state.* = MixedApp.init(std.heap.page_allocator, .{}, mixedOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    app_state.effects.channel_storage_allocator = failing.allocator();
+    const app = app_state.app();
+
+    try mixedHarnessStart(harness, app);
+
+    var name_buffer: [16]u8 = undefined;
+    // One live open, then its duplicate: the regenerating refusal
+    // stages FIRST.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", 0), .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", 0), .window_id = 1 } });
+    // Then the alloc-failed open: executor truth stages SECOND.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "open", 7), .window_id = 1 } });
+    try testing.expect(!failing.armed);
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 2), app_state.model.rejected_events);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = mixedCommandName(&name_buffer, "close", 0), .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "a regenerating rejection recorded ahead of an executor-truth one keeps its lead at replay" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    mixed_chain_enabled = false;
+
+    const recorded = try recordReversedMixedSession(gpa, buffer);
+    var expected: MixedRejectionModel = .{};
+    expected.record(.{ .key = mixed_key_base, .kind = .rejected });
+    expected.record(.{ .key = mixed_fail_key, .kind = .rejected });
+    expected.record(.{ .key = mixed_key_base, .kind = .closed });
+    try testing.expectEqual(expected.order_digest, recorded.model.order_digest);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    const app_state = try gpa.create(MixedApp);
+    defer gpa.destroy(app_state);
+    const report = try replayMixedSession(gpa, buffer, app_state, harness);
+    defer app_state.deinit();
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // The alloc-failed rejection and one closed terminal feed; the
+    // duplicate-key rejection regenerates.
+    try testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
+test "a mixed session whose second rejection handler opens a third channel replays without table divergence" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+    mixed_chain_enabled = true;
+    defer mixed_chain_enabled = false;
+
+    // Live: the table-full rejection's handler runs AFTER the
+    // alloc-failed rejection drained (its reservation released), so the
+    // chain open claims the freed capacity and is accepted.
+    const recorded = try recordMixedSession(gpa, buffer, true);
+    try testing.expectEqual(@as(u32, 2), recorded.model.rejected_events);
+    try testing.expectEqual(@as(u32, 8), recorded.model.closed_events);
+
+    // Replay must run the same handler against the same table state:
+    // the fed executor-truth rejection retires its parked slot BEFORE
+    // the regenerated table-full rejection delivers, so the chain open
+    // parks in the freed slot and its journaled `.closed` has a twin
+    // to feed. An inverted replay opens the chain channel against a
+    // full parked table and diverges.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    const app_state = try gpa.create(MixedApp);
+    defer gpa.destroy(app_state);
+    const report = try replayMixedSession(gpa, buffer, app_state, harness);
+    defer app_state.deinit();
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // The alloc-failed rejection and eight closed terminals feed; the
+    // table-full rejection regenerates.
+    try testing.expectEqual(@as(u64, 9), report.effects_fed);
+    try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+}
+
 test "live table capacity counts the alloc-failed open's reservation so replay agrees at the boundary" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
