@@ -34,6 +34,7 @@ const WindowsEventKind = enum(c_int) {
     timer = 16,
     appearance = 17,
     audio = 18,
+    context_menu_action = 19,
 };
 
 const WindowsEvent = extern struct {
@@ -101,6 +102,12 @@ const WindowsEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// CONTEXT_MENU_ACTION payload (same field names as the macOS host):
+    /// `widget_id` echoes the request's correlation token and
+    /// `menu_item_id` is the selected item's id (0 = dismissed without a
+    /// selection).
+    widget_id: u64,
+    menu_item_id: u32,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -181,6 +188,17 @@ extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_int;
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
 extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
+extern fn native_sdk_windows_show_context_menu(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const WindowsContextMenuItem, count: usize) c_int;
+
+/// One context-menu entry crossing the C ABI (the same shape the macOS
+/// host takes): labels ride as pointer+length, flags as ints.
+const WindowsContextMenuItem = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    enabled: c_int,
+    separator: c_int,
+};
 
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
@@ -326,6 +344,7 @@ pub const WindowsPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .show_context_menu_fn = showContextMenu,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -404,11 +423,14 @@ pub const WindowsPlatform = struct {
             // in Windows 10 2004 — the host probes the activation
             // support live instead of assuming the build.
             .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
-            // Native scroll drivers, native context menus, and app-owned
-            // view-surface adoption are macOS-only today; Win32 keeps
-            // the engine's wheel physics (TrackPopupMenu is the natural
-            // future context-menu seam — the tray already uses it).
-            .gpu_surface_scroll_drivers, .context_menus, .view_surface_adoption => false,
+            // Native context menus present through TrackPopupMenu (the
+            // same popup path the tray menu uses), so the answer rides
+            // the same system-engine gate as the tray.
+            .context_menus => self.web_engine == .system,
+            // Native scroll drivers and app-owned view-surface adoption
+            // are macOS-only today; Win32 keeps the engine's wheel
+            // physics.
+            .gpu_surface_scroll_drivers, .view_surface_adoption => false,
         };
     }
 
@@ -562,7 +584,21 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .buffering = event.audio_buffering != 0,
             .bands = event.audio_bands,
         } }),
+        .context_menu_action => state.emit(.{ .context_menu_action = contextMenuActionEventFromWindowsEvent(event) }),
     }
+}
+
+/// Pure event mapping (no host calls), unit-testable on every build
+/// host: the C event's `widget_id` is the request's correlation token
+/// and `menu_item_id` the selected item (0 = dismissed) — the same
+/// payload contract as the macOS host, so replay is shape-identical.
+fn contextMenuActionEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.ContextMenuActionEvent {
+    return .{
+        .window_id = event.window_id,
+        .view_label = event.view_label[0..event.view_label_len],
+        .token = event.widget_id,
+        .item_id = event.menu_item_id,
+    };
 }
 
 /// Ordinals match the audio report kinds in webview2_host.cpp (the same
@@ -1004,6 +1040,41 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+/// Translate the request's items to the C ABI shape. Pure (no host
+/// calls), so the separator/disabled mapping is unit-testable on every
+/// build host.
+fn contextMenuItemsToWindows(items: []const platform_mod.ContextMenuItem, buffer: []WindowsContextMenuItem) []const WindowsContextMenuItem {
+    const count = @min(items.len, buffer.len);
+    for (items[0..count], 0..) |item, index| {
+        buffer[index] = .{
+            .item_id = item.id,
+            .label = item.label.ptr,
+            .label_len = item.label.len,
+            .enabled = if (item.enabled) 1 else 0,
+            .separator = if (item.separator) 1 else 0,
+        };
+    }
+    return buffer[0..count];
+}
+
+fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuRequest) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var items: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
+    const translated = contextMenuItemsToWindows(request.items, &items);
+    if (native_sdk_windows_show_context_menu(
+        self.host,
+        request.window_id,
+        request.view_label.ptr,
+        request.view_label.len,
+        request.point.x,
+        request.point.y,
+        request.token,
+        translated.ptr,
+        translated.len,
+    ) == 0) return error.WindowNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -1460,6 +1531,41 @@ test "windows gpu surface input preserves key and text" {
     try std.testing.expectEqualStrings("\n", input.text);
     try std.testing.expect(input.modifiers.primary);
     try std.testing.expect(input.modifiers.shift);
+}
+
+test "windows context menu items translate separators, disabled flags, and labels" {
+    const items = [_]platform_mod.ContextMenuItem{
+        .{ .id = 1, .label = "Complete" },
+        .{ .separator = true },
+        .{ .id = 3, .label = "Delete", .enabled = false },
+    };
+    var buffer: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
+    const translated = contextMenuItemsToWindows(&items, &buffer);
+    try std.testing.expectEqual(@as(usize, 3), translated.len);
+    try std.testing.expectEqual(@as(u32, 1), translated[0].item_id);
+    try std.testing.expectEqualStrings("Complete", translated[0].label[0..translated[0].label_len]);
+    try std.testing.expectEqual(@as(c_int, 1), translated[0].enabled);
+    try std.testing.expectEqual(@as(c_int, 0), translated[0].separator);
+    try std.testing.expectEqual(@as(c_int, 1), translated[1].separator);
+    try std.testing.expectEqual(@as(u32, 3), translated[2].item_id);
+    try std.testing.expectEqual(@as(c_int, 0), translated[2].enabled);
+}
+
+test "windows context menu action event maps token and item id" {
+    const label = "canvas";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.kind = .context_menu_action;
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.widget_id = 42;
+    event.menu_item_id = 3;
+
+    const action = contextMenuActionEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), action.window_id);
+    try std.testing.expectEqualStrings("canvas", action.view_label);
+    try std.testing.expectEqual(@as(u64, 42), action.token);
+    try std.testing.expectEqual(@as(u32, 3), action.item_id);
 }
 
 test "windows gpu surface input maps pointer cancel" {

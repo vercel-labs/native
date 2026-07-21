@@ -130,6 +130,7 @@ enum EventKind {
     kTimer = 16,
     kAppearance = 17,
     kAudio = 18,
+    kContextMenuAction = 19,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -161,6 +162,11 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
+/* Posted by native_sdk_windows_show_context_menu (loop thread, but mid
+ * event dispatch); the window procedure presents the pending app context
+ * menu on a fresh loop turn — the same deferral the macOS host's
+ * dispatch_async performs before popUpMenuPositioningItem. */
+constexpr UINT kShowContextMenuMessage = WM_APP + 47;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 constexpr int kViewWebView = 0;
@@ -246,6 +252,21 @@ struct WindowsEvent {
      * from -60 dBFS at 0 to full scale at 255). Zeros on every other
      * event kind — every emit site value-initializes the struct. */
     uint8_t audio_bands[32];
+    /* kContextMenuAction payload (the macOS host's field names):
+     * widget_id echoes the request's correlation token, menu_item_id is
+     * the selected item's id (0 = dismissed without a selection). */
+    uint64_t widget_id;
+    uint32_t menu_item_id;
+};
+
+/* One context-menu entry crossing the C ABI (the same shape the macOS
+ * host takes). */
+struct WindowsContextMenuItem {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int enabled;
+    int separator;
 };
 
 struct WindowsOpenDialogOpts {
@@ -555,6 +576,27 @@ struct AudioState {
     std::shared_ptr<AudioDownloadCancel> download_cancel;
 };
 
+/* The one pending app context menu (menus are modal, so one at a time):
+ * copied out of the service call's borrowed request memory, presented on
+ * the next loop turn by the window procedure. */
+struct PendingContextMenu {
+    bool active = false;
+    uint64_t window_id = 0;
+    std::string view_label;
+    /* Pointer location in LOGICAL points, view-local (the same space the
+     * gpu-surface input path reports in). */
+    double x = 0;
+    double y = 0;
+    uint64_t token = 0;
+    struct Item {
+        uint32_t id = 0;
+        std::string label;
+        bool enabled = true;
+        bool separator = false;
+    };
+    std::vector<Item> items;
+};
+
 struct Host {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     std::string app_name;
@@ -592,6 +634,7 @@ struct Host {
     bool com_initialized = false;
     AudioState audio;
     AudioSpectrumState spectrum;
+    PendingContextMenu context_menu;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
 
@@ -1870,6 +1913,63 @@ static NativeView *gpuSurfaceViewForHwnd(Host *host, HWND hwnd) {
         if (entry.second.hwnd == hwnd && entry.second.kind == kViewGpuSurface) return &entry.second;
     }
     return nullptr;
+}
+
+/* Present the pending app context menu — the tray menu's popup
+ * discipline (SetForegroundWindow, TPM_RETURNCMD | TPM_NONOTIFY, the
+ * WM_NULL post) applied to the runtime's declared items. Runs from the
+ * kShowContextMenuMessage case in the window procedure, so it is on the
+ * message-loop thread but on a FRESH loop turn, never nested inside the
+ * input dispatch that requested it. TrackPopupMenu blocks in its own
+ * modal message loop until the user picks or dismisses (the same shape
+ * as the macOS host's popUpMenuPositioningItem nested tracking loop),
+ * and TPM_RETURNCMD hands the selection back inline — the
+ * kContextMenuAction event is emitted right after it returns, selection
+ * or dismissal (menu_item_id 0) alike, exactly the payload the macOS
+ * host emits so replay is shape-identical across platforms. */
+static void showAppContextMenu(Host *host, HWND hwnd) {
+    if (!host || !host->context_menu.active) return;
+    PendingContextMenu request = std::move(host->context_menu);
+    host->context_menu = PendingContextMenu{};
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    for (const PendingContextMenu::Item &item : request.items) {
+        if (item.separator) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            continue;
+        }
+        UINT flags = MF_STRING;
+        if (!item.enabled) flags |= MF_GRAYED;
+        std::wstring label = widen(item.label);
+        AppendMenuW(menu, flags, item.id, label.c_str());
+    }
+    /* The request's point is LOGICAL view-local (the exact coordinates
+     * the gpu-surface input path reported the click in, which divides
+     * physical client pixels by gpuSurfaceScale on the way out): invert
+     * that scale against the presenting view's HWND — the gpu-surface
+     * child when the label resolves, the top-level client area otherwise
+     * — then map to screen for TrackPopupMenu. */
+    HWND target = hwnd;
+    if (!request.view_label.empty()) {
+        auto view = host->native_views.find(nativeViewKey(request.window_id, request.view_label));
+        if (view != host->native_views.end() && view->second.hwnd) target = view->second.hwnd;
+    }
+    const double scale = gpuSurfaceScale(target);
+    POINT point = { (LONG)lround(request.x * scale), (LONG)lround(request.y * scale) };
+    ClientToScreen(target, &point);
+    SetForegroundWindow(hwnd);
+    UINT command_id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    WindowsEvent event = {};
+    event.kind = kContextMenuAction;
+    event.window_id = request.window_id;
+    event.view_label = request.view_label.c_str();
+    event.view_label_len = request.view_label.size();
+    event.timestamp_ns = gpuTimestampNs();
+    event.widget_id = request.token;
+    event.menu_item_id = command_id;
+    if (host->callback) host->callback(host->callback_context, &event);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
 /* ------------------------------------------------------------------------
@@ -4734,6 +4834,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case kAudioSpectrumMessage:
             if (host) audioHandleSpectrumMessage(host, wparam);
             return 0;
+        case kShowContextMenuMessage:
+            if (host) showAppContextMenu(host, hwnd);
+            return 0;
         case kNotificationCallbackMessage:
             if (host && host->tray_active) {
                 UINT tray_event = LOWORD(lparam);
@@ -5872,6 +5975,40 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
         view.gpu_emission_scheduled = false;
         gpuSurfaceScheduleFrameEmission(host, view);
     }
+    return 1;
+}
+
+/* Queue the app context menu for presentation. Called on the loop
+ * thread mid event dispatch (the runtime asks from inside its input
+ * handling), so the request is copied out of the caller's borrowed
+ * memory and presentation defers to a fresh loop turn via PostMessageW —
+ * the same two-step the macOS host performs (its dispatch_async before
+ * popUpMenuPositioningItem). The window procedure's
+ * kShowContextMenuMessage case runs showAppContextMenu, whose
+ * TrackPopupMenu blocks in its own modal loop and whose selection (or
+ * dismissal) emits the kContextMenuAction event carrying `token`. */
+int native_sdk_windows_show_context_menu(Host *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const WindowsContextMenuItem *items, size_t count) {
+    if (!host || !items || count == 0) return 0;
+    auto found = host->windows.find(window_id);
+    if (found == host->windows.end() || !found->second.hwnd) return 0;
+    PendingContextMenu pending;
+    pending.active = true;
+    pending.window_id = window_id;
+    pending.view_label = slice(label, label_len);
+    pending.x = x;
+    pending.y = y;
+    pending.token = token;
+    pending.items.reserve(count);
+    for (size_t index = 0; index < count; index++) {
+        PendingContextMenu::Item item;
+        item.id = items[index].item_id;
+        item.label = slice(items[index].label, items[index].label_len);
+        item.enabled = items[index].enabled != 0;
+        item.separator = items[index].separator != 0;
+        pending.items.push_back(std::move(item));
+    }
+    host->context_menu = std::move(pending);
+    PostMessageW(found->second.hwnd, kShowContextMenuMessage, 0, 0);
     return 1;
 }
 
