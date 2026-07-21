@@ -128,7 +128,9 @@ test "right click over a widget with a declared menu presents it natively and di
     // items (ids are 1-based item indices; separators stay separators).
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
     try std.testing.expectEqualStrings("canvas", harness.null_platform.contextMenuLabel());
-    try std.testing.expectEqual(@as(u64, 2), harness.null_platform.context_menu_token);
+    // The request's correlation token is minted per request (opaque to
+    // the platform, which only echoes it on the action event).
+    try std.testing.expect(harness.null_platform.context_menu_token != 0);
     try std.testing.expectEqualDeep(geometry.PointF.init(50, 20), harness.null_platform.context_menu_point);
     const recorded = harness.null_platform.contextMenuItems();
     try std.testing.expectEqual(@as(usize, 3), recorded.len);
@@ -144,15 +146,109 @@ test "right click over a widget with a declared menu presents it natively and di
     try std.testing.expectEqual(@as(u32, 1), app_state.raw_input_count);
 
     // Selecting "Delete" dispatches the typed context-menu event.
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 3));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
     try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
     try std.testing.expectEqual(@as(usize, 2), app_state.last_menu_item_index);
 
     // A dismissal (item 0) resolves silently.
     try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 0));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 0));
     try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+}
+
+test "a stale dismissal from a superseded menu never clears the successor's pending request" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Two rows, each with its own declared menu: the second right-click
+    // supersedes the first request while the first menu's deferred
+    // dismissal is still in flight (the GTK presenter tears the old menu
+    // down one loop turn later).
+    const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+    const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+    const first_row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "First",
+        .context_menu = &first_items,
+    };
+    const second_row = canvas.Widget{
+        .id = 3,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 60, 200, 40),
+        .text = "Second",
+        .context_menu = &second_items,
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // First request presents, then the second arrives before the first's
+    // dismissal is delivered. Each request carries its own minted token.
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+    const first_token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 70));
+    const second_token = harness.null_platform.context_menu_token;
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    try std.testing.expect(first_token != second_token);
+
+    // The superseded request's dismissal arrives late, carrying the OLD
+    // token: it is swallowed, never resolving (or clearing) the pending
+    // successor.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 0));
+    try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+
+    // The successor stays pending and resolvable: its own selection
+    // dispatches exactly one context-menu event for the second target.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+
+    // One event per request: neither token can resolve again.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 1));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+}
+
+test "re-clicking the same widget mints a fresh token so the old menu's late dismissal is inert" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // ONE widget: with a widget-id token the two requests would be
+    // indistinguishable and the superseded menu's deferred dismissal
+    // would resolve (clear) the replacement's pending request.
+    const items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Complete" }, .{ .label = "Delete" } };
+    const row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "Task",
+        .context_menu = &items,
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+    const first_token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(60, 24));
+    const second_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(first_token != second_token);
+
+    // The first menu's deferred dismissal lands after the re-click: its
+    // stale token is swallowed and the replacement stays live.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 0));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
 }
 
 test "right click on editable text presents the default edit menu wired to clipboard actions" {
@@ -200,7 +296,7 @@ test "right click on editable text presents the default edit menu wired to clipb
     try std.testing.expectEqualStrings("Select All", recorded[4].label);
 
     // Copy through the menu: clipboard captures the selection, text stays.
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 2));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
     var clipboard_buffer: [256]u8 = undefined;
     try std.testing.expectEqualStrings("Query", try harness.runtime.readClipboard(&clipboard_buffer));
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
@@ -208,20 +304,20 @@ test "right click on editable text presents the default edit menu wired to clipb
 
     // Cut through the menu: clipboard keeps the selection, field empties.
     try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 1));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 1));
     try std.testing.expectEqualStrings("Query", try harness.runtime.readClipboard(&clipboard_buffer));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("", retained.nodes[1].widget.text);
 
     // Paste through the menu: the clipboard lands at the caret.
     try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 3));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Query", retained.nodes[1].widget.text);
 
     // Select All through the menu re-selects everything.
     try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 4));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 4));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
 }
@@ -255,7 +351,7 @@ test "a near-capacity multi-line context-menu paste sanitizes before it clamps" 
     try harness.runtime.writeClipboard("a\nbc");
     try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
     // Paste is the default edit menu's third item.
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 3));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
 
     // Retained editor and the app's stamped edit hear the same whole
     // sanitized suffix, with no false truncation flag.
@@ -293,7 +389,7 @@ test "right click on selected static text presents a copy-only menu" {
     try std.testing.expectEqual(@as(usize, 1), recorded.len);
     try std.testing.expectEqualStrings("Copy", recorded[0].label);
 
-    try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 2));
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
     var clipboard_buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("Release", try harness.runtime.readClipboard(&clipboard_buffer));
 }

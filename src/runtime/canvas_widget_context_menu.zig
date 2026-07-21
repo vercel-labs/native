@@ -40,7 +40,17 @@ pub const default_item_select_all: u32 = 4;
 
 pub const PendingCanvasWidgetContextMenu = struct {
     window_id: platform.WindowId = 1,
+    /// Per-request generation, minted when the request is armed and
+    /// echoed back by the platform on the action event. Menus can be
+    /// superseded while a dismissal is still in flight (GTK tears the
+    /// old popover down one loop turn after the successor presents), so
+    /// the token must name the REQUEST, not the widget: a stale token's
+    /// event must never resolve — or clear — a successor's pending
+    /// request, even when both menus target the same widget.
     token: u64 = 0,
+    /// The widget the menu was presented for (selections dispatch
+    /// against it; the token above no longer doubles as its id).
+    target_id: canvas.ObjectId = 0,
     kind: Kind = .app,
 
     pub const Kind = enum {
@@ -108,7 +118,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     }
                     if (try showMenu(self, index, .{
                         .window_id = input_event.window_id,
-                        .token = widget.id,
+                        .target_id = widget.id,
                         .kind = .app,
                     }, point, items[0..count])) return;
                 }
@@ -138,7 +148,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = widget.text.len > 0 };
                     _ = try showMenu(self, index, .{
                         .window_id = input_event.window_id,
-                        .token = target.id,
+                        .target_id = target.id,
                         .kind = .edit_text,
                     }, point, items[0..5]);
                     return;
@@ -151,7 +161,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     items[0] = .{ .id = default_item_copy, .label = "Copy" };
                     _ = try showMenu(self, index, .{
                         .window_id = input_event.window_id,
-                        .token = target.id,
+                        .target_id = target.id,
                         .kind = .static_copy,
                     }, point, items[0..1]);
                     return;
@@ -172,7 +182,9 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// refusal is not fatal (app-declared menus fall back to the
         /// anchored canvas surface, the zero-code defaults degrade to
         /// their keyboard paths).
-        fn showMenu(self: *Runtime, view_index: usize, pending: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
+        fn showMenu(self: *Runtime, view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
+            var pending = request;
+            pending.token = nextContextMenuToken(self);
             self.options.platform.services.showContextMenu(.{
                 .window_id = pending.window_id,
                 .view_label = self.views[view_index].label,
@@ -196,8 +208,19 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// directly through the same paths the keyboard shortcuts use.
         pub fn dispatchContextMenuAction(self: *Runtime, app: runtime_api.App(Runtime), event: platform.ContextMenuActionEvent) anyerror!void {
             const pending = self.canvas_widget_context_menu_pending orelse return;
-            self.canvas_widget_context_menu_pending = null;
+            // Token gate BEFORE the clear: an event carrying a stale
+            // token belongs to a superseded request (its deferred
+            // dismissal outlived a re-click's replacement menu) and is
+            // swallowed — it must never clear, let alone resolve, the
+            // successor's pending request. Windows cannot produce a
+            // stale event (TrackPopupMenu blocks the loop thread and
+            // emits inline from the moved-out request, so a second
+            // request never dispatches mid-menu); macOS cannot either
+            // (each presentation block captures its own token and
+            // popUpMenuPositioningItem's nested tracking loop blocks
+            // the main queue); GTK popovers are asynchronous and CAN.
             if (pending.window_id != event.window_id or pending.token != event.token) return;
+            self.canvas_widget_context_menu_pending = null;
             if (event.item_id == 0) return; // dismissed
             const index = runtimeFindViewIndex(self, event.window_id, event.view_label) orelse return;
 
@@ -205,16 +228,24 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 .app => try self.dispatchEvent(app, .{ .canvas_widget_context_menu = .{
                     .window_id = event.window_id,
                     .view_label = self.views[index].label,
-                    .target_id = pending.token,
+                    .target_id = pending.target_id,
                     .item_index = event.item_id - 1,
                 } }),
-                .edit_text => try applyDefaultEditAction(self, app, index, pending.token, event.item_id),
+                .edit_text => try applyDefaultEditAction(self, app, index, pending.target_id, event.item_id),
                 .static_copy => {
                     if (event.item_id != default_item_copy) return;
                     const text = self.views[index].canvasWidgetCopyText() orelse return;
                     self.writeClipboard(text) catch return;
                 },
             }
+        }
+
+        /// Mint the next per-request correlation token. Never zero, so a
+        /// zero-token event can never match an armed request.
+        pub fn nextContextMenuToken(self: *Runtime) u64 {
+            self.canvas_widget_context_menu_token +%= 1;
+            if (self.canvas_widget_context_menu_token == 0) self.canvas_widget_context_menu_token = 1;
+            return self.canvas_widget_context_menu_token;
         }
 
         fn applyDefaultEditAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {

@@ -1782,7 +1782,8 @@ pub const ContextMenuRequest = struct {
     view_label: []const u8 = "",
     point: geometry.PointF = .{},
     /// Opaque correlation token echoed back on the action event (the
-    /// runtime uses the target widget's id).
+    /// runtime mints one per request, so a superseded menu's late
+    /// dismissal can never resolve its successor's request).
     token: u64 = 0,
     items: []const ContextMenuItem = &.{},
 };

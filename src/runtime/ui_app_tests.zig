@@ -3406,7 +3406,9 @@ test "ui app dispatches native context menu selections as typed messages" {
         .timestamp_ns = 2_000_000,
     } });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
-    try std.testing.expectEqual(@as(u64, row_id), harness.null_platform.context_menu_token);
+    // The request carries a minted per-request token (opaque to the
+    // platform, which only echoes it back on the action event).
+    try std.testing.expect(harness.null_platform.context_menu_token != 0);
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.contextMenuItems().len);
 
     // Selecting "Delete" (item id 3 = third declared entry) dispatches
@@ -3414,7 +3416,7 @@ test "ui app dispatches native context menu selections as typed messages" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
         .window_id = 1,
         .view_label = canvas_label,
-        .token = row_id,
+        .token = harness.null_platform.context_menu_token,
         .item_id = 3,
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);

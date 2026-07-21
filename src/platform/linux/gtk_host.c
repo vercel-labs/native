@@ -135,6 +135,14 @@ typedef struct native_sdk_gtk_context_menu {
     uint64_t window_id;
     char *view_label;
     uint64_t token;
+    /* Per-invocation action-group namespace ("native-sdk-context-<serial>").
+     * Popovers are asynchronous, so a re-click can install a successor
+     * menu while this one's deferred teardown idle is still queued; a
+     * shared namespace would let the stale teardown remove the action
+     * group the SUCCESSOR just inserted on the same parent, leaving the
+     * replacement menu inert. A unique name per request means teardown
+     * can only ever remove its own group. */
+    char group_name[48];
     GtkWidget *popover;
     GtkWidget *parent;
     int emitted;
@@ -388,8 +396,12 @@ struct native_sdk_gtk_host {
     native_sdk_gtk_menu_action_t menu_actions[NATIVE_SDK_MAX_MENU_ITEMS];
     int menu_action_count;
     /* The one live context menu (menus are modal-per-pointer, so one at
-     * a time); owned here between show and the teardown idle. */
+     * a time); owned here between show and the teardown idle. A
+     * superseded menu is no longer pointed to from here but stays alive
+     * until its own teardown idle runs. */
     native_sdk_gtk_context_menu_t *context_menu;
+    /* Feeds each context menu's per-invocation action-group name. */
+    uint64_t context_menu_serial;
     native_sdk_gtk_audio_t audio;
 };
 
@@ -3699,7 +3711,16 @@ static void native_sdk_context_menu_emit(native_sdk_gtk_context_menu_t *menu, ui
 /* Balanced teardown of one presented menu (NO event emission): remove
  * the per-invocation action group from the presenting widget, drop the
  * weak pointers, unparent the popover (the parent holds the only ref,
- * so unparent finalizes it), and free the state. */
+ * so unparent finalizes it), and free the state. This may run from a
+ * STALE teardown idle after a re-click already installed a successor
+ * menu, so it must only ever touch its own per-invocation state: the
+ * group removal names this request's unique namespace, never the
+ * successor's. (Only GTK needs this guard: popovers are asynchronous.
+ * The Windows host's TrackPopupMenu blocks the message-loop thread and
+ * emits inline from a moved-out request, and the macOS host's
+ * presentation block captures its menu, target, and token as locals
+ * while popUpMenuPositioningItem blocks the main queue — neither can
+ * interleave a successor with a pending teardown.) */
 static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu) {
     if (!menu) return;
     if (menu->teardown_idle) {
@@ -3707,7 +3728,7 @@ static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu) {
         menu->teardown_idle = 0;
     }
     if (menu->parent) {
-        gtk_widget_insert_action_group(menu->parent, "native-sdk-context", NULL);
+        gtk_widget_insert_action_group(menu->parent, menu->group_name, NULL);
         g_object_remove_weak_pointer(G_OBJECT(menu->parent), (gpointer *)&menu->parent);
     }
     if (menu->popover) {
@@ -3767,9 +3788,15 @@ int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t windo
     }
 
     /* A menu already up (re-click while open): dismiss it — its closed
-     * handler schedules its own teardown and dismissal event. A state
-     * whose popover already died with its window (weak pointer nulled,
-     * "closed" never delivered) has no handler coming: free it here. */
+     * handler schedules its own teardown and dismissal event. That
+     * teardown runs a loop turn from now, AFTER this successor is
+     * installed, and still emits the superseded request's one dismissal
+     * (with the old request's token — the runtime's token gate resolves
+     * or swallows it against ITS pending request, never the
+     * successor's), while the per-invocation group namespace keeps its
+     * cleanup off the successor's action group. A state whose popover
+     * already died with its window (weak pointer nulled, "closed" never
+     * delivered) has no handler coming: free it here. */
     if (host->context_menu) {
         if (host->context_menu->popover) {
             gtk_popover_popdown(GTK_POPOVER(host->context_menu->popover));
@@ -3787,12 +3814,13 @@ int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t windo
     menu_state->window_id = window_id;
     menu_state->view_label = label_copy;
     menu_state->token = token;
+    snprintf(menu_state->group_name, sizeof(menu_state->group_name), "native-sdk-context-%llu", (unsigned long long)++host->context_menu_serial);
     menu_state->parent = parent;
     g_object_add_weak_pointer(G_OBJECT(parent), (gpointer *)&menu_state->parent);
 
     /* The declared items become a sectioned GMenu — separators split
      * sections, the GMenu convention — wired to a fresh action group
-     * inserted on the presenting widget under the "native-sdk-context"
+     * inserted on the presenting widget under this request's unique
      * namespace. Every builder ref is dropped as soon as the next owner
      * holds its own (the set_menus discipline). */
     GSimpleActionGroup *group = g_simple_action_group_new();
@@ -3816,8 +3844,8 @@ int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t windo
         g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
         g_object_unref(action); /* the group holds its own ref */
         char *item_label = native_sdk_strndup(items[i].label ? items[i].label : "", items[i].label_len);
-        char detailed[48];
-        snprintf(detailed, sizeof(detailed), "native-sdk-context.item-%u", items[i].item_id);
+        char detailed[80];
+        snprintf(detailed, sizeof(detailed), "%s.item-%u", menu_state->group_name, items[i].item_id);
         GMenuItem *gitem = g_menu_item_new(item_label ? item_label : "", detailed);
         g_menu_append_item(section, gitem);
         g_object_unref(gitem); /* the section holds its own ref */
@@ -3828,7 +3856,7 @@ int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t windo
     }
     g_object_unref(section);
 
-    gtk_widget_insert_action_group(parent, "native-sdk-context", G_ACTION_GROUP(group));
+    gtk_widget_insert_action_group(parent, menu_state->group_name, G_ACTION_GROUP(group));
     g_object_unref(group); /* the widget holds its own ref */
 
     GtkWidget *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));

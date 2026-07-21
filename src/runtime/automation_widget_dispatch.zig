@@ -9,6 +9,7 @@ const runtime_clock = @import("clock.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
 
 const AutomationWidgetAction = automation_commands.AutomationWidgetAction;
 const AutomationWidgetTarget = automation_commands.AutomationWidgetTarget;
@@ -209,15 +210,17 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (declared.separator) return error.ContextMenuItemSeparator;
             if (!declared.enabled) return error.ContextMenuItemDisabled;
 
+            const token = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).nextContextMenuToken(self);
             self.canvas_widget_context_menu_pending = .{
                 .window_id = self.views[view_index].window_id,
-                .token = widget.id,
+                .token = token,
+                .target_id = widget.id,
                 .kind = .app,
             };
             try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
                 .window_id = self.views[view_index].window_id,
                 .view_label = self.views[view_index].label,
-                .token = widget.id,
+                .token = token,
                 .item_id = @intCast(item.item_index + 1),
             } });
         }

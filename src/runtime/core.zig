@@ -314,6 +314,11 @@ pub const Runtime = struct {
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
     canvas_widget_context_menu_pending: ?runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = null,
+    /// Monotonic per-request context-menu token source: each presented
+    /// (or automation-armed) request gets a fresh token, so a superseded
+    /// request's late dismissal can never resolve its successor — even
+    /// when both target the same widget.
+    canvas_widget_context_menu_token: u64 = 0,
     canvas_widget_display_list_refresh_batch_depth: usize = 0,
     /// Nonzero while a gpu-surface input dispatch is live: accessibility
     /// publishes requested inside it defer to after the responding
