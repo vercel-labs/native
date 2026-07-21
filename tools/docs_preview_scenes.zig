@@ -173,6 +173,7 @@ pub const scenes = [_]Scene{
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
     .{ .name = "media-surface", .height = 280, .build = stateless(buildMediaSurface) },
+    .{ .name = "video", .height = 300, .build = stateless(buildVideo) },
     .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
     .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
     .{ .name = "chart-bar", .height = 260, .build = stateless(buildChartBar) },
@@ -206,6 +207,7 @@ pub const scenes = [_]Scene{
     heroScene("list-hero", buildListHero),
     heroScene("markdown-hero", buildMarkdownHero),
     heroScene("media-surface-hero", buildMediaSurfaceHero),
+    heroScene("video-hero", buildVideoHero),
     heroScene("pagination-hero", buildPaginationHero),
     heroScene("panel-hero", buildPanelHero),
     heroScene("progress-hero", buildProgressHero),
@@ -592,6 +594,35 @@ fn buildMediaSurface(ui: *Ui) Node {
                 .semantics = .{ .label = "Camera preview" },
             }),
             ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Awaiting producer frames"),
+        }),
+    });
+}
+
+fn buildVideo(ui: *Ui) Node {
+    // Docs previews render through the deterministic reference
+    // renderer: the surface shows its placeholder and the house chrome
+    // its idle (no playback loaded) state — exactly what goldens show.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 360 }, .{
+            ui.video(.{
+                .src = "assets/clips/launch.mp4",
+                .controls = true,
+                .height = 200,
+                .label = "Launch clip",
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "House transport chrome under the picture"),
+        }),
+    });
+}
+
+fn buildVideoHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.video(.{
+            .src = "assets/clips/launch.mp4",
+            .controls = true,
+            .width = 300,
+            .height = 168,
+            .label = "Video",
         }),
     });
 }
