@@ -979,8 +979,13 @@ export const Cmd = {
   /// key shares the engine's effect-key space (a same-key fetch is
   /// blocked while the channel lives). Keys are positive integers
   /// below 2^53; the events are journaled at the effect boundary, so
-  /// recorded sessions replay the whole stream offline with no source
-  /// thread at all.
+  /// a recorded session replays the whole stream from the journal and
+  /// never NEEDS the source — under replay the open parks and the
+  /// native handle is inert (every post answers closed). The opening
+  /// update still re-executes, so a native producer launched
+  /// unconditionally really starts and is stopped at its first post;
+  /// one that consults the handle's live() before launching never
+  /// starts, keeping replay fully offline.
   channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
     return { op: "channel_open", key, eventKind: route.event };
   },
