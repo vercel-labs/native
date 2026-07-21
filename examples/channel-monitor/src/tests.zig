@@ -37,8 +37,17 @@ fn monitorOptions() MonitorApp.Options {
 /// `update` hands out, so each test posts deterministically itself.
 var captured_handle: ?native_sdk.ChannelHandle = null;
 
-fn captureSource(handle: native_sdk.ChannelHandle) void {
+fn captureSource(handle: native_sdk.ChannelHandle) std.Thread.SpawnError!void {
     captured_handle = handle;
+}
+
+/// The failing source: `std.Thread.spawn` cannot be made to fail
+/// deterministically, so the startup sequence's failure branch is
+/// exercised through the same injected-source seam the other tests
+/// use — the exact error a real spawn reports under thread exhaustion.
+fn failingSource(handle: native_sdk.ChannelHandle) std.Thread.SpawnError!void {
+    _ = handle;
+    return error.ThreadQuotaExceeded;
 }
 
 const Harness = struct {
@@ -158,6 +167,40 @@ test "back-pressure skips samples but never stops the monitor" {
     try testing.expectEqual(PostResult.accepted, handle.post("sample after stall"));
     try h.drainWakes();
     try testing.expectEqual(@as(u64, native_sdk.max_effect_channel_pending + 1), h.app_state.model.total_samples);
+}
+
+test "a failed source start never claims monitoring: the channel closes and the status says so" {
+    var h = try Harness.create();
+    defer h.destroy();
+    main.start_source = failingSource;
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    // Honest startup order: "monitoring" is claimed only AFTER the
+    // source started — a failed spawn leaves it false, immediately.
+    try testing.expect(!h.app_state.model.monitoring);
+    try testing.expect(h.app_state.model.source_failed);
+
+    // The failure closed the just-opened occupancy: the `.closed`
+    // terminal delivers and the key is free again.
+    try h.drainWakes();
+    try testing.expect(!h.app_state.model.monitoring);
+
+    // The UI renders the failure, never a silent "idle" (and never a
+    // "monitoring" with no producer behind it).
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqualStrings("sampler failed to start", h.app_state.model.statusText(arena_state.allocator()));
+
+    // A retry with a healthy source recovers completely: fresh open,
+    // fresh handle, monitoring for real.
+    main.start_source = captureSource;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try testing.expect(h.app_state.model.monitoring);
+    try testing.expect(!h.app_state.model.source_failed);
+    const handle = captured_handle orelse return error.TestExpectedHandle;
+    try testing.expectEqual(PostResult.accepted, handle.post("sample 1: recovered"));
+    try h.drainWakes();
+    try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
 }
 
 test "a duplicate start while monitoring is a no-op, and a refused open reports rejected" {

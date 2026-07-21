@@ -55,6 +55,10 @@ pub const Model = struct {
     dropped_total: u32 = 0,
     monitoring: bool = false,
     rejected: bool = false,
+    /// The source thread failed to start: the channel was closed again
+    /// and the status line says so — a monitor with no producer must
+    /// never report "monitoring".
+    source_failed: bool = false,
 
     /// Copy the payload: the event's byte slice is drain scratch and
     /// dies with this update call.
@@ -84,6 +88,7 @@ pub const Model = struct {
 
     pub fn statusText(model: *const Model, arena: std.mem.Allocator) []const u8 {
         if (model.rejected) return "channel rejected";
+        if (model.source_failed) return "sampler failed to start";
         if (model.monitoring) {
             // Honesty is this example's teaching job: delivered events
             // carry the channel's drop counters, so a stalled drain
@@ -112,17 +117,21 @@ pub const Effects = MonitorApp.Effects;
 // --------------------------------------------------------------- worker
 
 /// The one seam tests swap: `update` starts the source through this
-/// pointer, so the unit tests substitute a no-thread recorder while the
-/// real app spawns the sampling thread below.
-pub var start_source: *const fn (handle: native_sdk.ChannelHandle) void = startSamplerThread;
+/// pointer, so the unit tests substitute a no-thread recorder (and a
+/// failing starter) while the real app spawns the sampling thread
+/// below.
+pub var start_source: *const fn (handle: native_sdk.ChannelHandle) std.Thread.SpawnError!void = startSamplerThread;
 
 /// Spawn the sampling thread, DETACHED on purpose: the thread owns its
 /// own wind-down — after `fx.closeChannel` (or app teardown) its next
 /// `post` answers `.closed` and it returns. The generation-stamped
 /// handle makes that safe without a join: a post after the channel (or
 /// the whole runtime) is gone touches only the process-lifetime header.
-fn startSamplerThread(handle: native_sdk.ChannelHandle) void {
-    const thread = std.Thread.spawn(.{}, samplerMain, .{handle}) catch return;
+/// A failed spawn reports to the caller — `update` closes the channel
+/// and puts the failure in the model, never a "monitoring" claim with
+/// no producer behind it.
+fn startSamplerThread(handle: native_sdk.ChannelHandle) std.Thread.SpawnError!void {
+    const thread = try std.Thread.spawn(.{}, samplerMain, .{handle});
     thread.detach();
 }
 
@@ -192,8 +201,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .start => {
             if (model.monitoring) return;
-            model.monitoring = true;
             model.rejected = false;
+            model.source_failed = false;
             model.total_samples = 0;
             model.visible_count = 0;
             // Open the channel and hand its thread-safe handle to the
@@ -203,7 +212,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .key = monitor_key,
                 .on_event = Effects.channelMsg(.sample),
             });
-            start_source(handle);
+            // Start the source BEFORE claiming "monitoring": a monitor
+            // whose producer never started must never report otherwise.
+            // On failure the open occupancy would sit idle forever, so
+            // close it again — the `.closed` terminal retires the key
+            // for a retry — and put the failure where the UI renders it.
+            start_source(handle) catch {
+                model.source_failed = true;
+                fx.closeChannel(monitor_key);
+                return;
+            };
+            model.monitoring = true;
         },
         .stop => fx.closeChannel(monitor_key),
         .sample => |event| switch (event.kind) {

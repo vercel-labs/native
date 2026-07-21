@@ -28,4 +28,4 @@ native automate wait
 native test -Dplatform=null
 ```
 
-The tests swap the worker for a handle-capturing stub and drive the same `update`: posted bytes land as `.data` Msgs (and no fx timer is ever armed — the no-polling proof), a full staging FIFO answers `.dropped_full` without stopping the monitor (the drop count reaches the status line), Stop delivers the one `.closed` terminal and kills the handle, and a refused open reports `.rejected` instead of silence.
+The tests swap the worker for a handle-capturing stub and drive the same `update`: posted bytes land as `.data` Msgs (and no fx timer is ever armed — the no-polling proof), a full staging FIFO answers `.dropped_full` without stopping the monitor (the drop count reaches the status line), Stop delivers the one `.closed` terminal and kills the handle, and a refused open reports `.rejected` instead of silence. Startup is honest in the same way: "monitoring" is claimed only after the source thread actually started — a failed spawn closes the just-opened channel and puts the failure in the status line, exercised through the same injected-source seam.
