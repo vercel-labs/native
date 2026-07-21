@@ -1407,6 +1407,25 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqualSlices(u8, &bands, &decoded.audio.bands);
     }
     {
+        // Video events journal the whole shape including the stream
+        // dimensions the `.loaded` acknowledgment carries.
+        const decoded = try roundTripEvent(.{ .video = .{
+            .kind = .loaded,
+            .position_ms = 0,
+            .duration_ms = 92_500,
+            .playing = true,
+            .buffering = true,
+            .width = 1280,
+            .height = 720,
+        } });
+        try testing.expectEqual(platform.VideoEventKind.loaded, decoded.video.kind);
+        try testing.expectEqual(@as(u64, 92_500), decoded.video.duration_ms);
+        try testing.expect(decoded.video.playing);
+        try testing.expect(decoded.video.buffering);
+        try testing.expectEqual(@as(u64, 1280), decoded.video.width);
+        try testing.expectEqual(@as(u64, 720), decoded.video.height);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1616,6 +1635,30 @@ test "effect codec round-trips payloads and outcomes" {
     const closed_decoded = try decodeEffect(closed_encoded);
     try testing.expectEqual(runtime_effects.EffectChannelEventKind.closed, closed_decoded.channel_kind);
     try testing.expectEqual(@as(usize, 0), closed_decoded.payload.len);
+
+    // Video effect records round-trip the whole delivered event —
+    // including the dimensions the `.loaded` acknowledgment carries —
+    // because the journaled record is replay's only Msg source.
+    const video_encoded = try encodeEffect(.{
+        .kind = .video,
+        .key = 61,
+        .video_kind = .loaded,
+        .video_position_ms = 0,
+        .video_duration_ms = 92_500,
+        .video_playing = true,
+        .video_buffering = true,
+        .video_width = 1280,
+        .video_height = 720,
+    }, &buffer);
+    const video_decoded = try decodeEffect(video_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.video, video_decoded.kind);
+    try testing.expectEqual(@as(u64, 61), video_decoded.key);
+    try testing.expectEqual(runtime_effects.EffectVideoEventKind.loaded, video_decoded.video_kind);
+    try testing.expectEqual(@as(u64, 92_500), video_decoded.video_duration_ms);
+    try testing.expect(video_decoded.video_playing);
+    try testing.expect(video_decoded.video_buffering);
+    try testing.expectEqual(@as(u64, 1280), video_decoded.video_width);
+    try testing.expectEqual(@as(u64, 720), video_decoded.video_height);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {
