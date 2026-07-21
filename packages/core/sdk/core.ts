@@ -974,7 +974,11 @@ export const Cmd = {
   /// (accepted / dropped_full / dropped_oversized / closed), so a
   /// producer tells transient back-pressure from closure, and refused
   /// posts count into `droppedPending`/`droppedTotal` on the next
-  /// delivered event, never silence. One channel per key at a
+  /// delivered event, never silence. The native post never blocks its
+  /// producer given a conforming host wake — the platform's `wake_fn`
+  /// is contractually a bounded, enqueue-only nudge (see
+  /// `PlatformServices.wake_fn`; every first-party host conforms), and
+  /// the runtime holds no channel lock across it. One channel per key at a
   /// time — a duplicate live key dispatches state "rejected" — and the
   /// key shares the engine's effect-key space (a same-key fetch is
   /// blocked while the channel lives). Keys are positive integers

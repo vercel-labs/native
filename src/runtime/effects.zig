@@ -173,11 +173,13 @@ pub const default_effect_file_join_deadline_ms: u64 = 15_000;
 
 /// Teardown budget for one channel's in-flight host wake call (see
 /// `Effects.channel_wake_join_deadline_ms` and `quiesceChannelWake`).
-/// A healthy `wake_fn` is a bounded enqueue that returns in
-/// microseconds; a hook still inside the call after five seconds is
-/// stuck behind something teardown cannot service (typically a
-/// synchronous marshal against the stopping loop) and is abandoned
-/// with a warning rather than hanging teardown forever.
+/// A CONFORMING `wake_fn` is a bounded enqueue that returns in
+/// microseconds (the contract at `PlatformServices.wake_fn`), so this
+/// deadline is violator containment, not a wait any supported hook
+/// meets: a hook still inside the call after five seconds is stuck
+/// behind something teardown cannot service (typically a synchronous
+/// marshal against the stopping loop — a contract violation) and is
+/// abandoned with a warning rather than hanging teardown forever.
 pub const default_channel_wake_join_deadline_ms: u64 = 5_000;
 
 /// Maximum clipboard-effect payload: what one `writeClipboard` writes
@@ -888,14 +890,18 @@ const ChannelOwnerRefs = struct {
 /// call itself runs with `mutex` FREE. Media-surface could hold its
 /// wake mutex through the call because its frame-request
 /// implementations are enqueue-only BY CONTRACT; this seam calls the
-/// EMBEDDER-supplied `wake_fn`, where no such contract exists — an
-/// embedder wake that synchronously marshals to the loop thread would
-/// wait for a loop that is itself waiting on this mutex
+/// EMBEDDER-supplied `wake_fn`, where the same contract exists (see
+/// `PlatformServices.wake_fn`: bounded, non-blocking, enqueue-only)
+/// but cannot be enforced — so the lock discipline assumes a
+/// violator. An embedder wake that synchronously marshals to the loop
+/// thread would wait for a loop that is itself waiting on this mutex
 /// (`drainBoundary` takes it at every pass boundary): deadlock. So a
 /// post marks itself in flight under the mutex, RELEASES, invokes the
 /// host, then re-acquires to clear — `mutex` is only ever held for
 /// bounded field access, and no lock the loop thread takes is ever
-/// held across `wake_fn`.
+/// held across `wake_fn`. A violating wake therefore hangs only its
+/// own posting thread; it can never entangle the runtime's lock
+/// graph.
 ///
 /// Ownership story (the abandon-fence doctrine, ditto): `services`
 /// points at the owning Effects' late-bound services field, and the
@@ -1081,13 +1087,19 @@ pub const ChannelHandle = struct {
     /// and a burst rides it (the drain unlatches before it snapshots),
     /// so a fast producer costs the host loop's queue at most one
     /// entry per drain, never a backlog of redundant wakes.
-    /// Callable from ANY thread. Never blocks and never silently drops
-    /// a delivered event — and the never-blocks contract extends
-    /// through the wake: the host `wake_fn` is invoked with NO channel
-    /// lock held (`ChannelWake.in_flight` is the teardown fence, not
-    /// lock tenure), so a post can never hold a lock the loop thread
-    /// is waiting on, and an embedder wake that synchronizes with the
-    /// loop cannot deadlock a drain, close, or teardown against this
+    /// Callable from ANY thread. Never silently drops a delivered
+    /// event, and never blocks GIVEN a conforming host wake: the
+    /// guarantee is two-sided — `post`'s own work is bounded lock-held
+    /// copies, and the one call that leaves the runtime, the host
+    /// `wake_fn`, is contractually a bounded, non-blocking, enqueue-only
+    /// nudge (see `PlatformServices.wake_fn`; every first-party
+    /// implementation conforms). The runtime holds no channel lock
+    /// across that call (`ChannelWake.in_flight` is the teardown fence,
+    /// not lock tenure), so a violating embedder wake hangs in its own
+    /// stack on the posting thread WITHOUT entangling the runtime's
+    /// lock graph: a post can never hold a lock the loop thread is
+    /// waiting on, and even a wake that synchronizes with the loop
+    /// cannot deadlock a drain, close, or teardown against this
     /// call. The answer says exactly what happened (see
     /// `PostResult`) — `.dropped_full` and `.dropped_oversized` count
     /// into the drop counters the next delivered event carries;
@@ -1150,10 +1162,12 @@ pub const ChannelHandle = struct {
 
     /// Wake the owning loop for one accepted post. Any-thread; touches
     /// only the process-lifetime header's wake half. The host call runs
-    /// with the wake mutex FREE — the embedder's `wake_fn` has no
-    /// enqueue-only contract, and the loop thread takes this mutex at
-    /// every pass boundary (`drainBoundary`), so holding it across the
-    /// call would deadlock a wake that synchronizes with the loop (see
+    /// with the wake mutex FREE — the embedder's `wake_fn` is
+    /// contractually enqueue-only (`PlatformServices.wake_fn`) but the
+    /// contract cannot be enforced, and the loop thread takes this
+    /// mutex at every pass boundary (`drainBoundary`), so holding it
+    /// across the call would let a violating wake that synchronizes
+    /// with the loop deadlock the runtime's own lock graph (see
     /// `ChannelWake`). The teardown fence is `in_flight` instead: it
     /// increments under the mutex before the call and decrements under
     /// the mutex after, so a teardown quiesce can still wait out every
@@ -1235,13 +1249,17 @@ pub const ChannelHandle = struct {
 /// itself is a harmless nudge: the loop drains, finds nothing, moves
 /// on.
 ///
-/// Deliberately NOT a wait (`quiesceChannelWake` is): a supported
-/// embedder `wake_fn` may synchronously marshal to the loop thread,
-/// and when the marshaled dispatch delivers a channel message whose
-/// handler calls `closeChannel`, a close that waited for
+/// Deliberately NOT a wait (`quiesceChannelWake` is): a wake that
+/// synchronously marshals to the loop thread VIOLATES the wake
+/// contract (`PlatformServices.wake_fn` is enqueue-only), but the
+/// close path must contain the violator rather than join its
+/// deadlock — when the marshaled dispatch delivers a channel message
+/// whose handler calls `closeChannel`, a close that waited for
 /// `in_flight == 0` would spin on the loop thread while the producer
-/// inside `wake_fn` waited for that same loop to service its marshal —
-/// a deterministic deadlock on core supported usage.
+/// inside `wake_fn` waited for that same loop to service its marshal:
+/// a lock cycle of the runtime's own making. The non-blocking revoke
+/// keeps the runtime's half deadlock-free no matter what the hook
+/// does.
 ///
 /// Called by every close path AFTER `open` cleared under the staging
 /// mutex; the two locks are taken strictly one after the other, never
@@ -1271,8 +1289,12 @@ fn revokeChannelWake(shared: *ChannelShared) void {
 /// thread as the loop stops pumping dispatches, so a synchronous
 /// marshal already inside `wake_fn` may be waiting for a dispatch this
 /// loop will never service — an unbounded wait would hang teardown
-/// forever behind it. False means the call is ABANDONED, the
-/// abandoned-worker idiom: everything the framework hands the stale
+/// forever behind it. A CONFORMING `wake_fn` (bounded, enqueue-only —
+/// the contract at `PlatformServices.wake_fn`) returns in
+/// microseconds and never meets the deadline, so the bound is
+/// violator containment only, never a wait supported usage races.
+/// False means the call is ABANDONED, the abandoned-worker idiom:
+/// everything the framework hands the stale
 /// call to touch after it unblocks — the wake mutex, the in-flight
 /// decrement, the generation gate — lives in the process-lifetime
 /// header and stays valid forever; the embedder's own services object
@@ -3202,7 +3224,11 @@ pub fn Effects(comptime Msg: type) type {
                     // target of a synchronous marshal inside an
                     // in-flight `wake_fn` — an unbounded wait would
                     // hang teardown forever behind a marshal nobody
-                    // will ever service. A hook still stuck at the
+                    // will ever service. A conforming hook (bounded,
+                    // enqueue-only — `PlatformServices.wake_fn`)
+                    // returns in microseconds and never meets the
+                    // deadline, so this bound is violator containment
+                    // only. A hook still stuck at the
                     // deadline is abandoned, warned, and counted:
                     // everything the framework hands the stale call
                     // (the wake mutex, the in-flight decrement, the
@@ -3216,7 +3242,7 @@ pub fn Effects(comptime Msg: type) type {
                         self.abandoned_channel_wakes += 1;
                         if (comptime builtin.os.tag != .freestanding) {
                             std.debug.print(
-                                "effects teardown: a channel host wake hook is still executing after {d}ms (likely a synchronous marshal against this stopping loop); abandoning the in-flight call — the channel header it can still touch is process-lived, but the platform services it entered through must outlive it\n",
+                                "effects teardown: a channel host wake hook is still executing after {d}ms (likely a synchronous marshal against this stopping loop, which violates the enqueue-only wake contract); abandoning the in-flight call — the channel header it can still touch is process-lived, but the platform services it entered through must outlive it\n",
                                 .{self.channel_wake_join_deadline_ms},
                             );
                         }

@@ -793,14 +793,18 @@ test "a wake hook that posts back into the same channel coalesces instead of dea
     while (fx.takeMsg()) |_| {}
 }
 
-/// A wake hook that takes the exact locks the LOOP THREAD takes at
-/// every pass boundary: `drainBoundary` acquires each channel's wake
-/// mutex to clear the coalescer. An embedder `wake_fn` has no
-/// enqueue-only contract — one that synchronously marshals to the loop
-/// waits on a loop that contends on these locks — so the host call
-/// must run with the wake mutex FREE. When it ran under the mutex,
+/// VIOLATOR-CONTAINMENT PIN, not a supported-usage example. A wake
+/// hook that takes the exact locks the LOOP THREAD takes at every pass
+/// boundary: `drainBoundary` acquires each channel's wake mutex to
+/// clear the coalescer. A hook that synchronizes with the loop this
+/// way VIOLATES the wake contract (`PlatformServices.wake_fn` is
+/// bounded and enqueue-only), but the contract is unenforceable, so
+/// the runtime must survive its own half: the host call runs with the
+/// wake mutex FREE, and a violator hangs only in its own stack — never
+/// in the runtime's lock graph. When the call ran under the mutex,
 /// this hook deadlocked (`drainBoundary` spinning on the wake mutex
-/// the post still held); with the in-flight fence it completes.
+/// the post still held); with the in-flight fence it completes. That
+/// containment is the behavior pinned here.
 const BoundaryTakingWake = struct {
     var fx_under_test: ?*DirectFx = null;
     var shared_under_probe: ?*effects_mod.ChannelShared = null;
@@ -834,7 +838,7 @@ const BoundaryTakingWake = struct {
     }
 };
 
-test "a wake hook that takes the drain's pass boundary completes instead of deadlocking" {
+test "violator containment: a wake hook that takes the drain's pass boundary cannot deadlock the runtime's lock graph" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -862,18 +866,23 @@ test "a wake hook that takes the drain's pass boundary completes instead of dead
     while (fx.takeMsg()) |_| {}
 }
 
-/// A wake hook that SYNCHRONOUSLY MARSHALS to the loop thread — the
+/// VIOLATOR-CONTAINMENT PIN, not a supported-usage example. A wake
+/// hook that SYNCHRONOUSLY MARSHALS to the loop thread — the
 /// dispatch-sync shape (macOS `dispatch_sync` onto the main queue,
 /// Win32 `SendMessage`): the hook returns only after the loop thread
-/// has serviced the marshaled dispatch. Supported embedder usage —
-/// `wake_fn` has no enqueue-only contract — and the shape that turned
-/// the close path's blocking in-flight wait into a deadlock: the
-/// marshaled dispatch delivers the channel message, the message's
-/// handler calls `closeChannel`, and a close that waits for
-/// `in_flight == 0` waits on a hook that waits on the loop. The close
-/// path must REVOKE the binding (non-blocking) and let the in-flight
-/// call finish against the process-lifetime header on its own time;
-/// only teardown quiesces (see `quiesceChannelWake`).
+/// has serviced the marshaled dispatch. This VIOLATES the wake
+/// contract (`PlatformServices.wake_fn` is bounded and enqueue-only —
+/// the first-party hosts all enqueue), but the contract is
+/// unenforceable, and this is the exact shape that turned the close
+/// path's blocking in-flight wait into a deadlock of the runtime's own
+/// making: the marshaled dispatch delivers the channel message, the
+/// message's handler calls `closeChannel`, and a close that waits for
+/// `in_flight == 0` waits on a hook that waits on the loop. The
+/// runtime's half of the containment — pinned here — is that the close
+/// path REVOKES the binding (non-blocking) and lets the in-flight call
+/// finish against the process-lifetime header on its own time; only
+/// teardown quiesces, bounded (see `quiesceChannelWake`). The violator
+/// hangs nothing but its own posting thread.
 const SyncMarshalWake = struct {
     var loop_thread: std.Thread.Id = 0;
     var marshal_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -907,7 +916,7 @@ const SyncMarshalPoster = struct {
     }
 };
 
-test "a synchronous-marshal wake whose dispatched handler closes the channel completes instead of deadlocking" {
+test "violator containment: a synchronous-marshal wake whose dispatched handler closes the channel completes instead of deadlocking" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -958,7 +967,9 @@ test "a synchronous-marshal wake whose dispatched handler closes the channel com
 
 /// A wake hook held OPEN mid-call while the loop closes, drains, and
 /// REOPENS the channel — the stale in-flight call the revoke split
-/// leaves behind on purpose. The gated call FAILS once released, so
+/// leaves behind on purpose (a hook that blocks like this violates the
+/// enqueue-only wake contract; this pin is the containment's
+/// generation-safety half). The gated call FAILS once released, so
 /// its post-call failure unlatch runs against a dead generation: the
 /// gate in `requestHostWake` must keep it from clearing the fresh
 /// occupancy's latched wake, and its decrement must land safely in the
@@ -1096,7 +1107,8 @@ test "teardown quiesces an in-flight wake call before the services binding dies"
 
 /// A wake hook stuck PAST teardown's deadline — the shape quiesce
 /// cannot wait out (a synchronous marshal against the stopping loop
-/// never returns), pinned with a test-released gate instead.
+/// never returns; a wake-contract violation, which is the only way the
+/// deadline is ever met), pinned with a test-released gate instead.
 const StuckTeardownWake = struct {
     var loop_thread: std.Thread.Id = 0;
     var entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);

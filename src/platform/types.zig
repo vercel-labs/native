@@ -2242,6 +2242,22 @@ pub const PlatformServices = struct {
     /// must be thread-safe (macOS: main-queue dispatch, GTK: `g_idle_add`,
     /// Win32: `PostMessage`, null platform: an atomic counter tests drain
     /// explicitly).
+    ///
+    /// CONTRACT — bounded, non-blocking, enqueue-only. The
+    /// implementation must schedule the `.wake` delivery and return: it
+    /// must never synchronously wait on the loop thread (a
+    /// dispatch_sync-style marshal, a Win32 `SendMessage`) or on the
+    /// posting thread. The first-party implementations are the model —
+    /// macOS `dispatch_async` onto the main queue, GTK `g_idle_add`,
+    /// Win32 `PostMessageW`, the null platform's atomic counter — the
+    /// exact enqueue-only shape `request_frame_fn` documents for the
+    /// media-surface producer wake, so the call stays bounded and never
+    /// blocks on I/O. This contract is what the runtime's channel
+    /// posting guarantee is conditioned on: `ChannelHandle.post` never
+    /// blocks GIVEN a conforming wake, and because the runtime holds no
+    /// channel lock across the call, a violating implementation hangs
+    /// only its own posting thread — it can never entangle the
+    /// runtime's lock graph.
     wake_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     /// Ask the platform loop, from ANY thread, to deliver ONE
     /// `frame_requested` event on its loop thread soon — the same event a
@@ -2755,6 +2771,7 @@ pub const PlatformServices = struct {
         const wake_fn = self.wake_fn orelse return error.UnsupportedService;
         return wake_fn(self.context);
     }
+
 
     /// Ask the platform loop to deliver one `frame_requested` event on
     /// its own thread. Safe to call from any thread; a missing
