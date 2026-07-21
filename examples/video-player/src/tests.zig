@@ -212,6 +212,38 @@ test "the player screen declares the committed source and the null decoder loads
     const snapshot = live.harness.runtime.automationSnapshot("Video Player").video.?;
     try testing.expectEqual(@as(u64, 92_500), snapshot.duration_ms);
     try testing.expectEqual(@as(u64, 1280), snapshot.width);
+
+    // The screen's status line never pretends to track the transport
+    // it does not own: it teaches where the state lives, through load,
+    // playback, and completion alike — never a stuck "loading".
+    try expectStatusBar(live.app_state.tree.?.root, "house chrome drives the playback - transport state lives in the runtime, not the model");
+    try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), np.advanceVideo(500).?);
+    try expectStatusBar(live.app_state.tree.?.root, "house chrome drives the playback - transport state lives in the runtime, not the model");
+    try live.harness.runtime.dispatchPlatformEvent(live.app_state.app(), np.advanceVideo(100_000).?);
+    try expectStatusBar(live.app_state.tree.?.root, "house chrome drives the playback - transport state lives in the runtime, not the model");
+}
+
+test "the status line reports transport only where the app owns the events" {
+    var live = try Live.start(openedModel(clip_path, .player));
+    defer live.stop();
+    const fx = &live.app_state.effects;
+    fx.executor = .fake;
+
+    // The custom screen owns its events, so its status line follows
+    // them: loading until the acknowledgment, then the honest
+    // dimensions and transport, then completion.
+    try live.dispatch(.show_custom);
+    try expectStatusBar(live.app_state.tree.?.root, "loading");
+    try fx.feedVideoEvent(.loaded, 0, 92_500, true, false, 1280, 720);
+    try live.wake();
+    try expectStatusBar(live.app_state.tree.?.root, "1280x720 · playing");
+    try live.dispatch(.toggle_play);
+    try fx.feedVideoEvent(.position, 1_000, 92_500, false, false, 0, 0);
+    try live.wake();
+    try expectStatusBar(live.app_state.tree.?.root, "1280x720 · paused");
+    try fx.feedVideoEvent(.completed, 92_500, 92_500, false, false, 0, 0);
+    try live.wake();
+    try expectStatusBar(live.app_state.tree.?.root, "finished");
 }
 
 test "the view lays out through the canvas engine on both screens" {
@@ -241,6 +273,11 @@ test "the view lays out through the canvas engine on both screens" {
     const player_layout = try canvas.layoutWidgetTree(player_tree.root, geometry.RectF.init(0, 0, 760, 560), &player_nodes);
     try testing.expect(player_layout.nodes.len > 0);
     try testing.expect(findByKind(player_tree.root, .media_surface) != null);
+}
+
+fn expectStatusBar(root: canvas.Widget, expected: []const u8) !void {
+    const bar = findByKind(root, .status_bar) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(expected, bar.text);
 }
 
 fn findByKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {

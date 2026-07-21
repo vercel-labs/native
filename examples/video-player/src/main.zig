@@ -92,6 +92,18 @@ pub const Model = struct {
         if (event.height > 0) model.height = event.height;
     }
 
+    /// The Player screen's status line: static teaching, never
+    /// transport state — the declarative screen's whole point is that
+    /// the model carries none (the runtime-owned chrome shows the live
+    /// transport), so the only honest app-side words are where the
+    /// source comes from and who owns the playback.
+    pub fn playerHint(model: *const Model) []const u8 {
+        if (model.opened_len == 0) return "no source - pass a file path or http(s) url, or type one above";
+        return "house chrome drives the playback - transport state lives in the runtime, not the model";
+    }
+
+    /// The Custom screen's status line: fed by the app's own video
+    /// events, because on this screen the app owns the playback.
     pub fn statusText(model: *const Model, arena: std.mem.Allocator) []const u8 {
         if (model.opened_len == 0) return "no source - pass a file path or http(s) url, or type one above";
         const kind = model.status orelse return "loading";
@@ -243,7 +255,13 @@ pub fn view(ui: *PlayerUi, model: *const Model) PlayerUi.Node {
             .player => playerScreen(ui, model),
             .custom => customScreen(ui, model),
         },
-        ui.statusBar(.{}, model.statusText(ui.arena)),
+        // Each screen's status line matches its ownership model: the
+        // declarative screen has no event-fed state to report, the
+        // custom screen reports exactly what its events told it.
+        ui.statusBar(.{}, switch (model.screen) {
+            .player => model.playerHint(),
+            .custom => model.statusText(ui.arena),
+        }),
     });
 }
 
