@@ -725,6 +725,11 @@ pub const MobileHostApp = struct {
         // below so the runtime's service table starts without audio.
         self.null_platform.audio_playback = false;
         self.null_platform.audio_streaming = false;
+        // Video is declined the same way: no mobile shim registers a
+        // decoder yet, and the null platform's fake player belongs to
+        // hermetic tests — a load that "succeeds" but never decodes
+        // would be a lie. Apps hear one honest failed event instead.
+        self.null_platform.video_playback = false;
         self.last_error = null;
         self.activation_count = 0;
         self.deactivation_count = 0;
