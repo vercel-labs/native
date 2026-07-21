@@ -43,6 +43,8 @@ static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppea
  * is not paused, but no audio comes out until bytes arrive). */
 static void *NativeSdkAppKitAudioItemStatusContext = &NativeSdkAppKitAudioItemStatusContext;
 static void *NativeSdkAppKitAudioTimeControlContext = &NativeSdkAppKitAudioTimeControlContext;
+static void *NativeSdkAppKitVideoItemStatusContext = &NativeSdkAppKitVideoItemStatusContext;
+static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeControlContext;
 /* Render-thread ring state for the spectrum tap; defined with the rest
  * of the spectrum machinery in the audio section below. */
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
@@ -760,6 +762,56 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * when a new load replaces the stream; orphaned (left to finish) when
  * the stream completes naturally. */
 @property(nonatomic, strong) NSURLSessionDownloadTask *audioCacheDownload;
+/* The app's single video player and its two timers. One player is the
+ * whole surface, exactly like audio: a video app shows one stream at a
+ * time, and a second concurrent decode would be compositor design the
+ * platform seam has not earned. The position tick runs only while
+ * playing, at the audio tier's coarse honest cadence — position is a
+ * readout, not a frame clock; the FRAME timer (1/60 s, the
+ * scheduleFrame cadence) is the clock that actually paces decoded
+ * pixels into the sink, armed with the transport plus one-shot polls
+ * after seek/pause so a paused scrub still shows its frame. */
+@property(nonatomic, strong) AVPlayer *videoPlayer;
+@property(nonatomic, strong) AVPlayerItem *videoItem;
+/* The frame tap: created at readyToPlay (the presentation size is only
+ * decoded then), sized to FIT the sink's per-frame pixel budget. */
+@property(nonatomic, strong) AVPlayerItemVideoOutput *videoOutput;
+@property(nonatomic, strong) NSTimer *videoPositionTimer;
+@property(nonatomic, strong) NSTimer *videoFrameTimer;
+/* Where decoded frames go: the C push trampoline and its context,
+ * installed by the load entries. Every timer callback runs on the main
+ * run loop, so no locking guards the pair. */
+@property(nonatomic, assign) native_sdk_appkit_video_sink_push_t videoSinkPush;
+@property(nonatomic, assign) void *videoSinkContext;
+/* The reusable RGBA conversion target: malloc'd once per load to the
+ * output's max frame size, freed on stop/replace. Frames are converted
+ * BGRA -> tightly packed straight-alpha RGBA8 into it before the push. */
+@property(nonatomic, assign) uint8_t *videoFrameBuffer;
+@property(nonatomic, assign) size_t videoFrameBufferLen;
+/* The STREAM's decoded pixel dimensions (presentationSize, falling back
+ * to the track's transformed naturalSize) — what LOADED reports, even
+ * when the output texture is fitted smaller. */
+@property(nonatomic, assign) uint64_t videoStreamWidth;
+@property(nonatomic, assign) uint64_t videoStreamHeight;
+/* Whether the loaded source is a local file: local sources never
+ * report buffering. */
+@property(nonatomic, assign) BOOL videoSourceIsLocal;
+/* NSNotificationCenter block-observer tokens for the item's natural
+ * end and mid-flight failure; removed on teardown. */
+@property(nonatomic, strong) id videoEndObserver;
+@property(nonatomic, strong) id videoFailObserver;
+/* KVO registration flag so teardown removes observers exactly once. */
+@property(nonatomic, assign) BOOL videoObservingStatus;
+/* The LOADED acknowledgment fires once per load (item status can
+ * bounce through readyToPlay again after a stall). */
+@property(nonatomic, assign) BOOL videoLoadedEmitted;
+/* The honest buffering mirror emitted with every video event: YES from
+ * stream start (no bytes yet) until the player reports it is actually
+ * rolling, then follows timeControlStatus. Never set for local files. */
+@property(nonatomic, assign) BOOL videoBuffering;
+/* Loop intent: a looping player wraps from the natural end back to
+ * zero and keeps playing — no COMPLETED, because it never ends. */
+@property(nonatomic, assign) BOOL videoLooping;
 @property(nonatomic, strong) NSString *appName;
 /* The human-facing app name (app.zon display_name, falling back through
  * the window title to the binary name). Everything the OS labels the
@@ -918,6 +970,29 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)stopAudioSpectrumTimer;
 - (BOOL)anyHostWindowVisibleOnGlass;
 - (void)audioSpectrumTimerFired:(NSTimer *)timer;
+- (int)videoLoadPath:(NSString *)path pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (int)videoLoadURL:(NSString *)urlString pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (void)videoAttachOutputForItem:(AVPlayerItem *)item;
+- (void)videoTearDownPlayer;
+- (void)videoItemStatusChanged;
+- (void)videoTimeControlChanged;
+- (void)videoDidPlayToEnd;
+- (void)videoDidFail;
+- (int)videoPlay;
+- (int)videoPause;
+- (int)videoStop;
+- (int)videoSeekToMs:(uint64_t)positionMs;
+- (int)videoSetVolume:(double)volume;
+- (int)videoSetMuted:(BOOL)muted;
+- (int)videoSetLoop:(BOOL)loop;
+- (void)emitVideoEventOfKind:(int)kind;
+- (void)stopVideoPositionTimer;
+- (void)videoPositionTimerFired:(NSTimer *)timer;
+- (void)startVideoFrameTimer;
+- (void)stopVideoFrameTimer;
+- (void)videoFrameTimerFired:(NSTimer *)timer;
+- (void)videoPumpFrame;
 - (void)wakeFromAnyThread;
 - (void)scheduleBridgeFrames;
 - (void)emitFrame;
@@ -6933,6 +7008,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 - (void)dealloc {
     [self invalidateAppTimers];
     [self audioStop];
+    [self videoStop];
     /* The vDSP plan outlives individual playbacks (created lazily
      * once); the host's end is where it retires. */
     if (self.audioSpectrumFft) {
@@ -8725,6 +8801,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     self.timer = nil;
     [self invalidateAppTimers];
     [self audioStop];
+    [self videoStop];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -8846,6 +8923,22 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf audioTimeControlChanged];
+        });
+        return;
+    }
+    /* Same hop for the video player's observers: every video entry
+     * point is loop-thread only too. */
+    if (context == NativeSdkAppKitVideoItemStatusContext) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf videoItemStatusChanged];
+        });
+        return;
+    }
+    if (context == NativeSdkAppKitVideoTimeControlContext) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf videoTimeControlChanged];
         });
         return;
     }
@@ -9732,6 +9825,523 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     return 1;
 }
 
+/* ---------------------------------------------------- video player
+ *
+ * The app's single video player: one AVPlayer whose
+ * AVPlayerItemVideoOutput frames feed the sink push handed to the load
+ * entries. The transport, events, and buffering vocabulary mirror the
+ * audio player above; the one addition is the frame pump — a 1/60 s
+ * timer (the scheduleFrame cadence) that polls the output, converts
+ * each new BGRA pixel buffer into the reusable tightly packed RGBA8
+ * buffer, and pushes it through the sink. Pixels never ride events. */
+
+/* The sink's per-frame ceiling, mirrored from the Zig side
+ * (max_media_surface_pixel_bytes): the output is sized to FIT it. */
+#define NATIVE_SDK_VIDEO_MAX_FRAME_BYTES (8 * 1024 * 1024)
+
+/* Fit the stream's natural size to the frame budget: scale DOWN
+ * preserving aspect when width * height * 4 exceeds it (4K fits to
+ * roughly 1867x1050), never up — a small video decodes at its own
+ * size. */
+static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, size_t *outWidth, size_t *outHeight) {
+    double width = naturalWidth >= 1.0 ? naturalWidth : 1.0;
+    double height = naturalHeight >= 1.0 ? naturalHeight : 1.0;
+    const double budget_pixels = (double)(NATIVE_SDK_VIDEO_MAX_FRAME_BYTES / 4);
+    const double pixels = width * height;
+    if (pixels > budget_pixels) {
+        const double scale = sqrt(budget_pixels / pixels);
+        width = floor(width * scale);
+        height = floor(height * scale);
+        if (width < 1.0) width = 1.0;
+        if (height < 1.0) height = 1.0;
+    }
+    *outWidth = (size_t)width;
+    *outHeight = (size_t)height;
+}
+
+/* Emit one video report carrying the live position/duration readout of
+ * the app's single AVPlayer. Runs on the loop thread — every video
+ * entry point is loop-thread only; the player's KVO and notification
+ * handlers hop to the main queue before landing here. */
+- (void)emitVideoEventOfKind:(int)kind {
+    AVPlayer *player = self.videoPlayer;
+    uint64_t position_ms = 0;
+    uint64_t duration_ms = 0;
+    int playing = 0;
+    int buffering = 0;
+    if (player) {
+        double position = NativeSdkSecondsFromCMTime(player.currentTime);
+        double duration = self.videoItem ? NativeSdkSecondsFromCMTime(self.videoItem.duration) : 0.0;
+        if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
+        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
+        /* rate > 0 is the transport intent (un-paused); the buffering
+         * flag beside it says whether frames are actually coming out.
+         * Local files never buffer — the flag is stream-only. */
+        playing = player.rate > 0 ? 1 : 0;
+        buffering = (!self.videoSourceIsLocal && self.videoBuffering) ? 1 : 0;
+    }
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = kind,
+        .video_position_ms = position_ms,
+        .video_duration_ms = duration_ms,
+        .video_playing = playing,
+        .video_buffering = buffering,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    };
+    if (kind == NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED) {
+        /* The acknowledgment carries the STREAM's true dimensions —
+         * the honest source geometry, even when the output texture is
+         * fitted smaller to the frame budget. */
+        event.video_width = self.videoStreamWidth;
+        event.video_height = self.videoStreamHeight;
+    }
+    [self emitEvent:event];
+}
+
+- (void)stopVideoPositionTimer {
+    [self.videoPositionTimer invalidate];
+    self.videoPositionTimer = nil;
+}
+
+- (void)videoPositionTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.videoPlayer) {
+        [self stopVideoPositionTimer];
+        return;
+    }
+    [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION];
+}
+
+- (void)startVideoFrameTimer {
+    if (self.videoFrameTimer) return;
+    /* The pixel clock (1/60 s, the scheduleFrame cadence). Common
+     * modes so frames keep flowing during live resize and menu
+     * tracking (default-mode timers do not fire in tracking
+     * runloops). */
+    NSTimer *tick = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+                                            target:self
+                                          selector:@selector(videoFrameTimerFired:)
+                                          userInfo:nil
+                                           repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+    self.videoFrameTimer = tick;
+}
+
+- (void)stopVideoFrameTimer {
+    [self.videoFrameTimer invalidate];
+    self.videoFrameTimer = nil;
+}
+
+- (void)videoFrameTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (!self.videoPlayer) {
+        [self stopVideoFrameTimer];
+        return;
+    }
+    [self videoPumpFrame];
+}
+
+/* One poll of the video output: if a new frame is due at the current
+ * host time, convert it and push it through the sink. Also called
+ * one-shot after pause and seek, so a paused scrub still paints the
+ * frame it landed on. Main-thread only, like every video entry. */
+- (void)videoPumpFrame {
+    AVPlayerItemVideoOutput *output = self.videoOutput;
+    native_sdk_appkit_video_sink_push_t push = self.videoSinkPush;
+    if (!output || !push || !self.videoFrameBuffer) return;
+    CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
+    if (![output hasNewPixelBufferForItemTime:itemTime]) return;
+    CVPixelBufferRef pixels = [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
+    if (!pixels) return;
+    const size_t width = CVPixelBufferGetWidth(pixels);
+    const size_t height = CVPixelBufferGetHeight(pixels);
+    const size_t frame_len = width * height * 4;
+    if (frame_len == 0 || frame_len > self.videoFrameBufferLen) {
+        CFRelease(pixels);
+        return;
+    }
+    CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    void *base = CVPixelBufferGetBaseAddress(pixels);
+    int result = 0;
+    if (base) {
+        /* BGRA -> RGBA is one channel permutation; vImage reads the
+         * buffer's bytesPerRow stride and writes the tightly packed
+         * rows the sink contract requires. */
+        vImage_Buffer source = {
+            .data = base,
+            .height = height,
+            .width = width,
+            .rowBytes = CVPixelBufferGetBytesPerRow(pixels),
+        };
+        vImage_Buffer destination = {
+            .data = self.videoFrameBuffer,
+            .height = height,
+            .width = width,
+            .rowBytes = width * 4,
+        };
+        const uint8_t permute[4] = { 2, 1, 0, 3 };
+        if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) == kvImageNoError) {
+            result = push(self.videoSinkContext, width, height, self.videoFrameBuffer, frame_len);
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    CFRelease(pixels);
+    /* 1 says the receiving claim was released (the sink is
+     * latest-wins; a released claim just means stop pushing) — the
+     * frame timer has nothing left to feed. Any other nonzero result
+     * is one dropped frame; the decode keeps rolling. */
+    if (result == 1) [self stopVideoFrameTimer];
+}
+
+/* Local files on the app's single video player. Unlike audio there is
+ * no synchronous decode verdict to probe for (AVAudioPlayer's header
+ * decode has no video twin), so the existence check is the only
+ * synchronous refusal — an undecodable file reports asynchronously as
+ * one FAILED event. */
+- (int)videoLoadPath:(NSString *)path pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    [self videoStop];
+    /* Relative paths resolve against the bundle's Resources inside a
+     * packaged .app (where the process cwd is meaningless — `open`
+     * launches at /), and keep their cwd meaning everywhere else. */
+    NSString *resolved = NativeSdkResolvedAssetFilePath(path);
+    if (![[NSFileManager defaultManager] fileExistsAtPath:resolved]) return 1;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:resolved] options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self videoInstallItem:item localSource:YES pushFn:pushFn pushContext:pushContext];
+    return 0;
+}
+
+/* URL sources: a progressive AVPlayer stream — playable as soon as
+ * enough bytes arrive, never download-then-play. No cache layer here
+ * (unlike audio's verified-entry two-step): video bytes are large and
+ * the streaming path alone is the honest slice. Returns 0 for a
+ * started stream, 2 when the URL cannot be parsed; everything
+ * asynchronous — readiness, stalls, natural end, network death —
+ * arrives as EVENT_VIDEO reports. */
+- (int)videoLoadURL:(NSString *)urlString pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    [self videoStop];
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url || !url.scheme) return 2;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [self videoInstallItem:item localSource:NO pushFn:pushFn pushContext:pushContext];
+    return 0;
+}
+
+/* Shared install for both sources: the single AVPlayer, its status and
+ * time-control observers, the end/failure notifications, and the sink
+ * destination. The LOADED acknowledgment stays asynchronous by
+ * contract (readyToPlay KVO -> videoItemStatusChanged, which also
+ * attaches the video output — the presentation size is only decoded
+ * then): emitting inside the service call would re-enter the runtime
+ * while it is still dispatching the command that asked for the load. */
+- (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+    AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
+    /* Stall policy by source: a local file has all its bytes, so
+     * playback starts immediately; a stream keeps the default — start
+     * as soon as sustained playback is likely, roll through short gaps.
+     * Stated explicitly because immediate progressive start is the
+     * contract for streams. */
+    player.automaticallyWaitsToMinimizeStalling = localSource ? NO : YES;
+    self.videoItem = item;
+    self.videoPlayer = player;
+    self.videoSinkPush = pushFn;
+    self.videoSinkContext = pushContext;
+    self.videoSourceIsLocal = localSource;
+    /* A stream starts with no bytes; a local file never buffers. */
+    self.videoBuffering = localSource ? NO : YES;
+    self.videoLoadedEmitted = NO;
+    [item addObserver:self
+           forKeyPath:@"status"
+              options:NSKeyValueObservingOptionNew
+              context:NativeSdkAppKitVideoItemStatusContext];
+    [player addObserver:self
+             forKeyPath:@"timeControlStatus"
+                options:NSKeyValueObservingOptionNew
+                context:NativeSdkAppKitVideoTimeControlContext];
+    self.videoObservingStatus = YES;
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    self.videoEndObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                    object:item
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    [weakSelf videoDidPlayToEnd];
+                }];
+    self.videoFailObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+                    object:item
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    [weakSelf videoDidFail];
+                }];
+}
+
+/* Attach the frame tap once the item is ready — presentationSize is
+ * only decoded then. The output's pixel buffers are BGRA fitted to the
+ * frame budget; the STREAM dimensions recorded here are what LOADED
+ * reports. An item with no video geometry at all (an audio-only file
+ * loaded as video) attaches nothing: the transport still works, the
+ * acknowledgment carries zeros, and no frames flow — honest absence,
+ * not an error. */
+- (void)videoAttachOutputForItem:(AVPlayerItem *)item {
+    CGSize natural = item.presentationSize;
+    if (natural.width < 1.0 || natural.height < 1.0) {
+        /* Fallback: the first video track's naturalSize with its
+         * preferredTransform applied (rotated media reports a
+         * transposed natural size). */
+        NSArray<AVAssetTrack *> *tracks = [item.asset tracksWithMediaType:AVMediaTypeVideo];
+        if (tracks.count > 0) {
+            AVAssetTrack *track = tracks.firstObject;
+            CGSize transformed = CGSizeApplyAffineTransform(track.naturalSize, track.preferredTransform);
+            natural = CGSizeMake(fabs(transformed.width), fabs(transformed.height));
+        }
+    }
+    if (natural.width < 1.0 || natural.height < 1.0) return;
+    self.videoStreamWidth = (uint64_t)llround(natural.width);
+    self.videoStreamHeight = (uint64_t)llround(natural.height);
+    size_t fitted_width = 0;
+    size_t fitted_height = 0;
+    NativeSdkVideoFittedSize(natural.width, natural.height, &fitted_width, &fitted_height);
+    AVPlayerItemVideoOutput *output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferWidthKey: @(fitted_width),
+        (id)kCVPixelBufferHeightKey: @(fitted_height),
+    }];
+    [item addOutput:output];
+    self.videoOutput = output;
+    /* The reusable conversion target: one allocation per load at the
+     * output's max frame size, freed on stop/replace. */
+    if (self.videoFrameBuffer) free(self.videoFrameBuffer);
+    self.videoFrameBufferLen = fitted_width * fitted_height * 4;
+    self.videoFrameBuffer = malloc(self.videoFrameBufferLen);
+    if (!self.videoFrameBuffer) self.videoFrameBufferLen = 0;
+}
+
+/* Release the player, its observers, the frame tap, and the conversion
+ * buffer. The sink destination is cleared with them — a retired
+ * playback must never push another frame. */
+- (void)videoTearDownPlayer {
+    AVPlayerItem *item = self.videoItem;
+    AVPlayer *player = self.videoPlayer;
+    if (self.videoObservingStatus) {
+        [item removeObserver:self forKeyPath:@"status" context:NativeSdkAppKitVideoItemStatusContext];
+        [player removeObserver:self forKeyPath:@"timeControlStatus" context:NativeSdkAppKitVideoTimeControlContext];
+        self.videoObservingStatus = NO;
+    }
+    if (self.videoEndObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.videoEndObserver];
+        self.videoEndObserver = nil;
+    }
+    if (self.videoFailObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.videoFailObserver];
+        self.videoFailObserver = nil;
+    }
+    [player pause];
+    if (self.videoOutput && item) [item removeOutput:self.videoOutput];
+    self.videoOutput = nil;
+    self.videoItem = nil;
+    self.videoPlayer = nil;
+    self.videoSinkPush = NULL;
+    self.videoSinkContext = NULL;
+    self.videoSourceIsLocal = NO;
+    self.videoBuffering = NO;
+    self.videoLoadedEmitted = NO;
+    self.videoLooping = NO;
+    self.videoStreamWidth = 0;
+    self.videoStreamHeight = 0;
+    if (self.videoFrameBuffer) {
+        free(self.videoFrameBuffer);
+        self.videoFrameBuffer = NULL;
+        self.videoFrameBufferLen = 0;
+    }
+}
+
+/* Item status flipped (main queue, hopped from KVO): readyToPlay is
+ * the load's LOADED acknowledgment — the geometry is decoded, the
+ * frame tap attaches, and playback is rolling or about to; failed is
+ * the honest terminal report for an unreachable host or an
+ * undecodable payload. */
+- (void)videoItemStatusChanged {
+    AVPlayerItem *item = self.videoItem;
+    if (!item) return;
+    if (item.status == AVPlayerItemStatusReadyToPlay) {
+        if (self.videoLoadedEmitted) return;
+        self.videoLoadedEmitted = YES;
+        [self videoAttachOutputForItem:item];
+        [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED];
+        return;
+    }
+    if (item.status == AVPlayerItemStatusFailed) {
+        [self videoDidFail];
+    }
+}
+
+/* timeControlStatus flipped (main queue, hopped from KVO): waiting to
+ * play at the requested rate IS buffering — for streams. A local file
+ * has all its bytes, so the flag never surfaces for local sources
+ * (waits-to-minimize-stalling is off for them anyway). Emit the
+ * transition immediately as a position report so the UI flips its
+ * buffering state now, not at the next 500ms tick. */
+- (void)videoTimeControlChanged {
+    AVPlayer *player = self.videoPlayer;
+    if (!player || self.videoSourceIsLocal) return;
+    BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
+    if (buffering == self.videoBuffering) return;
+    self.videoBuffering = buffering;
+    [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION];
+}
+
+/* Natural end of the video, both sources. A looping playback wraps to
+ * zero and keeps rolling, emitting NOTHING — a playback that never
+ * ends never completes (the documented contract); position ticks keep
+ * telling the truth on their own cadence. A non-looping end is
+ * retire-before-emit, the audio pattern: the completion Msg routinely
+ * starts the NEXT video from inside its own dispatch, and tearing down
+ * afterwards would destroy the player that load just installed. The
+ * duration is captured first so the event still carries the honest
+ * terminal position. */
+- (void)videoDidPlayToEnd {
+    if (!self.videoPlayer) return;
+    if (self.videoLooping) {
+        CMTime zero = NativeSdkCMTimeFromMs(0);
+        [self.videoPlayer seekToTime:zero toleranceBefore:zero toleranceAfter:zero];
+        [self.videoPlayer play];
+        return;
+    }
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    uint64_t duration_ms = 0;
+    if (self.videoItem) {
+        double duration = NativeSdkSecondsFromCMTime(self.videoItem.duration);
+        if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
+    }
+    [self videoTearDownPlayer];
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_COMPLETED,
+        .video_position_ms = duration_ms,
+        .video_duration_ms = duration_ms,
+        .video_playing = 0,
+        .video_buffering = 0,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+/* Playback died — a stream lost its network, a local file hit a decode
+ * error mid-file, or an item never became playable (an undecodable
+ * payload, an unreachable host): one FAILED event, player retired
+ * first. */
+- (void)videoDidFail {
+    if (!self.videoPlayer) return;
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    [self videoTearDownPlayer];
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
+        .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_FAILED,
+        .video_position_ms = 0,
+        .video_duration_ms = 0,
+        .video_playing = 0,
+        .video_buffering = 0,
+        .timestamp_ns = NativeSdkTimestampNanoseconds(),
+    }];
+}
+
+- (int)videoPlay {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    /* AVPlayer's play is asynchronous by nature (it starts when
+     * buffered bytes allow), so play always "applies" — readiness and
+     * stalls report through the event stream. */
+    [player play];
+    if (!self.videoPositionTimer) {
+        /* Common modes for the same reason app timers use them: the
+         * readout must keep ticking while a menu is open or the window
+         * is live-resizing. */
+        NSTimer *tick = [NSTimer timerWithTimeInterval:0.5
+                                                target:self
+                                              selector:@selector(videoPositionTimerFired:)
+                                              userInfo:nil
+                                               repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+        self.videoPositionTimer = tick;
+    }
+    [self startVideoFrameTimer];
+    return 1;
+}
+
+- (int)videoPause {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    [player pause];
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    /* One final poll: the frame the pause landed on may not have been
+     * pumped yet, and a paused surface should hold it. */
+    [self videoPumpFrame];
+    return 1;
+}
+
+- (int)videoStop {
+    [self stopVideoPositionTimer];
+    [self stopVideoFrameTimer];
+    if (!self.videoPlayer) return 0;
+    [self videoTearDownPlayer];
+    return 1;
+}
+
+- (int)videoSeekToMs:(uint64_t)positionMs {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    /* AVPlayer clamps to the seekable ranges it has (or fetches the
+     * range it needs); exact tolerance keeps the readout honest
+     * against the requested position. */
+    CMTime zero = NativeSdkCMTimeFromMs(0);
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    [player seekToTime:NativeSdkCMTimeFromMs(positionMs)
+       toleranceBefore:zero
+        toleranceAfter:zero
+     completionHandler:^(BOOL finished) {
+         if (!finished) return;
+         /* One-shot poll on the loop thread so a PAUSED scrub still
+          * paints the sought frame — the frame timer only runs while
+          * playing. */
+         dispatch_async(dispatch_get_main_queue(), ^{
+             [weakSelf videoPumpFrame];
+         });
+     }];
+    return 1;
+}
+
+- (int)videoSetVolume:(double)volume {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    player.volume = (float)volume;
+    return 1;
+}
+
+- (int)videoSetMuted:(BOOL)muted {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    player.muted = muted;
+    return 1;
+}
+
+- (int)videoSetLoop:(BOOL)loop {
+    AVPlayer *player = self.videoPlayer;
+    if (!player) return 0;
+    self.videoLooping = loop;
+    /* A looping player must not pause itself at the end notification's
+     * moment — the wrap seek in videoDidPlayToEnd restarts it
+     * seamlessly. */
+    player.actionAtItemEnd = loop ? AVPlayerActionAtItemEndNone : AVPlayerActionAtItemEndPause;
+    return 1;
+}
+
 - (void)scheduleBridgeFrames {
     self.bridgeFrameKeepalive = NativeSdkBridgeFrameKeepaliveFrames;
     [self scheduleFrame];
@@ -10319,6 +10929,55 @@ int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t positi
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object audioSetVolume:volume];
+}
+
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *path_string = [[NSString alloc] initWithBytes:path length:path_len encoding:NSUTF8StringEncoding];
+    if (!path_string) return 1;
+    return [object videoLoadPath:path_string pushFn:push_fn pushContext:push_context];
+}
+
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *url_string = [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding];
+    if (!url_string) return 2;
+    return [object videoLoadURL:url_string pushFn:push_fn pushContext:push_context];
+}
+
+int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoPlay];
+}
+
+int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoPause];
+}
+
+int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoStop];
+}
+
+int native_sdk_appkit_video_seek(native_sdk_appkit_host_t *host, uint64_t position_ms) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSeekToMs:position_ms];
+}
+
+int native_sdk_appkit_video_set_volume(native_sdk_appkit_host_t *host, double volume) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetVolume:volume];
+}
+
+int native_sdk_appkit_video_set_muted(native_sdk_appkit_host_t *host, int muted) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetMuted:(muted != 0)];
+}
+
+int native_sdk_appkit_video_set_loop(native_sdk_appkit_host_t *host, int loop) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object videoSetLoop:(loop != 0)];
 }
 
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host) {

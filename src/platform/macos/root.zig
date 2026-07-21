@@ -39,6 +39,7 @@ const AppKitEventKind = enum(c_int) {
     gpu_surface_scroll_driver = 18,
     context_menu_action = 19,
     audio = 20,
+    video = 21,
 };
 
 const AppKitEvent = extern struct {
@@ -117,10 +118,31 @@ const AppKitEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// Video player report payload (`kind == .video`): the
+    /// `VideoEventKind` ordinal plus the player's position/duration
+    /// readout at emit time. `video_buffering` is stream-only, distinct
+    /// from `video_playing` (the transport intent) — the audio pair's
+    /// exact semantics.
+    video_kind: c_int,
+    video_position_ms: u64,
+    video_duration_ms: u64,
+    video_playing: c_int,
+    video_buffering: c_int,
+    /// `.loaded` payload: the STREAM's decoded pixel dimensions — the
+    /// honest source geometry even when the host fits frames to the
+    /// sink's pixel budget. Zeros on every other kind.
+    video_width: u64,
+    video_height: u64,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
 const AppKitBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, webview_label: [*]const u8, webview_label_len: usize, message: [*]const u8, message_len: usize, origin: [*]const u8, origin_len: usize) callconv(.c) void;
+/// Where the AppKit host's video frame pump delivers decoded frames
+/// (`native_sdk_appkit_video_sink_push_t`): one tightly packed
+/// straight-alpha RGBA8 frame per call, answered 0 accepted, 1 the
+/// receiving claim was released (the host stops its frame timer),
+/// anything else one dropped frame.
+const AppKitVideoSinkPush = *const fn (context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int;
 
 const shortcut_modifier_primary: u32 = 1 << 0;
 const shortcut_modifier_command: u32 = 1 << 1;
@@ -177,6 +199,15 @@ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
 extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
+extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_video_pause(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_video_stop(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_video_seek(host: *AppKitHost, position_ms: u64) c_int;
+extern fn native_sdk_appkit_video_set_volume(host: *AppKitHost, volume: f64) c_int;
+extern fn native_sdk_appkit_video_set_muted(host: *AppKitHost, muted: c_int) c_int;
+extern fn native_sdk_appkit_video_set_loop(host: *AppKitHost, loop: c_int) c_int;
 extern fn native_sdk_appkit_wake(host: *AppKitHost) void;
 extern fn native_sdk_appkit_present_gpu_surface_pixels(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn native_sdk_appkit_present_gpu_surface_packet(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, json: [*]const u8, json_len: usize) c_int;
@@ -528,6 +559,13 @@ pub const MacPlatform = struct {
     /// `createWithOptions` and retire it through `destroy`, the
     /// latch-gated free.
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// The CURRENT video frame sink — the host's C push trampoline
+    /// cannot carry a Zig error-union fn pointer, so the sink lives
+    /// here and `nativeSdkVideoSinkPush` forwards through it. Single
+    /// player, single slot: loads replace it on the main thread, and
+    /// every push happens on the main thread (the host's frame pump is
+    /// a run-loop timer), so a plain field is race-free.
+    video_sink: platform_mod.VideoFrameSink = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!MacPlatform {
         return initWithEngine(title, size, .system);
@@ -690,6 +728,15 @@ pub const MacPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                .video_load_fn = videoLoad,
+                .video_load_url_fn = videoLoadUrl,
+                .video_play_fn = videoPlay,
+                .video_pause_fn = videoPause,
+                .video_stop_fn = videoStop,
+                .video_seek_fn = videoSeek,
+                .video_set_volume_fn = videoSetVolume,
+                .video_set_muted_fn = videoSetMuted,
+                .video_set_loop_fn = videoSetLoop,
                 .wake_fn = wake,
                 .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrame,
@@ -753,7 +800,12 @@ pub const MacPlatform = struct {
             .audio_streaming,
             .audio_spectrum,
             => self.web_engine == .system,
-            .video_playback => false,
+            // AVFoundation video ships in the AppKit host only (one
+            // AVPlayer whose AVPlayerItemVideoOutput frames feed the
+            // media-surface sink); the CEF host stubs the C ABI and
+            // reports honestly unsupported rather than half-implementing
+            // a second player.
+            .video_playback => self.web_engine == .system,
         };
     }
 
@@ -918,6 +970,15 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .buffering = event.audio_buffering != 0,
             .bands = event.audio_bands,
         } }),
+        .video => state.emit(.{ .video = .{
+            .kind = videoEventKindFromInt(event.video_kind),
+            .position_ms = event.video_position_ms,
+            .duration_ms = event.video_duration_ms,
+            .playing = event.video_playing != 0,
+            .buffering = event.video_buffering != 0,
+            .width = event.video_width,
+            .height = event.video_height,
+        } }),
         .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
             state.emit(.{ .widget_accessibility_action = .{
                 .window_id = event.window_id,
@@ -957,6 +1018,18 @@ fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
         1 => .position,
         2 => .completed,
         4 => .spectrum,
+        else => .failed,
+    };
+}
+
+/// Ordinals match `native_sdk_appkit_video_event_kind_t` in
+/// appkit_host.h; anything unknown degrades to `.failed` so a host/SDK
+/// skew is loud in the app instead of undefined behavior here.
+fn videoEventKindFromInt(value: c_int) platform_mod.VideoEventKind {
+    return switch (value) {
+        0 => .loaded,
+        1 => .position,
+        2 => .completed,
         else => .failed,
     };
 }
@@ -1414,6 +1487,88 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_appkit_audio_set_volume(self.host, volume);
+}
+
+/// The C-callable bridge for `VideoFrameSink.push`: the sink's `push_fn`
+/// is a Zig-calling-convention error-union fn the host cannot invoke, so
+/// the host is handed this trampoline (context = the `MacPlatform`) and
+/// it forwards through the platform's current sink. Answers 0 accepted,
+/// 1 when the claim reports `error.MediaSurfaceReleased` (the host stops
+/// its frame timer — a released claim just means stop pushing), 2 for
+/// any other refusal (one dropped frame; latest-wins).
+fn nativeSdkVideoSinkPush(context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    self.video_sink.push(width, height, pixels[0..len]) catch |err| {
+        return if (err == error.MediaSurfaceReleased) 1 else 2;
+    };
+    return 0;
+}
+
+/// Map the video host's synchronous load result: 0 loaded, 1 the file is
+/// missing/unreadable, anything else a decode failure. The asynchronous
+/// `.loaded` acknowledgment (with the stream's dimensions and duration)
+/// follows as a `.video` event on the run loop; decoded frames flow
+/// through the sink stored on the platform (see `nativeSdkVideoSinkPush`).
+fn videoLoad(context: ?*anyopaque, path: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    self.video_sink = sink;
+    return switch (native_sdk_appkit_video_load(self.host, path.ptr, path.len, nativeSdkVideoSinkPush, self)) {
+        0 => {},
+        1 => error.VideoSourceNotFound,
+        else => error.VideoDecodeFailed,
+    };
+}
+
+/// Map the streaming host's synchronous result: 0 a progressive stream
+/// started (the `.loaded` acknowledgment follows when the item is
+/// ready), anything else the URL itself was unusable. Network failures
+/// after this point are asynchronous and arrive as `.video`/`.failed`
+/// events.
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    self.video_sink = sink;
+    return switch (native_sdk_appkit_video_load_url(self.host, url.ptr, url.len, nativeSdkVideoSinkPush, self)) {
+        0 => {},
+        else => error.InvalidVideoOptions,
+    };
+}
+
+fn videoPlay(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_video_play(self.host) == 0) return error.InvalidVideoOptions;
+}
+
+fn videoPause(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_video_pause(self.host);
+}
+
+fn videoStop(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_video_stop(self.host);
+    self.video_sink = .{};
+}
+
+fn videoSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_video_seek(self.host, position_ms) == 0) return error.InvalidVideoOptions;
+}
+
+fn videoSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_video_set_volume(self.host, volume);
+}
+
+fn videoSetMuted(context: ?*anyopaque, muted: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_video_set_muted(self.host, if (muted) 1 else 0);
+}
+
+fn videoSetLoop(context: ?*anyopaque, loop: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_video_set_loop(self.host, if (loop) 1 else 0);
 }
 
 /// Thread-safe: dispatches onto the main queue (`dispatch_async` — the
