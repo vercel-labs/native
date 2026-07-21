@@ -1,3 +1,4 @@
+
 // Emitter tests: one mapping rule per case — small TS in, the rule's Zig
 // shape out. Substring asserts, not golden files: the shapes are the spec.
 
@@ -22,6 +23,35 @@ export function scale(x: number): number {
 `);
   assert.match(zig, /fn pick\(bytes: \[\]const u8, i: i64\) i64/);
   assert.match(zig, /fn scale\(x: f64\) f64/);
+});
+
+test("R2 forward demand converges when a helper also receives an exported host parameter", () => {
+  const zig = emit(`
+export type Msg =
+  | { readonly kind: "toggle"; readonly id: number }
+  | { readonly kind: "noop" };
+
+function identity(id: number): number { return id; }
+
+export function fromHost(id: number): number {
+  return identity(id);
+}
+
+export function update(msg: Msg): number {
+  switch (msg.kind) {
+    case "toggle":
+      if (msg.id === 0) return 0;
+      return identity(msg.id);
+    case "noop":
+      return 0;
+  }
+}
+`);
+  // The comparison tentatively demands Msg.id while the shared helper also
+  // receives an f64 host-boundary parameter. Rejecting the propagated claim
+  // must settle the fixed point instead of spinning forever.
+  assert.match(zig, /pub fn fromHost\(id: f64\) f64/);
+  assert.match(zig, /pub fn update\(msg: Msg\) f64/);
 });
 
 test("R2 .length widens through jlen", () => {
