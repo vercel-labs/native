@@ -3576,6 +3576,193 @@ test "a rebuild while the native menu is open never redirects the visible select
     try std.testing.expectEqual(@as(u32, 0), app_state.model.deleted);
 }
 
+// ------------------------------------- context-menu arena-payload fixture
+
+const ArenaPayloadModel = struct {
+    generation: u32 = 0,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+};
+
+const ArenaPayloadMsg = union(enum) {
+    bump,
+    send: []const u8,
+};
+
+const ArenaPayloadApp = ui_app_model.UiApp(ArenaPayloadModel, ArenaPayloadMsg);
+
+fn arenaPayloadUpdate(model: *ArenaPayloadModel, msg: ArenaPayloadMsg) void {
+    switch (msg) {
+        .bump => model.generation += 1,
+        .send => |bytes| {
+            const len = @min(bytes.len, model.received_storage.len);
+            @memcpy(model.received_storage[0..len], bytes[0..len]);
+            model.received_len = len;
+            model.sends += 1;
+        },
+    }
+}
+
+const arena_payload_original = "menu-payload-original";
+const arena_payload_sentinel = "!!!!!!!!!!!!!!!!!!!!!";
+
+fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) ArenaPayloadApp.Ui.Node {
+    // Pin the build arena to one address-stable chunk: the first
+    // allocation of every build is a slab larger than the whole build,
+    // filled with sentinel bytes, so every later allocation lands at
+    // the same offset build after build. A rebuild after the arena
+    // reset therefore rewrites the payload's exact storage — the
+    // deterministic form of "the reset arena reused the memory".
+    const slab = ui.arena.alloc(u8, 256 * 1024) catch @panic("arena slab");
+    @memset(slab, '!');
+    // The documented Msg-payload shape: a display string formatted into
+    // the BUILD ARENA and carried by a context-menu item's Msg. Every
+    // rebuild formats a same-length payload, so the reset arena places
+    // it exactly where a stale present-time slice points — generation
+    // > 0 overwrites the original bytes with sentinels.
+    comptime std.debug.assert(arena_payload_original.len == arena_payload_sentinel.len);
+    const payload = ui.fmt("{s}", .{if (model.generation == 0) arena_payload_original else arena_payload_sentinel});
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+            },
+        }, .{}),
+        ui.button(.{ .on_press = .bump }, "Rebuild"),
+    });
+}
+
+test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    // The leak-detecting backing allocator is part of the assertion:
+    // every snapshot copy must be freed — superseded, dismissed, or
+    // still armed at teardown.
+    const app_state = try std.testing.allocator.create(ArenaPayloadApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ArenaPayloadApp.init(std.testing.allocator, .{}, .{
+        .name = "ui-app-context-menu-arena",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = arenaPayloadUpdate,
+        .view = arenaPayloadView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var button_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try std.testing.expect(!button_frame.isEmpty());
+
+    // Present the menu. GTK popovers are asynchronous: the menu stays
+    // on the glass while the app keeps rebuilding underneath.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    const shown_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(shown_token != 0);
+
+    // TWO rebuilds while the menu is open: view builds double-buffer
+    // two arenas, so the second rebuild resets the arena the presented
+    // tree was built in and overwrites the payload's storage with
+    // sentinel bytes.
+    for (0..2) |press| {
+        const base: u64 = 3_000_000 + @as(u64, @intCast(press)) * 2_000_000;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_down,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base + 1_000_000,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.generation);
+
+    // The user picks "Send": the dispatched Msg must carry the bytes
+    // the user SAW at present time, never whatever the reset build
+    // arena holds at selection time.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings(arena_payload_original, app_state.model.received_storage[0..app_state.model.received_len]);
+
+    // Supersession and dismissal both release their snapshot copies: a
+    // re-presented menu replaces the previous snapshot, its successor is
+    // dismissed without a selection, and teardown (the deferred deinit)
+    // frees whatever is still armed — the backing allocator reports any
+    // copy that escapes.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 8_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 9_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.context_menu_request_count);
+    const superseding_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(superseding_token != shown_token);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = superseding_token,
+        .item_id = 0,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+}
+
 // ------------------------------------------------- press fall-through fixture
 
 const RowsModel = struct {

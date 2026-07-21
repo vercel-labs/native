@@ -881,8 +881,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// edge.
         context_menu_fallback_point: geometry.PointF = .{},
         /// The presented native menu's selection snapshot: the per-item
-        /// dispatch Msgs captured (by value) at present time, keyed by
-        /// the request's token. Native presentation is asynchronous (a
+        /// dispatch Msgs captured at present time, keyed by the
+        /// request's token. Native presentation is asynchronous (a
         /// GTK popover outlives its presenting dispatch), so a rebuild
         /// while the menu is open — a timer reordering conditional
         /// items, an effect re-mapping captured messages — must never
@@ -894,6 +894,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         context_menu_shown_token: u64 = 0,
         context_menu_shown_count: usize = 0,
         context_menu_shown_msgs: [platform.max_context_menu_items]?MsgT = undefined,
+        /// Backs the snapshot's slice payloads: a Msg may carry
+        /// build-arena slices (the documented payload shape), and the
+        /// open menu outlives the arena's double-buffered two-build
+        /// lifetime, so `handleContextMenuShown` deep-copies every
+        /// reachable slice in here. Reset when the snapshot resolves or
+        /// is superseded by the next presentation (a dismissed menu's
+        /// copies wait for that supersession — the platform reports
+        /// dismissal only to the runtime's pending gate, and the stale
+        /// token can never resolve — so at most one snapshot's payloads
+        /// are retained); `deinit` frees the arena at teardown.
+        context_menu_shown_arena: std.heap.ArenaAllocator,
         /// The windowed virtual lists the LAST build declared
         /// (`Ui.virtualList` records): scroll events on these regions
         /// re-derive the view even without an app `on_scroll` binding,
@@ -943,6 +954,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
+                .context_menu_shown_arena = std.heap.ArenaAllocator.init(backing),
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .effects = Effects.init(backing),
@@ -999,6 +1011,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.heap.ArenaAllocator.init(backing),
                     std.heap.ArenaAllocator.init(backing),
                 },
+                .context_menu_shown_arena = std.heap.ArenaAllocator.init(backing),
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .effects = Effects.init(backing),
@@ -1026,6 +1039,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.arenas[1].deinit();
             self.markup_arenas[0].deinit();
             self.markup_arenas[1].deinit();
+            self.context_menu_shown_arena.deinit();
             if (comptime fragment_watch_enabled) {
                 for (&self.markup_fragment_slots) |*slot| {
                     slot.arenas[0].deinit();
@@ -3578,18 +3592,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         /// The runtime handed a widget's declared menu to the native
-        /// presenter: capture the shown items' dispatch Msgs (by value)
-        /// keyed by the request's token. Selection resolves from this
-        /// snapshot, so the user always gets the item they SAW even when
-        /// the tree rebuilds under the open menu. Payload lifetime
-        /// matches every deferred Msg's rule: values are copied here,
-        /// so a Msg carrying a slice must point at model-owned storage,
-        /// never the build arena.
+        /// presenter: capture the shown items' dispatch Msgs keyed by
+        /// the request's token. Selection resolves from this snapshot,
+        /// so the user always gets the item they SAW even when the tree
+        /// rebuilds under the open menu. A Msg payload may carry
+        /// build-arena slices (the documented payload shape), and the
+        /// arena double-buffers only two builds while the open menu can
+        /// outlive any number of them, so every reachable slice is
+        /// deep-copied into the snapshot arena — resetting it first
+        /// releases a superseded presentation's copies.
         fn handleContextMenuShown(self: *Self, shown_event: core.CanvasWidgetContextMenuShownEvent) void {
             const tree = self.treeForViewLabel(shown_event.view_label) orelse return;
+            _ = self.context_menu_shown_arena.reset(.retain_capacity);
+            const snapshot_arena = self.context_menu_shown_arena.allocator();
             const count = @min(shown_event.item_count, self.context_menu_shown_msgs.len);
             for (0..count) |item_index| {
-                self.context_menu_shown_msgs[item_index] = tree.msgForContextMenu(shown_event.target_id, item_index);
+                self.context_menu_shown_msgs[item_index] = blk: {
+                    const msg = tree.msgForContextMenu(shown_event.target_id, item_index) orelse break :blk null;
+                    // OOM: swallow the item rather than snapshot a slice
+                    // that may dangle by selection time.
+                    break :blk dupeSlicesDeep(MsgT, snapshot_arena, msg) catch null;
+                };
             }
             self.context_menu_shown_token = shown_event.token;
             self.context_menu_shown_count = count;
@@ -3612,6 +3635,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 const count = self.context_menu_shown_count;
                 self.context_menu_shown_token = 0;
                 self.context_menu_shown_count = 0;
+                // The snapshot is consumed on every path out of this
+                // block — resolved, out-of-range, or a failed dispatch —
+                // but only AFTER the dispatch: the Msg's slice payloads
+                // live in the snapshot arena until `update` has run.
+                defer _ = self.context_menu_shown_arena.reset(.retain_capacity);
                 if (menu_event.item_index >= count) return;
                 if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
                     try self.dispatch(runtime, menu_event.window_id, msg);
@@ -3729,4 +3757,60 @@ fn effectsQuitApp(context: *anyopaque) bool {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     runtime.quitApp() catch return false;
     return true;
+}
+
+/// Deep-copy every slice reachable in `value` into `allocator`-owned
+/// storage, returning a value that no longer aliases the source's slice
+/// payloads. The context-menu snapshot uses this at present time: a
+/// declared item's Msg may carry build-arena slices (the documented
+/// payload shape), and a native menu stays open across arbitrarily many
+/// rebuilds while the build arenas double-buffer only two. Non-slice
+/// pointers pass through by reference — a Msg payload's contract points
+/// them at static or model-owned storage — and untagged unions cannot
+/// be walked, so they pass through by value.
+fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) error{OutOfMemory}!T {
+    switch (@typeInfo(T)) {
+        .pointer => |pointer_info| switch (pointer_info.size) {
+            .slice => {
+                const copy = if (comptime pointer_info.sentinel()) |sentinel_value|
+                    try allocator.allocSentinel(pointer_info.child, value.len, sentinel_value)
+                else
+                    try allocator.alloc(pointer_info.child, value.len);
+                for (copy, value) |*element, source| {
+                    element.* = try dupeSlicesDeep(pointer_info.child, allocator, source);
+                }
+                return copy;
+            },
+            else => return value,
+        },
+        .@"struct" => |struct_info| {
+            var copy = value;
+            inline for (struct_info.fields) |field| {
+                if (comptime !field.is_comptime) {
+                    @field(copy, field.name) = try dupeSlicesDeep(field.type, allocator, @field(value, field.name));
+                }
+            }
+            return copy;
+        },
+        .@"union" => |union_info| {
+            if (comptime union_info.tag_type == null) return value;
+            switch (value) {
+                inline else => |payload, tag| {
+                    return @unionInit(T, @tagName(tag), try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
+                },
+            }
+        },
+        .optional => {
+            const payload = value orelse return null;
+            return try dupeSlicesDeep(@TypeOf(payload), allocator, payload);
+        },
+        .array => |array_info| {
+            var copy = value;
+            for (&copy, value) |*element, source| {
+                element.* = try dupeSlicesDeep(array_info.child, allocator, source);
+            }
+            return copy;
+        },
+        else => return value,
+    }
 }
