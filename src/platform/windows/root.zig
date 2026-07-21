@@ -1042,16 +1042,45 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
     ) == 0) return error.ViewNotFound;
 }
 
-/// Translate the request's items to the C ABI shape. Pure (no host
-/// calls), so the separator/disabled mapping is unit-testable on every
-/// build host.
-fn contextMenuItemsToWindows(items: []const platform_mod.ContextMenuItem, buffer: []WindowsContextMenuItem) []const WindowsContextMenuItem {
+/// Win32 menus treat `&` in an item label as a mnemonic marker —
+/// AppendMenuW eats the ampersand and underlines the next character —
+/// so an app-authored label like "R&D" must cross the ABI with the
+/// ampersand doubled ("R&&D") to render literally. Labels without an
+/// ampersand pass through uncopied; a label whose escaped form does
+/// not fit the remaining pool also passes through raw, because an
+/// accidental mnemonic on a pathological label beats dropping bytes.
+fn escapeMenuLabelAmpersands(label: []const u8, pool: []u8, used: *usize) []const u8 {
+    const ampersands = std.mem.count(u8, label, "&");
+    if (ampersands == 0) return label;
+    if (label.len + ampersands > pool.len - used.*) return label;
+    const start = used.*;
+    var out = start;
+    for (label) |byte| {
+        pool[out] = byte;
+        out += 1;
+        if (byte == '&') {
+            pool[out] = '&';
+            out += 1;
+        }
+    }
+    used.* = out;
+    return pool[start..out];
+}
+
+/// Translate the request's items to the C ABI shape, escaping mnemonic
+/// ampersands into `label_pool` (the host copies every label before
+/// returning, so a caller stack pool is safe). Pure (no host calls), so
+/// the separator/disabled/label mapping is unit-testable on every build
+/// host.
+fn contextMenuItemsToWindows(items: []const platform_mod.ContextMenuItem, buffer: []WindowsContextMenuItem, label_pool: []u8) []const WindowsContextMenuItem {
     const count = @min(items.len, buffer.len);
+    var pool_used: usize = 0;
     for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelAmpersands(item.label, label_pool, &pool_used);
         buffer[index] = .{
             .item_id = item.id,
-            .label = item.label.ptr,
-            .label_len = item.label.len,
+            .label = label.ptr,
+            .label_len = label.len,
             .enabled = if (item.enabled) 1 else 0,
             .separator = if (item.separator) 1 else 0,
         };
@@ -1063,7 +1092,8 @@ fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuReques
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     var items: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
-    const translated = contextMenuItemsToWindows(request.items, &items);
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToWindows(request.items, &items, &label_pool);
     if (native_sdk_windows_show_context_menu(
         self.host,
         request.window_id,
@@ -1211,10 +1241,15 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var label_lens: [max_tray_items]usize = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
+    // Tray labels are app-supplied too, so they get the same mnemonic
+    // escape as context-menu items (the host copies before returning).
+    var label_pool: [max_tray_items * 64]u8 = undefined;
+    var pool_used: usize = 0;
     for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelAmpersands(item.label, &label_pool, &pool_used);
         ids[index] = item.id;
-        labels[index] = item.label.ptr;
-        label_lens[index] = item.label.len;
+        labels[index] = label.ptr;
+        label_lens[index] = label.len;
         separators[index] = if (item.separator) 1 else 0;
         enabled_flags[index] = if (item.enabled) 1 else 0;
     }
@@ -1538,10 +1573,12 @@ test "windows context menu items translate separators, disabled flags, and label
         .{ .id = 1, .label = "Complete" },
         .{ .separator = true },
         .{ .id = 3, .label = "Delete", .enabled = false },
+        .{ .id = 4, .label = "Move to R&D" },
     };
     var buffer: [platform_mod.max_context_menu_items]WindowsContextMenuItem = undefined;
-    const translated = contextMenuItemsToWindows(&items, &buffer);
-    try std.testing.expectEqual(@as(usize, 3), translated.len);
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToWindows(&items, &buffer, &label_pool);
+    try std.testing.expectEqual(@as(usize, 4), translated.len);
     try std.testing.expectEqual(@as(u32, 1), translated[0].item_id);
     try std.testing.expectEqualStrings("Complete", translated[0].label[0..translated[0].label_len]);
     try std.testing.expectEqual(@as(c_int, 1), translated[0].enabled);
@@ -1549,6 +1586,24 @@ test "windows context menu items translate separators, disabled flags, and label
     try std.testing.expectEqual(@as(c_int, 1), translated[1].separator);
     try std.testing.expectEqual(@as(u32, 3), translated[2].item_id);
     try std.testing.expectEqual(@as(c_int, 0), translated[2].enabled);
+    // A literal `&` doubles on the way to AppendMenuW so Win32 renders
+    // it instead of eating it as a mnemonic marker; ampersand-free
+    // labels pass through pointing at the caller's bytes.
+    try std.testing.expectEqualStrings("Move to R&&D", translated[3].label[0..translated[3].label_len]);
+    try std.testing.expectEqual(items[0].label.ptr, translated[0].label);
+}
+
+test "windows menu label escape passes a label through raw when the pool cannot hold it" {
+    var pool: [4]u8 = undefined;
+    var used: usize = 0;
+    const label = "R&D";
+    // Escaped form needs 4 bytes and fits exactly.
+    try std.testing.expectEqualStrings("R&&D", escapeMenuLabelAmpersands(label, &pool, &used));
+    // The pool is spent: the next ampersand label rides unescaped
+    // (accidental mnemonic) rather than truncated.
+    const passed_through = escapeMenuLabelAmpersands(label, &pool, &used);
+    try std.testing.expectEqualStrings("R&D", passed_through);
+    try std.testing.expectEqual(label.ptr, passed_through.ptr);
 }
 
 test "windows context menu action event maps token and item id" {
