@@ -1,6 +1,7 @@
 const std = @import("std");
 const trace = @import("trace");
 const canvas = @import("canvas");
+const geometry = @import("geometry");
 const automation = @import("../automation/root.zig");
 const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
@@ -213,6 +214,10 @@ pub const CanvasWidgetContextMenuRequestEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
     target_id: canvas.ObjectId,
+    /// The secondary click's pointer location (view-local canvas points):
+    /// the fallback surface anchors here — like a native menu — not at a
+    /// target-widget edge.
+    point: geometry.PointF = .{},
 };
 
 /// A window the RUNTIME knew as open was closed by the platform — the

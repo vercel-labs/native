@@ -399,6 +399,15 @@ pub fn Ui(comptime Msg: type) type {
         /// `Tree.context_menu_fallback`. 0 (the default) synthesizes
         /// nothing.
         context_menu_fallback_target: ObjectId = 0,
+        /// The secondary click's pointer location (view-local canvas
+        /// points, the same space widget frames resolve in), set alongside
+        /// `context_menu_fallback_target`: the synthesized surface anchors
+        /// at this point — like every native context menu — instead of a
+        /// target-widget edge, so a menu opened on a wide row opens at the
+        /// click, not the row's corner. Null keeps the legacy
+        /// below-the-target anchor (a fallback opened without pointer
+        /// provenance).
+        context_menu_fallback_point: ?geometry.PointF = null,
         /// Set by `finalizeNode` when the fallback target was found and a
         /// surface was synthesized; copied onto the returned `Tree`.
         context_menu_fallback_result: ?Tree.ContextMenuFallback = null,
@@ -2541,9 +2550,11 @@ pub fn Ui(comptime Msg: type) type {
         }
 
         /// Synthesize the anchored context-menu fallback surface as a
-        /// child of `widget`: a `dropdown_menu` floating below the target
-        /// with one `menu_item` per declared item (`separator`s keep
-        /// their slots). Items carry press semantics but no handler
+        /// child of `widget`: a `dropdown_menu` floating at the click
+        /// point (`context_menu_fallback_point`; below the target when no
+        /// point was recorded) with one `menu_item` per declared item
+        /// (`separator`s keep their slots). Items carry press semantics
+        /// but no handler
         /// entries — the app loop maps their presses through the
         /// target's existing `.context_menu` handler, the same entry a
         /// native selection resolves.
@@ -2577,7 +2588,16 @@ pub fn Ui(comptime Msg: type) type {
                 .semantics = .{ .label = "Context menu" },
                 .children = item_widgets,
             };
-            surface.layout.anchor = .{ .placement = .below, .alignment = .start };
+            // Anchor at the recorded click point when the request carried
+            // one (offset 0: the surface corner sits at the pointer, the
+            // native-menu convention); the widget-edge anchor remains the
+            // pointer-less floor. Either way the anchored-surface edge
+            // rules apply: flip above the anchor when the surface would
+            // cross the bottom edge, clamp into the window.
+            surface.layout.anchor = if (self.context_menu_fallback_point) |point|
+                .{ .placement = .below, .alignment = .start, .offset = 0, .point = point }
+            else
+                .{ .placement = .below, .alignment = .start };
             const children = try self.arena.alloc(Widget, widget.children.len + 1);
             @memcpy(children[0..widget.children.len], widget.children);
             children[widget.children.len] = surface;

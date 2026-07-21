@@ -875,6 +875,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         context_menu_fallback_window_id: platform.WindowId = 1,
         context_menu_fallback_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         context_menu_fallback_label_len: usize = 0,
+        /// The secondary click's pointer location from the request event
+        /// (view-local canvas points): threaded to `Ui.finalize` so the
+        /// synthesized surface anchors at the click, not the target's
+        /// edge.
+        context_menu_fallback_point: geometry.PointF = .{},
         /// The windowed virtual lists the LAST build declared
         /// (`Ui.virtualList` records): scroll events on these regions
         /// re-derive the view even without an app `on_scroll` binding,
@@ -1431,6 +1436,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.virtual_extent_context = @ptrCast(self);
                 ui.virtual_extent_source = virtualExtentResolve;
                 ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(self.options.canvas_label);
+                if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
                 self.armUiFragmentHost(&ui);
                 if (comptime features.runtime_markup) {
                     if (self.markup_view != null and runtime.options.automation != null) {
@@ -2058,6 +2064,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
+            if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
             self.armUiFragmentHost(&ui);
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
@@ -3581,6 +3588,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.context_menu_fallback_label_len = label_len;
             self.context_menu_fallback_window_id = request_event.window_id;
             self.context_menu_fallback_target = request_event.target_id;
+            self.context_menu_fallback_point = request_event.point;
             try self.rebuildAllViews(runtime);
         }
 

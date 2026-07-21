@@ -316,7 +316,11 @@ fn layoutAnchoredChildren(
 /// width), placed on the preferred side of the anchor rect — flipping to
 /// the other side when it does not fit and the other side has more room —
 /// with height clamped to the chosen side's space and both axes clamped
-/// into the window. Pure geometry, unit-testable on its own.
+/// into the window. A point anchor (`anchor.point`) replaces the anchor
+/// rect with a zero-size rect at that point (clamped into the window), so
+/// the same flip and clamp rules position a surface against an explicit
+/// coordinate — the context-menu-at-the-pointer shape. Pure geometry,
+/// unit-testable on its own.
 pub fn anchoredWidgetFrame(
     child: Widget,
     anchor: widget_model.WidgetAnchor,
@@ -325,7 +329,12 @@ pub fn anchoredWidgetFrame(
     tokens: DesignTokens,
 ) geometry.RectF {
     const window = window_rect.normalized();
-    const anchor_frame = anchor_rect.normalized();
+    const anchor_frame = if (anchor.point) |point| geometry.RectF.init(
+        std.math.clamp(point.x, window.x, window.maxX()),
+        std.math.clamp(point.y, window.y, window.maxY()),
+        0,
+        0,
+    ) else anchor_rect.normalized();
     const intrinsic = intrinsicWidgetSize(child, tokens);
 
     var width = if (child.frame.width > 0) child.frame.width else intrinsic.width;

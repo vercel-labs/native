@@ -323,6 +323,16 @@ pub const WidgetAnchor = struct {
     alignment: WidgetAnchorAlignment = .start,
     /// Gap in points between the anchor edge and the surface.
     offset: f32 = 4,
+    /// Point-anchor mode: when set, the surface anchors at this explicit
+    /// point in the window's coordinate space instead of the parent
+    /// widget's frame (the context-menu-at-the-pointer shape). The point
+    /// acts as a zero-size anchor rect, so the standard popup edge rules
+    /// apply unchanged: `placement` prefers a side of the point, the
+    /// surface flips to the other side when it would cross the window
+    /// edge and the other side has more room, and both axes clamp into
+    /// the window. `stretch` alignment has no width to inherit from a
+    /// point and behaves like `start`.
+    point: ?geometry.PointF = null,
 };
 
 pub const WidgetLayoutStyle = struct {

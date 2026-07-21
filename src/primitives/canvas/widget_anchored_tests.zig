@@ -73,6 +73,54 @@ test "anchored frame clamps into the window horizontally and by offset" {
     try std.testing.expectEqual(@as(f32, 58), frame.y); // 20 + 28 + 10
 }
 
+test "point anchor places the surface corner at the point" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // The anchor rect (a wide row's frame) must be ignored: only the
+    // point positions the surface.
+    const frame = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(180, 60) },
+        geometry.RectF.init(0, 40, 400, 40),
+    );
+    try std.testing.expectEqual(@as(f32, 180), frame.x);
+    try std.testing.expectEqual(@as(f32, 60), frame.y);
+    try std.testing.expectEqual(@as(f32, 140), frame.width);
+    try std.testing.expectEqual(@as(f32, 90), frame.height);
+}
+
+test "point anchor flips above when the surface would cross the bottom edge" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // window is 300 tall: below the point has 300-260 = 40 < 90, above
+    // has 260 — flip, bottom edge lands on the point.
+    const frame = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(50, 260) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 260 - 90), frame.y);
+    try std.testing.expectEqual(@as(f32, 90), frame.height);
+}
+
+test "point anchor clamps into the window horizontally" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // window is 400 wide: a point near the right edge cannot push the
+    // surface off-screen — it clamps to the window's right edge.
+    const right = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(390, 60) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 400 - 140), right.x);
+    // A point beyond the window clamps into it first (never off-screen
+    // left either).
+    const left = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(-30, 60) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 0), left.x);
+}
+
 test "anchored children consume no flow space and float against the parent" {
     const menu_items = [_]Widget{.{ .id = 4, .kind = .menu_item, .text = "One" }};
     const dropdown = Widget{

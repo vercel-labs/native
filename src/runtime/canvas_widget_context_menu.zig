@@ -116,6 +116,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     .window_id = input_event.window_id,
                     .view_label = self.views[index].label,
                     .target_id = widget.id,
+                    .point = point,
                 } });
                 return;
             }

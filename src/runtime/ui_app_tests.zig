@@ -261,6 +261,65 @@ test "a declared context menu presents as the anchored fallback surface on prese
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
 }
 
+test "the fallback surface mounts at the click point, not the wide row's edge" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.context_menus = false;
+    harness.runtime.options.platform = harness.null_platform.platform();
+
+    const app_state = try std.testing.allocator.create(TaskRowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Secondary-click the full-width row far from its left edge: the
+    // click point rides the request into the mounted surface's anchor.
+    const layout_before = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_id = findWidgetIdByText(app_state.tree.?, .list_item, "Task").?;
+    const row_frame = blk: {
+        for (layout_before.nodes) |node| {
+            if (node.widget.id == row_id) break :blk node.frame;
+        }
+        return error.TestUnexpectedResult;
+    };
+    const click = geometry.PointF.init(row_frame.x + 150, row_frame.y + row_frame.height / 2);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = click.x,
+        .y = click.y,
+        .timestamp_ns = 1_000_000_000,
+    } });
+
+    try std.testing.expect(app_state.tree.?.context_menu_fallback != null);
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const surface_frame = blk: {
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .dropdown_menu) break :blk node.frame;
+        }
+        return error.TestUnexpectedResult;
+    };
+    // The surface corner sits at the pointer (space permits below and to
+    // the right here), NOT at the row's bottom-left corner.
+    try std.testing.expectEqual(click.x, surface_frame.x);
+    try std.testing.expectEqual(click.y, surface_frame.y);
+    try std.testing.expect(surface_frame.x != row_frame.x);
+}
+
 // ------------------------------------------------- scroll event fixture
 
 const FeedModel = struct {

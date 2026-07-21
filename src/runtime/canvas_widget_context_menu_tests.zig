@@ -25,6 +25,7 @@ const MenuTestApp = struct {
     last_menu_item_index: usize = 0,
     request_count: u32 = 0,
     last_request_target: canvas.ObjectId = 0,
+    last_request_point: geometry.PointF = .{},
     last_edit_insert: [64]u8 = undefined,
     last_edit_insert_len: usize = 0,
     saw_truncated: bool = false,
@@ -47,6 +48,7 @@ const MenuTestApp = struct {
             .canvas_widget_context_menu_request => |request_event| {
                 self.request_count += 1;
                 self.last_request_target = request_event.target_id;
+                self.last_request_point = request_event.point;
             },
             .canvas_widget_keyboard => |keyboard_event| {
                 if (keyboard_event.keyboard.edit_truncated) self.saw_truncated = true;
@@ -362,6 +364,9 @@ test "a declared menu on a presenter-less host becomes a fallback request, not a
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
     try std.testing.expectEqual(@as(u32, 1), app_state.request_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_request_target);
+    // The click point rides the request: the fallback surface anchors at
+    // the pointer, not a target-widget edge.
+    try std.testing.expectEqualDeep(geometry.PointF.init(50, 20), app_state.last_request_point);
     // Never the hold alternative: a declared menu consumed the press.
     try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
 
