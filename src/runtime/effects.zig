@@ -854,17 +854,48 @@ const ChannelStaging = struct {
 };
 
 /// The owner-side references a post may touch WHILE THE CHANNEL IS
-/// OPEN: the shared post-order stamp, the pending mirror behind
-/// `hasPending`, and the services binding behind the host wake. The
-/// validity argument is the mutex: every close path (closeChannel,
-/// teardown) clears `open` under `ChannelShared.mutex` before the owner
-/// can be freed, and a post reads these only after observing `open`
-/// under that same mutex — so a post that may touch the owner holds the
-/// lock the close must first acquire.
+/// OPEN: the shared post-order stamp and the pending mirror behind
+/// `hasPending`. The validity argument is the mutex: every close path
+/// (closeChannel, teardown) clears `open` under `ChannelShared.mutex`
+/// before the owner can be freed, and a post reads these only after
+/// observing `open` under that same mutex — so a post that may touch
+/// the owner holds the lock the close must first acquire. The host
+/// wake lives in `ChannelWake`, never here: nothing behind the staging
+/// mutex may call into the host.
 const ChannelOwnerRefs = struct {
     seq: *std.atomic.Value(u64),
     pending: *std.atomic.Value(usize),
-    services: *const ?*const platform.PlatformServices,
+};
+
+/// The producer-to-loop wake binding, one per channel header, guarded
+/// by its OWN spin mutex — never `ChannelShared.mutex`, whose guarded
+/// sections must stay bounded memcpys: the wake path calls into the
+/// platform host, and holding the staging mutex across that call would
+/// stall every drain, close, and teardown behind a slow (or blocking)
+/// host wake hook. This is the media-surface producer's data/wake
+/// split (`MediaSurfaceWake` in media_surface.zig), matched exactly.
+///
+/// Ownership story (the abandon-fence doctrine, ditto): `services`
+/// points at the owning Effects' late-bound services field, and the
+/// host call happens UNDER `mutex`. Every close path (closeChannel,
+/// terminal retire, teardown) disarms under the same mutex AFTER
+/// clearing `open` under the staging mutex, so once a disarm returns
+/// no post is inside the host call and none can start one — a stale
+/// handle's post can never wake a dead host. The `wake_fn`
+/// implementations are enqueue-only (macOS: main-queue dispatch, GTK:
+/// `g_idle_add`, Win32: `PostMessage`, null platform: an atomic
+/// counter), so the guarded section stays bounded.
+const ChannelWake = struct {
+    mutex: SpinMutex = .{},
+    /// The occupancy this binding serves (the header's generation): a
+    /// post wakes only when its handle's generation matches, so a
+    /// stale producer of a closed — or reopened — channel can never
+    /// wake the loop spuriously.
+    generation: u32 = 0,
+    /// The owning Effects' services binding (a pointer to the field,
+    /// so a channel opened before `bindServices` still wakes), or null
+    /// while disarmed.
+    services: ?*const ?*const platform.PlatformServices = null,
 };
 
 /// The thread-shared half of one channel table slot — the block a
@@ -880,6 +911,16 @@ const ChannelOwnerRefs = struct {
 /// plain `.closed` through the header's `open`/`generation` gate, never
 /// a use-after-free.
 pub const ChannelShared = struct {
+    /// The staging mutex. LOCK-ORDER INVARIANT: this mutex is NEVER
+    /// held across a host callback. The host wake lives in `wake`,
+    /// behind its own mutex, taken only AFTER this one is released —
+    /// the two never nest, in either order. Drain, close, and teardown
+    /// all contend here, so a wake hook that is slow, blocks, or
+    /// synchronizes against the loop thread must never be able to
+    /// stall (or deadlock) them; every guarded section below is a
+    /// bounded copy of at most one staged post. The media-surface
+    /// producer's data/wake split (`MediaSurfaceWake`), matched
+    /// exactly.
     mutex: SpinMutex = .{},
     /// Posts are accepted only while set. Cleared under the mutex by
     /// every close path before anything a post could reach is freed.
@@ -896,6 +937,9 @@ pub const ChannelShared = struct {
     staging: ?*ChannelStaging = null,
     /// Valid only while `open` (see `ChannelOwnerRefs`).
     owner: ?ChannelOwnerRefs = null,
+    /// The host-wake binding (its own mutex; see `ChannelWake` for the
+    /// ownership story and the lock-order invariant on `mutex`).
+    wake: ChannelWake = .{},
 };
 
 /// The THREAD-SAFE posting handle `openChannel` returns: the one
@@ -956,41 +1000,78 @@ pub const ChannelHandle = struct {
     /// flood the host loop's queue.
     pub fn post(handle: ChannelHandle, bytes: []const u8) PostResult {
         const shared = handle.shared orelse return .closed;
-        shared.mutex.lock();
-        defer shared.mutex.unlock();
-        if (!shared.open or shared.generation != handle.generation) return .closed;
-        // Open implies the owner references are alive (see
-        // `ChannelOwnerRefs`) and staging is installed.
-        const owner = shared.owner.?;
-        const staging = shared.staging.?;
-        if (bytes.len > max_effect_channel_bytes or staging.len >= shared.max_pending) {
-            shared.dropped_pending +|= 1;
-            shared.dropped_total +|= 1;
-            // NO wake for a refusal — the invariant of this whole post
-            // site is that a wake is issued only when a post makes new
-            // work drainable. A full stage proves staged entries exist
-            // whose accepted posts already woke the loop, and the drop
-            // counters ride the next delivered event with no extra
-            // nudge; an oversized post stages nothing, so there is
-            // nothing to drain. Waking here would let a producer that
-            // keeps posting after `.dropped_full` — the documented
-            // producer contract — grow the host loop's queue without
-            // bound, defeating the bounded stage's back-pressure.
-            // (`.closed` answers above are pure no-ops for the same
-            // reason: nothing staged, nothing to drain.)
-            return if (bytes.len > max_effect_channel_bytes) .dropped_oversized else .dropped_full;
+        {
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+            if (!shared.open or shared.generation != handle.generation) return .closed;
+            // Open implies the owner references are alive (see
+            // `ChannelOwnerRefs`) and staging is installed.
+            const owner = shared.owner.?;
+            const staging = shared.staging.?;
+            if (bytes.len > max_effect_channel_bytes or staging.len >= shared.max_pending) {
+                shared.dropped_pending +|= 1;
+                shared.dropped_total +|= 1;
+                // NO wake for a refusal — the invariant of this whole post
+                // site is that a wake is issued only when a post makes new
+                // work drainable. A full stage proves staged entries exist
+                // whose accepted posts already woke the loop, and the drop
+                // counters ride the next delivered event with no extra
+                // nudge; an oversized post stages nothing, so there is
+                // nothing to drain. Waking here would let a producer that
+                // keeps posting after `.dropped_full` — the documented
+                // producer contract — grow the host loop's queue without
+                // bound, defeating the bounded stage's back-pressure.
+                // (`.closed` answers above are pure no-ops for the same
+                // reason: nothing staged, nothing to drain.)
+                return if (bytes.len > max_effect_channel_bytes) .dropped_oversized else .dropped_full;
+            }
+            const seq = owner.seq.fetchAdd(1, .monotonic);
+            const index = (staging.head + staging.len) % max_effect_channel_pending;
+            staging.lens[index] = @intCast(bytes.len);
+            staging.seqs[index] = seq;
+            @memcpy(staging.data[index][0..bytes.len], bytes);
+            staging.len += 1;
+            _ = owner.pending.fetchAdd(1, .monotonic);
         }
-        const seq = owner.seq.fetchAdd(1, .monotonic);
-        const index = (staging.head + staging.len) % max_effect_channel_pending;
-        staging.lens[index] = @intCast(bytes.len);
-        staging.seqs[index] = seq;
-        @memcpy(staging.data[index][0..bytes.len], bytes);
-        staging.len += 1;
-        _ = owner.pending.fetchAdd(1, .monotonic);
-        if (owner.services.*) |services| services.wake() catch {};
+        // New work is staged: wake the host loop OUTSIDE the staging
+        // mutex (the lock-order invariant at `ChannelShared.mutex`) and
+        // gated on the generation again under the wake half's own lock,
+        // so a close racing this gap wakes nobody spuriously.
+        requestHostWake(shared, handle.generation);
         return .accepted;
     }
+
+    /// Wake the owning loop for one accepted post. Any-thread; touches
+    /// only the process-lifetime header's wake half. The host call runs
+    /// UNDER the wake mutex (the abandon-fence doctrine — see
+    /// `ChannelWake`): every disarm takes the same mutex, so a disarm
+    /// can never complete while a call into the host is in flight, and
+    /// after it returns no call can start.
+    fn requestHostWake(shared: *ChannelShared, generation: u32) void {
+        const wake = &shared.wake;
+        wake.mutex.lock();
+        defer wake.mutex.unlock();
+        // Stale occupancy (closed, reopened, or torn down): no wake.
+        if (wake.generation != generation) return;
+        // Disarmed, or no host services bound yet: nothing to call.
+        const services_ref = wake.services orelse return;
+        const services = services_ref.* orelse return;
+        services.wake() catch {};
+    }
 };
+
+/// Disarm one channel header's wake binding: after this returns, no
+/// post is inside the host wake and none can start one (the call runs
+/// under the mutex this takes — see `ChannelWake`). Called by every
+/// close path AFTER `open` cleared under the staging mutex; the two
+/// locks are taken strictly one after the other, never nested.
+fn disarmChannelWake(shared: *ChannelShared) void {
+    const wake = &shared.wake;
+    wake.mutex.lock();
+    defer wake.mutex.unlock();
+    wake.generation = 0;
+    wake.services = null;
+}
 
 /// Base platform timer id for fx timers: slot N arms the platform timer
 /// `effect_timer_platform_id_base + N`. Lives in the framework-reserved
@@ -2718,6 +2799,12 @@ pub fn Effects(comptime Msg: type) type {
                     shared.staging = null;
                     shared.owner = null;
                     shared.mutex.unlock();
+                    // The wake disarm is the abandon fence: it takes
+                    // the mutex the host call runs under, so after it
+                    // returns no posting thread is inside `wake_fn`
+                    // and none can re-enter — this struct (and the
+                    // services binding) may die safely.
+                    disarmChannelWake(shared);
                     if (staging) |s| process_allocator.destroy(s);
                 }
                 channel_slot.* = .{};
@@ -3778,9 +3865,17 @@ pub fn Effects(comptime Msg: type) type {
             shared.owner = .{
                 .seq = &self.channel_seq,
                 .pending = &self.channel_pending_count,
-                .services = &self.services,
             };
             shared.mutex.unlock();
+            // Arm the wake binding for this occupancy (after the
+            // staging mutex dropped — the locks never nest). No handle
+            // of THIS generation exists before we return, so nothing
+            // races the arm; a stale generation taking the wake mutex
+            // fails its generation gate.
+            shared.wake.mutex.lock();
+            shared.wake.generation = generation;
+            shared.wake.services = &self.services;
+            shared.wake.mutex.unlock();
             return .{ .shared = shared, .generation = generation };
         }
 
@@ -3817,6 +3912,10 @@ pub fn Effects(comptime Msg: type) type {
                 shared.mutex.lock();
                 shared.open = false;
                 shared.mutex.unlock();
+                // Disarm AFTER `open` cleared: a post already past the
+                // open check parks on the wake mutex the disarm takes,
+                // so no host call outlives this line (see `ChannelWake`).
+                disarmChannelWake(shared);
             }
             // Replay mode: the recorded session already journaled this
             // channel's `.closed` terminal, and feeding that record is
@@ -6246,6 +6345,10 @@ pub fn Effects(comptime Msg: type) type {
                 shared.staging = null;
                 shared.owner = null;
                 shared.mutex.unlock();
+                // Usually a no-op (closeChannel already disarmed), but
+                // fed terminals can retire a channel that never closed
+                // through the verb — disarm uniformly (idempotent).
+                disarmChannelWake(shared);
                 if (staging) |s| process_allocator.destroy(s);
             }
             slot.state = .idle;

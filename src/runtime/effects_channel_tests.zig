@@ -12,6 +12,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const platform_mod = @import("../platform/root.zig");
 const journal = @import("session_journal.zig");
 const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
@@ -341,6 +342,62 @@ test "under replay a duplicate open still rejects symmetrically against the park
     try testing.expectEqual(@as(u64, 23), rejected.event.key);
     // The parked first occupancy is untouched by the refusal.
     try testing.expect(fx.channelHandle(23) != null);
+}
+
+// ------------------------------------------- lock-order invariant gate
+
+/// A test-injected host wake hook standing where a real platform's
+/// cross-thread nudge runs (macOS: main-queue dispatch, GTK:
+/// `g_idle_add`, Win32: `PostMessage`). It PROBES the poster's lock
+/// state: the staging mutex must never be held while the host hook
+/// runs — the lock-order invariant documented at `ChannelShared.mutex`.
+/// A hook observing the mutex held is the deadlock precursor this gate
+/// exists to catch: drain, close, and teardown contend on that mutex,
+/// so a wake path that holds it across the host call stalls the loop
+/// behind a slow hook and deadlocks outright if the hook ever
+/// synchronizes against a loop thread blocked on the same mutex.
+const WakeProbe = struct {
+    var shared_under_probe: ?*effects_mod.ChannelShared = null;
+    var staging_mutex_free_during_wake: ?bool = null;
+    var wake_calls: usize = 0;
+
+    fn reset() void {
+        shared_under_probe = null;
+        staging_mutex_free_during_wake = null;
+        wake_calls = 0;
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        wake_calls += 1;
+        const shared = shared_under_probe orelse return;
+        const free = shared.mutex.inner.tryLock();
+        if (free) shared.mutex.inner.unlock();
+        staging_mutex_free_during_wake = free;
+    }
+};
+
+test "the staging mutex is never held across the host wake hook" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeProbe.reset();
+    defer WakeProbe.reset();
+
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeProbe.wake };
+    fx.services = &services;
+
+    const handle = fx.openChannel(.{ .key = 51, .on_event = DirectFx.channelMsg(.event) });
+    WakeProbe.shared_under_probe = handle.shared;
+
+    try testing.expectEqual(PostResult.accepted, handle.post("probe"));
+    try testing.expect(WakeProbe.wake_calls >= 1);
+    try testing.expectEqual(@as(?bool, true), WakeProbe.staging_mutex_free_during_wake);
+
+    WakeProbe.shared_under_probe = null;
+    fx.closeChannel(51);
+    _ = try expectData(&fx, 51, "probe");
+    _ = fx.takeMsg();
 }
 
 // ---------------------------------------------- record/replay acceptance
