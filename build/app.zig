@@ -961,6 +961,18 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 app_mod.addRPath(.{ .cwd_relative = "$ORIGIN" });
             },
         }
+        // GPU-surface Vulkan presenter: direct scanout via a wl_subsurface
+        // (Wayland) or child window (X11), the Metal analog on Linux. Falls
+        // back to the GSK path in gtk_host.c when no Vulkan surface applies.
+        app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/native_sdk_vk.c"), .flags = &.{} });
+        // Cairo packet renderer (opt-in SCHEMIFY_CAIRO=1): the Core Graphics
+        // analog. cairo/pango headers + libs ride the gtk4 pkg-config link above.
+        app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/native_sdk_cairo.c"), .flags = &.{} });
+        app_mod.linkSystemLibrary("vulkan", .{});
+        app_mod.linkSystemLibrary("freetype2", .{}); // native_sdk_cairo.c text (cairo-ft + FT_*)
+        app_mod.linkSystemLibrary("shaderc", .{}); // pkg-config → libshaderc_shared + headers
+        app_mod.linkSystemLibrary("wayland-client", .{});
+        app_mod.linkSystemLibrary("x11", .{});
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {

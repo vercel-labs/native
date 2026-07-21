@@ -458,6 +458,9 @@ pub const textSpanFontId = text_spans.textSpanFontId;
 pub const textSpanBounds = text_spans.textSpanBounds;
 pub const textSpanRunBounds = text_spans.textSpanRunBounds;
 pub const textSpansEqual = text_spans.textSpansEqual;
+/// Content equality for one canvas command (follows slices, so it's arena-
+/// independent); used to skip a resubmitted-but-unchanged display list.
+pub const commandsEqual = @import("equality.zig").commandsEqual;
 pub const max_text_spans_per_paragraph = text_spans.max_text_spans_per_paragraph;
 pub const max_text_span_runs_per_paragraph = text_spans.max_text_span_runs_per_paragraph;
 pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per_paragraph;

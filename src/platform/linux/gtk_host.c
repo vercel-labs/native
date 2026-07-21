@@ -1,4 +1,5 @@
 #include "gtk_host.h"
+#include "native_sdk_vk.h"
 
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
@@ -169,6 +170,11 @@ typedef struct native_sdk_gtk_native_view {
     int gpu_buf_width;
     int gpu_buf_height;
     int gpu_buf_stride;
+    /* Vulkan presenter for this gpu_surface (Wayland subsurface / X11 child
+     * window). NULL when Vulkan is unavailable — the Cairo pixel path below
+     * owns the glass. vk_tried gates the one-shot lazy bring-up. */
+    native_sdk_vk_view_t *vk;
+    int vk_tried;
     /* Pre-first-present placeholder pump ONLY: a repeating timeout that
      * arms the scheduler below until the first present lands, then
      * removes itself (the macOS host's placeholder display timer, in
@@ -347,6 +353,10 @@ struct native_sdk_gtk_host {
     int did_shutdown;
     int app_active;
     guint frame_timer;
+    /* Host-global Vulkan objects (device/queue/pipeline), created lazily on
+     * the first gpu_surface view. NULL when Vulkan is unavailable. */
+    native_sdk_vk_context_t *vk;
+    int vk_init;
     /* The quit verb's queued stop turn (native_sdk_gtk_stop), tracked
      * like frame_timer so it can be coalesced while pending and
      * removed at destroy — a bare g_idle_add would leave a second stop
@@ -1022,6 +1032,7 @@ static void native_sdk_gpu_surface_emit_frame(native_sdk_gtk_native_view_t *view
         .frame_interval_ns = NATIVE_SDK_GTK_GPU_FRAME_INTERVAL_NS,
         .nonblank = view->gpu_nonblank,
         .sample_color = view->gpu_sample_color,
+        .gpu_backend = view->vk ? (int)native_sdk_vk_view_backend(view->vk) : 0,
     });
 }
 
@@ -1103,6 +1114,8 @@ static gboolean native_sdk_gpu_surface_placeholder_tick(gpointer data) {
 /* GtkDrawingArea resize: report the new logical size immediately (the
  * demand-driven scheduler has no poll to catch it) so the runtime can
  * re-render at the new geometry; its present re-arms the scheduler. */
+static void native_sdk_gpu_surface_child_origin(native_sdk_gtk_native_view_t *view, int *out_x, int *out_y);
+
 static void native_sdk_gpu_surface_resized(GtkDrawingArea *area, int width, int height, gpointer data) {
     (void)area;
     (void)width;
@@ -1113,6 +1126,11 @@ static void native_sdk_gpu_surface_resized(GtkDrawingArea *area, int width, int 
     const double logical_height = native_sdk_gpu_surface_height(view);
     if (logical_width <= 0 || logical_height <= 0) return;
     const double scale = (double)gtk_widget_get_scale_factor(view->widget);
+    if (view->vk) {
+        int origin_x, origin_y;
+        native_sdk_gpu_surface_child_origin(view, &origin_x, &origin_y);
+        native_sdk_vk_view_set_geometry(view->vk, origin_x, origin_y, (int)logical_width, (int)logical_height, scale);
+    }
     if (native_sdk_gpu_surface_sync_geometry(view, logical_width, logical_height, scale)) {
         gtk_widget_queue_draw(view->widget);
     }
@@ -1431,6 +1449,11 @@ static void native_sdk_teardown_gpu_surface_view(native_sdk_gtk_native_view_t *v
         view->gpu_im_context = NULL;
     }
     native_sdk_gpu_surface_clear_preedit(view);
+    if (view->vk) {
+        native_sdk_vk_view_destroy(view->vk);
+        view->vk = NULL;
+    }
+    view->vk_tried = 0;
     free(view->gpu_argb);
     view->gpu_argb = NULL;
     view->gpu_buf_width = 0;
@@ -2865,6 +2888,12 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_clear_window(&host->windows[i]);
     }
+    /* Views (and their Vulkan renderers) are gone with the windows above; the
+     * host-global Vulkan context outlived them and is torn down last. */
+    if (host->vk) {
+        native_sdk_vk_context_destroy(host->vk);
+        host->vk = NULL;
+    }
     g_object_unref(host->app);
     free(host->app_name);
     free(host->window_title);
@@ -3657,6 +3686,65 @@ int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64
     return 1;
 }
 
+/* Bring up the Vulkan presenter for a gpu_surface view on its first present
+ * (by which point the drawing area is realized and has a GdkSurface). Returns
+ * the view's renderer, or NULL to keep the Cairo path. One-shot: a failed
+ * attempt never retries. `px_w`/`px_h` are the incoming device-pixel frame
+ * dimensions used to size the initial swapchain. */
+/* The gpu_surface widget's origin in the TOPLEVEL surface's coordinate system,
+ * where the Vulkan child surface must sit: the widget's position in the content
+ * plus the native's surface transform. That transform is GTK's client-side-
+ * decoration shadow margin — nonzero on Wayland (the wl_surface origin is the
+ * shadow's top-left, the content sits inset), zero on X11 with server-side
+ * decorations. Omitting it shifts the canvas up into the CSD margin on Wayland
+ * (the top of the chrome clips off-window); X11 was unaffected. */
+static void native_sdk_gpu_surface_child_origin(native_sdk_gtk_native_view_t *view, int *out_x, int *out_y) {
+    *out_x = (int)view->x;
+    *out_y = (int)view->y;
+    GtkNative *native = gtk_widget_get_native(view->widget);
+    if (!native) return;
+    double tx = 0, ty = 0;
+    gtk_native_get_surface_transform(native, &tx, &ty);
+    graphene_point_t wp;
+    if (gtk_widget_compute_point(view->widget, GTK_WIDGET(native), &GRAPHENE_POINT_INIT(0.0f, 0.0f), &wp)) {
+        *out_x = (int)(wp.x + tx);
+        *out_y = (int)(wp.y + ty);
+    } else {
+        *out_x = (int)tx;
+        *out_y = (int)ty;
+    }
+}
+
+static native_sdk_vk_view_t *native_sdk_gpu_surface_ensure_vk(native_sdk_gtk_native_view_t *view, uint32_t px_w, uint32_t px_h) {
+    if (view->vk) return view->vk;
+    if (view->vk_tried) return NULL;
+    view->vk_tried = 1;
+
+    native_sdk_gtk_host_t *host = view->window ? view->window->host : NULL;
+    if (!host) return NULL;
+    if (!host->vk_init) {
+        host->vk_init = 1;
+        host->vk = native_sdk_vk_context_create();
+    }
+    if (!host->vk) return NULL;
+
+    GtkNative *native = gtk_widget_get_native(view->widget);
+    GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
+    if (!surface) {
+        view->vk_tried = 0; /* not realized yet — retry on a later present */
+        return NULL;
+    }
+
+    double scale = (double)gtk_widget_get_scale_factor(view->widget);
+    if (scale < 1.0) scale = 1.0;
+    int lw = (int)(px_w / scale + 0.5);
+    int lh = (int)(px_h / scale + 0.5);
+    int origin_x, origin_y;
+    native_sdk_gpu_surface_child_origin(view, &origin_x, &origin_y);
+    view->vk = native_sdk_vk_view_create(host->vk, surface, origin_x, origin_y, lw > 0 ? lw : 1, lh > 0 ? lh : 1, scale);
+    return view->vk;
+}
+
 int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
     (void)scale;
     (void)has_dirty_rect;
@@ -3672,6 +3760,22 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
     if (!rgba8 || width == 0 || height == 0) return 0;
     if (width > INT_MAX || height > INT_MAX) return 0;
     if (rgba8_len != width * height * 4) return 0;
+
+    /* Vulkan present path: upload the straight-alpha RGBA8 to the swapchain and
+     * scan out directly, skipping the Cairo/GSK glass entirely (the Metal
+     * analog). The reference renderer already produced the pixels; we only
+     * present them. Falls through to Cairo when no Vulkan surface applies. */
+    if (native_sdk_gpu_surface_ensure_vk(view, (uint32_t)width, (uint32_t)height)) {
+        native_sdk_vk_view_present_pixels(view->vk, rgba8, (uint32_t)width, (uint32_t)height);
+        const size_t si = ((height / 2) * width + width / 2) * 4;
+        if (rgba8[si] != 0 || rgba8[si + 1] != 0 || rgba8[si + 2] != 0) {
+            view->gpu_nonblank = 1;
+            view->gpu_sample_color = ((uint32_t)rgba8[si + 3] << 24) | ((uint32_t)rgba8[si] << 16) | ((uint32_t)rgba8[si + 1] << 8) | (uint32_t)rgba8[si + 2];
+        }
+        view->gpu_presented = 1;
+        native_sdk_gpu_surface_schedule_frame_emission(view);
+        return 1;
+    }
 
     const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, (int)width);
     if (stride <= 0) return 0;

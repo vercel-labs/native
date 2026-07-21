@@ -313,17 +313,41 @@ pub const ReferenceRenderSurface = struct {
 
     fn fillRect(self: ReferenceRenderSurface, command: RenderCommand, value: FillRect, draw_bounds: geometry.RectF) Error!void {
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
-        // Render memo: a large translucent fill (the modal scrim's wash
-        // covers the whole viewport) blends every pixel; it reads only
-        // the pixel it writes, so no apron rows join the key.
+        // Render memo: a translucent full-viewport fill blends every pixel but
+        // reads only the pixel it writes, so no apron rows join the key; a no-op
+        // when no memo is attached.
         const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(1, command, value));
         if (self.memoReplay(probe, pixel_rect)) return;
-        var y = pixel_rect.y;
-        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
-            var x = pixel_rect.x;
-            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                const point = referencePixelCenter(x, y);
-                self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+        // Opaque-solid fast path: an opaque solid fill writes identical RGBA
+        // bytes to every pixel (alpha 255, no dependence on the destination).
+        // The whole-canvas background fill is this shape and dominated the CPU
+        // raster, so fill one row and memcpy it down. Gradients and translucent
+        // fills keep the per-pixel blend below.
+        if (command.opacity >= 1.0 and value.fill == .color and value.fill.color.a >= 1.0) {
+            const color = value.fill.color;
+            const quad = [4]u8{
+                colorChannelToByte(color.r),
+                colorChannelToByte(color.g),
+                colorChannelToByte(color.b),
+                255,
+            };
+            const row_bytes = pixel_rect.width * 4;
+            const first = (pixel_rect.y * self.width + pixel_rect.x) * 4;
+            var x: usize = 0;
+            while (x < pixel_rect.width) : (x += 1) self.pixels[first + x * 4 ..][0..4].* = quad;
+            var y = pixel_rect.y + 1;
+            while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+                const dst = (y * self.width + pixel_rect.x) * 4;
+                @memcpy(self.pixels[dst..][0..row_bytes], self.pixels[first..][0..row_bytes]);
+            }
+        } else {
+            var y = pixel_rect.y;
+            while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+                var x = pixel_rect.x;
+                while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                    const point = referencePixelCenter(x, y);
+                    self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
+                }
             }
         }
         self.memoStore(probe, pixel_rect);
@@ -934,6 +958,21 @@ pub const ReferenceRenderSurface = struct {
     /// `CoverageBlend`).
     fn blendPixelCoverage(self: ReferenceRenderSurface, x: usize, y: usize, color: Color, coverage: f32, opacity: f32, blend: CoverageBlend) void {
         const index = (y * self.width + x) * 4;
+        // Opaque, fully-covered fast path: `blendRgba8Coverage` with
+        // coverage>=1, an opaque source, and opacity>=1 folds to the source's
+        // straight bytes with alpha 255 — the destination is fully replaced,
+        // so the read + float blend are wasted. This is the interior of every
+        // opaque rounded-rect / path / glyph fill, where only the thin
+        // anti-aliased edge band carries fractional coverage. The edge band
+        // and translucent / AA-in-linear cases keep the general path below.
+        // Byte-identical to the general result.
+        if (coverage >= 1.0 and opacity >= 1.0 and color.a >= 1.0) {
+            self.pixels[index + 0] = colorChannelToByte(color.r);
+            self.pixels[index + 1] = colorChannelToByte(color.g);
+            self.pixels[index + 2] = colorChannelToByte(color.b);
+            self.pixels[index + 3] = 255;
+            return;
+        }
         const dst = [4]u8{
             self.pixels[index + 0],
             self.pixels[index + 1],
@@ -1654,6 +1693,22 @@ fn rgba8ToColor(pixel: [4]u8) Color {
 
 fn blendRgba8(dst: [4]u8, src: Color, opacity: f32) [4]u8 {
     const src_a = std.math.clamp(src.a * std.math.clamp(opacity, 0, 1), 0, 1);
+    // Opaque-destination fast path: when the destination pixel is opaque,
+    // source-over's `out_a` is exactly 1, so the three per-channel divides
+    // collapse to a plain lerp. This is the dominant case for the whole
+    // renderer — nearly everything composites onto an opaque background or an
+    // opaque parent fill (chrome, schematic, text, any translucent element) —
+    // and it otherwise pays three f32 divides per pixel. Byte-identical to
+    // the general path when dst_a == 1.
+    if (dst[3] == 255) {
+        const inv = 1 - src_a;
+        return .{
+            colorChannelToByte(std.math.clamp(src.r, 0, 1) * src_a + (@as(f32, @floatFromInt(dst[0])) / 255.0) * inv),
+            colorChannelToByte(std.math.clamp(src.g, 0, 1) * src_a + (@as(f32, @floatFromInt(dst[1])) / 255.0) * inv),
+            colorChannelToByte(std.math.clamp(src.b, 0, 1) * src_a + (@as(f32, @floatFromInt(dst[2])) / 255.0) * inv),
+            255,
+        };
+    }
     const dst_a = @as(f32, @floatFromInt(dst[3])) / 255.0;
     const out_a = src_a + dst_a * (1 - src_a);
     if (out_a <= 0) return .{ 0, 0, 0, 0 };

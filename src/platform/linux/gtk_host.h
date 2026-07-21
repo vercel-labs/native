@@ -61,6 +61,10 @@ typedef struct {
     uint64_t frame_interval_ns;
     int nonblank;
     uint32_t sample_color;
+    /* GPU-surface frame events: which present path produced this frame.
+     * 0 = software (GSK/pixel), 1 = Vulkan/Wayland, 2 = Vulkan/X11. Maps to
+     * platform.GpuSurfaceBackend in root.zig. */
+    int gpu_backend;
     int input_kind;
     int button;
     double delta_x;
