@@ -2294,6 +2294,14 @@ pub fn Effects(comptime Msg: type) type {
             /// `.rejected` names the parked channel-table slot it
             /// retires at delivery (see `PendingChannel`).
             channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool, retire_slot: ?usize = null, retire_generation: u64 = 0 },
+            /// A fully formed Msg staged on the loop thread by a
+            /// caller-side validator (`stageLoopMsg` — the TS bridge's
+            /// synchronous refusals). Always regenerating by contract:
+            /// never journaled, re-staged identically by the caller's
+            /// replayed dispatch. Never in the lossy ring — staged in
+            /// the non-lossy `pending_staged` (see `PendingStaged`)
+            /// and takes this union shape only at drain time.
+            staged: Msg,
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -2321,6 +2329,10 @@ pub fn Effects(comptime Msg: type) type {
                     // `pending_channels` for the same reason —
                     // exactly one `.rejected` per refused open.
                     .channel => unreachable,
+                    // Staged Msgs live in the non-lossy
+                    // `pending_staged` — one per caller-side refusal,
+                    // and no counter to fold a loss into.
+                    .staged => unreachable,
                 }
             }
 
@@ -2336,6 +2348,7 @@ pub fn Effects(comptime Msg: type) type {
                     // Never in the ring; see `addDropped`.
                     .image => unreachable,
                     .channel => unreachable,
+                    .staged => unreachable,
                 };
             }
         };
@@ -2386,6 +2399,21 @@ pub fn Effects(comptime Msg: type) type {
             /// Generation gate for `retire_slot`, the fed-terminal
             /// discipline.
             retire_generation: u64 = 0,
+        };
+
+        /// One caller-staged loop-side Msg awaiting drain (see
+        /// `stageLoopMsg`) — non-lossy like `PendingImage` and
+        /// `PendingChannel`, and for the same contract: each staged
+        /// entry is some refused dispatch's ONLY answer, unbounded per
+        /// dispatch (a `Cmd.batch` of N refused records stages N), and
+        /// there is no drop counter that could make an eviction
+        /// visible. Shares the `pending_seq` stamp so the drain merges
+        /// all the loop-side stages in enqueue order — staging at
+        /// refusal time is what puts a caller-side refusal at its
+        /// command-stream position among the engine's own refusals.
+        const PendingStaged = struct {
+            seq: u64,
+            msg: Msg,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -2920,6 +2948,15 @@ pub fn Effects(comptime Msg: type) type {
         pending_channel_spill: []PendingChannel = &.{},
         pending_channel_head: usize = 0,
         pending_channel_len: usize = 0,
+        /// Loop-thread-only caller-staged Msg stage (see
+        /// `PendingStaged` for the non-lossy contract) — the image
+        /// stage's storage discipline exactly: inline until a burst
+        /// outgrows it, geometric spill after, freed when it drains
+        /// empty and at `deinit`.
+        pending_staged: [max_effect_pending_images_inline]PendingStaged = undefined,
+        pending_staged_spill: []PendingStaged = &.{},
+        pending_staged_head: usize = 0,
+        pending_staged_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -3271,6 +3308,13 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_channel_head = 0;
             self.pending_channel_len = 0;
+            // And undrained caller-staged Msgs.
+            if (self.pending_staged_spill.len > 0) {
+                self.allocator.free(self.pending_staged_spill);
+                self.pending_staged_spill = &.{};
+            }
+            self.pending_staged_head = 0;
+            self.pending_staged_len = 0;
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -5091,6 +5135,7 @@ pub fn Effects(comptime Msg: type) type {
             return self.pending_exit_len > 0 or
                 self.pending_image_len > 0 or
                 self.pending_channel_len > 0 or
+                self.pending_staged_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.queue_count.load(.seq_cst) > 0;
         }
@@ -5344,6 +5389,16 @@ pub fn Effects(comptime Msg: type) type {
                             });
                             const channel_fn = entry.channel_fn orelse continue;
                             return channel_fn(entry.event);
+                        },
+                        .staged => |msg| {
+                            // Deliberately NO journal record: a
+                            // caller-staged Msg is regenerating by
+                            // contract (`stageLoopMsg`) — the replayed
+                            // dispatch that staged it re-runs and
+                            // stages the identical Msg at the
+                            // identical pending position, so a
+                            // journaled record would double-deliver.
+                            return msg;
                         },
                     }
                 }
@@ -7049,6 +7104,76 @@ pub fn Effects(comptime Msg: type) type {
             self.wakeHost();
         }
 
+        /// Stage a fully formed Msg for the next drain, at THIS
+        /// moment's position in the loop-side pending order — the seam
+        /// a caller-side validator (the TS bridge) uses so its own
+        /// synchronous refusals deliver in one stream with the
+        /// engine's: both are stamped from the shared `pending_seq` at
+        /// refusal time, so a `Cmd.batch`'s rejections dispatch in
+        /// command order no matter which layer refused each record.
+        /// Loop-thread only, and two contracts ride on the caller:
+        /// the Msg must be SELF-CONTAINED (no drain-scratch or
+        /// frame-arena references — it is held until the next drain),
+        /// and it must be DETERMINISTICALLY RE-DERIVED by the caller's
+        /// replayed dispatch (the regenerating class: nothing is
+        /// journaled here, so under session replay the re-run update
+        /// must stage the identical Msg at the identical position —
+        /// exactly what a validation refusal against caller-side
+        /// tables does).
+        pub fn stageLoopMsg(self: *Self, msg: Msg) void {
+            self.stagePendingStaged(.{
+                .seq = self.nextPendingSeq(),
+                .msg = msg,
+            });
+        }
+
+        /// The caller-staged Msg stage's current backing storage —
+        /// `pendingImageStorage`'s twin.
+        fn pendingStagedStorage(self: *Self) []PendingStaged {
+            if (self.pending_staged_spill.len > 0) return self.pending_staged_spill;
+            return &self.pending_staged;
+        }
+
+        /// Stage one caller-built Msg for the next drain — never
+        /// dropping one (`stagePendingImage`'s discipline and growth
+        /// story: each staged entry is one refused dispatch's only
+        /// answer, loud refusal on allocation failure for the same
+        /// stranded-issuer reason).
+        fn stagePendingStaged(self: *Self, entry: PendingStaged) void {
+            const storage = self.pendingStagedStorage();
+            if (self.pending_staged_len == storage.len) {
+                const grown = self.allocator.alloc(PendingStaged, storage.len * 2) catch
+                    @panic("effects: out of memory staging a loop-side Msg - each staged entry is one refused dispatch's only answer and must never be dropped");
+                for (grown[0..self.pending_staged_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_staged_head + index) % storage.len];
+                }
+                if (self.pending_staged_spill.len > 0) self.allocator.free(self.pending_staged_spill);
+                self.pending_staged_spill = grown;
+                self.pending_staged_head = 0;
+            }
+            const active = self.pendingStagedStorage();
+            active[(self.pending_staged_head + self.pending_staged_len) % active.len] = entry;
+            self.pending_staged_len += 1;
+            self.wakeHost();
+        }
+
+        /// Pop the staged-Msg stage's head — `takePendingImage`'s
+        /// twin, including the drained-empty spill release.
+        fn takePendingStaged(self: *Self) PendingStaged {
+            const storage = self.pendingStagedStorage();
+            const entry = storage[self.pending_staged_head];
+            self.pending_staged_head = (self.pending_staged_head + 1) % storage.len;
+            self.pending_staged_len -= 1;
+            if (self.pending_staged_len == 0) {
+                self.pending_staged_head = 0;
+                if (self.pending_staged_spill.len > 0) {
+                    self.allocator.free(self.pending_staged_spill);
+                    self.pending_staged_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
         /// Pop the channel stage's head — `takePendingImage`'s twin,
         /// including the drained-empty spill release.
         fn takePendingChannel(self: *Self) PendingChannel {
@@ -7067,13 +7192,14 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Take the next loop-side pending terminal in enqueue order,
-        /// merging the ring, the image stage, and the channel stage by
-        /// their shared stamp so splitting the storage never reordered
-        /// delivery. Entries stamped at or past `before` stay staged:
-        /// they were produced during the current drain pass and belong
-        /// to the next one (the `DrainBoundary` causality contract).
-        /// All three structures are FIFO over the monotonic stamp, so
-        /// refusing the merged head refuses everything younger too.
+        /// merging the ring, the image stage, the channel stage, and
+        /// the caller-staged Msg stage by their shared stamp so
+        /// splitting the storage never reordered delivery. Entries
+        /// stamped at or past `before` stay staged: they were produced
+        /// during the current drain pass and belong to the next one
+        /// (the `DrainBoundary` causality contract). All four
+        /// structures are FIFO over the monotonic stamp, so refusing
+        /// the merged head refuses everything younger too.
         fn takePendingMsg(self: *Self, before: u64) ?PendingMsg {
             const no_seq = std.math.maxInt(u64);
             const ring_seq: u64 = if (self.pending_exit_len > 0)
@@ -7088,8 +7214,15 @@ pub fn Effects(comptime Msg: type) type {
                 self.pendingChannelStorage()[self.pending_channel_head].seq
             else
                 no_seq;
-            const min_seq = @min(ring_seq, @min(image_seq, channel_seq_head));
+            const staged_seq: u64 = if (self.pending_staged_len > 0)
+                self.pendingStagedStorage()[self.pending_staged_head].seq
+            else
+                no_seq;
+            const min_seq = @min(@min(ring_seq, staged_seq), @min(image_seq, channel_seq_head));
             if (min_seq == no_seq or min_seq >= before) return null;
+            if (min_seq == staged_seq) {
+                return .{ .staged = self.takePendingStaged().msg };
+            }
             if (min_seq == image_seq) {
                 const staged = self.takePendingImage();
                 return .{ .image = .{

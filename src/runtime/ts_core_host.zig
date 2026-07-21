@@ -145,7 +145,8 @@
 //!                  duplicate LIVE id rejects the new load (the spawn
 //!                  discipline: one load per id, never replaced
 //!                  implicitly), dispatching state "rejected" at the
-//!                  post-cycle boundary with the refused id echoed; ids
+//!                  next drain, in command-stream order with the
+//!                  engine's own refusals, the refused id echoed; ids
 //!                  the wire cannot carry exactly (0, non-integers,
 //!                  2^53 and past — the SDK contract is BELOW 2^53)
 //!                  reject the same way echoing id 0, and so does a
@@ -188,8 +189,9 @@
 //!                  the TS tier opens, closes, and receives. A
 //!                  duplicate LIVE key rejects the new open (one
 //!                  channel per key, never replaced implicitly),
-//!                  dispatching state "rejected" at the post-cycle
-//!                  boundary with the refused key echoed; keys the wire
+//!                  dispatching state "rejected" at the next drain, in
+//!                  command-stream order with the engine's own
+//!                  refusals, the refused key echoed; keys the wire
 //!                  cannot carry exactly reject the same way echoing
 //!                  key 0, and so does a full bridge table.
 //!   channel_close-> `fx.closeChannel(key)` on the live channel under
@@ -235,12 +237,12 @@
 //! superseded entry dropped and cancelling its engine call; the
 //! engine's `.cancelled` terminal retires the entry and its Msg is
 //! swallowed before dispatch. The ONE exception is a live `Cmd.spawn`
-//! key: a duplicate REJECTS the new spawn — its err arm dispatches with
-//! "rejected" right after the issuing cycle (the same post-cycle
-//! boundary `now` dispatches use) — because a running subprocess is
-//! never killed implicitly; cancel it first. And spawn's explicit
-//! cancel stays loud (err arm "cancelled"), because killing a process
-//! is an observable event.
+//! key: a duplicate REJECTS the new spawn — its err arm dispatches
+//! with "rejected" on the next drain, at the refusal's command-stream
+//! position (see the rejection-ordering paragraph below) — because a
+//! running subprocess is never killed implicitly; cancel it first. And
+//! spawn's explicit cancel stays loud (err arm "cancelled"), because
+//! killing a process is an observable event.
 //!   Sub timer   -> `fx.startTimer` (repeating) with a fixed slot table
 //!                  reconciled by wire key: a new key arms the first
 //!                  free slot (slot order — deterministic, never hash
@@ -256,10 +258,18 @@
 //! `.effects_wake` and presented-frame drains), exactly like Zig-core
 //! fx results. The bridge adds no scheduler of its own; the one
 //! deliberate exception is `now` (above), which is synchronous the way
-//! `fx.wallMs` is. Bridge-refused rejections (spawn/image/channel, the
-//! post-cycle boundary above) dispatch in COMMAND-STREAM order across
-//! families — `Cmd.batch`'s performed-in-order contract extends to
-//! refusals, so one stage carries every family (see `Reject`).
+//! `fx.wallMs` is. Bridge-refused rejections (spawn/image/channel)
+//! stage into the ENGINE's loop-side pending order at refusal time
+//! (`Effects.stageLoopMsg`) and dispatch at the next drain — the same
+//! delivery moment as the engine's own refusals, so a `Cmd.batch`
+//! whose records are refused by DIFFERENT layers (the bridge's table
+//! validation, the engine's cross-family key gate) still dispatches
+//! its rejections in COMMAND-STREAM order: one seq-ordered stream is
+//! the ordering authority for every rejection, `Cmd.batch`'s
+//! performed-in-order contract extended to refusals. A second
+//! delivery moment is exactly how families fall out of stream order,
+//! so a new refusing family joins by staging, never by dispatching
+//! from its own boundary.
 //!
 //! Result payload lifetime: the engine's result bytes are drain
 //! scratch, but a routed result's bytes become a Msg payload the core
@@ -506,123 +516,25 @@ pub fn TsCoreHost(comptime core: type) type {
         /// after the issuing cycle's frame reset.
         const PendingNow = struct { tag: u8, ms: i64 };
 
-        /// The inline (allocation-free) capacity of one cycle's
-        /// rejection stage — everyday command values never carry more
-        /// refused records than the effect table holds slots.
-        const max_rejects_per_cmd: usize = runtime_effects.max_effects;
-
-        /// One dispatch the bridge itself refused during the command
-        /// walk — a spawn under a live wire key (the one reject in the
-        /// keyed-effect discipline), an image load or channel open
-        /// under a duplicate live id/key, an unrepresentable one, or a
-        /// full bridge table — delivered as the record's err/event arm
-        /// with "rejected" after the issuing cycle's frame reset, at
-        /// the same boundary `now` dispatches use. ONE stage carries
-        /// every family so a `Cmd.batch`'s rejections dispatch in
-        /// command-stream order (the SDK's performed-in-order
-        /// contract), interleaved exactly as the records arrived. `id`
-        /// echoes the requested ImageId / channel key so concurrent
-        /// rejections stay distinguishable — 0 when the wire value is
-        /// not an exactly-carried positive integer (there is no honest
-        /// integer to echo for one), and always 0 for spawn, whose err
-        /// arm carries reason bytes, not an echo.
-        const Reject = struct {
-            kind: Kind,
-            tag: u8,
-            id: u64,
-
-            /// Every family the bridge refuses at dispatch time. A new
-            /// family joins the one delivery order by adding a member
-            /// here and its Msg-constructor arm in `finishCycle`'s
-            /// rejection drain — one enum member plus one switch arm,
-            /// never a separate buffer (a second buffer is exactly how
-            /// families fall out of stream order).
-            const Kind = enum { spawn, image, channel };
-        };
-
-        /// Every image_load record occupies at least this many wire
-        /// bytes ([op][id f64][event_tag], three empty long-bytes
-        /// fields, [expected f64]) — the spill bound needs no second
-        /// record parser to stay in sync with.
-        const min_image_load_record_bytes: usize = 1 + 8 + 1 + 3 * 4 + 8;
-
-        /// The channel_open twin: [op][key f64][event_tag].
-        const min_channel_open_record_bytes: usize = 1 + 8 + 1;
-
-        /// The spawn twin: [op][key_len][line_tag][exit_tag][err_tag]
-        /// [mode][argc][stdin_len u32] with an empty key, no argv, and
-        /// empty stdin.
-        const min_spawn_record_bytes: usize = 1 + 1 + 5 + 4;
-
-        /// The smallest wire footprint across every family the stage
-        /// carries: a command value of L bytes holds at most
-        /// L / min_reject_record_bytes stageable records, so rejects
-        /// can never outnumber that quotient.
-        const min_reject_record_bytes: usize =
-            @min(min_spawn_record_bytes, @min(min_image_load_record_bytes, min_channel_open_record_bytes));
-
-        /// One cycle's staging for every bridge-refused dispatch, in
-        /// wire order across families. The count is the APP's to
-        /// choose — a `Cmd.batch` of N records against full tables must
-        /// yield N rejected results, never a crash — so the stage never
-        /// caps at a table size: the inline buffer covers everyday
-        /// command values without touching an allocator, and the first
-        /// overflow spills once into an engine-allocator block sized by
-        /// the wire's own arithmetic bound. Staging exists because the
-        /// command walk cannot dispatch (the wire bytes are frame-arena
-        /// resident, and a nested cycle's frame reset would free them
-        /// mid-walk): rejects are captured during the walk and
-        /// delivered after the issuing cycle's frame reset, at the same
-        /// boundary `now` dispatches use — stack and heap storage both
-        /// survive the nested delivery cycles that boundary runs.
-        const RejectStage = struct {
-            inline_buf: [max_rejects_per_cmd]Reject = undefined,
-            spill: []Reject = &.{},
-            count: usize = 0,
-            /// The arithmetic ceiling on this cycle's stageable record
-            /// count (and therefore on its rejects).
-            bound: usize,
-            allocator: std.mem.Allocator,
-
-            fn open(fx: *Fx, cmd_len: usize) RejectStage {
-                return .{
-                    .bound = cmd_len / min_reject_record_bytes,
-                    .allocator = fx.allocator,
-                };
-            }
-
-            fn push(self: *RejectStage, kind: Reject.Kind, tag: u8, id: u64) void {
-                if (self.count < self.inline_buf.len) {
-                    self.inline_buf[self.count] = .{ .kind = kind, .tag = tag, .id = id };
-                    self.count += 1;
-                    return;
-                }
-                if (self.spill.len == 0) {
-                    // First overflow: size by the wire bound once and
-                    // move the inline prefix over — one allocation for
-                    // the whole cycle, and only on cycles that earn it.
-                    self.spill = self.allocator.alloc(Reject, self.bound) catch
-                        @panic("ts core host: out of memory staging rejected records");
-                    @memcpy(self.spill[0..self.count], &self.inline_buf);
-                }
-                // The wire arithmetic sized the spill: rejects <=
-                // records <= bound, so the store below can never run
-                // past it.
-                std.debug.assert(self.count < self.spill.len);
-                self.spill[self.count] = .{ .kind = kind, .tag = tag, .id = id };
-                self.count += 1;
-            }
-
-            fn staged(self: *const RejectStage) []const Reject {
-                if (self.spill.len > 0) return self.spill[0..self.count];
-                return self.inline_buf[0..self.count];
-            }
-
-            fn close(self: *RejectStage) void {
-                if (self.spill.len > 0) self.allocator.free(self.spill);
-                self.spill = &.{};
-            }
-        };
+        // Bridge-refused dispatches (a spawn under a live wire key, an
+        // image load or channel open under a duplicate live id/key, an
+        // unrepresentable one, or a full bridge table) do NOT dispatch
+        // from the bridge's own boundary: each refusal builds its
+        // record's err/event arm Msg ("rejected", echoing the
+        // requested ImageId / channel key where the family has one —
+        // 0 when the wire value is not an exactly-carried positive
+        // integer, since there is no honest integer to echo) and
+        // stages it into the ENGINE's loop-side pending order at
+        // refusal time (`Effects.stageLoopMsg`). One seq-ordered
+        // stream is the ordering authority for every rejection, so a
+        // batch mixing bridge-refused and engine-refused records
+        // dispatches all of them in command-stream order at the next
+        // drain — see the result-ordering contract in the module doc.
+        // The staged Msgs are self-contained (static reason bytes and
+        // scalar echoes, never frame-arena slices) and regenerate
+        // deterministically under replay: the walk re-runs against the
+        // same table state, so record and replay stage identical
+        // sequences — `stageLoopMsg`'s two caller contracts.
 
         /// Install the core: reset the kernel and the bridge tables
         /// (deterministic re-init — the seam session replay relies on),
@@ -783,38 +695,21 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        /// The tail of every cycle: walk the command bytes, reconcile
+        /// The tail of every cycle: walk the command bytes (staging any
+        /// bridge-refused rejections into the engine's pending order as
+        /// it goes — see the rejection note above `init`), reconcile
         /// subscriptions against the NEW committed model, reset the
-        /// frame arena, then run the cycle's `now` dispatches and
-        /// bridge-refused rejections (each a full cycle of its own, on
-        /// the fresh frame — nows first, rejections after, in record
-        /// order; deterministic under record and replay alike).
+        /// frame arena, then run the cycle's `now` dispatches (each a
+        /// full cycle of its own, on the fresh frame, in record order;
+        /// deterministic under record and replay alike).
         fn finishCycle(fx: *Fx, cmd: []const u8, depth: usize) void {
             var nows: [max_nows_per_cmd]PendingNow = undefined;
             var now_count: usize = 0;
-            var rejects = RejectStage.open(fx, cmd.len);
-            defer rejects.close();
-            runCmd(fx, cmd, &nows, &now_count, &rejects);
+            runCmd(fx, cmd, &nows, &now_count);
             reconcileTimers(fx);
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
                 dispatchDepth(fx, msgFromTagNumber(pending.tag, @floatFromInt(pending.ms)), depth + 1);
-            }
-            // Bridge-refused dispatches (a spawn under a live wire key,
-            // an image load or channel open under a duplicate live
-            // id/key, an unrepresentable one, or a full bridge table):
-            // each record's err/event arm with "rejected", in
-            // command-stream order across families — `Cmd.batch`'s
-            // performed-in-order contract extends to refusals.
-            // Regenerated deterministically under replay: the walk
-            // re-runs against the same table state, so record and
-            // replay stage identical sequences.
-            for (rejects.staged()) |reject| {
-                dispatchDepth(fx, switch (reject.kind) {
-                    .spawn => msgFromTagBytes(reject.tag, "rejected"),
-                    .image => msgFromTagImage(reject.tag, .{ .id = reject.id, .outcome = .rejected }),
-                    .channel => msgFromTagChannel(reject.tag, .{ .key = reject.id, .kind = .rejected }),
-                }, depth + 1);
             }
         }
 
@@ -827,7 +722,6 @@ pub fn TsCoreHost(comptime core: type) type {
             cmd: []const u8,
             nows: *[max_nows_per_cmd]PendingNow,
             now_count: *usize,
-            rejects: *RejectStage,
         ) void {
             var at: usize = 0;
             while (at < cmd.len) {
@@ -984,7 +878,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
                         for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
                         const stdin = takeLongBytes(cmd, &at);
-                        issueSpawn(fx, .{ .key = key, .line_tag = line_tag, .exit_tag = exit_tag, .err_tag = err_tag }, mode == 1, argv[0..argc], stdin, rejects);
+                        issueSpawn(fx, .{ .key = key, .line_tag = line_tag, .exit_tag = exit_tag, .err_tag = err_tag }, mode == 1, argv[0..argc], stdin);
                     },
                     // audio_play [op][key_len][key][event_tag]
                     //            [path_len u32 LE][path][url_len u32 LE][url]
@@ -1046,7 +940,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const cache_path = takeLongBytes(cmd, &at);
                         const expected_bits = takeBytes(cmd, &at, 8);
                         const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
-                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected, rejects);
+                        issueImageLoad(fx, id_value, event_tag, image_path, url, cache_path, expected);
                     },
                     // image_cancel [op][id f64 LE]
                     0x13 => {
@@ -1065,7 +959,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const key_bits = takeBytes(cmd, &at, 8);
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         const event_tag = takeByte(cmd, &at);
-                        issueChannelOpen(fx, key_value, event_tag, rejects);
+                        issueChannelOpen(fx, key_value, event_tag);
                     },
                     // channel_close [op][key f64 LE]
                     0x16 => {
@@ -1205,10 +1099,9 @@ pub fn TsCoreHost(comptime core: type) type {
             collect: bool,
             argv: []const []const u8,
             stdin: []const u8,
-            rejects: *RejectStage,
         ) void {
             if (head.key.len > 0 and findStream(head.key) != null) {
-                rejects.push(.spawn, head.err_tag, 0);
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             }
             const index = freeStreamIndex() orelse
@@ -1333,8 +1226,9 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Issue one image load. The keyed-effect discipline here is
         /// the SPAWN exception, by the same reasoning: one load per id
         /// at a time, never replaced implicitly — a duplicate LIVE id
-        /// rejects the new load (event arm, state "rejected", at the
-        /// post-cycle boundary), and so do an id the f64 wire cannot
+        /// rejects the new load (event arm, state "rejected", staged
+        /// into the engine's pending order and delivered at the next
+        /// drain), and so do an id the f64 wire cannot
         /// honestly carry into the u64 registry (0, negatives,
         /// fractions, 2^53 and past) and a 17th in-flight load (the table
         /// mirrors the engine's max_effects slots, whose own exhaustion
@@ -1349,7 +1243,6 @@ pub fn TsCoreHost(comptime core: type) type {
             url: []const u8,
             cache_path: []const u8,
             expected: f64,
-            rejects: *RejectStage,
         ) void {
             // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
             // grid steps by 2, so 2^53 is the first value that aliases
@@ -1360,12 +1253,12 @@ pub fn TsCoreHost(comptime core: type) type {
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
             if (!representable) {
-                rejects.push(.image, event_tag, 0);
+                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }));
                 return;
             }
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) != null) {
-                rejects.push(.image, event_tag, id);
+                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
                 return;
             }
             const index = freeImageIndex() orelse {
@@ -1377,7 +1270,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 // vocabulary: exactly one rejected result through the
                 // event arm, never a crash — however many loads one
                 // batch stages against it.
-                rejects.push(.image, event_tag, id);
+                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
                 return;
             };
             const entry = &images[index];
@@ -1482,7 +1375,8 @@ pub fn TsCoreHost(comptime core: type) type {
         /// discipline here is the spawn/image exception, by the same
         /// reasoning: one channel per key at a time, never replaced
         /// implicitly — a duplicate LIVE key rejects the new open
-        /// (event arm, state "rejected", at the post-cycle boundary),
+        /// (event arm, state "rejected", staged into the engine's
+        /// pending order and delivered at the next drain),
         /// and so do a key the f64 wire cannot honestly carry into the
         /// u64 engine (0, negatives, fractions, 2^53 and past — the
         /// image id gate) and a bridge table already holding
@@ -1497,22 +1391,21 @@ pub fn TsCoreHost(comptime core: type) type {
             fx: *Fx,
             key_value: f64,
             event_tag: u8,
-            rejects: *RejectStage,
         ) void {
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
             if (!representable) {
-                rejects.push(.channel, event_tag, 0);
+                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
                 return;
             }
             const key: u64 = @intFromFloat(key_value);
             if (findChannel(key) != null) {
-                rejects.push(.channel, event_tag, key);
+                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
                 return;
             }
             const index = freeChannelIndex() orelse {
-                rejects.push(.channel, event_tag, key);
+                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
                 return;
             };
             const entry = &channels[index];
@@ -1876,6 +1769,25 @@ pub fn TsCoreHost(comptime core: type) type {
             @panic("ts core host: a routed result names a Msg tag outside the union");
         }
 
+        /// `msgFromTagBytes` for STATIC payloads (the staged rejection
+        /// Msgs' "rejected"): no frame-arena copy, because a staged
+        /// Msg outlives the issuing cycle's frame reset — it is held
+        /// in the engine's pending order until the next drain, so its
+        /// payload must be self-contained (`stageLoopMsg`'s contract).
+        /// The commit walkers keep non-frame pointers as-is, and a
+        /// static string's lifetime is the program's.
+        fn msgFromTagStaticBytes(tag: u8, comptime bytes: []const u8) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime arm.type == []const u8) {
+                        return @unionInit(Msg, arm.name, bytes);
+                    }
+                    @panic("ts core host: a routed result targets Msg arm '" ++ arm.name ++ "', whose payload is not bytes");
+                }
+            }
+            @panic("ts core host: a routed result names a Msg tag outside the union");
+        }
+
         /// Build the payload-less Msg arm at index `tag` (write_file's
         /// ok route — success carries nothing).
         fn msgFromTagVoid(tag: u8) Msg {
@@ -2128,6 +2040,14 @@ pub fn TsCoreHost(comptime core: type) type {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_pending) else @intCast(event.dropped_pending);
                             } else if (comptime std.mem.eql(u8, f.name, "droppedTotal")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_total) else @intCast(event.dropped_total);
+                            } else if (event.bytes.len == 0) {
+                                // Payload-free events (rejected/closed
+                                // terminals, and the staged rejection
+                                // Msgs that must be self-contained
+                                // across the frame reset) carry the
+                                // static empty slice, never a
+                                // zero-length frame pointer.
+                                @field(payload, f.name) = "";
                             } else {
                                 const copy = core.rt.frameAlloc(u8, event.bytes.len);
                                 @memcpy(copy, event.bytes);

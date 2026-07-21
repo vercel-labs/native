@@ -712,6 +712,11 @@ const ChannelSessionModel = struct {
     /// replay that reorders or alters one byte diverges here (and in
     /// the fingerprints that pin it).
     payload_digest: u64 = 0,
+    /// Rolling order-sensitive digest of every REJECTED key — the
+    /// mixed-authority test's order pin: engine-staged and
+    /// caller-staged (`stageLoopMsg`) rejections must deliver in
+    /// staging order, and a replay that reorders them diverges here.
+    rejected_key_digest: u64 = 0,
     last_line: [48]u8 = @splat(' '),
     last_line_len: usize = 0,
 
@@ -719,7 +724,10 @@ const ChannelSessionModel = struct {
         switch (event.kind) {
             .data => model.data_events += 1,
             .closed => model.closed_events += 1,
-            .rejected => model.rejected_events += 1,
+            .rejected => {
+                model.rejected_events += 1;
+                model.rejected_key_digest = std.hash.Wyhash.hash(model.rejected_key_digest, std.mem.asBytes(&event.key));
+            },
         }
         model.dropped_pending_last = event.dropped_pending;
         model.dropped_total_last = event.dropped_total;
@@ -737,6 +745,12 @@ const ChannelSessionModel = struct {
 const ChannelSessionMsg = union(enum) {
     open,
     open_dup,
+    /// One dispatch mixing both rejection authorities: a caller-staged
+    /// rejection (`stageLoopMsg`, the TS bridge's synchronous-refusal
+    /// seam), an engine-staged rejection (a duplicate open the engine
+    /// refuses loop-side), and a second caller-staged one — three
+    /// refusals whose delivery must hold staging order across layers.
+    open_mixed,
     close,
     event: effects_mod.EffectChannelEvent,
 };
@@ -763,6 +777,22 @@ fn channelSessionUpdate(model: *ChannelSessionModel, msg: ChannelSessionMsg, fx:
             .key = session_channel_key,
             .on_event = ChannelSessionApp.Effects.channelMsg(.event),
         }),
+        // Both rejection authorities in one dispatch, interleaved:
+        // caller-staged (77), engine-staged (the dup of 41),
+        // caller-staged (88). All three stamp the shared pending seq
+        // at refusal time, so delivery — and the model's rejected-key
+        // digest — pins 77, 41, 88 on record and replay alike. The
+        // caller-staged Msgs are never journaled (`stageLoopMsg`'s
+        // regenerating contract); the engine's dup rejection journals
+        // marked regenerable and is skipped at replay.
+        .open_mixed => {
+            fx.stageLoopMsg(.{ .event = .{ .key = 77, .kind = .rejected } });
+            _ = fx.openChannel(.{
+                .key = session_channel_key,
+                .on_event = ChannelSessionApp.Effects.channelMsg(.event),
+            });
+            fx.stageLoopMsg(.{ .event = .{ .key = 88, .kind = .rejected } });
+        },
         .close => fx.closeChannel(session_channel_key),
         .event => |event| model.record(event),
     }
@@ -782,6 +812,7 @@ fn channelSessionView(ui: *ChannelSessionApp.Ui, model: *const ChannelSessionMod
 fn channelSessionCommand(name: []const u8) ?ChannelSessionMsg {
     if (std.mem.eql(u8, name, "channel.open")) return .open;
     if (std.mem.eql(u8, name, "channel.open-dup")) return .open_dup;
+    if (std.mem.eql(u8, name, "channel.open-mixed")) return .open_mixed;
     if (std.mem.eql(u8, name, "channel.close")) return .close;
     return null;
 }
@@ -957,6 +988,113 @@ test "a recorded channel session replays fingerprint-identical offline with no s
     try testing.expect(app_state.effects.channelHandle(session_channel_key) == null);
 }
 
+/// Record the mixed-authority rejection session: one live channel, one
+/// accepted post, then one dispatch that interleaves caller-staged
+/// rejections (`stageLoopMsg`) around an engine-staged one, and the
+/// close terminal.
+fn recordMixedRejectionSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedChannelSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "channel-session-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, channelSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+    session_handle = null;
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = channel_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.open", .window_id = 1 } });
+    const handle = session_handle orelse return error.TestExpectedHandle;
+    try testing.expectEqual(PostResult.accepted, handle.post("reading 1: 42 units"));
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 1), app_state.model.data_events);
+
+    // The mixed dispatch: three rejections, two authorities, one
+    // staging order (77 caller, 41 engine, 88 caller).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.open-mixed", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 3), app_state.model.rejected_events);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.close", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 1), app_state.model.closed_events);
+
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "mixed caller- and engine-staged rejections deliver in staging order and replay identically with neither journaled as executor truth" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordMixedRejectionSession(gpa, buffer);
+    // The order pin: rejected keys hashed in delivery order must be
+    // exactly the staging order 77 (caller), 41 (engine), 88 (caller).
+    var expected_digest: u64 = 0;
+    for ([_]u64{ 77, session_channel_key, 88 }) |key| {
+        expected_digest = std.hash.Wyhash.hash(expected_digest, std.mem.asBytes(&key));
+    }
+    try testing.expectEqual(expected_digest, recorded.model.rejected_key_digest);
+
+    // Replay into a fresh app: the journal is the whole world.
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, channelSessionOptions());
+    defer app_state.deinit();
+    session_handle = null;
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // The journal carries NEITHER rejection authority as executor
+    // truth: the one data event and the closed terminal FEED; the
+    // engine's dup rejection journals marked regenerable and is
+    // SKIPPED (the replayed open re-derives it); the two caller-staged
+    // rejections were never journaled at all — nothing to feed,
+    // nothing to skip, regenerated by the replayed dispatch itself.
+    try testing.expectEqual(@as(u64, 2), report.effects_fed);
+    try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    // The identical model INCLUDES the rejected-key digest: the
+    // replayed Msg order matches the recorded order across both
+    // authorities.
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    try testing.expect(app_state.effects.channelHandle(session_channel_key) == null);
+}
+
 // ------------------- replay acceptance: the open-and-spawn pattern
 //
 // The channel-monitor example's documented shape: ONE update handler
@@ -1035,6 +1173,9 @@ fn monitorUpdate(model: *ChannelSessionModel, msg: ChannelSessionMsg, fx: *Chann
             .key = monitor_channel_key,
             .on_event = ChannelSessionApp.Effects.channelMsg(.event),
         }),
+        // The session-app msg set is shared; the monitor session never
+        // dispatches the mixed-authority probe.
+        .open_mixed => {},
         .close => fx.closeChannel(monitor_channel_key),
         .event => |event| model.record(event),
     }

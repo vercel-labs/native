@@ -706,8 +706,9 @@ test "image loads route their one terminal into the transpiled core through the 
 
     // A duplicate LIVE id rejects the new load (the spawn discipline):
     // the event arm carries state "rejected" — echoing the refused id —
-    // and the in-flight load stays parked.
+    // delivered at the next drain, and the in-flight load stays parked.
     try h.menu("core.coveragain");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
@@ -827,8 +828,9 @@ test "a seventeenth in-flight image load rejects instead of crashing" {
     // The 17th finds no free entry: the exactly-one-result contract
     // answers state "rejected" through the event arm — the engine's own
     // slot-exhaustion vocabulary, never a crash — echoing the refused id
-    // (the 17th dynamic id, 100 + 16).
+    // (the 17th dynamic id, 100 + 16), delivered at the next drain.
     try h.menu("core.covernext");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 116), Bridge.model().lastImageId);
@@ -874,10 +876,11 @@ test "a seventeen-load batch against a full table yields seventeen rejections, n
     try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
 
     // ONE command value carrying seventeen more loads: the reject
-    // staging outgrows the table-sized inline buffer, and every load
-    // still gets its one "rejected" result at the post-cycle boundary
-    // in record order — the last echo is the batch's last id.
+    // staging outgrows the engine stage's inline buffer, and every
+    // load still gets its one "rejected" result at the next drain in
+    // record order — the last echo is the batch's last id.
     try h.menu("core.coverflood");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 216), Bridge.model().lastImageId);
@@ -1100,6 +1103,7 @@ test "the image id wire bound is exclusive at 2^53 for dynamic values" {
     // exactly. The bridge answers "rejected" (the runtime twin of the
     // emitter's NS1030 literal gate) and the parked load stays live.
     try h.menu("core.coverpast");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
     try std.testing.expect(Bridge.model().imageState == .rejected);
     // An id the wire cannot carry exactly has no honest integer to
@@ -1204,15 +1208,18 @@ test "a mixed refused batch rejects in command-stream order across channel and i
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), -1), Bridge.model().imgRejectAt);
 
     // Both batch records are refused (duplicate live key/id): the
-    // rejections dispatch in the batch's own order — channel first,
-    // image second, Cmd.batch's performed-in-order contract.
+    // rejections deliver at the next drain in the batch's own order —
+    // channel first, image second, Cmd.batch's performed-in-order
+    // contract.
     try h.menu("core.mixreject");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 1), Bridge.model().chanRejectAt);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 2), Bridge.model().imgRejectAt);
 
     // The flipped batch flips the delivery: stream order, never a
     // family-blocked drain.
     try h.menu("core.mixrejectflip");
+    try h.wake();
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 3), Bridge.model().imgRejectAt);
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 4), Bridge.model().chanRejectAt);
 
@@ -1582,7 +1589,9 @@ fn recordMixedRejectSession(buffer: *JournalBuffer) !MixSnapshot {
     try h.menu("core.watch");
     try h.menu("core.cover");
     try h.menu("core.mixreject");
+    try h.wake();
     try h.menu("core.mixrejectflip");
+    try h.wake();
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
 
     recorder.finish();
