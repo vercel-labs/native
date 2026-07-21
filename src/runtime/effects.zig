@@ -7156,7 +7156,10 @@ test "image cache probe propagates a cancel interruption and reads every other f
             _ = dir;
             _ = sub_path;
             _ = options;
-            return .{ .handle = 0, .flags = .{ .nonblocking = false } };
+            return .{
+                .handle = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else 0,
+                .flags = .{ .nonblocking = false },
+            };
         }
         fn readCanceled(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
             _ = userdata;
