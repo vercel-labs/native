@@ -311,6 +311,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&timeline_item_attr_docs, name)) |doc| return doc;
     if (findDoc(&avatar_attr_docs, name)) |doc| return doc;
     if (findDoc(&media_surface_attr_docs, name)) |doc| return doc;
+    if (findDoc(&video_attr_docs, name)) |doc| return doc;
     if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     if (findDoc(&chart_attr_docs, name)) |doc| return doc;
     if (findDoc(&series_attr_docs, name)) |doc| return doc;
