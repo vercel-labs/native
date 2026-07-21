@@ -418,15 +418,13 @@ pub const LinuxPlatform = struct {
                 .close_view_fn = closeView,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
-                // Opt-in Cairo packet renderer. Left null (pixel/reference path
-                // only) unless SCHEMIFY_CAIRO=1, so wiring it never adds packet
-                // serialization overhead to the default build.
-                .present_gpu_surface_packet_fn = if (cairoEnabled()) presentGpuSurfacePacket else null,
-                // Image seam feeds the Cairo path's draw_image cache; gated with
-                // the packet fn so the default build never uploads pixels the
-                // reference renderer resolves from its own store.
-                .upload_gpu_surface_image_fn = if (cairoEnabled()) uploadGpuSurfaceImage else null,
-                .remove_gpu_surface_image_fn = if (cairoEnabled()) removeGpuSurfaceImage else null,
+                // Cairo packet renderer (native_sdk_cairo.c): the accelerated
+                // Linux draw path. Any command it can't paint refuses the frame,
+                // so the reference renderer still resolves it correctly.
+                .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
+                // Image seam feeds the Cairo path's draw_image cache.
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -1109,7 +1107,7 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
     if (native_sdk_gtk_present_gpu_surface_pixels_desc(self.host, &desc) == 0) return error.ViewNotFound;
 }
 
-// ── Cairo packet path (opt-in: SCHEMIFY_CAIRO=1) ────────────────────────────
+// ── Cairo packet path ───────────────────────────────────────────────────────
 // Decodes the runtime's JSON GPU packet and draws it with Cairo, the Core
 // Graphics analog (see native_sdk_cairo.c). Dispatch is payload-structural:
 // every command carries exactly one drawable payload (shape+paint, text,
@@ -1118,10 +1116,6 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
 // extends coverage in both at once. Any command whose payload we can't render
 // refuses the whole frame, so the runtime falls back to the reference renderer
 // — correct, just unaccelerated.
-
-fn cairoEnabled() bool {
-    return std.c.getenv("SCHEMIFY_CAIRO") != null;
-}
 
 /// Whether the Cairo renderer can fully draw this command, probed by payload.
 /// Mirrors `drawCairoCommand`'s dispatch exactly: if the gate accepts a
@@ -1201,29 +1195,7 @@ fn nums4(arr: std.json.Array) [4]f64 {
     return out;
 }
 
-var cairo_drawn_frames: u64 = 0;
-var cairo_fallback_frames: u64 = 0;
-var cairo_kind_logged = false;
-
-/// SCHEMIFY_CAIRO_DIAG=1: report how many frames the Cairo path fully drew vs
-/// handed back to the reference renderer, so activation is observable.
-fn cairoDiag(drawn: bool) void {
-    if (std.c.getenv("SCHEMIFY_CAIRO_DIAG") == null) return;
-    if (drawn) cairo_drawn_frames += 1 else cairo_fallback_frames += 1;
-    const total = cairo_drawn_frames + cairo_fallback_frames;
-    if (total <= 3 or total % 30 == 0)
-        std.debug.print("[cairo] drawn={d} fallback={d}\n", .{ cairo_drawn_frames, cairo_fallback_frames });
-}
-
 fn presentGpuSurfacePacket(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
-    presentGpuSurfacePacketInner(context, packet) catch |e| {
-        cairoDiag(false);
-        return e;
-    };
-    cairoDiag(true);
-}
-
-fn presentGpuSurfacePacketInner(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     if (packet.json.len == 0) return error.UnsupportedService; // JSON variant only
@@ -1246,8 +1218,6 @@ fn presentGpuSurfacePacketInner(context: ?*anyopaque, packet: platform_mod.GpuSu
     };
     const commands = jarr(root, "commands") orelse return error.UnsupportedService;
 
-    const diag = std.c.getenv("SCHEMIFY_CAIRO_DIAG") != null;
-
     // All-or-nothing gate: a frame with any command we cannot draw falls back
     // whole, so the reference renderer paints it correctly.
     for (commands.items) |cmd_v| {
@@ -1255,17 +1225,7 @@ fn presentGpuSurfacePacketInner(context: ?*anyopaque, packet: platform_mod.GpuSu
             .object => |o| o,
             else => return error.UnsupportedService,
         };
-        if (!cairoCanDraw(obj)) {
-            if (diag and !cairo_kind_logged) {
-                cairo_kind_logged = true;
-                const k = switch (obj.get("kind") orelse .null) {
-                    .string => |s| s,
-                    else => "?",
-                };
-                std.debug.print("[cairo] refuse: unhandled kind \"{s}\"\n", .{k});
-            }
-            return error.UnsupportedService;
-        }
+        if (!cairoCanDraw(obj)) return error.UnsupportedService;
     }
 
     const scale: f64 = packet.scale_factor;
