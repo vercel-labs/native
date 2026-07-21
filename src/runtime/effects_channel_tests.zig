@@ -648,12 +648,12 @@ test "a post racing bindServices is never stranded: one side always wakes" {
 }
 
 /// A wake hook that posts back into the channel that woke it — the
-/// reentrant shape a real hook must never have (host wake
-/// implementations are enqueue-only by contract), turned into the
-/// strongest available deadlock gate: pre-split this deadlocked on the
-/// staging mutex; with the wake half alone it would deadlock on the
-/// wake mutex; the coalescer's pre-latched flag is what lets the inner
-/// post coalesce lock-free and return.
+/// reentrant shape a well-behaved hook avoids (enqueue-only), turned
+/// into a regression gate: pre-split this deadlocked on the staging
+/// mutex, and the coalescer's pre-latched flag is what lets the inner
+/// post coalesce lock-free and return — without it, the inner post
+/// would find the (now free, see `ChannelWake`) wake mutex and
+/// re-enter the hook unboundedly.
 const ReentrantPoster = struct {
     var handle: ?effects_mod.ChannelHandle = null;
     var inner_result: ?PostResult = null;
@@ -695,6 +695,75 @@ test "a wake hook that posts back into the same channel coalesces instead of dea
     _ = try expectData(&fx, 54, "outer");
     _ = try expectData(&fx, 54, "reentrant");
     fx.closeChannel(54);
+    while (fx.takeMsg()) |_| {}
+}
+
+/// A wake hook that takes the exact locks the LOOP THREAD takes at
+/// every pass boundary: `drainBoundary` acquires each channel's wake
+/// mutex to clear the coalescer. An embedder `wake_fn` has no
+/// enqueue-only contract — one that synchronously marshals to the loop
+/// waits on a loop that contends on these locks — so the host call
+/// must run with the wake mutex FREE. When it ran under the mutex,
+/// this hook deadlocked (`drainBoundary` spinning on the wake mutex
+/// the post still held); with the in-flight fence it completes.
+const BoundaryTakingWake = struct {
+    var fx_under_test: ?*DirectFx = null;
+    var shared_under_probe: ?*effects_mod.ChannelShared = null;
+    var wake_mutex_free_during_wake: ?bool = null;
+    var boundary_taken: bool = false;
+
+    fn reset() void {
+        fx_under_test = null;
+        shared_under_probe = null;
+        wake_mutex_free_during_wake = null;
+        boundary_taken = false;
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        // Pin the invariant directly: the wake mutex is free while the
+        // hook runs (the disarm fence is the in-flight count, never
+        // lock tenure).
+        if (shared_under_probe) |shared| {
+            const free = shared.wake.mutex.inner.tryLock();
+            if (free) shared.wake.mutex.inner.unlock();
+            wake_mutex_free_during_wake = free;
+        }
+        // And prove it end to end: take the loop's own pass boundary —
+        // the same wake-mutex acquisition drainBoundary performs —
+        // from inside the host call.
+        const fx = fx_under_test orelse return;
+        if (boundary_taken) return;
+        boundary_taken = true;
+        _ = fx.drainBoundary();
+    }
+};
+
+test "a wake hook that takes the drain's pass boundary completes instead of deadlocking" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    BoundaryTakingWake.reset();
+    defer BoundaryTakingWake.reset();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = BoundaryTakingWake.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 57, .on_event = DirectFx.channelMsg(.event) });
+    BoundaryTakingWake.fx_under_test = &fx;
+    BoundaryTakingWake.shared_under_probe = handle.shared;
+
+    // Deadlocked here pre-fix: the post held the wake mutex through
+    // the hook while the hook's drainBoundary spun on the same mutex.
+    try testing.expectEqual(PostResult.accepted, handle.post("boundary probe"));
+    try testing.expect(BoundaryTakingWake.boundary_taken);
+    try testing.expectEqual(@as(?bool, true), BoundaryTakingWake.wake_mutex_free_during_wake);
+
+    // The hook's boundary cleared the coalescer, so the staged entry
+    // still delivers and a later post latches a fresh wake of its own.
+    BoundaryTakingWake.fx_under_test = null;
+    BoundaryTakingWake.shared_under_probe = null;
+    _ = try expectData(&fx, 57, "boundary probe");
+    fx.closeChannel(57);
     while (fx.takeMsg()) |_| {}
 }
 
@@ -2278,3 +2347,4 @@ test "live table capacity counts the alloc-failed open's reservation so replay a
     try testing.expectEqual(@as(u32, 7), recorded.model.closed_events);
     try testing.expectEqual(@as(u32, 0), recorded.model.data_events);
 }
+
