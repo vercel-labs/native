@@ -944,12 +944,16 @@ pub const ChannelHandle = struct {
     };
 
     /// Stage `bytes` for delivery as one `.data` event Msg on the next
-    /// drain, and wake the host loop. Callable from ANY thread. Never
-    /// blocks and never silently drops a delivered event: the answer
-    /// says exactly what happened (see `PostResult`) — `.dropped_full`
-    /// and `.dropped_oversized` count into the drop counters the next
-    /// delivered event carries; `.closed` counts nothing and ends the
-    /// producer's occupancy for good.
+    /// drain, and — for an ACCEPTED post only — wake the host loop.
+    /// Callable from ANY thread. Never blocks and never silently drops
+    /// a delivered event: the answer says exactly what happened (see
+    /// `PostResult`) — `.dropped_full` and `.dropped_oversized` count
+    /// into the drop counters the next delivered event carries;
+    /// `.closed` counts nothing and ends the producer's occupancy for
+    /// good. Refused and closed posts never wake: a wake is issued
+    /// only when a post makes new work drainable, so a producer loop
+    /// that keeps going through drops (the documented pattern) cannot
+    /// flood the host loop's queue.
     pub fn post(handle: ChannelHandle, bytes: []const u8) PostResult {
         const shared = handle.shared orelse return .closed;
         shared.mutex.lock();
@@ -962,10 +966,18 @@ pub const ChannelHandle = struct {
         if (bytes.len > max_effect_channel_bytes or staging.len >= shared.max_pending) {
             shared.dropped_pending +|= 1;
             shared.dropped_total +|= 1;
-            // Wake anyway: the counts surface on the next delivered
-            // event, and a stalled consumer is exactly when the app
-            // needs to hear about drops.
-            if (owner.services.*) |services| services.wake() catch {};
+            // NO wake for a refusal — the invariant of this whole post
+            // site is that a wake is issued only when a post makes new
+            // work drainable. A full stage proves staged entries exist
+            // whose accepted posts already woke the loop, and the drop
+            // counters ride the next delivered event with no extra
+            // nudge; an oversized post stages nothing, so there is
+            // nothing to drain. Waking here would let a producer that
+            // keeps posting after `.dropped_full` — the documented
+            // producer contract — grow the host loop's queue without
+            // bound, defeating the bounded stage's back-pressure.
+            // (`.closed` answers above are pure no-ops for the same
+            // reason: nothing staged, nothing to drain.)
             return if (bytes.len > max_effect_channel_bytes) .dropped_oversized else .dropped_full;
         }
         const seq = owner.seq.fetchAdd(1, .monotonic);

@@ -787,6 +787,79 @@ test "replaying an open-and-spawn session parks the channel: the re-spawned work
     try testing.expect(app_state.effects.channelHandle(monitor_channel_key) == null);
 }
 
+// --------------------------------------------- wake back-pressure gate
+
+test "rejected posts never wake the host: the pending-wake count stays flat under a refusal storm" {
+    const gpa = testing.allocator;
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, channelSessionOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+    session_handle = null;
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = channel_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.open", .window_id = 1 } });
+    const handle = session_handle orelse return error.TestExpectedHandle;
+
+    // Accepted posts wake: each staged entry nudges the host exactly
+    // once, so delivery latency never depends on unrelated traffic.
+    const before_accepted = harness.null_platform.pendingWakeCount();
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 1"));
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 2"));
+    try testing.expectEqual(before_accepted + 2, harness.null_platform.pendingWakeCount());
+
+    // The stage is full (max_pending = 2). A refused post stages
+    // nothing, so it must NOT wake: the staged entries' own accepted
+    // posts already woke the loop, and the drop counters ride the next
+    // delivered event with no extra nudge. A producer that keeps going
+    // after `.dropped_full` — the documented pattern — must never grow
+    // the host loop's queue.
+    const before_refused = harness.null_platform.pendingWakeCount();
+    var index: usize = 0;
+    while (index < 64) : (index += 1) {
+        try testing.expectEqual(PostResult.dropped_full, handle.post("refused"));
+    }
+    const oversized = [_]u8{'x'} ** (effects_mod.max_effect_channel_bytes + 1);
+    try testing.expectEqual(PostResult.dropped_oversized, handle.post(&oversized));
+    try testing.expectEqual(before_refused, harness.null_platform.pendingWakeCount());
+
+    // Drain: the staged entries deliver and the first delivered event
+    // carries every counted drop.
+    while (harness.null_platform.takeWake()) |event| {
+        try harness.runtime.dispatchPlatformEvent(app, event);
+    }
+    try testing.expectEqual(@as(u32, 2), app_state.model.data_events);
+    try testing.expectEqual(@as(u32, 65), app_state.model.dropped_total_last);
+
+    // Non-regression: with the stage relieved, an accepted post wakes
+    // exactly once, same as before.
+    const before_relieved = harness.null_platform.pendingWakeCount();
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 3"));
+    try testing.expectEqual(before_relieved + 1, harness.null_platform.pendingWakeCount());
+
+    // A post against a closed channel is a pure no-op: nothing staged,
+    // nothing counted, no wake.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.close", .window_id = 1 } });
+    const before_closed = harness.null_platform.pendingWakeCount();
+    try testing.expectEqual(PostResult.closed, handle.post("after close"));
+    try testing.expectEqual(before_closed, harness.null_platform.pendingWakeCount());
+}
+
 // ------------------------------------------------- replay damage gates
 
 /// Frame a minimal journal around one hand-built channel effect record:
