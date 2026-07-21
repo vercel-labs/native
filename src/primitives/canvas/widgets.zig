@@ -670,6 +670,7 @@ pub const WidgetActions = struct {
     drag: bool = false,
     drop_files: bool = false,
     dismiss: bool = false,
+    hover: bool = false,
 
     pub fn isEmpty(self: WidgetActions) bool {
         return !self.focus and
@@ -682,7 +683,8 @@ pub const WidgetActions = struct {
             !self.select and
             !self.drag and
             !self.drop_files and
-            !self.dismiss;
+            !self.dismiss and
+            !self.hover;
     }
 };
 

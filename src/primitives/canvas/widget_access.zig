@@ -83,6 +83,7 @@ pub fn widgetKindHitTarget(kind: WidgetKind) bool {
 pub fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.hover) return true;
     if (widget.window_drag) return true;
     // A chart with hover details opted in is hoverable (the runtime
     // tracks the pointer over it to snap the detail card to the nearest

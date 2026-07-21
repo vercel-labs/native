@@ -1826,6 +1826,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failVoid(node, markup.on_dismiss_element_message);
                 }
                 options.on_dismiss = msg;
+            } else if (std.mem.eql(u8, event, "hover")) {
+                options.on_hover = msg;
             } else if (std.mem.eql(u8, event, "hold")) {
                 // Press family: like on-press, a bound hold makes any
                 // element pressable.

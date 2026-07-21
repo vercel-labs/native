@@ -274,6 +274,7 @@ pub const UiHandlerEvent = enum {
     submit,
     input,
     scroll,
+    hover,
     context_menu,
     dismiss,
     hold,
@@ -691,6 +692,7 @@ pub fn Ui(comptime Msg: type) type {
             /// the route dispatches it immediately, the desktop
             /// alternative. Like `on_press`, binding it makes the element
             /// a hit target and press claimer.
+            on_hover: ?Msg = null,
             on_hold: ?Msg = null,
             /// Message constructor for text edits: called with each
             /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.
@@ -764,6 +766,7 @@ pub fn Ui(comptime Msg: type) type {
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
             on_dismiss: ?Msg = null,
+            on_hover: ?Msg = null,
             on_hold: ?Msg = null,
             on_reach_end: ?Msg = null,
             on_reach_start: ?Msg = null,
@@ -1067,6 +1070,14 @@ pub fn Ui(comptime Msg: type) type {
                 return self.msgFor(id, .dismiss);
             }
 
+            /// Typed dispatch for a hover-enter: the widget's `on_hover`
+            /// message. UiApp dispatches this on the hover-enter EDGE
+            /// (the resolved hover target changed), so a SET-style arm
+            /// re-fires only when the target actually changes.
+            pub fn msgForHover(self: Tree, id: ObjectId) ?Msg {
+                return self.msgFor(id, .hover);
+            }
+
             /// Typed dispatch for a press-and-hold (or menu-less secondary
             /// click): the widget's `on_hold` message.
             pub fn msgForHold(self: Tree, id: ObjectId) ?Msg {
@@ -1231,6 +1242,7 @@ pub fn Ui(comptime Msg: type) type {
                 .on_change = options.on_change,
                 .on_submit = options.on_submit,
                 .on_dismiss = options.on_dismiss,
+                .on_hover = options.on_hover,
                 .on_hold = options.on_hold,
                 .on_reach_end = options.on_reach_end,
                 .on_reach_start = options.on_reach_start,
@@ -2456,6 +2468,7 @@ pub fn Ui(comptime Msg: type) type {
             // press, and the classic list-row shape (press to open, hold
             // for the menu) pairs the two on one element.
             if (node.on_hold != null) widget.semantics.actions.press = true;
+            if (node.on_hover != null) widget.semantics.actions.hover = true;
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;
@@ -2491,6 +2504,7 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
             appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
+            appendHandler(handlers, handler_len, widget.id, .hover, node.on_hover);
             appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
             appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
             appendHandler(handlers, handler_len, widget.id, .reach_start, node.on_reach_start);
@@ -2603,6 +2617,7 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_change != null) total += 1;
             if (node.on_submit != null) total += 1;
             if (node.on_dismiss != null) total += 1;
+            if (node.on_hover != null) total += 1;
             if (node.on_hold != null) total += 1;
             if (node.on_reach_end != null) total += 1;
             if (node.on_reach_start != null) total += 1;
