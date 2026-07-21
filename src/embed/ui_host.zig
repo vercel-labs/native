@@ -178,6 +178,19 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // its heap-owned registrations (registered canvas font
             // bytes) before the host storage goes.
             self.embedded.deinit();
+            // The embedded null platform lives inside `self`, so freeing
+            // `self` IS this path's platform destruction — and an
+            // abandoned channel wake call may still enter that platform
+            // at any later time (see
+            // `PlatformServices.note_channel_wake_abandoned_fn`; the
+            // null platform's own enqueue-only wake never triggers it,
+            // but a shim-registered service could). Consult the latch
+            // like every first-party destroy path: skip the free and
+            // leak the host storage, process-lived, with one loud line.
+            if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) {
+                std.debug.print("mobile ui host teardown: an abandoned channel wake call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
+                return;
+            }
             std.heap.page_allocator.destroy(self);
         }
 

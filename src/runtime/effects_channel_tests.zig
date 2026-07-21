@@ -1138,8 +1138,17 @@ test "teardown abandons a wake call still stuck at the deadline and the stale ca
     StuckTeardownWake.reset();
     defer StuckTeardownWake.reset();
     StuckTeardownWake.loop_thread = std.Thread.getCurrentId();
-    const services: platform_mod.PlatformServices = .{ .wake_fn = StuckTeardownWake.wake };
-    fx.bindServices(&services);
+    // A real (null) platform behind the services table, with its
+    // conforming wake REPLACED by the stuck hook: the abandon-report
+    // seam (`note_channel_wake_abandoned_fn`) stays the platform's own,
+    // so the test observes the platform half of the abandon — the
+    // destroy gate — through the null platform's reference model.
+    const null_platform = try testing.allocator.create(platform_mod.NullPlatform);
+    defer testing.allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    var host_platform = null_platform.platform();
+    host_platform.services.wake_fn = StuckTeardownWake.wake;
+    fx.bindServices(&host_platform.services);
 
     const handle = fx.openChannel(.{ .key = 64, .on_event = DirectFx.channelMsg(.event) });
     var post_result: PostResult = .closed;
@@ -1160,6 +1169,17 @@ test "teardown abandons a wake call still stuck at the deadline and the stale ca
     fx.deinit();
     try testing.expectEqual(@as(u32, 1), fx.abandoned_channel_wakes);
 
+    // The abandon was reported to the platform, synchronously, while
+    // it was alive: the latch is set...
+    try testing.expect(null_platform.channel_wake_abandoned.load(.seq_cst));
+    // ...and the platform-destroy path is SUPPRESSED — deinit consults
+    // the latch, skips destruction, and leaks the host, process-lived,
+    // so the stale call still inside `wake_fn` can never execute into
+    // freed host state (the real hosts' destroy gate, observed through
+    // the null platform's reference model).
+    null_platform.deinit();
+    try testing.expect(!null_platform.destroyed);
+
     // The abandoned call unblocks LATER and finishes against the
     // process-lifetime header — a safe decrement, never a
     // use-after-free — and the post it served still answers honestly.
@@ -1167,6 +1187,37 @@ test "teardown abandons a wake call still stuck at the deadline and the stale ca
     producer.join();
     joined = true;
     try testing.expectEqual(PostResult.accepted, post_result);
+    try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
+}
+
+test "a conforming enqueue-only wake at teardown quiesces fast and platform destruction proceeds" {
+    // The two-sided contract's healthy half, pinned as the abandon
+    // test's non-regression twin: with the platform's OWN wake (the
+    // null platform's atomic counter — bounded, enqueue-only, the
+    // contract at `PlatformServices.wake_fn`), teardown's quiesce
+    // covers every in-flight call without ever nearing the deadline,
+    // nothing is abandoned, and the platform destroys normally.
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    const null_platform = try testing.allocator.create(platform_mod.NullPlatform);
+    defer testing.allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    const host_platform = null_platform.platform();
+    fx.bindServices(&host_platform.services);
+
+    const handle = fx.openChannel(.{ .key = 65, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("healthy"));
+    // The conforming wake already returned: it enqueued (the null
+    // platform counts) and nothing lingers inside the hook.
+    try testing.expect(null_platform.wake_count.load(.acquire) >= 1);
+
+    fx.deinit();
+    try testing.expectEqual(@as(u32, 0), fx.abandoned_channel_wakes);
+
+    // No abandon, no latch, no leak: destruction proceeds.
+    try testing.expect(!null_platform.channel_wake_abandoned.load(.seq_cst));
+    null_platform.deinit();
+    try testing.expect(null_platform.destroyed);
     try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
 }
 

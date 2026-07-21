@@ -1293,13 +1293,18 @@ fn revokeChannelWake(shared: *ChannelShared) void {
 /// the contract at `PlatformServices.wake_fn`) returns in
 /// microseconds and never meets the deadline, so the bound is
 /// violator containment only, never a wait supported usage races.
-/// False means the call is ABANDONED, the abandoned-worker idiom:
-/// everything the framework hands the stale
-/// call to touch after it unblocks — the wake mutex, the in-flight
-/// decrement, the generation gate — lives in the process-lifetime
-/// header and stays valid forever; the embedder's own services object
-/// is the one thing outside that invariant, which is why the caller
-/// warns loudly naming the stuck hook.
+/// False means the call is ABANDONED, the abandoned-worker idiom, and
+/// the abandon is safe END TO END because both halves of what the
+/// stale call can still touch now outlive it: everything the
+/// framework hands it after it unblocks — the wake mutex, the
+/// in-flight decrement, the generation gate — lives in the
+/// process-lifetime header and stays valid forever, and the platform
+/// it entered through is told to outlive it too (the caller reports
+/// the abandon through
+/// `PlatformServices.noteChannelWakeAbandoned`, and the platform's
+/// destruction path skips destruction and leaks the host,
+/// process-lived). The caller still warns loudly naming the stuck
+/// hook — the leak is deliberate, never silent.
 fn quiesceChannelWake(shared: *ChannelShared, deadline_ms: u64) bool {
     revokeChannelWake(shared);
     const wake = &shared.wake;
@@ -3011,9 +3016,11 @@ pub fn Effects(comptime Msg: type) type {
         /// pin the abandon path with a tiny bound.
         channel_wake_join_deadline_ms: u64 = default_channel_wake_join_deadline_ms,
         /// How many in-flight channel wake calls teardown has
-        /// abandoned (each one warned; the header the stale call still
-        /// touches is process-lived — see `quiesceChannelWake`). The
-        /// seam tests assert against: zero on every healthy teardown.
+        /// abandoned (each one warned, and each one reported to the
+        /// platform so its destruction is skipped and the host leaks,
+        /// process-lived — the header the stale call still touches is
+        /// process-lived too; see `quiesceChannelWake`). The seam
+        /// tests assert against: zero on every healthy teardown.
         abandoned_channel_wakes: u32 = 0,
         /// Injectable concurrent-start switch for fetch supervisors,
         /// following `file_join_interrupt`: always true in real use;
@@ -3228,21 +3235,26 @@ pub fn Effects(comptime Msg: type) type {
                     // enqueue-only — `PlatformServices.wake_fn`)
                     // returns in microseconds and never meets the
                     // deadline, so this bound is violator containment
-                    // only. A hook still stuck at the
-                    // deadline is abandoned, warned, and counted:
-                    // everything the framework hands the stale call
-                    // (the wake mutex, the in-flight decrement, the
-                    // generation gate) lives in the process-lifetime
-                    // header and stays valid forever; only the
-                    // embedder's own services object — which the
-                    // embedder is holding hostage inside its own
-                    // blocked hook — sits outside that invariant,
-                    // which is what the warning names.
+                    // only. A hook still stuck at the deadline is
+                    // abandoned, warned, counted — and made safe end
+                    // to end: everything the framework hands the
+                    // stale call (the wake mutex, the in-flight
+                    // decrement, the generation gate) lives in the
+                    // process-lifetime header and stays valid
+                    // forever, and the platform the call entered
+                    // through is signaled — synchronously, while it
+                    // is still alive — to outlive the call too: its
+                    // destruction path consults the latch, skips
+                    // destruction, and deliberately leaks the host,
+                    // process-lived (the abandoned-worker idiom,
+                    // applied to the platform itself; see
+                    // `PlatformServices.note_channel_wake_abandoned_fn`).
                     if (!quiesceChannelWake(shared, self.channel_wake_join_deadline_ms)) {
                         self.abandoned_channel_wakes += 1;
+                        if (self.services) |services| services.noteChannelWakeAbandoned();
                         if (comptime builtin.os.tag != .freestanding) {
                             std.debug.print(
-                                "effects teardown: a channel host wake hook is still executing after {d}ms (likely a synchronous marshal against this stopping loop, which violates the enqueue-only wake contract); abandoning the in-flight call — the channel header it can still touch is process-lived, but the platform services it entered through must outlive it\n",
+                                "effects teardown: a channel host wake hook is still executing after {d}ms (likely a synchronous marshal against this stopping loop, which violates the enqueue-only wake contract); abandoning the in-flight call — the channel header it can still touch is process-lived, and the platform it entered through has been signaled to skip its own destruction and stay leaked, process-lived, so the stale call can never execute into freed host state\n",
                                 .{self.channel_wake_join_deadline_ms},
                             );
                         }

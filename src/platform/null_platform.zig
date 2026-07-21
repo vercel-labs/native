@@ -573,6 +573,19 @@ pub const NullPlatform = struct {
     /// embed host drain it on their own thread via `takeWake` and then
     /// dispatch the `.wake` platform event themselves.
     wake_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    /// Latched when the runtime's effects teardown abandons an in-flight
+    /// channel `wake_fn` call (see
+    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale call
+    /// still holds this platform as its context, so `deinit` must skip
+    /// destruction and leak the host, process-lived — the reference model
+    /// of the real hosts' destroy gate, and the seam channel teardown
+    /// tests observe.
+    channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Whether `deinit` actually ran its destruction (the null platform
+    /// holds no OS resources, so "destruction" is this flag): stays false
+    /// when `channel_wake_abandoned` forced the deliberate leak. The
+    /// observation seam the abandon tests assert against.
+    destroyed: bool = false,
     /// Pending cross-thread frame requests (`request_frame_fn`), counted
     /// atomically like `wake_count`: the automation arrival watcher calls
     /// it from its own thread, and a scripted run loop (or test) drains
@@ -631,6 +644,22 @@ pub const NullPlatform = struct {
 
     pub fn initWithOptions(surface_value: Surface, web_engine: WebEngine, app_info: AppInfo) NullPlatform {
         return .{ .surface_value = surface_value, .web_engine = web_engine, .app_info = app_info };
+    }
+
+    /// The reference model of the real hosts' destroy gate (`MacPlatform`
+    /// / `LinuxPlatform` / `WindowsPlatform` `deinit`): destruction is
+    /// SKIPPED — the platform deliberately leaked, process-lived, with
+    /// one loud line — while an abandoned channel wake call may still
+    /// enter this host (see `channel_wake_abandoned`); otherwise the
+    /// `destroyed` flag records that destruction ran. The null platform
+    /// holds no OS resources, so the flag is the whole destruction —
+    /// which is exactly what makes the gate observable in tests.
+    pub fn deinit(self: *NullPlatform) void {
+        if (self.channel_wake_abandoned.load(.seq_cst)) {
+            std.debug.print("null platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
+            return;
+        }
+        self.destroyed = true;
     }
 
     pub fn platform(self: *NullPlatform) Platform {
@@ -702,6 +731,7 @@ pub const NullPlatform = struct {
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
                 .wake_fn = wakeService,
+                .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrameService,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
@@ -1654,6 +1684,14 @@ pub const NullPlatform = struct {
     fn wakeService(context: ?*anyopaque) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         _ = self.wake_count.fetchAdd(1, .release);
+    }
+
+    /// Teardown abandoned an in-flight channel wake call: latch the
+    /// flag `deinit` consults so this host is leaked rather than
+    /// destroyed (see `channel_wake_abandoned`).
+    fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.channel_wake_abandoned.store(true, .seq_cst);
     }
 
     fn requestFrameService(context: ?*anyopaque) anyerror!void {

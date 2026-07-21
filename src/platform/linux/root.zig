@@ -233,6 +233,13 @@ pub const LinuxPlatform = struct {
     app_info: platform_mod.AppInfo,
     surface_value: platform_mod.Surface,
     state: RunState = .{},
+    /// Latched when the runtime's effects teardown abandons an
+    /// in-flight channel `wake_fn` call (see
+    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
+    /// call still holds this platform as its context and may execute
+    /// into it at any later time, so `deinit` must skip destruction
+    /// and leak the host, process-lived.
+    channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!LinuxPlatform {
         return initWithEngine(title, size, .system);
@@ -268,6 +275,15 @@ pub const LinuxPlatform = struct {
     }
 
     pub fn deinit(self: *LinuxPlatform) void {
+        // An abandoned channel wake call may still enter this host at
+        // any later time (see `channel_wake_abandoned`): destroying it
+        // would turn that stale call into a use-after-free, so the
+        // host is deliberately leaked, process-lived — the
+        // abandoned-worker idiom, applied to the platform itself.
+        if (self.channel_wake_abandoned.load(.seq_cst)) {
+            std.debug.print("linux platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
+            return;
+        }
         native_sdk_gtk_destroy(self.host);
     }
 
@@ -340,6 +356,7 @@ pub const LinuxPlatform = struct {
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
                 .wake_fn = wake,
+                .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrame,
                 .decode_image_fn = decodeImage,
             },
@@ -685,11 +702,21 @@ fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name:
     native_sdk_gtk_emit_window_event(self.host, window_id, name.ptr, name.len, detail_json.ptr, detail_json.len);
 }
 
-/// Thread-safe: schedules an idle source on the GLib main loop, which
-/// emits `.wake` there. One of the two services worker threads may call.
+/// Thread-safe: schedules an idle source on the GLib main loop
+/// (`g_idle_add` — the enqueue-only shape the wake contract requires),
+/// which emits `.wake` there. One of the two services worker threads
+/// may call.
 fn wake(context: ?*anyopaque) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     native_sdk_gtk_wake(self.host);
+}
+
+/// Teardown abandoned an in-flight channel wake call: latch the flag
+/// `deinit` consults so this host is leaked rather than destroyed (see
+/// `LinuxPlatform.channel_wake_abandoned`).
+fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    self.channel_wake_abandoned.store(true, .seq_cst);
 }
 
 /// Thread-safe like `wake`: schedules an idle source on the GLib main

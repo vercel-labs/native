@@ -2257,8 +2257,29 @@ pub const PlatformServices = struct {
     /// blocks GIVEN a conforming wake, and because the runtime holds no
     /// channel lock across the call, a violating implementation hangs
     /// only its own posting thread — it can never entangle the
-    /// runtime's lock graph.
+    /// runtime's lock graph. A violator still inside the call when the
+    /// runtime tears down is ABANDONED after a bounded quiesce; see
+    /// `note_channel_wake_abandoned_fn` for the consequence the
+    /// platform must then honor.
     wake_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Teardown consequence of an abandoned wake call. The runtime's
+    /// effects teardown waits (bounded) for posts still inside
+    /// `wake_fn`; a call that outlives the deadline — only possible
+    /// when the wake violates its enqueue-only contract above — is
+    /// abandoned, and it still holds `context` and may execute into the
+    /// platform at ANY later time. The runtime reports that abandon
+    /// here, synchronously, while the platform is still alive. A
+    /// platform receiving this call must latch it, and its destruction
+    /// path must consult the latch: destruction is SKIPPED and the
+    /// platform deliberately leaked, process-lived, so the stale call
+    /// can never execute into freed host state (the abandoned-worker
+    /// idiom the effect workers already follow). Every first-party
+    /// platform wires this seam and gates its `deinit` on the latch;
+    /// embedders providing their own `Platform` must do the same — or
+    /// guarantee a conforming `wake_fn`, under which the teardown
+    /// deadline is never met and this is never called. Loop-thread,
+    /// teardown-only, unlike `wake_fn` itself.
+    note_channel_wake_abandoned_fn: ?*const fn (context: ?*anyopaque) void = null,
     /// Ask the platform loop, from ANY thread, to deliver ONE
     /// `frame_requested` event on its loop thread soon — the same event a
     /// resize or an input-driven frame produces, so everything that rides
@@ -2772,6 +2793,16 @@ pub const PlatformServices = struct {
         return wake_fn(self.context);
     }
 
+    /// Report that an in-flight `wake_fn` call was abandoned at
+    /// teardown (see `note_channel_wake_abandoned_fn` for the platform
+    /// obligation this triggers). Loop-thread, teardown-only. A
+    /// platform without the seam simply cannot be told — the caller's
+    /// own warning still names the leak, and a conforming `wake_fn`
+    /// never reaches this in the first place.
+    pub fn noteChannelWakeAbandoned(self: PlatformServices) void {
+        const note_fn = self.note_channel_wake_abandoned_fn orelse return;
+        note_fn(self.context);
+    }
 
     /// Ask the platform loop to deliver one `frame_requested` event on
     /// its own thread. Safe to call from any thread; a missing
