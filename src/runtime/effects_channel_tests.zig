@@ -1120,6 +1120,65 @@ test "rejected posts never wake the host: the pending-wake count stays flat unde
     try testing.expectEqual(before_closed, harness.null_platform.pendingWakeCount());
 }
 
+// -------------------- generation width: permanent-closed is absolute
+
+test "channel generations are u64 from the channel-owned counter" {
+    // Type pins: the posting handle and the process-lifetime header
+    // carry the channel family's u64 generation — never the shared u32
+    // effect counter, whose wrap would bound the permanent-`.closed`
+    // guarantee at 2^32 occupancies.
+    try testing.expectEqual(u64, @FieldType(effects_mod.ChannelHandle, "generation"));
+    try testing.expectEqual(u64, @FieldType(effects_mod.ChannelShared, "generation"));
+
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // The counter is channel-owned and monotonic: seed it past
+    // anything a u32 can hold and the next occupancy continues from
+    // there — the shared effect counter never touches it.
+    fx.channel_generation = @as(u64, std.math.maxInt(u32)) + 41;
+    const handle = fx.openChannel(.{ .key = 61, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(@as(u64, std.math.maxInt(u32)) + 42, handle.generation);
+    try testing.expectEqual(PostResult.accepted, handle.post("wide"));
+    _ = try expectData(&fx, 61, "wide");
+    fx.closeChannel(61);
+    _ = fx.takeMsg();
+}
+
+test "a stale handle stays closed across a u32 wrap's worth of occupancy turnovers" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // First occupancy: the stale handle a long-lived producer thread
+    // might still hold centuries of churn later.
+    const stale = fx.openChannel(.{ .key = 62, .on_event = DirectFx.channelMsg(.event) });
+    fx.closeChannel(62);
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+
+    // Simulate 2^32 turnovers of the old u32 counter's worth: seed the
+    // channel counter so the reused slot's next generation TRUNCATES
+    // to the stale handle's value in u32 arithmetic — exactly the wrap
+    // that would have resurrected the stale handle against the reused
+    // slot's header.
+    fx.channel_generation = stale.generation + (@as(u64, 1) << 32) - 1;
+    const fresh = fx.openChannel(.{ .key = 62, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(stale.generation + (@as(u64, 1) << 32), fresh.generation);
+    // The u32 collision is real...
+    try testing.expectEqual(@as(u32, @truncate(stale.generation)), @as(u32, @truncate(fresh.generation)));
+    // ...and harmless at u64: the stale handle still answers `.closed`
+    // — nothing staged, nothing counted — while the fresh occupancy
+    // posts normally into its own stream.
+    try testing.expectEqual(PostResult.closed, stale.post("resurrected?"));
+    try testing.expectEqual(PostResult.accepted, fresh.post("fresh stream"));
+    const delivered = try expectData(&fx, 62, "fresh stream");
+    try testing.expectEqual(@as(u32, 0), delivered.dropped_total);
+    fx.closeChannel(62);
+    _ = fx.takeMsg();
+}
+
 // ------------------------------------------------- replay damage gates
 
 /// Frame a minimal journal around one hand-built channel effect record:

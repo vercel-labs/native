@@ -891,7 +891,7 @@ const ChannelWake = struct {
     /// post wakes only when its handle's generation matches, so a
     /// stale producer of a closed — or reopened — channel can never
     /// wake the loop spuriously.
-    generation: u32 = 0,
+    generation: u64 = 0,
     /// The owning Effects' ATOMIC services mirror (`wake_services` — a
     /// pointer to the mirror, so a channel opened before
     /// `bindServices` still wakes once the binding publishes), or null
@@ -944,7 +944,8 @@ pub const ChannelShared = struct {
     open: bool = false,
     /// The occupancy this block currently serves; a handle stamped
     /// with an older generation posts into nothing (answers `.closed`).
-    generation: u32 = 0,
+    /// u64, channel-owned and monotonic (see `ChannelHandle.generation`).
+    generation: u64 = 0,
     /// The occupancy's effective staging bound (1..max_effect_channel_pending).
     max_pending: u32 = max_effect_channel_pending,
     /// Posts refused since the last delivered event / over the whole
@@ -971,7 +972,14 @@ pub const ChannelShared = struct {
 /// touching freed memory.
 pub const ChannelHandle = struct {
     shared: ?*ChannelShared = null,
-    generation: u32 = 0,
+    /// The occupancy this handle serves. u64 from the channel-owned
+    /// monotonic counter, NEVER the shared u32 effect counter: the
+    /// permanent-`.closed` guarantee is absolute, and a u32 that wraps
+    /// after 2^32 occupancies would let a long-lived stale handle
+    /// match a reused slot and post into some other producer's channel
+    /// — the media-surface producer handle draws the same line with
+    /// the same width (`MediaSurfaceProducer.generation`).
+    generation: u64 = 0,
 
     /// What one `post` answered — the producer's whole contract in one
     /// value, because "try again later" and "stop forever" demand
@@ -1071,7 +1079,7 @@ pub const ChannelHandle = struct {
     /// `ChannelWake`): every disarm takes the same mutex, so a disarm
     /// can never complete while a call into the host is in flight, and
     /// after it returns no call can start.
-    fn requestHostWake(shared: *ChannelShared, generation: u32) void {
+    fn requestHostWake(shared: *ChannelShared, generation: u64) void {
         const wake = &shared.wake;
         // Coalesce, LOCK-FREE: a latched flag means a host wake is in
         // flight whose drain pass clears the flag before snapshotting
@@ -1995,7 +2003,11 @@ pub fn Effects(comptime Msg: type) type {
         const ChannelSlot = struct {
             state: ChannelSlotState = .idle,
             key: u64 = 0,
-            generation: u32 = 0,
+            /// The occupancy's generation — u64 from the channel-owned
+            /// monotonic counter (`channel_generation`), never the
+            /// shared u32 effect counter (see `ChannelHandle.generation`
+            /// for why the width is load-bearing).
+            generation: u64 = 0,
             on_event: ?ChannelMsgFn = null,
             /// The slot's process-lifetime posting header — created at
             /// the slot's first open, reused across occupancies, never
@@ -2116,6 +2128,11 @@ pub fn Effects(comptime Msg: type) type {
             kind: EntryKind = .line,
             slot_index: u16 = 0,
             generation: u32 = 0,
+            /// `.channel` entries only: the parked occupancy's u64
+            /// channel generation (`slot_index` names a CHANNEL table
+            /// slot there, and the shared `generation` above is the
+            /// slot families' u32 — see `ChannelSlot.generation`).
+            channel_generation: u64 = 0,
             key: u64 = 0,
             /// Line length for `.line` entries; body length for
             /// `.response` entries (the bytes live in the slot's fetch
@@ -2238,7 +2255,7 @@ pub fn Effects(comptime Msg: type) type {
             /// `retire_slot`/`retire_generation`: a fed park-retiring
             /// `.rejected` names the parked channel-table slot it
             /// retires at delivery (see `PendingChannel`).
-            channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool, retire_slot: ?usize = null, retire_generation: u32 = 0 },
+            channel: struct { event: EffectChannelEvent, channel_fn: ?ChannelMsgFn, regenerates: bool, retire_slot: ?usize = null, retire_generation: u64 = 0 },
 
             fn addDropped(pending: *PendingMsg, count: u32) void {
                 switch (pending.*) {
@@ -2330,7 +2347,7 @@ pub fn Effects(comptime Msg: type) type {
             retire_slot: ?usize = null,
             /// Generation gate for `retire_slot`, the fed-terminal
             /// discipline.
-            retire_generation: u32 = 0,
+            retire_generation: u64 = 0,
         };
 
         /// Everything a real spawn worker's BLOCKING phase may touch,
@@ -2787,6 +2804,19 @@ pub fn Effects(comptime Msg: type) type {
         /// drained.
         fetch_start_rejections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         next_generation: u32 = 1,
+        /// The channel family's OWN generation counter — u64 and
+        /// monotonic for the process's lifetime, never the shared u32
+        /// `next_generation` above: channel handles live on app-owned
+        /// threads with no lifetime bound, so their permanent-`.closed`
+        /// guarantee must survive any number of occupancies, and a
+        /// wrapped u32 would let a stale handle match a reused slot
+        /// after 2^32 turnovers (the media-surface producer handle
+        /// draws the same line — `MediaSurfaceSlot.generation`). The
+        /// slot families keep the u32 counter: their generations gate
+        /// loop-internal queue entries and worker joins, not
+        /// process-lifetime posting handles. Seedable in tests to pin
+        /// the non-wrapping guarantee without 2^32 opens.
+        channel_generation: u64 = 0,
         slots: [max_effects]Slot = [_]Slot{.{}} ** max_effects,
         /// Fixed fx timer table (see `max_effect_timers`): timers live
         /// beside the effect slots, never in them. Loop-thread only.
@@ -3994,9 +4024,7 @@ pub fn Effects(comptime Msg: type) type {
             // -> the drain's terminal retire), the same causal instant
             // live delivery frees the key.
             if (self.replay) {
-                const parked_generation = self.next_generation;
-                self.next_generation +%= 1;
-                if (self.next_generation == 0) self.next_generation = 1;
+                const parked_generation = self.nextChannelGeneration();
                 slot.state = .open;
                 slot.key = options.key;
                 slot.generation = parked_generation;
@@ -4034,9 +4062,7 @@ pub fn Effects(comptime Msg: type) type {
                 return dead;
             };
             staging.* = .{};
-            const generation = self.next_generation;
-            self.next_generation +%= 1;
-            if (self.next_generation == 0) self.next_generation = 1;
+            const generation = self.nextChannelGeneration();
             slot.state = .open;
             slot.key = options.key;
             slot.generation = generation;
@@ -4172,7 +4198,7 @@ pub fn Effects(comptime Msg: type) type {
             var entry: Entry = .{
                 .kind = .channel,
                 .slot_index = @intCast(slot_index),
-                .generation = slot.generation,
+                .channel_generation = slot.generation,
                 .key = key,
                 .line_len = @intCast(staged_len),
                 .dropped_before = dropped_pending,
@@ -5669,7 +5695,7 @@ pub fn Effects(comptime Msg: type) type {
                         // verbatim; the handler resolves from the live
                         // slot at delivery (the audio resolve rule).
                         const channel_slot = &self.channel_slots[entry.slot_index];
-                        if (channel_slot.state == .idle or entry.generation != channel_slot.generation) continue;
+                        if (channel_slot.state == .idle or entry.channel_generation != channel_slot.generation) continue;
                         const on_event = channel_slot.on_event;
                         // Terminals retire the slot BEFORE the Msg
                         // reaches update — the drain-wide discipline:
@@ -6547,6 +6573,18 @@ pub fn Effects(comptime Msg: type) type {
                 .channel_fn = channel_fn,
                 .regenerates = regenerates,
             });
+        }
+
+        /// The next channel occupancy generation — channel-owned,
+        /// u64, monotonic (see `channel_generation`). The zero skip
+        /// mirrors the shared counter's: 0 is the never-opened /
+        /// disarmed sentinel, unreachable to a live handle. Wrapping
+        /// arithmetic is kept for form; at one open per nanosecond the
+        /// wrap is five centuries away.
+        fn nextChannelGeneration(self: *Self) u64 {
+            self.channel_generation +%= 1;
+            if (self.channel_generation == 0) self.channel_generation = 1;
+            return self.channel_generation;
         }
 
         fn findChannelSlot(self: *Self, key: u64) ?*ChannelSlot {
