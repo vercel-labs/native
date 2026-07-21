@@ -964,7 +964,9 @@ test "a note row's context menu copies, deletes, restores, and purges through re
     try testing.expectEqualStrings("Delete", groceries_row.context_menu[1].label);
     try h.contextPress(groceries_row.id);
     try testing.expectEqual(@as(usize, 1), h.harness.null_platform.context_menu_request_count);
-    try testing.expectEqual(groceries_row.id, h.harness.null_platform.context_menu_token);
+    // The correlation token is minted per request and opaque; the null
+    // platform records it, and the platform only ever echoes it back.
+    try testing.expect(h.harness.null_platform.context_menu_token != 0);
     const presented = h.harness.null_platform.contextMenuItems();
     try testing.expectEqual(@as(usize, 2), presented.len);
     try testing.expectEqualStrings("Copy", presented[0].label);
@@ -1053,7 +1055,8 @@ test "a folder row's context menu renames and deletes through real dispatch" {
     try testing.expectEqualStrings("Delete", ideas_row.context_menu[1].label);
     try h.contextPress(ideas_row.id);
     try testing.expectEqual(@as(usize, 1), h.harness.null_platform.context_menu_request_count);
-    try testing.expectEqual(ideas_row.id, h.harness.null_platform.context_menu_token);
+    // Per-request token: opaque to the test as it is to the platform.
+    try testing.expect(h.harness.null_platform.context_menu_token != 0);
     try testing.expectEqual(model_mod.all_folder_id, model.selected_folder);
 
     // Rename opens the same dialog flow the keyboard uses, prefilled,
