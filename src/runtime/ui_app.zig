@@ -3769,25 +3769,34 @@ fn effectsQuitApp(context: *anyopaque) bool {
     return true;
 }
 
-/// Deep-copy every CONST slice reachable in `value` into
+/// Deep-copy every const slice reachable in `value` into
 /// `allocator`-owned storage, returning a value that no longer aliases
-/// the source's const slice payloads. The context-menu snapshot uses
-/// this at present time: a declared item's Msg may carry build-arena
-/// slices (the documented payload shape — `ui.fmt` strings and
-/// allocator-form bindings, always const), and a native menu stays open
-/// across arbitrarily many rebuilds while the build arenas
-/// double-buffer only two. MUTABLE slices pass through by reference: a
-/// `[]u8` payload aliases app-owned storage by contract (a build cannot
-/// produce a mutable arena slice through the const model reference),
-/// and the app's `update` may write THROUGH it — a copy would swallow
-/// those writes into discarded snapshot storage. Non-slice pointers
-/// pass through by reference for the same reason, and untagged unions
-/// cannot be walked, so they pass through by value.
+/// the source's slice payloads. The context-menu snapshot uses this at
+/// present time: a declared item's Msg may carry build-arena slices
+/// (the documented payload shape — `ui.fmt` strings and allocator-form
+/// bindings, always const), and a native menu stays open across
+/// arbitrarily many rebuilds while the build arenas double-buffer only
+/// two. Non-slice pointers pass through by reference (their contract is
+/// static or model-owned storage). Shapes the deferred copy cannot
+/// handle SOUNDLY are teaching errors at compile time, never a silent
+/// guess:
+/// - mutable slices: unknowable aliasing — `[]u8` from the build arena
+///   must be copied before the arena resets, while `[]u8` into
+///   app-owned storage must NOT be (update may write through it);
+/// - slices inside fixed arrays: an array's length says nothing about
+///   which elements are initialized (count-plus-buffer leaves the tail
+///   undefined), so walking every element reads undefined values;
+/// - slices inside untagged unions: no tag, no active arm to copy.
+/// Slice-free arrays and untagged unions are plain bytes and pass by
+/// value with the enclosing copy.
 fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) error{OutOfMemory}!T {
     switch (@typeInfo(T)) {
         .pointer => |pointer_info| switch (pointer_info.size) {
             .slice => {
-                if (comptime !pointer_info.is_const) return value;
+                if (comptime !pointer_info.is_const) @compileError(
+                    "a context-menu Msg payload carries the mutable slice '" ++ @typeName(T) ++
+                        "', and the presented menu's deferred snapshot cannot know whether it aliases model-owned storage (writes through it must land) or the build arena (its bytes must be copied before the arena resets) - carry a const slice, or an index update resolves against the model",
+                );
                 // The copy keeps the declared alignment and sentinel, so
                 // it coerces back to the payload's exact slice type.
                 const copy = try allocator.allocWithOptions(
@@ -3813,7 +3822,13 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
             return copy;
         },
         .@"union" => |union_info| {
-            if (comptime union_info.tag_type == null) return value;
+            if (comptime union_info.tag_type == null) {
+                if (comptime typeCanReachSlice(T)) @compileError(
+                    "a context-menu Msg payload carries slices inside the untagged union '" ++ @typeName(T) ++
+                        "', and without a tag the presented menu's deferred snapshot cannot know which arm to copy - use a tagged union",
+                );
+                return value;
+            }
             switch (value) {
                 inline else => |payload, tag| {
                     return @unionInit(T, @tagName(tag), try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
@@ -3828,18 +3843,44 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
             const payload = value catch |err| return @as(T, err);
             return @as(T, try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
         },
-        .array => |array_info| {
-            var copy = value;
-            for (&copy, value) |*element, source| {
-                element.* = try dupeSlicesDeep(array_info.child, allocator, source);
-            }
-            return copy;
+        .array => {
+            // A slice's length defines exactly its initialized elements;
+            // a fixed array's length defines only its storage. Walking a
+            // count-plus-buffer array would interpret the undefined tail
+            // as slices, so slice-bearing arrays are refused outright and
+            // slice-free arrays pass by value as plain bytes.
+            if (comptime typeCanReachSlice(T)) @compileError(
+                "a context-menu Msg payload carries slices inside the fixed array '" ++ @typeName(T) ++
+                    "', whose length says nothing about which elements are initialized (count-plus-buffer leaves the tail undefined), so the presented menu's deferred snapshot cannot copy them soundly - carry a slice of slices, whose length defines exactly the initialized elements",
+            );
+            return value;
         },
         else => return value,
     }
 }
 
-test "dupeSlicesDeep copies const slices with their alignment and sentinel, aliases mutable ones, and recurses error unions" {
+/// Whether a value of `T` can transitively reach a slice through the
+/// shapes `dupeSlicesDeep` walks: struct fields, union arms, optionals,
+/// error-union payloads, and array elements. Non-slice pointers stop
+/// the walk — they pass by reference, so nothing behind them is copied.
+fn typeCanReachSlice(comptime T: type) bool {
+    @setEvalBranchQuota(10_000);
+    return switch (@typeInfo(T)) {
+        .pointer => |pointer_info| pointer_info.size == .slice,
+        .@"struct" => |struct_info| for (struct_info.fields) |field| {
+            if (typeCanReachSlice(field.type)) break true;
+        } else false,
+        .@"union" => |union_info| for (union_info.fields) |field| {
+            if (typeCanReachSlice(field.type)) break true;
+        } else false,
+        .optional => |optional_info| typeCanReachSlice(optional_info.child),
+        .error_union => |error_union_info| typeCanReachSlice(error_union_info.payload),
+        .array => |array_info| typeCanReachSlice(array_info.child),
+        else => false,
+    };
+}
+
+test "dupeSlicesDeep copies const slices with their alignment and sentinel, recurses error unions, and passes slice-free arrays as bytes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -3847,22 +3888,26 @@ test "dupeSlicesDeep copies const slices with their alignment and sentinel, alia
     const Payload = struct {
         name: []const u8,
         aligned: []align(64) const u8,
-        mutable: []u8,
         maybe: ?[]const u8,
         result: error{Overloaded}![]const u8,
         terminated: [:0]const u8,
+        // The count-plus-buffer shape WITHOUT slices: plain bytes, so
+        // the undefined tail is copied as bytes and never interpreted.
+        used: usize,
+        slots: [4]u32,
     };
 
-    var mutable_storage: [4]u8 = .{ 1, 2, 3, 4 };
     const aligned_storage: [8]u8 align(64) = @splat(7);
-    const source: Payload = .{
+    var source: Payload = .{
         .name = "model-name",
         .aligned = &aligned_storage,
-        .mutable = &mutable_storage,
         .maybe = "maybe",
         .result = "ok",
         .terminated = "zed",
+        .used = 1,
+        .slots = undefined,
     };
+    source.slots[0] = 42;
 
     const copy = try dupeSlicesDeep(Payload, allocator, source);
 
@@ -3884,9 +3929,9 @@ test "dupeSlicesDeep copies const slices with their alignment and sentinel, alia
     const copied_result = try copy.result;
     try std.testing.expect(copied_result.ptr != (source.result catch unreachable).ptr);
     try std.testing.expectEqualStrings("ok", copied_result);
-    // Mutable slices pass by REFERENCE: they alias app-owned storage
-    // that `update` may write through, so a copy would swallow writes.
-    try std.testing.expect(copy.mutable.ptr == &mutable_storage);
+    // The slice-free array's initialized region survives by value.
+    try std.testing.expectEqual(@as(usize, 1), copy.used);
+    try std.testing.expectEqual(@as(u32, 42), copy.slots[0]);
 
     // A failed error union passes the error through as the value.
     const failing: error{Overloaded}![]const u8 = error.Overloaded;
