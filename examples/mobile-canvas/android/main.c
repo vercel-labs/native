@@ -156,11 +156,17 @@ static void push_viewport(Shim *shim) {
         if (rect.right > 0 && rect.right < px_width) safe_right = (float)(px_width - rect.right) / scale;
         if (rect.bottom > 0 && rect.bottom < px_height) safe_bottom = (float)(px_height - rect.bottom) / scale;
     }
-    native_sdk_app_viewport(shim->native_app,
-                             (float)px_width / scale, (float)px_height / scale, scale,
-                             shim->window,
-                             safe_top, safe_right, safe_bottom, safe_left,
-                             0, 0, 0, 0);
+    native_sdk_viewport_t viewport = {
+        .width = (float)px_width / scale,
+        .height = (float)px_height / scale,
+        .scale = scale,
+        .surface = shim->window,
+        .safe_top = safe_top,
+        .safe_right = safe_right,
+        .safe_bottom = safe_bottom,
+        .safe_left = safe_left,
+    };
+    native_sdk_app_viewport(shim->native_app, &viewport);
     log_native_error(shim, "viewport");
     shim->needs_present = true;
 }

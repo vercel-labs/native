@@ -224,6 +224,16 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         switch (web_engine) {
             .system => {
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{} });
+                // GPU-surface Vulkan presenter (Wayland/X11 direct scanout) — gtk_host.c references it.
+                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/native_sdk_vk.c"), .flags = &.{} });
+        // Cairo/Pango packet renderer (opt-in SCHEMIFY_CAIRO=1); root.zig
+        // references it, so every Linux link needs it (see build/app.zig).
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/native_sdk_cairo.c"), .flags = &.{} });
+                app_mod.linkSystemLibrary("vulkan", .{});
+        app_mod.linkSystemLibrary("freetype2", .{}); // native_sdk_cairo.c text (cairo-ft + FT_*)
+                app_mod.linkSystemLibrary("shaderc", .{});
+                app_mod.linkSystemLibrary("wayland-client", .{});
+                app_mod.linkSystemLibrary("x11", .{});
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
                 app_mod.linkSystemLibrary("dl", .{});

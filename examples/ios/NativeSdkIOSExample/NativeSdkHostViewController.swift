@@ -233,21 +233,17 @@ final class NativeSdkHostViewController: UIViewController {
         guard let nativeApp else { return }
         let scale = Float(view.window?.screen.scale ?? UIScreen.main.scale)
         let safe = view.safeAreaInsets
-        native_sdk_app_viewport(
-            nativeApp,
-            Float(webView.bounds.width),
-            Float(webView.bounds.height),
-            scale,
-            nil,
-            Float(safe.top),
-            Float(safe.right),
-            Float(safe.bottom),
-            Float(safe.left),
-            0,
-            0,
-            Float(keyboardBottomInset),
-            0
-        )
+        var viewport = native_sdk_viewport_t()
+        viewport.width = Float(webView.bounds.width)
+        viewport.height = Float(webView.bounds.height)
+        viewport.scale = scale
+        viewport.surface = nil
+        viewport.safe_top = Float(safe.top)
+        viewport.safe_right = Float(safe.right)
+        viewport.safe_bottom = Float(safe.bottom)
+        viewport.safe_left = Float(safe.left)
+        viewport.keyboard_bottom = Float(keyboardBottomInset)
+        native_sdk_app_viewport(nativeApp, &viewport)
         native_sdk_app_frame(nativeApp)
         refreshWidgetAccessibility()
     }

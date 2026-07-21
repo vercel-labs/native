@@ -705,11 +705,18 @@ pub const ViewKind = enum {
 
 pub const GpuSurfaceBackend = enum {
     none,
+    /// macOS: SDK-owned Metal renderer presenting to a CAMetalLayer.
     metal,
+    /// Linux/Wayland: SDK-owned Vulkan renderer presenting to a wl_subsurface
+    /// swapchain (native scanout, GSK skipped — the Metal analog on Wayland).
+    wayland,
+    /// Linux/X11: SDK-owned Vulkan renderer presenting to a child-window
+    /// swapchain (native scanout, GSK skipped — the Metal analog on X11).
+    x11,
     /// CPU rasterization (reference renderer) presented through the
-    /// platform's pixel blit path. Platforms without a GPU packet renderer
-    /// (Linux/GTK) report this backend in their frame events; manifests
-    /// declaring another backend fall back to it rather than erroring.
+    /// platform's pixel blit path (the GTK/GSK fallback when no Vulkan
+    /// surface backend applies); manifests declaring another backend fall
+    /// back to it rather than erroring.
     software,
 };
 

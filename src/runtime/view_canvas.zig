@@ -277,6 +277,25 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
 
         pub fn copyCanvasDisplayList(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
             _ = try CanvasResourceCounts.fromDisplayList(display_list);
+            // Content-identical resubmit: skip the copy and don't bump
+            // canvas_revision. The app resubmits the whole list on every Msg
+            // (idle pumps, the 60 Hz hover present); an unchanged list that
+            // bumped the revision would force a full repaint of identical
+            // pixels, pinning a core at idle. commandsEqual follows slices, so
+            // it's arena-independent, and runs only where we'd otherwise raster.
+            {
+                const current = self.canvasDisplayList().commands;
+                if (current.len == display_list.commands.len) {
+                    var unchanged = true;
+                    for (current, display_list.commands) |a, b| {
+                        if (!canvas.commandsEqual(a, b)) {
+                            unchanged = false;
+                            break;
+                        }
+                    }
+                    if (unchanged) return;
+                }
+            }
             if (display_list.commands.len > 0 and display_list.commands.ptr == self.canvas_commands[0..].ptr) {
                 self.canvas_revision += 1;
                 return;

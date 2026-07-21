@@ -21,6 +21,7 @@ const MobileTextInputState = types.MobileTextInputState;
 const MobileWidgetSemantics = types.MobileWidgetSemantics;
 const MobileWidgetTextGeometry = types.MobileWidgetTextGeometry;
 const MobileWidgetActionRequest = types.MobileWidgetActionRequest;
+const MobileViewport = types.MobileViewport;
 const MobileViewportState = types.MobileViewportState;
 const MobileGpuFrameState = types.MobileGpuFrameState;
 const MobileCanvasPixels = types.MobileCanvasPixels;
@@ -86,34 +87,21 @@ pub fn MobileCApi(comptime Host: type) type {
             self.embedded.resize(mobileSurface(width, height, scale, surface, .{}, .{})) catch |err| recordError(self, err);
         }
 
-        pub fn native_sdk_app_viewport(
-            app: ?*anyopaque,
-            width: f32,
-            height: f32,
-            scale: f32,
-            surface: ?*anyopaque,
-            safe_top: f32,
-            safe_right: f32,
-            safe_bottom: f32,
-            safe_left: f32,
-            keyboard_top: f32,
-            keyboard_right: f32,
-            keyboard_bottom: f32,
-            keyboard_left: f32,
-        ) callconv(.c) void {
+        pub fn native_sdk_app_viewport(app: ?*anyopaque, viewport: ?*const MobileViewport) callconv(.c) void {
             const self = hostApp(Host, app) orelse return;
-            const safe_area = geometry.InsetsF.init(safe_top, safe_right, safe_bottom, safe_left);
+            const v = viewport orelse return;
+            const safe_area = geometry.InsetsF.init(v.safe_top, v.safe_right, v.safe_bottom, v.safe_left);
             // Safe areas ride the window-chrome channel too (see
-            // host.publishViewportChrome) before the resize dispatch, so
-            // the chrome re-query the resize triggers reads fresh insets.
+            // host.publishViewportChrome) before the resize dispatch, so the
+            // chrome re-query the resize triggers reads fresh insets.
             host.publishViewportChrome(self, safe_area);
             self.embedded.resize(mobileSurface(
-                width,
-                height,
-                scale,
-                surface,
+                v.width,
+                v.height,
+                v.scale,
+                v.surface,
                 safe_area,
-                geometry.InsetsF.init(keyboard_top, keyboard_right, keyboard_bottom, keyboard_left),
+                geometry.InsetsF.init(v.keyboard_top, v.keyboard_right, v.keyboard_bottom, v.keyboard_left),
             )) catch |err| recordError(self, err);
         }
 

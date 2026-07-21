@@ -65,6 +65,7 @@ const GtkEvent = extern struct {
     frame_interval_ns: u64,
     nonblank: c_int,
     sample_color: u32,
+    gpu_backend: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -129,14 +130,125 @@ extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
 extern fn native_sdk_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_minimize_window(host: *GtkHost, window_id: u64) c_int;
-extern fn native_sdk_gtk_create_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
-extern fn native_sdk_gtk_update_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
+// Struct-by-pointer view create/update (see gtk_host.h). The wide positional
+// externs are miscompiled by Zig 0.16.0's self-hosted x86_64 backend (SysV
+// stack-arg placement), so the host call crosses the boundary through a single
+// descriptor pointer instead. Field order/types must match the C structs.
+const GtkViewDesc = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    kind: c_int,
+    parent: [*]const u8,
+    parent_len: usize,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    layer: c_int,
+    visible: c_int,
+    enabled: c_int,
+    role: [*]const u8,
+    role_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+    text: [*]const u8,
+    text_len: usize,
+    command: [*]const u8,
+    command_len: usize,
+};
+const GtkViewPatch = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    has_frame: c_int,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    has_layer: c_int,
+    layer: c_int,
+    has_visible: c_int,
+    visible: c_int,
+    has_enabled: c_int,
+    enabled: c_int,
+    has_role: c_int,
+    role: [*]const u8,
+    role_len: usize,
+    has_accessibility_label: c_int,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+    has_text: c_int,
+    text: [*]const u8,
+    text_len: usize,
+    has_command: c_int,
+    command: [*]const u8,
+    command_len: usize,
+};
+extern fn native_sdk_gtk_create_view_desc(host: *GtkHost, desc: *const GtkViewDesc) c_int;
+extern fn native_sdk_gtk_update_view_patch(host: *GtkHost, patch: *const GtkViewPatch) c_int;
 extern fn native_sdk_gtk_set_view_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_gtk_set_view_visible(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
 extern fn native_sdk_gtk_focus_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_close_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_request_gpu_surface_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_present_gpu_surface_pixels(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+// Descriptor-pointer twin: the wide positional present signature is mis-lowered
+// by the self-hosted x86_64 backend (rgba8_len lands a slot off), so cross the
+// seam with one struct pointer instead. Mirrors GtkViewDesc.
+const GtkGpuPresentDesc = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    width: usize,
+    height: usize,
+    scale: f64,
+    has_dirty_rect: c_int,
+    dirty_x: f64,
+    dirty_y: f64,
+    dirty_width: f64,
+    dirty_height: f64,
+    rgba8: [*]const u8,
+    rgba8_len: usize,
+};
+extern fn native_sdk_gtk_present_gpu_surface_pixels_desc(host: *GtkHost, desc: *const GtkGpuPresentDesc) c_int;
+
+// Cairo packet renderer (native_sdk_cairo.c): an immediate-mode 2D surface the
+// packet service below drives command by command. See presentGpuSurfacePacket.
+const CairoCtx = opaque {};
+extern fn native_sdk_cairo_begin(px_width: c_int, px_height: c_int, clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64) ?*CairoCtx;
+extern fn native_sdk_cairo_save(c: *CairoCtx) void;
+extern fn native_sdk_cairo_restore(c: *CairoCtx) void;
+extern fn native_sdk_cairo_identity_matrix(c: *CairoCtx) void;
+extern fn native_sdk_cairo_set_matrix(c: *CairoCtx, a: f64, b: f64, cc: f64, d: f64, tx: f64, ty: f64) void;
+extern fn native_sdk_cairo_clip_rect(c: *CairoCtx, x: f64, y: f64, w: f64, h: f64) void;
+extern fn native_sdk_cairo_set_color(c: *CairoCtx, r: f64, g: f64, b: f64, a: f64) void;
+extern fn native_sdk_cairo_set_linear_gradient(c: *CairoCtx, x0: f64, y0: f64, x1: f64, y1: f64, n: c_int, offsets: [*]const f64, colors: [*]const f64) void;
+extern fn native_sdk_cairo_new_path(c: *CairoCtx) void;
+extern fn native_sdk_cairo_move_to(c: *CairoCtx, x: f64, y: f64) void;
+extern fn native_sdk_cairo_line_to(c: *CairoCtx, x: f64, y: f64) void;
+extern fn native_sdk_cairo_curve_to(c: *CairoCtx, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) void;
+extern fn native_sdk_cairo_close_path(c: *CairoCtx) void;
+extern fn native_sdk_cairo_rectangle(c: *CairoCtx, x: f64, y: f64, w: f64, h: f64) void;
+extern fn native_sdk_cairo_rounded_rect(c: *CairoCtx, x: f64, y: f64, w: f64, h: f64, tl: f64, tr: f64, br: f64, bl: f64) void;
+extern fn native_sdk_cairo_fill(c: *CairoCtx) void;
+extern fn native_sdk_cairo_stroke(c: *CairoCtx, width: f64, cap: c_int) void;
+extern fn native_sdk_cairo_read_rgba8(c: *CairoCtx, out: [*]u8, out_len: usize) c_int;
+extern fn native_sdk_cairo_free(c: *CairoCtx) void;
+extern fn native_sdk_cairo_register_fonts(reg: [*]const u8, reg_len: usize, mono: [*]const u8, mono_len: usize) c_int;
+extern fn native_sdk_cairo_show_string(c: *CairoCtx, font_id: u64, size: f64, x: f64, y: f64, text: [*]const u8, text_len: usize, r: f64, g: f64, b: f64, a: f64) void;
+extern fn native_sdk_cairo_shadow(c: *CairoCtx, x: f64, y: f64, w: f64, h: f64, tl: f64, tr: f64, br: f64, bl: f64, dx: f64, dy: f64, blur: f64, spread: f64, r: f64, g: f64, b: f64, a: f64) void;
+extern fn native_sdk_cairo_blur(c: *CairoCtx, x: f64, y: f64, w: f64, h: f64, radius: f64, opacity: f64) void;
+extern fn native_sdk_cairo_upload_image(id: u64, width: c_int, height: c_int, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_cairo_remove_image(id: u64) void;
+extern fn native_sdk_cairo_draw_image(c: *CairoCtx, id: u64, has_src: c_int, sx: f64, sy: f64, sw: f64, sh: f64, dx: f64, dy: f64, dw: f64, dh: f64, tl: f64, tr: f64, br: f64, bl: f64, fit: c_int, sampling: c_int, opacity: f64) void;
+
+// The same bundled Geist TTFs the reference renderer inks with, embedded again
+// here so the Cairo path resolves glyph shapes identically. ponytail: duplicate
+// embed (~400 KiB); share a fonts module if the binary size ever matters.
+const cairo_geist_regular = @embedFile("../../primitives/canvas/fonts/Geist-Regular.ttf");
+const cairo_geist_mono = @embedFile("../../primitives/canvas/fonts/GeistMono-Regular.ttf");
+var cairo_fonts_ready = false;
 extern fn native_sdk_gtk_create_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_gtk_set_webview_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_gtk_navigate_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -306,6 +418,13 @@ pub const LinuxPlatform = struct {
                 .close_view_fn = closeView,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                // Cairo packet renderer (native_sdk_cairo.c): the accelerated
+                // Linux draw path. Any command it can't paint refuses the frame,
+                // so the reference renderer still resolves it correctly.
+                .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
+                // Image seam feeds the Cairo path's draw_image cache.
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -518,7 +637,11 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .frame_interval_ns = event.frame_interval_ns,
             .nonblank = event.nonblank != 0,
             .sample_color = event.sample_color,
-            .backend = .software,
+            .backend = switch (event.gpu_backend) {
+                1 => .wayland,
+                2 => .x11,
+                else => .software,
+            },
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
             .alpha_mode = .@"opaque",
@@ -866,30 +989,30 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     const frame = options.frame;
     const parent = options.parent orelse "";
-    if (native_sdk_gtk_create_view(
-        self.host,
-        options.window_id,
-        options.label.ptr,
-        options.label.len,
-        viewKindInt(options.kind),
-        parent.ptr,
-        parent.len,
-        frame.x,
-        frame.y,
-        frame.width,
-        frame.height,
-        options.layer,
-        if (options.visible) 1 else 0,
-        if (options.enabled) 1 else 0,
-        options.role.ptr,
-        options.role.len,
-        options.accessibility_label.ptr,
-        options.accessibility_label.len,
-        options.text.ptr,
-        options.text.len,
-        options.command.ptr,
-        options.command.len,
-    ) == 0) return error.CreateFailed;
+    const desc = GtkViewDesc{
+        .window_id = options.window_id,
+        .label = options.label.ptr,
+        .label_len = options.label.len,
+        .kind = viewKindInt(options.kind),
+        .parent = parent.ptr,
+        .parent_len = parent.len,
+        .x = frame.x,
+        .y = frame.y,
+        .width = frame.width,
+        .height = frame.height,
+        .layer = options.layer,
+        .visible = if (options.visible) 1 else 0,
+        .enabled = if (options.enabled) 1 else 0,
+        .role = options.role.ptr,
+        .role_len = options.role.len,
+        .accessibility_label = options.accessibility_label.ptr,
+        .accessibility_label_len = options.accessibility_label.len,
+        .text = options.text.ptr,
+        .text_len = options.text.len,
+        .command = options.command.ptr,
+        .command_len = options.command.len,
+    };
+    if (native_sdk_gtk_create_view_desc(self.host, &desc) == 0) return error.CreateFailed;
 }
 
 fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, patch: platform_mod.ViewPatch) anyerror!void {
@@ -901,35 +1024,35 @@ fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []c
     const accessibility_label = patch.accessibility_label orelse "";
     const text = patch.text orelse "";
     const command = patch.command orelse "";
-    if (native_sdk_gtk_update_view(
-        self.host,
-        window_id,
-        label.ptr,
-        label.len,
-        if (patch.frame != null) 1 else 0,
-        frame.x,
-        frame.y,
-        frame.width,
-        frame.height,
-        if (patch.layer != null) 1 else 0,
-        patch.layer orelse 0,
-        if (patch.visible != null) 1 else 0,
-        if (patch.visible orelse false) 1 else 0,
-        if (patch.enabled != null) 1 else 0,
-        if (patch.enabled orelse false) 1 else 0,
-        if (patch.role != null) 1 else 0,
-        role.ptr,
-        role.len,
-        if (patch.accessibility_label != null) 1 else 0,
-        accessibility_label.ptr,
-        accessibility_label.len,
-        if (patch.text != null) 1 else 0,
-        text.ptr,
-        text.len,
-        if (patch.command != null) 1 else 0,
-        command.ptr,
-        command.len,
-    ) == 0) return error.ViewNotFound;
+    const view_patch = GtkViewPatch{
+        .window_id = window_id,
+        .label = label.ptr,
+        .label_len = label.len,
+        .has_frame = if (patch.frame != null) 1 else 0,
+        .x = frame.x,
+        .y = frame.y,
+        .width = frame.width,
+        .height = frame.height,
+        .has_layer = if (patch.layer != null) 1 else 0,
+        .layer = patch.layer orelse 0,
+        .has_visible = if (patch.visible != null) 1 else 0,
+        .visible = if (patch.visible orelse false) 1 else 0,
+        .has_enabled = if (patch.enabled != null) 1 else 0,
+        .enabled = if (patch.enabled orelse false) 1 else 0,
+        .has_role = if (patch.role != null) 1 else 0,
+        .role = role.ptr,
+        .role_len = role.len,
+        .has_accessibility_label = if (patch.accessibility_label != null) 1 else 0,
+        .accessibility_label = accessibility_label.ptr,
+        .accessibility_label_len = accessibility_label.len,
+        .has_text = if (patch.text != null) 1 else 0,
+        .text = text.ptr,
+        .text_len = text.len,
+        .has_command = if (patch.command != null) 1 else 0,
+        .command = command.ptr,
+        .command_len = command.len,
+    };
+    if (native_sdk_gtk_update_view_patch(self.host, &view_patch) == 0) return error.ViewNotFound;
 }
 
 fn setViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
@@ -966,22 +1089,446 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     const dirty_bounds = if (pixels.dirty_bounds) |bounds| bounds.normalized() else geometry.RectF{};
-    if (native_sdk_gtk_present_gpu_surface_pixels(
-        self.host,
-        pixels.window_id,
-        pixels.label.ptr,
-        pixels.label.len,
-        pixels.width,
-        pixels.height,
-        pixels.scale_factor,
-        if (pixels.dirty_bounds != null) 1 else 0,
-        dirty_bounds.x,
-        dirty_bounds.y,
-        dirty_bounds.width,
-        dirty_bounds.height,
-        pixels.rgba8.ptr,
-        pixels.rgba8.len,
-    ) == 0) return error.ViewNotFound;
+    const desc = GtkGpuPresentDesc{
+        .window_id = pixels.window_id,
+        .label = pixels.label.ptr,
+        .label_len = pixels.label.len,
+        .width = pixels.width,
+        .height = pixels.height,
+        .scale = pixels.scale_factor,
+        .has_dirty_rect = if (pixels.dirty_bounds != null) 1 else 0,
+        .dirty_x = dirty_bounds.x,
+        .dirty_y = dirty_bounds.y,
+        .dirty_width = dirty_bounds.width,
+        .dirty_height = dirty_bounds.height,
+        .rgba8 = pixels.rgba8.ptr,
+        .rgba8_len = pixels.rgba8.len,
+    };
+    if (native_sdk_gtk_present_gpu_surface_pixels_desc(self.host, &desc) == 0) return error.ViewNotFound;
+}
+
+// ── Cairo packet path ───────────────────────────────────────────────────────
+// Decodes the runtime's JSON GPU packet and draws it with Cairo, the Core
+// Graphics analog (see native_sdk_cairo.c). Dispatch is payload-structural:
+// every command carries exactly one drawable payload (shape+paint, text,
+// image, or effect), so both the gate and the drawer key off which payload is
+// present rather than a whitelist of `kind` strings — a new payload renderer
+// extends coverage in both at once. Any command whose payload we can't render
+// refuses the whole frame, so the runtime falls back to the reference renderer
+// — correct, just unaccelerated.
+
+/// Whether the Cairo renderer can fully draw this command, probed by payload.
+/// Mirrors `drawCairoCommand`'s dispatch exactly: if the gate accepts a
+/// command the drawer can't fully paint, that command silently drops — so the
+/// two must agree on every payload.
+fn cairoCanDraw(obj: std.json.ObjectMap) bool {
+    if (jobj(obj, "effect")) |eff| return cairoEffectRenderable(eff);
+    if (jobj(obj, "text")) |_| return cairo_fonts_ready; // shaped by Cairo from `lines`/`origin`
+    if (jobj(obj, "image")) |_| return true; // absent id skips, like the reference renderer
+    if (jobj(obj, "paint")) |paint| return jobj(obj, "shape") != null and cairoPaintRenderable(paint);
+    return false;
+}
+
+/// Effects we can paint: shadow (offset rounded fill) and blur (backdrop box
+/// blur). A future effect kind refuses until it has a renderer.
+fn cairoEffectRenderable(eff: std.json.ObjectMap) bool {
+    const kind = switch (eff.get("kind") orelse return false) {
+        .string => |s| s,
+        else => return false,
+    };
+    return std.mem.eql(u8, kind, "shadow") or std.mem.eql(u8, kind, "blur");
+}
+
+/// Paints `setCairoPaint` can install: solid color and linear gradient.
+fn cairoPaintRenderable(paint: std.json.ObjectMap) bool {
+    const kind = switch (paint.get("kind") orelse return false) {
+        .string => |s| s,
+        else => return false,
+    };
+    return std.mem.eql(u8, kind, "color") or std.mem.eql(u8, kind, "linear_gradient");
+}
+
+/// Cache a registered image's straight-RGBA8 pixels for the Cairo draw_image
+/// path, keyed by id host-wide (the macOS uploadGpuSurfaceImage twin). The
+/// runtime pushes these before presenting any packet that draws the id.
+fn uploadGpuSurfaceImage(context: ?*anyopaque, image: platform_mod.GpuSurfaceImagePixels) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_cairo_upload_image(image.id, @intCast(image.width), @intCast(image.height), image.rgba8.ptr, image.rgba8.len) == 0)
+        return error.InvalidGpuSurfaceImage;
+}
+
+fn removeGpuSurfaceImage(context: ?*anyopaque, id: u64) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    native_sdk_cairo_remove_image(id);
+}
+
+fn jnum(v: std.json.Value) f64 {
+    return switch (v) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch 0,
+        else => 0,
+    };
+}
+
+fn jarr(map: std.json.ObjectMap, key: []const u8) ?std.json.Array {
+    return switch (map.get(key) orelse return null) {
+        .array => |arr| arr,
+        else => null,
+    };
+}
+
+fn jobj(map: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    return switch (map.get(key) orelse return null) {
+        .object => |o| o,
+        else => null,
+    };
+}
+
+/// First four (or fewer) numbers of an array, zero-padded. Serves rect
+/// [x,y,w,h], color [r,g,b,a], radius [tl,tr,br,bl], and point [x,y].
+fn nums4(arr: std.json.Array) [4]f64 {
+    var out = [4]f64{ 0, 0, 0, 0 };
+    for (arr.items[0..@min(4, arr.items.len)], 0..) |v, i| out[i] = jnum(v);
+    return out;
+}
+
+fn presentGpuSurfacePacket(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedViewKind;
+    if (packet.json.len == 0) return error.UnsupportedService; // JSON variant only
+
+    if (!cairo_fonts_ready) {
+        cairo_fonts_ready = native_sdk_cairo_register_fonts(cairo_geist_regular.ptr, cairo_geist_regular.len, cairo_geist_mono.ptr, cairo_geist_mono.len) != 0;
+    }
+
+    // ponytail: page-allocator arena parsed + freed per frame. Move to a
+    // persistent arena (or the binary packet) if the JSON parse shows up hot.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, packet.json, .{}) catch
+        return error.UnsupportedService;
+    const root = switch (parsed) {
+        .object => |o| o,
+        else => return error.UnsupportedService,
+    };
+    const commands = jarr(root, "commands") orelse return error.UnsupportedService;
+
+    // All-or-nothing gate: a frame with any command we cannot draw falls back
+    // whole, so the reference renderer paints it correctly.
+    for (commands.items) |cmd_v| {
+        const obj = switch (cmd_v) {
+            .object => |o| o,
+            else => return error.UnsupportedService,
+        };
+        if (!cairoCanDraw(obj)) return error.UnsupportedService;
+    }
+
+    const scale: f64 = packet.scale_factor;
+    const px_w: c_int = @intFromFloat(@round(packet.surface_size.width * scale));
+    const px_h: c_int = @intFromFloat(@round(packet.surface_size.height * scale));
+    if (px_w <= 0 or px_h <= 0) return error.UnsupportedService;
+
+    const clr = packet.clear_color_rgba8;
+    const ctx = native_sdk_cairo_begin(px_w, px_h, @as(f64, @floatFromInt(clr[0])) / 255.0, @as(f64, @floatFromInt(clr[1])) / 255.0, @as(f64, @floatFromInt(clr[2])) / 255.0, @as(f64, @floatFromInt(clr[3])) / 255.0) orelse return error.UnsupportedService;
+    defer native_sdk_cairo_free(ctx);
+
+    for (commands.items) |cmd_v| {
+        drawCairoCommand(ctx, cmd_v.object, a);
+    }
+
+    const bytes: usize = @as(usize, @intCast(px_w)) * @as(usize, @intCast(px_h)) * 4;
+    const buf = a.alloc(u8, bytes) catch return error.UnsupportedService;
+    if (native_sdk_cairo_read_rgba8(ctx, buf.ptr, buf.len) == 0) return error.UnsupportedService;
+
+    const present_desc = GtkGpuPresentDesc{
+        .window_id = packet.window_id,
+        .label = packet.label.ptr,
+        .label_len = packet.label.len,
+        .width = @intCast(px_w),
+        .height = @intCast(px_h),
+        .scale = scale,
+        .has_dirty_rect = 0,
+        .dirty_x = 0,
+        .dirty_y = 0,
+        .dirty_width = 0,
+        .dirty_height = 0,
+        .rgba8 = buf.ptr,
+        .rgba8_len = buf.len,
+    };
+    if (native_sdk_gtk_present_gpu_surface_pixels_desc(self.host, &present_desc) == 0)
+        return error.ViewNotFound;
+}
+
+fn drawCairoCommand(ctx: *CairoCtx, cmd: std.json.ObjectMap, a: std.mem.Allocator) void {
+    const kind = switch (cmd.get("kind") orelse return) {
+        .string => |s| s,
+        else => return,
+    };
+    const opacity: f64 = if (cmd.get("opacity")) |v| jnum(v) else 1;
+
+    native_sdk_cairo_save(ctx);
+    defer native_sdk_cairo_restore(ctx);
+    // Clips are surface-space (identity CTM), transform applied after — the
+    // NativeSdkPacketDrawCommand order.
+    native_sdk_cairo_identity_matrix(ctx);
+    if (jarr(cmd, "clip")) |clip| {
+        const r = nums4(clip);
+        native_sdk_cairo_clip_rect(ctx, r[0], r[1], r[2], r[3]);
+    }
+    if (jarr(cmd, "transform")) |t| {
+        if (t.items.len == 6)
+            native_sdk_cairo_set_matrix(ctx, jnum(t.items[0]), jnum(t.items[1]), jnum(t.items[2]), jnum(t.items[3]), jnum(t.items[4]), jnum(t.items[5]));
+    }
+
+    // Payload dispatch: effect / text / image / shape+paint (exactly one is
+    // meaningful per command), matching cairoCanDraw's probe order.
+    if (jobj(cmd, "effect")) |eff| {
+        drawCairoEffect(ctx, eff, opacity);
+        return;
+    }
+    if (jobj(cmd, "text")) |_| {
+        drawCairoText(ctx, cmd, opacity);
+        return;
+    }
+    if (jobj(cmd, "image")) |image| {
+        drawCairoImage(ctx, image, opacity);
+        return;
+    }
+
+    const shape = jobj(cmd, "shape") orelse return;
+    buildCairoShape(ctx, shape);
+    if (!setCairoPaint(ctx, cmd, opacity, a)) return;
+
+    if (std.mem.startsWith(u8, kind, "stroke_") or std.mem.startsWith(u8, kind, "draw_line")) {
+        var width: f64 = if (cmd.get("strokeWidth")) |v| jnum(v) else 1;
+        if (shape.get("width")) |wv| width = jnum(wv); // line/stroke_rect carry their own
+        if (width < 1) width = 1;
+        const cap: c_int = if (cmd.get("cap")) |cv| switch (cv) {
+            .string => |s| if (std.mem.eql(u8, s, "round")) @as(c_int, 1) else 0,
+            else => 0,
+        } else 0;
+        native_sdk_cairo_stroke(ctx, width, cap);
+    } else {
+        native_sdk_cairo_fill(ctx);
+    }
+}
+
+fn buildCairoShape(ctx: *CairoCtx, shape: std.json.ObjectMap) void {
+    native_sdk_cairo_new_path(ctx);
+    const kind = switch (shape.get("kind") orelse return) {
+        .string => |s| s,
+        else => return,
+    };
+    if (std.mem.eql(u8, kind, "rect")) {
+        if (jarr(shape, "rect")) |r| {
+            const q = nums4(r);
+            native_sdk_cairo_rectangle(ctx, q[0], q[1], q[2], q[3]);
+        }
+    } else if (std.mem.eql(u8, kind, "rounded_rect") or std.mem.eql(u8, kind, "stroke_rect")) {
+        const r = nums4(jarr(shape, "rect") orelse return);
+        const rad = if (jarr(shape, "radius")) |x| nums4(x) else [4]f64{ 0, 0, 0, 0 };
+        native_sdk_cairo_rounded_rect(ctx, r[0], r[1], r[2], r[3], rad[0], rad[1], rad[2], rad[3]);
+    } else if (std.mem.eql(u8, kind, "line")) {
+        const from = nums4(jarr(shape, "from") orelse return);
+        const to = nums4(jarr(shape, "to") orelse return);
+        native_sdk_cairo_move_to(ctx, from[0], from[1]);
+        native_sdk_cairo_line_to(ctx, to[0], to[1]);
+    } else if (std.mem.eql(u8, kind, "path")) {
+        buildCairoPath(ctx, shape);
+    }
+}
+
+fn buildCairoPath(ctx: *CairoCtx, shape: std.json.ObjectMap) void {
+    const elems = jarr(shape, "path") orelse return;
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    for (elems.items) |ev| {
+        const e = switch (ev) {
+            .object => |o| o,
+            else => continue,
+        };
+        const verb = switch (e.get("verb") orelse continue) {
+            .string => |s| s,
+            else => continue,
+        };
+        const pts = jarr(e, "points") orelse continue;
+        if (std.mem.eql(u8, verb, "move_to")) {
+            if (pts.items.len >= 1) {
+                const p = pt2(pts.items[0]);
+                native_sdk_cairo_move_to(ctx, p[0], p[1]);
+                cx = p[0];
+                cy = p[1];
+            }
+        } else if (std.mem.eql(u8, verb, "line_to")) {
+            if (pts.items.len >= 1) {
+                const p = pt2(pts.items[0]);
+                native_sdk_cairo_line_to(ctx, p[0], p[1]);
+                cx = p[0];
+                cy = p[1];
+            }
+        } else if (std.mem.eql(u8, verb, "quad_to")) {
+            if (pts.items.len >= 2) {
+                const q = pt2(pts.items[0]);
+                const p = pt2(pts.items[1]);
+                // Quadratic → cubic (exact): control points at 2/3 toward the quad control.
+                native_sdk_cairo_curve_to(ctx, cx + 2.0 / 3.0 * (q[0] - cx), cy + 2.0 / 3.0 * (q[1] - cy), p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1]), p[0], p[1]);
+                cx = p[0];
+                cy = p[1];
+            }
+        } else if (std.mem.eql(u8, verb, "cubic_to")) {
+            if (pts.items.len >= 3) {
+                const c1 = pt2(pts.items[0]);
+                const c2 = pt2(pts.items[1]);
+                const p = pt2(pts.items[2]);
+                native_sdk_cairo_curve_to(ctx, c1[0], c1[1], c2[0], c2[1], p[0], p[1]);
+                cx = p[0];
+                cy = p[1];
+            }
+        } else if (std.mem.eql(u8, verb, "close")) {
+            native_sdk_cairo_close_path(ctx);
+        }
+    }
+}
+
+/// draw_text: shape the string with Cairo at the engine-measured baseline —
+/// each `lines` entry {x, baseline, text} verbatim (the macOS host's approach),
+/// or the single line at `origin`. origin.y / baseline are the text baseline,
+/// which is Cairo's pen origin for show_text.
+fn drawCairoText(ctx: *CairoCtx, cmd: std.json.ObjectMap, opacity: f64) void {
+    const text = jobj(cmd, "text") orelse return;
+    const size = if (text.get("size")) |v| jnum(v) else return;
+    const col = if (jarr(text, "color")) |c| nums4(c) else [4]f64{ 0, 0, 0, 1 };
+    const font_id: u64 = if (text.get("font")) |v| @intFromFloat(jnum(v)) else 1;
+    const alpha = col[3] * opacity;
+
+    if (jarr(text, "lines")) |lines| {
+        for (lines.items) |lv| {
+            const ln = switch (lv) {
+                .object => |o| o,
+                else => continue,
+            };
+            const s = switch (ln.get("text") orelse continue) {
+                .string => |x| x,
+                else => continue,
+            };
+            if (s.len == 0) continue;
+            const lx = if (ln.get("x")) |v| jnum(v) else 0;
+            const by = if (ln.get("baseline")) |v| jnum(v) else 0;
+            native_sdk_cairo_show_string(ctx, font_id, size, lx, by, s.ptr, s.len, col[0], col[1], col[2], alpha);
+        }
+        return;
+    }
+
+    const origin = if (jarr(text, "origin")) |o| nums4(o) else return;
+    const s = switch (text.get("text") orelse return) {
+        .string => |x| x,
+        else => return,
+    };
+    if (s.len == 0) return;
+    native_sdk_cairo_show_string(ctx, font_id, size, origin[0], origin[1], s.ptr, s.len, col[0], col[1], col[2], alpha);
+}
+
+fn drawCairoEffect(ctx: *CairoCtx, eff: std.json.ObjectMap, opacity: f64) void {
+    const kind = switch (eff.get("kind") orelse return) {
+        .string => |s| s,
+        else => return,
+    };
+    const rect = nums4(jarr(eff, "rect") orelse return);
+    if (std.mem.eql(u8, kind, "blur")) {
+        // Backdrop blur: `radius` is a scalar; the effect just softens whatever
+        // is under `rect` (the reference renderer's drawBlur, mixed by opacity).
+        const radius = if (eff.get("radius")) |v| jnum(v) else 0;
+        native_sdk_cairo_blur(ctx, rect[0], rect[1], rect[2], rect[3], radius, opacity);
+        return;
+    }
+    // shadow: offset + spread rounded fill (radius here is the four corners).
+    const rad = if (jarr(eff, "radius")) |r| nums4(r) else [4]f64{ 0, 0, 0, 0 };
+    const off = if (jarr(eff, "offset")) |o| nums4(o) else [4]f64{ 0, 0, 0, 0 };
+    const blur = if (eff.get("blur")) |v| jnum(v) else 0;
+    const spread = if (eff.get("spread")) |v| jnum(v) else 0;
+    const col = if (jarr(eff, "color")) |c| nums4(c) else [4]f64{ 0, 0, 0, 1 };
+    native_sdk_cairo_shadow(ctx, rect[0], rect[1], rect[2], rect[3], rad[0], rad[1], rad[2], rad[3], off[0], off[1], blur, spread, col[0], col[1], col[2], col[3] * opacity);
+}
+
+/// draw_image: blit a cached image (uploaded via the image seam) into `dst`,
+/// cropped to `src`, aspect-fitted, rounded-masked, at command×image opacity.
+/// The C side owns the fit math (it knows the cached dimensions).
+fn drawCairoImage(ctx: *CairoCtx, image: std.json.ObjectMap, opacity: f64) void {
+    const id: u64 = if (image.get("image")) |v| @intFromFloat(jnum(v)) else return;
+    const dst = nums4(jarr(image, "dst") orelse return);
+    const has_src: c_int = if (jarr(image, "src") != null) 1 else 0;
+    const src = if (jarr(image, "src")) |s| nums4(s) else [4]f64{ 0, 0, 0, 0 };
+    const rad = if (jarr(image, "radius")) |r| nums4(r) else [4]f64{ 0, 0, 0, 0 };
+    const img_opacity = if (image.get("opacity")) |v| jnum(v) else 1;
+    const fit: c_int = fitCode(image.get("fit"));
+    const sampling: c_int = if (image.get("sampling")) |sv| switch (sv) {
+        .string => |s| if (std.mem.eql(u8, s, "nearest")) @as(c_int, 0) else 1,
+        else => 1,
+    } else 1;
+    native_sdk_cairo_draw_image(ctx, id, has_src, src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], rad[0], rad[1], rad[2], rad[3], fit, sampling, img_opacity * opacity);
+}
+
+/// ImageFit tagName → C code (0 stretch, 1 contain, 2 cover).
+fn fitCode(v: ?std.json.Value) c_int {
+    const s = switch (v orelse return 0) {
+        .string => |x| x,
+        else => return 0,
+    };
+    if (std.mem.eql(u8, s, "contain")) return 1;
+    if (std.mem.eql(u8, s, "cover")) return 2;
+    return 0;
+}
+
+fn pt2(v: std.json.Value) [2]f64 {
+    const arr = switch (v) {
+        .array => |x| x,
+        else => return .{ 0, 0 },
+    };
+    return .{
+        if (arr.items.len > 0) jnum(arr.items[0]) else 0,
+        if (arr.items.len > 1) jnum(arr.items[1]) else 0,
+    };
+}
+
+fn setCairoPaint(ctx: *CairoCtx, cmd: std.json.ObjectMap, opacity: f64, a: std.mem.Allocator) bool {
+    const paint = jobj(cmd, "paint") orelse return false;
+    const kind = switch (paint.get("kind") orelse return false) {
+        .string => |s| s,
+        else => return false,
+    };
+    if (std.mem.eql(u8, kind, "color")) {
+        const c = nums4(jarr(paint, "color") orelse return false);
+        native_sdk_cairo_set_color(ctx, c[0], c[1], c[2], c[3] * opacity);
+        return true;
+    } else if (std.mem.eql(u8, kind, "linear_gradient")) {
+        const start = nums4(jarr(paint, "start") orelse return false);
+        const end = nums4(jarr(paint, "end") orelse return false);
+        const stops = jarr(paint, "stops") orelse return false;
+        const n = stops.items.len;
+        if (n == 0) return false;
+        const offsets = a.alloc(f64, n) catch return false;
+        const colors = a.alloc(f64, n * 4) catch return false;
+        for (stops.items, 0..) |sv, i| {
+            const s = switch (sv) {
+                .object => |o| o,
+                else => continue,
+            };
+            offsets[i] = if (s.get("offset")) |ov| jnum(ov) else 0;
+            const cc = if (jarr(s, "color")) |x| nums4(x) else [4]f64{ 0, 0, 0, 1 };
+            colors[i * 4 + 0] = cc[0];
+            colors[i * 4 + 1] = cc[1];
+            colors[i * 4 + 2] = cc[2];
+            colors[i * 4 + 3] = cc[3] * opacity;
+        }
+        native_sdk_cairo_set_linear_gradient(ctx, start[0], start[1], end[0], end[1], @intCast(n), offsets.ptr, colors.ptr);
+        return true;
+    }
+    return false;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {

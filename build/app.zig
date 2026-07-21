@@ -40,6 +40,17 @@ pub const AppOptions = struct {
     /// "../.." so `src/`, `app.zon`, and `assets/` keep resolving in the
     /// app directory rather than the cache directory.
     app_root: []const u8 = ".",
+    /// App exe optimize mode. null resolves from `-Doptimize` / the release
+    /// mode, defaulting to Debug; a consumer build.zig passes the mode it
+    /// wants (e.g. `b.standardOptimizeOption(.{})`).
+    optimize: ?std.builtin.OptimizeMode = null,
+    /// Codegen backend selection, forwarded to every artifact this builds
+    /// (exe, tests, embed lib, generated helpers). null lets Zig choose
+    /// (self-hosted for Debug, LLVM for Release). The wide host C-ABI seams
+    /// now cross by descriptor pointer, so self-hosted x86_64 Debug is
+    /// correct; this stays an escape hatch if a future seam regresses.
+    use_llvm: ?bool = null,
+    use_lld: ?bool = null,
 };
 
 /// Which core the app tree carries. No flag and no config anywhere: the
@@ -395,6 +406,11 @@ pub const MobileLibOptions = struct {
     /// `src/embed/ui_host.zig`. Ignored for `.scene = .webview`.
     main: []const u8 = "src/main.zig",
     scene: MobileSceneOption = .canvas,
+    /// Codegen backend for the embed lib; null lets Zig choose. The mobile
+    /// viewport/host C ABI now crosses by descriptor pointer, so self-hosted
+    /// x86_64 Debug is correct; this stays an escape hatch for a future seam.
+    use_llvm: ?bool = null,
+    use_lld: ?bool = null,
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -442,13 +458,13 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         .linkage = .static,
         .name = options.name,
         .root_module = exports_mod,
-        // The embed C ABI (`native_sdk_app_viewport`) is exactly the
-        // f32-heavy SysV signature Zig 0.16.0's self-hosted x86_64 backend
-        // miscompiles (see useLlvmWorkaround in the framework build.zig):
-        // clang-compiled hosts calling a self-hosted Debug lib receive
-        // corrupted inset/keyboard floats on x86_64 (Android emulators,
-        // Intel simulators). Force LLVM there; Release already uses it.
-        .use_llvm = useLlvmWorkaround(target),
+        // Codegen backend is caller-selected (MobileLibOptions.use_llvm/lld):
+        // the embed C ABI (`native_sdk_app_viewport`) is an f32-heavy SysV
+        // signature that Zig 0.16.0's self-hosted x86_64 backend can
+        // miscompile in Debug, so a mobile consumer on x86_64 passes
+        // use_llvm = true. null lets Zig choose.
+        .use_llvm = options.use_llvm,
+        .use_lld = options.use_lld,
     });
     b.installArtifact(lib);
 
@@ -474,9 +490,11 @@ pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions
 
 pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) AppArtifacts {
     const target = nativeSdkTarget(b);
-    const optimize_request = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
+    // The consumer's build.zig may hand us the mode directly; otherwise honor
+    // `-Doptimize` / the release mode. Default is Debug (safety checks + markup
+    // hot-reload); pass `.optimize` or `-Doptimize=ReleaseFast` for a fast build.
+    const optimize_request = app_options.optimize orelse b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size");
     const optimize = exampleOptimizeMode(b, optimize_request, .Debug);
-    const app_optimize = exampleOptimizeMode(b, optimize_request, .ReleaseFast);
 
     // The core role is detected from the tree (never a flag or config):
     // builds with a custom `main` entry declared their core explicitly and
@@ -507,6 +525,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),
+            .use_llvm = app_options.use_llvm,
+            .use_lld = app_options.use_lld,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -556,22 +576,17 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, options_mod, ts_stage);
+    const app_mod = appModule(b, dep, target, optimize, app_options, options_mod, ts_stage);
     const exe = b.addExecutable(.{
         .name = app_options.name,
         .root_module = app_mod,
-        // The app executable crosses the platform C seam on every host
-        // call (the GTK host's `native_sdk_gtk_create_view` is a
-        // 22-parameter mix of pointers, sizes, ints, and doubles), and
-        // Zig 0.16.0's self-hosted x86_64 backend miscompiles exactly
-        // that calling-convention shape (see useLlvmWorkaround below):
-        // a Debug `native dev` on x86_64 Linux placed the stack-passed
-        // string arguments one slot off, so the host read a garbage
-        // `role` pointer and crashed in `native_sdk_strndup` while the
-        // register-passed `label` arrived intact. Every other artifact
-        // in this graph already forces LLVM on x86_64; the app exe —
-        // the one binary users actually run — must too.
-        .use_llvm = useLlvmWorkaround(target),
+        // Codegen backend is caller-selected (AppOptions.use_llvm/lld). The
+        // exe crosses the platform C seam on every host call (the GTK host's
+        // 22-parameter `native_sdk_gtk_create_view`), a calling-convention
+        // shape Zig 0.16.0's self-hosted x86_64 backend can miscompile in
+        // Debug; a consumer on x86_64 that hits it passes use_llvm = true.
+        .use_llvm = app_options.use_llvm,
+        .use_lld = app_options.use_lld,
     });
     // Windows subsystem posture: release-shaped exes (`native build`,
     // and therefore everything `native package --target windows` wraps)
@@ -582,7 +597,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // on GUI exes (handles inherit; only console AUTO-allocation is
     // gated by the subsystem), so automation harnesses that pipe
     // `app.exe > log 2>&1` keep their logs either way.
-    if (target.result.os.tag == .windows and app_optimize != .Debug) {
+    if (target.result.os.tag == .windows and optimize != .Debug) {
         exe.subsystem = .windows;
     }
     linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install);
@@ -595,8 +610,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
 
-    const test_app_mod = if (app_optimize == optimize) app_mod else appModule(b, dep, target, optimize, app_options, options_mod, ts_stage);
-    const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
+    // The app module already builds at `optimize`, so tests reuse it directly.
+    const test_app_mod = app_mod;
+    const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = app_options.use_llvm, .use_lld = app_options.use_lld });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
@@ -627,7 +643,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const analysis_obj = b.addObject(.{
         .name = b.fmt("{s}-analysis", .{app_options.name}),
         .root_module = analysis_mod,
-        .use_llvm = useLlvmWorkaround(target),
+        .use_llvm = app_options.use_llvm,
+        .use_lld = app_options.use_lld,
     });
     test_step.dependOn(&analysis_obj.step);
 
@@ -665,7 +682,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const contract_exe = b.addExecutable(.{
         .name = b.fmt("{s}-model-contract", .{app_options.name}),
         .root_module = contract_mod,
-        .use_llvm = useLlvmWorkaround(target),
+        .use_llvm = app_options.use_llvm,
+        .use_lld = app_options.use_lld,
     });
     const contract_run = b.addRunArtifact(contract_exe);
     contract_run.setCwd(b.path(app_options.app_root));
@@ -701,7 +719,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // The archive and report names carry an optimize label; this
         // build graph knows the packaged binary's REAL mode, so forward
         // it instead of letting the CLI assume one.
-        package_run.addArgs(&.{ "--optimize", @tagName(app_optimize) });
+        package_run.addArgs(&.{ "--optimize", @tagName(optimize) });
         // Forward the RESOLVED web-layer decision, never the raw inputs:
         // this graph already decided web vs native-only for the exe it is
         // packaging (app.zon declarations plus -Dweb-layer/-Dweb-engine),
@@ -721,37 +739,6 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     }
 
     return .{ .exe = exe, .tests = tests, .install = install, .run = run };
-}
-
-/// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
-/// convention for f32-heavy signatures with interleaved pointer arguments
-/// (`native_sdk_app_viewport`: 11 f32s + 2 pointers): both the caller and
-/// the callee place/read the wrong registers and stack slots, so safe-area
-/// insets arrive as garbage on x86_64 Debug builds while every LLVM-backed
-/// build is correct. Minimal repro (fails under `zig test`, passes with
-/// `-fllvm` on x86_64-linux):
-///
-///   fn take(a: ?*anyopaque, w: f32, h: f32, s: f32, p: ?*anyopaque,
-///           t: f32, r: f32, bo: f32, l: f32, kt: f32, kr: f32, kb: f32,
-///           kl: f32) callconv(.c) void { ... }
-///
-/// The same backend also mis-places STACK-passed integer/pointer arguments
-/// in long mixed signatures with interleaved doubles: calling the GTK
-/// host's `native_sdk_gtk_create_view` (22 params: 6 register ints, 4
-/// doubles, 12 stack ints/pointers/sizes) from self-hosted Debug code
-/// hands the clang-compiled callee arguments shifted by one stack slot
-/// from `visible` onward — the callee's `role` pointer reads as the
-/// caller's `enabled` value (a 4-byte 1 under 0xAA undefined fill,
-/// faulting at 0xaaaaaaaa00000001) and `role_len` reads as the role
-/// pointer. Register-passed arguments (`label`) arrive intact, which is
-/// why the crash appears only at the first stack-passed string. Verified
-/// against zig 0.16.0 on x86_64-linux with a standalone caller/callee
-/// pair: self-hosted Debug corrupts, `-fllvm` is correct.
-///
-/// Force the LLVM backend on x86_64 until the upstream backend is fixed;
-/// Release modes already default to LLVM, so this only changes Debug.
-pub fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
-    return if (target.result.cpu.arch == .x86_64) true else null;
 }
 
 fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, default_mode: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
@@ -974,6 +961,18 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 app_mod.addRPath(.{ .cwd_relative = "$ORIGIN" });
             },
         }
+        // GPU-surface Vulkan presenter: direct scanout via a wl_subsurface
+        // (Wayland) or child window (X11), the Metal analog on Linux. Falls
+        // back to the GSK path in gtk_host.c when no Vulkan surface applies.
+        app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/native_sdk_vk.c"), .flags = &.{} });
+        // Cairo packet renderer (opt-in SCHEMIFY_CAIRO=1): the Core Graphics
+        // analog. cairo/pango headers + libs ride the gtk4 pkg-config link above.
+        app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/native_sdk_cairo.c"), .flags = &.{} });
+        app_mod.linkSystemLibrary("vulkan", .{});
+        app_mod.linkSystemLibrary("freetype2", .{}); // native_sdk_cairo.c text (cairo-ft + FT_*)
+        app_mod.linkSystemLibrary("shaderc", .{}); // pkg-config → libshaderc_shared + headers
+        app_mod.linkSystemLibrary("wayland-client", .{});
+        app_mod.linkSystemLibrary("x11", .{});
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {

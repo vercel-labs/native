@@ -195,6 +195,20 @@ typedef struct native_sdk_viewport_state {
   float content_width;
   float content_height;
 } native_sdk_viewport_state_t;
+typedef struct native_sdk_viewport {
+  float width;
+  float height;
+  float scale;
+  void *surface;
+  float safe_top;
+  float safe_right;
+  float safe_bottom;
+  float safe_left;
+  float keyboard_top;
+  float keyboard_right;
+  float keyboard_bottom;
+  float keyboard_left;
+} native_sdk_viewport_t;
 typedef struct native_sdk_gpu_frame_state {
   uint64_t surface_id;
   uint64_t window_id;
@@ -236,7 +250,7 @@ void native_sdk_app_activate(void *app);
 void native_sdk_app_deactivate(void *app);
 void native_sdk_app_stop(void *app);
 void native_sdk_app_resize(void *app, float width, float height, float scale, void *surface);
-void native_sdk_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
+void native_sdk_app_viewport(void *app, const native_sdk_viewport_t *viewport);
 int native_sdk_app_viewport_state(void *app, native_sdk_viewport_state_t *out);
 int native_sdk_app_gpu_frame_state(void *app, native_sdk_gpu_frame_state_t *out);
 void native_sdk_app_touch(void *app, uint64_t id, int phase, float x, float y, float pressure);

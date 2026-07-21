@@ -790,11 +790,17 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     self.viewportScale = scale;
     [self metalLayer].contentsScale = scale;
     UIEdgeInsets safe = self.view.safeAreaInsets;
-    native_sdk_app_viewport(self.nativeApp,
-                             (float)size.width, (float)size.height, (float)scale,
-                             (__bridge void *)[self metalLayer],
-                             (float)safe.top, (float)safe.right, (float)safe.bottom, (float)safe.left,
-                             0, 0, 0, 0);
+    native_sdk_viewport_t viewport = {
+        .width = (float)size.width,
+        .height = (float)size.height,
+        .scale = (float)scale,
+        .surface = (__bridge void *)[self metalLayer],
+        .safe_top = (float)safe.top,
+        .safe_right = (float)safe.right,
+        .safe_bottom = (float)safe.bottom,
+        .safe_left = (float)safe.left,
+    };
+    native_sdk_app_viewport(self.nativeApp, &viewport);
     [self logNativeErrorIfAny:@"viewport"];
     self.needsPresent = YES;
 }
