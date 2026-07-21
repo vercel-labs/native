@@ -4545,7 +4545,14 @@ pub fn Effects(comptime Msg: type) type {
         /// would be silently destroyed with its `hasPending` count
         /// stranded — a permanent busy signal. Live occupancies end
         /// through `closeChannel`, never through the feed seam.
-        pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull, ChannelLiveFeed }!void {
+        ///
+        /// One terminal per open: a replay-parked occupancy's
+        /// pending-order reservation (`ParkOrderState`) resolves at
+        /// the FIRST fed terminal and never again — a `.rejected`
+        /// record targeting a park already vacated is journal damage
+        /// (`error.ReplayDamagedRecord`), refused before it could
+        /// append a duplicate terminal to the pending ring.
+        pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull, ChannelLiveFeed, ReplayDamagedRecord }!void {
             const slot_index = blk: {
                 for (&self.channel_slots, 0..) |*slot, index| {
                     if (slot.state != .idle and slot.key == key) break :blk index;
@@ -4565,6 +4572,28 @@ pub fn Effects(comptime Msg: type) type {
             // and the event rides the queue like every fed result.
             if (slot.park_state != .none) {
                 if (kind == .rejected) {
+                    // Resolve ONLY while `.reserved`: one open reserves
+                    // exactly one pending-order stamp, and the first
+                    // fed terminal spends it. A `.rejected` record
+                    // targeting a park already vacated — whether the
+                    // first terminal was this refusal or a `.data`
+                    // that proved the open was accepted live — is a
+                    // SECOND terminal for the same open, which no
+                    // recorder can write (one terminal per open, the
+                    // families' shared discipline). Reusing the stamp
+                    // here would append duplicate entries to the
+                    // one-entry-per-open pending ring until its
+                    // capacity panic; refuse the record as journal
+                    // damage instead.
+                    if (slot.park_state != .reserved) {
+                        if (comptime builtin.os.tag != .freestanding) {
+                            std.debug.print(
+                                "replay refused: channel record for key {d} feeds a .rejected terminal into a park already resolved - a recorded open delivers exactly one terminal (one terminal per open), so the journal is damaged or hand-edited; re-record the session\n",
+                                .{key},
+                            );
+                        }
+                        return error.ReplayDamagedRecord;
+                    }
                     const park_seq = slot.park_seq;
                     slot.park_state = .vacated;
                     self.stagePendingChannel(.{

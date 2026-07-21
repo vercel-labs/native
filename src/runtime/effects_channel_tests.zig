@@ -359,6 +359,32 @@ test "under replay openChannel parks the occupancy and hands back an inert handl
     try testing.expect(fx.channelHandle(17) == null);
 }
 
+test "a second rejection record against one park is journal damage, not a second terminal" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 29, .on_event = DirectFx.channelMsg(.event) });
+    // The first fed `.rejected` resolves the park's pending-order
+    // reservation — one open, one terminal.
+    try fx.feedChannelEvent(29, .rejected, "", 0, 0);
+    // A SECOND rejection record targeting the same park (a damaged or
+    // hand-edited journal — no recorder writes two terminals for one
+    // open) must not reuse the vacated reservation and append a
+    // duplicate terminal to the one-entry-per-open pending ring.
+    try testing.expectError(
+        error.ReplayDamagedRecord,
+        fx.feedChannelEvent(29, .rejected, "", 0, 0),
+    );
+    // Exactly one terminal delivers, and it retires the key.
+    const rejected = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.rejected, rejected.event.kind);
+    try testing.expectEqual(@as(u64, 29), rejected.event.key);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(29) == null);
+}
+
 test "under replay a duplicate open still rejects symmetrically against the parked occupancy" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
