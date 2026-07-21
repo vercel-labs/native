@@ -37,7 +37,12 @@ pub const max_command_bytes: usize = 16 * 1024 + 64;
 /// 7 = the `widget-pinch` verb (drive a trackpad pinch gesture as the
 /// real begin/change/end platform input events, journaled like every
 /// synthesized input).
-pub const version: u32 = 7;
+/// 8 = context-menu action tokens are per-request generations, not
+/// widget ids. A v7 journal's recorded `context_menu_action` tokens can
+/// never match a v8 build's minted generations, so its selections would
+/// be silently swallowed by the token gate (replay divergence with no
+/// refusal); the bump turns that into the loud preamble mismatch.
+pub const version: u32 = 8;
 
 /// How many commands may sit in the dropbox queue at once. Automation
 /// drivers are scripts, not firehoses: the app drains one command per
