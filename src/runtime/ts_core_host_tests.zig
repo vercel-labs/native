@@ -71,6 +71,10 @@ const mini_core = struct {
     /// same by-NAME matching proof.
     pub const ChannelState = enum { rejected, data, closed };
 
+    /// The image outcome states the mixed-rejection tests observe,
+    /// shuffled off the engine order like the other two.
+    pub const ImageState = enum { rejected, loaded };
+
     pub const Model = struct {
         polling: bool,
         fast: bool,
@@ -102,6 +106,12 @@ const mini_core = struct {
         chan_dropped_pending: f64,
         chan_dropped_total: f64,
         chan_events: i64,
+        // Image event mirrors.
+        img_state: ImageState,
+        img_events: i64,
+        // Rejection delivery order probe: one mark per rejection Msg
+        // ('S' spawn, 'I' image, 'C' channel), in dispatch order.
+        order: []const u8,
     };
 
     pub const Msg = union(enum) {
@@ -168,6 +178,17 @@ const mini_core = struct {
             droppedPending: f64,
             droppedTotal: f64,
         },
+        load_img, // 48: image_load id 7 -> img_evt
+        img_evt: struct { // 49: the five-field image result arm
+            id: f64,
+            state: ImageState,
+            width: f64,
+            height: f64,
+            status: f64,
+        },
+        mix_chan_then_img, // 50: batch [channel_open 41, image_load 7]
+        mix_img_then_chan, // 51: batch [image_load 7, channel_open 41]
+        mix_three, // 52: batch [channel_open 41, image_load 7, spawn "job"]
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -209,6 +230,9 @@ const mini_core = struct {
                 .chan_dropped_pending = -1,
                 .chan_dropped_total = -1,
                 .chan_events = 0,
+                .img_state = .loaded,
+                .img_events = 0,
+                .order = "",
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -256,6 +280,7 @@ const mini_core = struct {
                 const out = frameCreate(model.*);
                 out.errs = model.errs + 1;
                 out.last_err = why;
+                if (std.mem.eql(u8, why, "rejected")) out.order = appendOrder(model.order, 'S');
                 return .{ .model = out, .cmd = "" };
             },
             .save_file => return .{ .model = model, .cmd = cmdWriteFile("save", 12, 8, "notes.bin", model.status) },
@@ -363,9 +388,51 @@ const mini_core = struct {
                 out.chan_dropped_pending = event.droppedPending;
                 out.chan_dropped_total = event.droppedTotal;
                 out.chan_events = model.chan_events + 1;
+                if (event.state == .rejected) out.order = appendOrder(model.order, 'C');
                 return .{ .model = out, .cmd = "" };
             },
+            .load_img => return .{ .model = model, .cmd = cmdImageLoad(7, 49, "img/a.png", "", "", 0) },
+            .img_evt => |event| {
+                const out = frameCreate(model.*);
+                out.img_state = event.state;
+                out.img_events = model.img_events + 1;
+                if (event.state == .rejected) out.order = appendOrder(model.order, 'I');
+                return .{ .model = out, .cmd = "" };
+            },
+            .mix_chan_then_img => {
+                const first = cmdChannelOpen(41, 47);
+                const second = cmdImageLoad(7, 49, "img/a.png", "", "", 0);
+                const out = rt.frameAlloc(u8, first.len + second.len);
+                @memcpy(out[0..first.len], first);
+                @memcpy(out[first.len..], second);
+                return .{ .model = model, .cmd = out };
+            },
+            .mix_img_then_chan => {
+                const first = cmdImageLoad(7, 49, "img/a.png", "", "", 0);
+                const second = cmdChannelOpen(41, 47);
+                const out = rt.frameAlloc(u8, first.len + second.len);
+                @memcpy(out[0..first.len], first);
+                @memcpy(out[first.len..], second);
+                return .{ .model = model, .cmd = out };
+            },
+            .mix_three => {
+                const first = cmdChannelOpen(41, 47);
+                const second = cmdImageLoad(7, 49, "img/a.png", "", "", 0);
+                const third = cmdSpawn("job", 0xFF, 26, 8, 0, &.{"/bin/dup"}, "");
+                const out = rt.frameAlloc(u8, first.len + second.len + third.len);
+                @memcpy(out[0..first.len], first);
+                @memcpy(out[first.len..][0..second.len], second);
+                @memcpy(out[first.len + second.len ..], third);
+                return .{ .model = model, .cmd = out };
+            },
         }
+    }
+
+    fn appendOrder(prev: []const u8, mark: u8) []const u8 {
+        const out = rt.frameAlloc(u8, prev.len + 1);
+        @memcpy(out[0..prev.len], prev);
+        out[prev.len] = mark;
+        return out;
     }
 
     pub fn subscriptions(model: *const Model) []const u8 {
@@ -383,6 +450,7 @@ const mini_core = struct {
         out[0].output = commitBytes(next.output);
         out[0].bands = commitBytes(next.bands);
         out[0].chan_bytes = commitBytes(next.chan_bytes);
+        out[0].order = commitBytes(next.order);
         return &out[0];
     }
 
@@ -579,6 +647,19 @@ const mini_core = struct {
     fn cmdQuitApp() []const u8 {
         const out = rt.frameAlloc(u8, 1);
         out[0] = 0x11;
+        return out;
+    }
+
+    fn cmdImageLoad(id: f64, event_tag: u8, image_path: []const u8, url: []const u8, cache_path: []const u8, expected: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 8 + 1 + 4 + image_path.len + 4 + url.len + 4 + cache_path.len + 8);
+        out[0] = 0x12;
+        std.mem.writeInt(u64, out[1..][0..8], @bitCast(id), .little);
+        out[9] = event_tag;
+        var off: usize = 10;
+        off = writeLongBytes(out, off, image_path);
+        off = writeLongBytes(out, off, url);
+        off = writeLongBytes(out, off, cache_path);
+        std.mem.writeInt(u64, out[off..][0..8], @bitCast(expected), .little);
         return out;
     }
 
@@ -1543,4 +1624,50 @@ test "a channel opens, posts route the five-field arm by name, and close retires
     Host.dispatch(fx, .open_chan);
     try std.testing.expectEqual(@as(i64, 4), Host.model().chan_events);
     try std.testing.expect(fx.channelHandle(41) != null);
+}
+
+test "a mixed refused batch dispatches its rejections in command-stream order" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // Park a live channel under key 41 and a live load under id 7 —
+    // accepted issues dispatch no rejection Msg, so the probe is empty.
+    Host.dispatch(fx, .open_chan);
+    Host.dispatch(fx, .load_img);
+    try std.testing.expectEqualStrings("", Host.model().order);
+
+    // Both records in one batch are refused (duplicate LIVE key/id).
+    // Cmd.batch's contract: performed in order — the channel rejection
+    // reaches update FIRST because its record came first.
+    Host.dispatch(fx, .mix_chan_then_img);
+    try std.testing.expectEqualStrings("CI", Host.model().order);
+}
+
+test "the reverse mixed refused batch keeps command-stream order (image first)" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_chan);
+    Host.dispatch(fx, .load_img);
+
+    Host.dispatch(fx, .mix_img_then_chan);
+    try std.testing.expectEqualStrings("IC", Host.model().order);
+}
+
+test "a three-family refused batch pins full stream order across channel, image, and spawn" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // One live occupant per family: channel 41, image 7, spawn "job".
+    Host.dispatch(fx, .open_chan);
+    Host.dispatch(fx, .load_img);
+    Host.dispatch(fx, .run_quiet);
+    try std.testing.expectEqualStrings("", Host.model().order);
+
+    // channel_open ++ image_load ++ spawn, all refused: stream order.
+    Host.dispatch(fx, .mix_three);
+    try std.testing.expectEqualStrings("CIS", Host.model().order);
 }

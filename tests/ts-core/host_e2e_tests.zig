@@ -92,6 +92,9 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.evictfirst")) return .evict_first;
     if (std.mem.eql(u8, name, "core.evictcover")) return .evict_cover;
     if (std.mem.eql(u8, name, "core.evictmissing")) return .evict_missing;
+    if (std.mem.eql(u8, name, "core.watch")) return .watch;
+    if (std.mem.eql(u8, name, "core.mixreject")) return .mix_reject;
+    if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
     return null;
 }
 
@@ -1184,6 +1187,40 @@ test "the dynamic expectedBytes bound is exclusive at 2^53" {
     try std.testing.expectEqual(@as(u64, 0), past_request.expected_bytes);
 }
 
+test "a mixed refused batch rejects in command-stream order across channel and image" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Park the live occupants: channel 41 opens, image load 21 parks.
+    try h.menu("core.watch");
+    try h.menu("core.cover");
+    try std.testing.expect(fx.channelHandle(41) != null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), -1), Bridge.model().chanRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), -1), Bridge.model().imgRejectAt);
+
+    // Both batch records are refused (duplicate live key/id): the
+    // rejections dispatch in the batch's own order — channel first,
+    // image second, Cmd.batch's performed-in-order contract.
+    try h.menu("core.mixreject");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 1), Bridge.model().chanRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 2), Bridge.model().imgRejectAt);
+
+    // The flipped batch flips the delivery: stream order, never a
+    // family-blocked drain.
+    try h.menu("core.mixrejectflip");
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 3), Bridge.model().imgRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 4), Bridge.model().chanRejectAt);
+
+    // The refusals left the live occupants untouched.
+    try std.testing.expect(fx.channelHandle(41) != null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+}
+
 // -------------------------------------------------------- record / replay
 
 const JournalBuffer = struct {
@@ -1502,4 +1539,91 @@ test "a recorded stream session replays byte-identically with no process launche
     try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
     try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
     try std.testing.expectEqualDeep(recorded, StreamSnapshot.take());
+}
+
+/// The mixed-rejection order probe fields, snapshotted by value (the
+/// committed slices live in the shared core heap; these are scalars).
+const MixSnapshot = struct {
+    chan_state: @FieldType(fixture.Model, "chanState"),
+    reject_seq: @FieldType(fixture.Model, "rejectSeq"),
+    chan_reject_at: @FieldType(fixture.Model, "chanRejectAt"),
+    img_reject_at: @FieldType(fixture.Model, "imgRejectAt"),
+    image_results: @FieldType(fixture.Model, "imageResults"),
+
+    fn take() MixSnapshot {
+        const m = Bridge.model();
+        return .{
+            .chan_state = m.chanState,
+            .reject_seq = m.rejectSeq,
+            .chan_reject_at = m.chanRejectAt,
+            .img_reject_at = m.imgRejectAt,
+            .image_results = m.imageResults,
+        };
+    }
+};
+
+/// Record the mixed-rejection session: a live channel and a parked
+/// image load, then both mixed refused batches. Bridge-refused
+/// rejections are never engine results, so the journal carries no
+/// record for them — replay REGENERATES them by re-running the same
+/// command walk against the same table state, and the order probe
+/// proves the regenerated delivery matches the recorded one.
+fn recordMixedRejectSession(buffer: *JournalBuffer) !MixSnapshot {
+    const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "ts-core-e2e", .window_width = 400, .window_height = 300 });
+
+    HostStub.reset();
+    const h = try Harness.createFull(recorder, .fake);
+    defer h.destroy();
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+    try h.menu("core.watch");
+    try h.menu("core.cover");
+    try h.menu("core.mixreject");
+    try h.menu("core.mixrejectflip");
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return MixSnapshot.take();
+}
+
+test "a recorded mixed-rejection session replays with identical cross-family order" {
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordMixedRejectSession(buffer);
+    // Two batches, two rejections each — and the second batch's flipped
+    // record order flipped the delivery order.
+    try std.testing.expectEqual(@as(@TypeOf(recorded.reject_seq), 4), recorded.reject_seq);
+    try std.testing.expectEqual(@as(@TypeOf(recorded.img_reject_at), 3), recorded.img_reject_at);
+    try std.testing.expectEqual(@as(@TypeOf(recorded.chan_reject_at), 4), recorded.chan_reject_at);
+    try std.testing.expect(recorded.chan_state == .rejected);
+
+    // Replay into a fresh app: the journal holds the menu commands and
+    // frame boundaries — NO rejection records — so identical snapshots
+    // prove the replayed command walk regenerated every rejection in
+    // the recorded order.
+    HostStub.reset();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = native_sdk.geometry.SizeF.init(400, 300),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    defer app_state.deinit();
+    app_state.effects.bindHostCalls(HostStub.binding());
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
+    try std.testing.expectEqualDeep(recorded, MixSnapshot.take());
 }

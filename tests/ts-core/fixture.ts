@@ -18,6 +18,8 @@ export type ImageState =
   | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
   | "alloc_failed";
 
+export type ChannelState = "data" | "closed" | "rejected";
+
 export interface Model {
   readonly polling: boolean;
   readonly ticks: number;
@@ -63,6 +65,15 @@ export interface Model {
   // one honest count to verify against.
   readonly topBytes: number;
   readonly pastBytes: number;
+  readonly chanState: ChannelState;
+  readonly chanEvents: number;
+  // Rejection delivery-order probe for the mixed refused batches: each
+  // rejection Msg takes the next sequence number, so assertions read
+  // which family's rejection reached update first — Cmd.batch's
+  // performed-in-order contract, pinned across effect families.
+  readonly rejectSeq: number;
+  readonly chanRejectAt: number;
+  readonly imgRejectAt: number;
 }
 
 export type Msg =
@@ -110,7 +121,11 @@ export type Msg =
   | { readonly kind: "evict_first" }
   | { readonly kind: "evict_cover" }
   | { readonly kind: "evict_missing" }
-  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number };
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number }
+  | { readonly kind: "watch" }
+  | { readonly kind: "mix_reject" }
+  | { readonly kind: "mix_reject_flip" }
+  | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -147,6 +162,11 @@ export function initialModel(): [Model, Cmd<Msg>] {
       wholeBytes: 4096,
       topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
       pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
+      chanState: "closed",
+      chanEvents: 0,
+      rejectSeq: 0,
+      chanRejectAt: -1,
+      imgRejectAt: -1,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -333,7 +353,31 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // discipline reads it off the result instead of hardcoding it.
       if (msg.state === "loaded")
         return { ...model, cover: msg.id, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
+      if (msg.state === "rejected")
+        return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id, rejectSeq: model.rejectSeq + 1, imgRejectAt: model.rejectSeq + 1 };
       return { ...model, imageState: msg.state, imageStatus: msg.status, imageResults: model.imageResults + 1, lastImageId: msg.id };
+    case "watch":
+      return [model, Cmd.channelOpen(41, { event: "chan_evt" })];
+    case "mix_reject":
+      // The mixed refused batch: BOTH records are refused (duplicate
+      // live key/id), and Cmd.batch's performed-in-order contract
+      // extends to the rejections — the channel rejection dispatches
+      // first because its record comes first.
+      return [model, Cmd.batch([
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+      ])];
+    case "mix_reject_flip":
+      // The reverse order, so the pin is stream order — never one
+      // family blocked ahead of the other.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+      ])];
+    case "chan_evt":
+      if (msg.state === "rejected")
+        return { ...model, chanState: msg.state, chanEvents: model.chanEvents + 1, rejectSeq: model.rejectSeq + 1, chanRejectAt: model.rejectSeq + 1 };
+      return { ...model, chanState: msg.state, chanEvents: model.chanEvents + 1 };
   }
 }
 
