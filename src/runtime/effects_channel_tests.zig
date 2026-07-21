@@ -285,6 +285,64 @@ test "channelHandle resolves the open occupancy and nothing else" {
     _ = fx.takeMsg();
 }
 
+test "under replay openChannel parks the occupancy and hands back an inert handle" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    // The parked occupancy registers exactly as a live open...
+    const handle = fx.openChannel(.{ .key = 17, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(fx.channelHandle(17) != null);
+    // ...but the handle is INERT: every post answers `.closed`
+    // immediately — nothing staged, no drop counted, nothing to
+    // journal — so a well-behaved producer thread exits on its first
+    // post.
+    try testing.expectEqual(PostResult.closed, handle.post("never lands"));
+    try testing.expect(!fx.hasPending());
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+
+    // closeChannel on the parked occupancy: no live flush, no
+    // self-delivered terminal — the slot parks `.closing` until the
+    // journaled `.closed` record feeds.
+    fx.closeChannel(17);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+
+    // The fed events are the ONLY stream: the recorded data and the
+    // recorded terminal deliver verbatim (drop counts included), and
+    // the fed `.closed` retires the parked occupancy at delivery.
+    try fx.feedChannelEvent(17, .data, "recorded sample", 0, 2);
+    try fx.feedChannelEvent(17, .closed, "", 0, 2);
+    const data = try expectData(&fx, 17, "recorded sample");
+    try testing.expectEqual(@as(u32, 2), data.dropped_total);
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(u32, 2), closed.event.dropped_total);
+    try testing.expect(fx.channelHandle(17) == null);
+}
+
+test "under replay a duplicate open still rejects symmetrically against the parked occupancy" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 23, .on_event = DirectFx.channelMsg(.event) });
+    // The duplicate open is regenerating validation: the replayed
+    // dispatch refuses against the parked occupancy exactly as the
+    // recording refused against the live one, and delivers its own
+    // `.rejected` terminal loop-side (the journaled copy is skipped by
+    // the replay pump, not fed).
+    const dup = fx.openChannel(.{ .key = 23, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(dup.shared == null);
+    try testing.expectEqual(PostResult.closed, dup.post("nope"));
+    const rejected = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.rejected, rejected.event.kind);
+    try testing.expectEqual(@as(u64, 23), rejected.event.key);
+    // The parked first occupancy is untouched by the refusal.
+    try testing.expect(fx.channelHandle(23) != null);
+}
+
 // ---------------------------------------------- record/replay acceptance
 
 const channel_canvas_label = "channel-session-canvas";
@@ -542,6 +600,191 @@ test "a recorded channel session replays fingerprint-identical offline with no s
     // Replay opened (and close-parked) the channel through the same
     // dispatches; the fed `.closed` retired it — nothing is left open.
     try testing.expect(app_state.effects.channelHandle(session_channel_key) == null);
+}
+
+// ------------------- replay acceptance: the open-and-spawn pattern
+//
+// The channel-monitor example's documented shape: ONE update handler
+// both opens the channel and spawns the worker thread that posts into
+// it. A replayed session re-executes that update — so replay must park
+// the channel and hand back an INERT handle whose every post answers
+// closed, making the re-spawned worker exit on its FIRST post. The fed
+// journal events are the only event stream; a live re-run source would
+// interleave with them and diverge the fingerprint.
+
+const monitor_channel_key: u64 = 61;
+
+var monitor_thread: ?std.Thread = null;
+var monitor_posts_made: u32 = 0;
+var monitor_first_post_closed: bool = false;
+
+/// The worker the update handler spawns — the example's sampling loop,
+/// bounded at three samples so record-side staging is deterministic.
+/// A closed answer ends the loop immediately (the well-behaved
+/// producer contract).
+const MonitorWorker = struct {
+    fn run(handle: effects_mod.ChannelHandle) void {
+        var buffer: [32]u8 = undefined;
+        var index: u32 = 0;
+        while (index < 3) : (index += 1) {
+            const line = std.fmt.bufPrint(&buffer, "sample {d}", .{index}) catch unreachable;
+            const result = handle.post(line);
+            monitor_posts_made += 1;
+            switch (result) {
+                // Drops are transient: skip the sample, keep sampling.
+                .accepted, .dropped_full, .dropped_oversized => {},
+                // The occupancy is over: exit the loop for good.
+                .closed => {
+                    monitor_first_post_closed = (index == 0);
+                    return;
+                },
+            }
+        }
+    }
+};
+
+fn monitorUpdate(model: *ChannelSessionModel, msg: ChannelSessionMsg, fx: *ChannelSessionApp.Effects) void {
+    switch (msg) {
+        // The open-and-spawn pattern under test: BOTH sides re-run this
+        // dispatch. The join inside the handler is the test's
+        // determinism pin (the example joins later, at close) — it
+        // pins exactly when the worker's posts have all been answered,
+        // on the recording and the replay alike.
+        .open => {
+            const handle = fx.openChannel(.{
+                .key = monitor_channel_key,
+                .on_event = ChannelSessionApp.Effects.channelMsg(.event),
+            });
+            monitor_thread = std.Thread.spawn(.{}, MonitorWorker.run, .{handle}) catch null;
+            if (monitor_thread) |thread| {
+                thread.join();
+                monitor_thread = null;
+            }
+        },
+        .open_dup => _ = fx.openChannel(.{
+            .key = monitor_channel_key,
+            .on_event = ChannelSessionApp.Effects.channelMsg(.event),
+        }),
+        .close => fx.closeChannel(monitor_channel_key),
+        .event => |event| model.record(event),
+    }
+}
+
+fn monitorCommand(name: []const u8) ?ChannelSessionMsg {
+    if (std.mem.eql(u8, name, "monitor.open")) return .open;
+    if (std.mem.eql(u8, name, "monitor.close")) return .close;
+    return null;
+}
+
+fn monitorOptions() ChannelSessionApp.Options {
+    return .{
+        .name = "channel-monitor-session",
+        .scene = channel_session_scene,
+        .canvas_label = channel_canvas_label,
+        .update_fx = monitorUpdate,
+        .view = channelSessionView,
+        .on_command = monitorCommand,
+    };
+}
+
+fn recordMonitorSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedChannelSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "channel-monitor-session", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, monitorOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = channel_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Open-and-spawn: the worker posts its three samples and exits
+    // (joined inside the dispatch), then the drain delivers them.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "monitor.open", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 3), app_state.model.data_events);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "monitor.close", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 1), app_state.model.closed_events);
+
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "replaying an open-and-spawn session parks the channel: the re-spawned worker exits on its first post and the fed stream is the only stream" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    monitor_thread = null;
+    monitor_posts_made = 0;
+    monitor_first_post_closed = false;
+    const recorded = try recordMonitorSession(gpa, buffer);
+    try testing.expectEqual(@as(u32, 3), recorded.model.data_events);
+    try testing.expectEqual(@as(u32, 1), recorded.model.closed_events);
+    try testing.expectEqual(@as(u32, 3), monitor_posts_made);
+
+    // Replay re-executes the SAME open-and-spawn update. The worker
+    // thread really spawns — app code is app code — but the parked
+    // channel's inert handle answers closed on its first post, the
+    // worker exits (joined before the report below), nothing is staged
+    // or journaled, and the fed events replay the recorded stream
+    // byte-identical.
+    monitor_posts_made = 0;
+    monitor_first_post_closed = false;
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, monitorOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try testing.expect(monitor_thread == null);
+    // The worker exited on its FIRST post: the inert handle answered
+    // closed immediately.
+    try testing.expectEqual(@as(u32, 1), monitor_posts_made);
+    try testing.expect(monitor_first_post_closed);
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // Three fed data events plus the fed closed terminal — and NOTHING
+    // else: the re-run worker contributed no events and no journal
+    // records.
+    try testing.expectEqual(@as(u64, 4), report.effects_fed);
+    try testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // The fed closed terminal retired the parked occupancy.
+    try testing.expect(app_state.effects.channelHandle(monitor_channel_key) == null);
 }
 
 // ------------------------------------------------- replay damage gates

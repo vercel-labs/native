@@ -3679,8 +3679,12 @@ pub fn Effects(comptime Msg: type) type {
         /// the next drain (and the returned handle is dead — posts
         /// answer `.closed`). Channel events are journaled as executor
         /// truth at the drain boundary; under session replay the
-        /// recorded events feed verbatim and the source is NEVER re-run
-        /// — replay needs no source thread at all.
+        /// recorded events feed verbatim and the source is NEVER
+        /// re-run: the replayed open PARKS the occupancy (the key
+        /// registers exactly as live, so duplicate opens reject
+        /// symmetrically) and returns an INERT handle whose every post
+        /// answers `.closed` — a re-run source thread exits on its
+        /// first post instead of interleaving with the fed stream.
         pub fn openChannel(self: *Self, options: OpenChannelOptions) ChannelHandle {
             self.reclaimSlots();
             const dead: ChannelHandle = .{};
@@ -3696,6 +3700,31 @@ pub fn Effects(comptime Msg: type) type {
                 return dead;
             };
             const slot = &self.channel_slots[slot_index];
+            // Session replay: PARK the occupancy instead of arming a
+            // live channel — the fake-slot discipline, channel-shaped.
+            // The slot registers exactly as a live open (duplicate
+            // opens reject symmetrically above, the shared key space
+            // holds), but no staging is allocated, nothing can be
+            // journaled, and the returned handle is INERT: every post
+            // answers `.closed` immediately (nothing staged, no drop
+            // counted), so a re-run source thread exits on its first
+            // post. The journaled `.data` events are the whole stream,
+            // and the fed `.closed`/`.rejected` terminal retires the
+            // parked slot at its recorded position (`feedChannelEvent`
+            // -> the drain's terminal retire), the same causal instant
+            // live delivery frees the key.
+            if (self.replay) {
+                const parked_generation = self.next_generation;
+                self.next_generation +%= 1;
+                if (self.next_generation == 0) self.next_generation = 1;
+                slot.state = .open;
+                slot.key = options.key;
+                slot.generation = parked_generation;
+                slot.on_event = options.on_event;
+                slot.closed_seq = 0;
+                slot.closed_staged = false;
+                return dead;
+            }
             // The posting header is process-lifetime storage: created
             // at the slot's first open, reused forever (see
             // `ChannelShared`). Failing to stage the channel is NOT
@@ -3769,14 +3798,19 @@ pub fn Effects(comptime Msg: type) type {
             const slot = self.findChannelSlot(key) orelse return;
             if (slot.state != .open) return;
             slot.state = .closing;
-            const shared = slot.shared.?;
-            shared.mutex.lock();
-            shared.open = false;
-            shared.mutex.unlock();
+            // A replay-parked occupancy never armed the posting header
+            // (its handle was inert from the open), so there may be
+            // nothing to sever here.
+            if (slot.shared) |shared| {
+                shared.mutex.lock();
+                shared.open = false;
+                shared.mutex.unlock();
+            }
             // Replay mode: the recorded session already journaled this
             // channel's `.closed` terminal, and feeding that record is
             // the one delivery — the slot parks `.closing` until then
-            // (the `cancel` discipline).
+            // (the `cancel` discipline), with no live flush (the fed
+            // events carry whatever the recording delivered).
             if (self.replay) return;
             slot.closed_seq = self.channel_seq.fetchAdd(1, .monotonic);
             slot.closed_staged = true;
