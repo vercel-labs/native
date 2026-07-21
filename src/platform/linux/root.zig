@@ -1023,16 +1023,45 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
     ) == 0) return error.ViewNotFound;
 }
 
-/// Translate the request's items to the C ABI shape. Pure (no host
-/// calls), so the separator/disabled mapping is unit-testable on every
-/// build host.
-fn contextMenuItemsToGtk(items: []const platform_mod.ContextMenuItem, buffer: []GtkContextMenuItem) []const GtkContextMenuItem {
+/// GTK popover menus treat `_` in an item label as a mnemonic marker —
+/// GtkPopoverMenu eats the underscore and underlines the next character —
+/// so an app-authored label like "Save_As" must cross the ABI with the
+/// underscore doubled ("Save__As") to render literally. Labels without
+/// an underscore pass through uncopied; a label whose escaped form does
+/// not fit the remaining pool also passes through raw, because an
+/// accidental mnemonic on a pathological label beats dropping bytes.
+fn escapeMenuLabelUnderscores(label: []const u8, pool: []u8, used: *usize) []const u8 {
+    const underscores = std.mem.count(u8, label, "_");
+    if (underscores == 0) return label;
+    if (label.len + underscores > pool.len - used.*) return label;
+    const start = used.*;
+    var out = start;
+    for (label) |byte| {
+        pool[out] = byte;
+        out += 1;
+        if (byte == '_') {
+            pool[out] = '_';
+            out += 1;
+        }
+    }
+    used.* = out;
+    return pool[start..out];
+}
+
+/// Translate the request's items to the C ABI shape, escaping mnemonic
+/// underscores into `label_pool` (the host strndup-copies every label
+/// before returning, so a caller stack pool is safe). Pure (no host
+/// calls), so the separator/disabled/label mapping is unit-testable on
+/// every build host.
+fn contextMenuItemsToGtk(items: []const platform_mod.ContextMenuItem, buffer: []GtkContextMenuItem, label_pool: []u8) []const GtkContextMenuItem {
     const count = @min(items.len, buffer.len);
+    var pool_used: usize = 0;
     for (items[0..count], 0..) |item, index| {
+        const label = escapeMenuLabelUnderscores(item.label, label_pool, &pool_used);
         buffer[index] = .{
             .item_id = item.id,
-            .label = item.label.ptr,
-            .label_len = item.label.len,
+            .label = label.ptr,
+            .label_len = label.len,
             .enabled = if (item.enabled) 1 else 0,
             .separator = if (item.separator) 1 else 0,
         };
@@ -1044,7 +1073,8 @@ fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuReques
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     var items: [platform_mod.max_context_menu_items]GtkContextMenuItem = undefined;
-    const translated = contextMenuItemsToGtk(request.items, &items);
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToGtk(request.items, &items, &label_pool);
     if (native_sdk_gtk_show_context_menu(
         self.host,
         request.window_id,
@@ -1625,10 +1655,12 @@ test "linux context menu items translate separators, disabled flags, and labels"
         .{ .id = 1, .label = "Complete" },
         .{ .separator = true },
         .{ .id = 3, .label = "Delete", .enabled = false },
+        .{ .id = 4, .label = "Move to Save_As" },
     };
     var buffer: [platform_mod.max_context_menu_items]GtkContextMenuItem = undefined;
-    const translated = contextMenuItemsToGtk(&items, &buffer);
-    try std.testing.expectEqual(@as(usize, 3), translated.len);
+    var label_pool: [platform_mod.max_context_menu_items * 64]u8 = undefined;
+    const translated = contextMenuItemsToGtk(&items, &buffer, &label_pool);
+    try std.testing.expectEqual(@as(usize, 4), translated.len);
     try std.testing.expectEqual(@as(u32, 1), translated[0].item_id);
     try std.testing.expectEqualStrings("Complete", translated[0].label[0..translated[0].label_len]);
     try std.testing.expectEqual(@as(c_int, 1), translated[0].enabled);
@@ -1636,6 +1668,24 @@ test "linux context menu items translate separators, disabled flags, and labels"
     try std.testing.expectEqual(@as(c_int, 1), translated[1].separator);
     try std.testing.expectEqual(@as(u32, 3), translated[2].item_id);
     try std.testing.expectEqual(@as(c_int, 0), translated[2].enabled);
+    // A literal `_` doubles on the way to GtkPopoverMenu so GTK renders
+    // it instead of eating it as a mnemonic marker; underscore-free
+    // labels pass through pointing at the caller's bytes.
+    try std.testing.expectEqualStrings("Move to Save__As", translated[3].label[0..translated[3].label_len]);
+    try std.testing.expectEqual(items[0].label.ptr, translated[0].label);
+}
+
+test "linux menu label escape passes a label through raw when the pool cannot hold it" {
+    var pool: [8]u8 = undefined;
+    var used: usize = 0;
+    const label = "Save_As";
+    // Escaped form needs 8 bytes and fits exactly.
+    try std.testing.expectEqualStrings("Save__As", escapeMenuLabelUnderscores(label, &pool, &used));
+    // The pool is spent: the next underscore label rides unescaped
+    // (accidental mnemonic) rather than truncated.
+    const passed_through = escapeMenuLabelUnderscores(label, &pool, &used);
+    try std.testing.expectEqualStrings("Save_As", passed_through);
+    try std.testing.expectEqual(label.ptr, passed_through.ptr);
 }
 
 test "linux context menu action event maps token and item id" {
