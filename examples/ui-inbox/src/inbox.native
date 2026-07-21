@@ -32,10 +32,16 @@
     <scroll grow="1">
       <column gap="2">
         <for each="visible" key="id" as="t">
-          <row gap="8" padding="6" cross="center">
+          <!-- The composite list row: one hit target whose right-click
+               carries the row's menu; the checkbox child keeps its own
+               press. -->
+          <list-item gap="8" padding="6" label="{t.title}">
             <checkbox checked="{t.done}" on-toggle="toggle:{t.id}" label="Done" />
             <text grow="1">{t.title}</text>
-          </row>
+            <context-menu>
+              <menu-item on-press="toggle:{t.id}">Toggle done</menu-item>
+            </context-menu>
+          </list-item>
         </for>
       </column>
     </scroll>

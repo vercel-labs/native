@@ -1256,13 +1256,30 @@ static int native_sdk_gpu_point_in_drag_region(const native_sdk_gtk_native_view_
     return 0;
 }
 
+/* GDK numbers pointer buttons primary=1, MIDDLE=2, SECONDARY=3; the
+ * runtime's pointer contract is primary=0, secondary=1, middle=2 (the
+ * web/Win32 ordering, which the secondary-button context-menu check
+ * depends on). A plain subtract-one swaps secondary and middle, so map
+ * explicitly. Extra buttons (back/forward, 8+) keep the subtract-one
+ * offset the runtime already expects for indices above 2. */
+static int native_sdk_gpu_runtime_button(unsigned int gdk_button) {
+    switch (gdk_button) {
+        case GDK_BUTTON_PRIMARY: return 0;
+        case GDK_BUTTON_SECONDARY: return 1;
+        case GDK_BUTTON_MIDDLE: return 2;
+        case 0: return 0;
+        default: return (int)gdk_button - 1;
+    }
+}
+
 static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view || !view->widget) return;
     gtk_widget_grab_focus(view->widget);
     view->gpu_pointer_x = x;
     view->gpu_pointer_y = y;
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const unsigned int gdk_button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    const int button = native_sdk_gpu_runtime_button(gdk_button);
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
     /* Stash the press for the widget `window_drag` channel: an
      * interactive window move must begin from the originating device,
@@ -1277,7 +1294,9 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         }
         view->window->last_press_device = event ? gdk_event_get_device(event) : NULL;
         view->window->last_press_time = event ? gdk_event_get_time(event) : GDK_CURRENT_TIME;
-        view->window->last_press_button = button < 0 ? 0 : button + 1;
+        /* gdk_toplevel_begin_move takes the GDK button number, so the
+         * stash keeps GDK numbering — no runtime mapping here. */
+        view->window->last_press_button = (int)gdk_button;
         view->window->last_press_x = window_point.x;
         view->window->last_press_y = window_point.y;
     }
@@ -1299,7 +1318,7 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         return;
     }
     view->gpu_pointer_down = 1;
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_DOWN, x, y, button < 0 ? 0 : button, 0, 0, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_DOWN, x, y, button, 0, 0, "", "", modifiers);
 }
 
 static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
@@ -1315,9 +1334,9 @@ static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_pres
         view->gpu_drag_claimed_press = 0;
         return;
     }
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const int button = native_sdk_gpu_runtime_button(gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_UP, x, y, button < 0 ? 0 : button, 0, 0, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_UP, x, y, button, 0, 0, "", "", modifiers);
 }
 
 static void native_sdk_gpu_pointer_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data) {

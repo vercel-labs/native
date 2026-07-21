@@ -187,8 +187,8 @@ jobs:
       # only succeed if nothing in a native-only app needs the WebKitGTK
       # headers or pkg-config entry. (The seam under webkit-PRESENT
       # conditions is the linux-webkitgtk job's ELF cross-audit.)
-      - name: Install GTK and Xvfb
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb
+      - name: Install GTK, Xvfb, and xdotool
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool
       # The stub is the expected, configured state of every native-only
       # Linux app, so compiling the GTK host with the stub define must be
       # diagnostic-FREE, not merely successful: zig renders every clang
@@ -215,9 +215,10 @@ jobs:
           fi
       # Drives the gpu_surface software path under Xvfb: snapshot ready,
       # gpu_backend=software, gpu_nonblank=true, automation widget-click,
-      # a rendered screenshot, an ELF audit that the built binary carries
-      # no WebKitGTK reference, and ZERO WebKit helper processes (canvas
-      # apps never boot WebKit). A11y env, the widened cold-start
+      # a real xdotool right-click driving a task row's native context
+      # menu end to end, a rendered screenshot, an ELF audit that the
+      # built binary carries no WebKitGTK reference, and ZERO WebKit
+      # helper processes (canvas apps never boot WebKit). A11y env, the widened cold-start
       # readiness budget (shared runners stall ~27 s before the first
       # runtime event), and failure forensics (dump snapshot + app log)
       # all live in the script.

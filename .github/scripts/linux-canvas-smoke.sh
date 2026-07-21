@@ -15,8 +15,10 @@
 #   3. gpu_backend=software           (the software present path is active)
 #   4. gpu_nonblank=true              (real pixels were presented)
 #   5. widget-click "Add task" -> '4 open'   (automation input mutates state)
-#   6. automate screenshot renders a non-empty PNG
-#   7. ZERO WebKit helper processes for the whole run (a native-only app
+#   6. a real X11 right-click opens a task row's declared context menu and
+#      keyboard-selecting its item dispatches the Msg ('1 done')
+#   7. automate screenshot renders a non-empty PNG
+#   8. ZERO WebKit helper processes for the whole run (a native-only app
 #      has no web layer to boot WebKit with)
 #
 # Deliberately NOT `set -e` (same as windows-canvas-smoke.sh): grep exits 1
@@ -56,12 +58,13 @@ app_log="${TMPDIR:-/tmp}/linux-canvas-smoke-app.log"
 ready_timeout_ms=90000
 
 app_pid=""
+xvfb_pid=""
 cleanup() {
   [ -n "$app_pid" ] && kill "$app_pid" >/dev/null 2>&1
-  # xvfb-run does not forward signals to an already-detached app; reap the
-  # app and its Xvfb directly so local runs exit clean (CI would otherwise
-  # rely on the runner's orphan sweep).
+  # Reap the app and our Xvfb directly so local runs exit clean (CI would
+  # otherwise rely on the runner's orphan sweep).
   pkill -f "$app_dir/zig-out/bin/ui-inbox" >/dev/null 2>&1
+  [ -n "$xvfb_pid" ] && kill "$xvfb_pid" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -108,9 +111,23 @@ assert_no_webkit() {
 echo "== native-only ELF audit ok"
 
 # ---- launch ---------------------------------------------------------------
+# The script owns its Xvfb (instead of wrapping the app in xvfb-run) so
+# the xdotool step below shares the app's display. -displayfd picks a
+# free display number, the modern equivalent of xvfb-run -a's probing.
+display_file="$(mktemp)"
+Xvfb -displayfd 4 -screen 0 1280x800x24 4>"$display_file" &
+xvfb_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$display_file" ] && break
+  sleep 0.1
+done
+[ -s "$display_file" ] || fail "Xvfb never reported a display number"
+export DISPLAY=":$(cat "$display_file")"
+echo "== Xvfb on $DISPLAY"
+
 cd "$app_dir" || fail "missing $app_dir"
 rm -rf .zig-cache/native-sdk-automation
-xvfb-run -a "$app_dir/zig-out/bin/ui-inbox" > "$app_log" 2>&1 &
+"$app_dir/zig-out/bin/ui-inbox" > "$app_log" 2>&1 &
 app_pid=$!
 
 # ---- 2: automation snapshot becomes ready ---------------------------------
@@ -139,12 +156,65 @@ add_id=$(grep -o 'widget @w1/inbox-canvas#[0-9]* role=button name="Add task"' "$
   || fail "widget-click did not reach '4 open'"
 echo "== open after click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
 
-# ---- 6: screenshot renders a non-empty PNG ---------------------------------
+# ---- 6: a real right-click opens and drives a task-row context menu --------
+# What this proves: an X-level SECONDARY-button press (GDK button 3)
+# travels the whole GTK path — click gesture -> button mapping -> runtime
+# secondary check -> declared-menu lookup -> native popover — and
+# keyboard-selecting the popover's "Toggle done" item dispatches the
+# row's Msg, observable as the model change '1 done' in the snapshot
+# (the popover itself is an OS surface and never appears in the
+# snapshot, so the dispatched selection is the provable signal).
+# Regression coverage: the swapped GDK button mapping this smoke was
+# blind to made every right-click arrive as MIDDLE and never open the
+# menu — under that defect the popover never presents, Down/Return land
+# on the canvas, and '1 done' never appears.
+# Limit: '1 done' proves the toggle Msg dispatched; it cannot attribute
+# the dispatch to the popover VISUALLY (no snapshot record of the OS
+# menu), so a hypothetical non-menu path that also toggles task 1 on
+# Down+Return would false-pass. No such path exists today (canvas arrow
+# keys do not focus checkboxes, and Return without focus is inert).
+echo "== done before right-click: $(grep -oE '[0-9]+ done' "$snap" | head -1)"
+row_line=$(grep -o 'widget @w1/inbox-canvas#[0-9]*[^|]*context_menu=\["Toggle done"\][^|]*' "$snap" | head -1)
+[ -n "$row_line" ] || fail "no task row with the declared context menu in snapshot"
+bounds=$(echo "$row_line" | grep -o 'bounds=([^)]*)')
+bx=$(echo "$bounds" | sed -n 's/bounds=(\([0-9.-]*\),.*/\1/p')
+by=$(echo "$bounds" | sed -n 's/bounds=([0-9.-]*,\([0-9.-]*\) .*/\1/p')
+bw=$(echo "$bounds" | sed -n 's/.* \([0-9.]*\)x[0-9.]*).*/\1/p')
+bh=$(echo "$bounds" | sed -n 's/.* [0-9.]*x\([0-9.]*\)).*/\1/p')
+[ -n "$bx" ] && [ -n "$by" ] && [ -n "$bw" ] && [ -n "$bh" ] || fail "could not parse row bounds: $row_line"
+win=""
+for w in $(xdotool search --name "Inbox" 2>/dev/null); do win="$w"; done
+[ -n "$win" ] || fail "app X window not found"
+eval "$(xdotool getwindowgeometry --shell "$win")"
+# Xvfb has no compositor, so GTK draws no CSD shadow and the X window is
+# exactly the client area; correct by the measured height difference the
+# same way windows-canvas-smoke.sh does, in case a runner image ever
+# composites.
+client_h=$(grep -o 'window @w1 "[^"]*" bounds=([^)]*)' "$snap" | head -1 \
+  | sed -n 's/.*x\([0-9]*\)[^x]*$/\1/p')
+[ -n "$client_h" ] || client_h=$HEIGHT
+y_off=$((HEIGHT - client_h))
+[ "$y_off" -ge 0 ] 2>/dev/null || y_off=0
+cx=$(awk "BEGIN{printf \"%d\", $X + $bx + $bw / 2}")
+cy=$(awk "BEGIN{printf \"%d\", $Y + $y_off + $by + $bh / 2}")
+xdotool windowactivate "$win" >/dev/null 2>&1 || xdotool windowfocus "$win" >/dev/null 2>&1
+echo "== right-clicking task row $bounds at ($cx,$cy)"
+xdotool mousemove "$cx" "$cy" click 3
+sleep 1
+# The popover holds the keyboard grab: Down focuses its first item,
+# Return activates "Toggle done" for the row.
+xdotool key Down
+xdotool key Return
+"$cli" automate assert --timeout-ms 30000 '1 done' \
+  || fail "right-click menu selection did not dispatch the toggle Msg ('1 done')"
+echo "== done after menu selection: $(grep -oE '[0-9]+ done' "$snap" | head -1)"
+
+# ---- 7: screenshot renders a non-empty PNG ---------------------------------
 "$cli" automate screenshot inbox-canvas || fail "CLI screenshot failed"
 test -s .zig-cache/native-sdk-automation/screenshot-inbox-canvas.png \
   || fail "screenshot PNG missing or empty"
 
-# ---- 7: still zero WebKit processes at the end of the run -------------------
+# ---- 8: still zero WebKit processes at the end of the run -------------------
 assert_no_webkit "at end of run"
 echo "== zero WebKit processes at end of run"
 
