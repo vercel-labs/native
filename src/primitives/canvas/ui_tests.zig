@@ -1184,6 +1184,55 @@ test "a bound press handler makes layout containers hit targets" {
     try testing.expectEqual(@as(u32, 7), tree.msgForPointer(row.id, .up).?.toggle);
 }
 
+test "Ui.video records the declaration last-wins, formats times, and disables chrome when inactive" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // Inactive channel (the default outside an app loop): the chrome
+    // renders disabled at the play glyph with zeroed readouts.
+    const idle = ui.video(.{ .src = "assets/clips/one.mp4", .controls = true, .width = 320, .height = 180 });
+    const idle_surface = idle.nodes[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, idle_surface.widget.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, idle_surface.widget.image_id);
+    const idle_row = idle.nodes[1];
+    const idle_button = idle_row.nodes[0];
+    try testing.expectEqual(canvas.VideoControlVerb.toggle, idle_button.widget.video_control);
+    try testing.expect(idle_button.widget.state.disabled);
+    try testing.expectEqualStrings("play", idle_button.widget.icon);
+    try testing.expectEqualStrings("0:00", idle_row.nodes[1].widget.text);
+    const idle_slider = idle_row.nodes[2];
+    try testing.expectEqual(canvas.VideoControlVerb.scrub, idle_slider.widget.video_control);
+    try testing.expect(idle_slider.widget.state.disabled);
+    try testing.expectEqual(@as(f32, 0), idle_slider.widget.value);
+    try testing.expectEqualStrings("0:00", idle_row.nodes[3].widget.text);
+    try testing.expectEqualStrings("assets/clips/one.mp4", ui.video_declaration.?.src);
+
+    // A live stamped snapshot: the pause glyph, h:mm:ss past the hour,
+    // and the seek fraction from position over duration.
+    ui.video_state = .{ .active = true, .playing = true, .position_ms = 3_725_000, .duration_ms = 7_200_000 };
+    const live = ui.video(.{ .src = "assets/clips/two.mp4", .controls = true, .loop = true });
+    const live_row = live.nodes[1];
+    const live_button = live_row.nodes[0];
+    try testing.expect(!live_button.widget.state.disabled);
+    try testing.expectEqualStrings("pause", live_button.widget.icon);
+    try testing.expectEqualStrings("1:02:05", live_row.nodes[1].widget.text);
+    try testing.expectApproxEqAbs(@as(f32, 3_725_000.0 / 7_200_000.0), live_row.nodes[2].widget.value, 0.0001);
+    try testing.expect(!live_row.nodes[2].widget.state.disabled);
+    try testing.expectEqualStrings("2:00:00", live_row.nodes[3].widget.text);
+
+    // The last declaration wins (loadVideo's replace semantics: one
+    // player is the whole surface).
+    try testing.expectEqualStrings("assets/clips/two.mp4", ui.video_declaration.?.src);
+    try testing.expect(ui.video_declaration.?.loop);
+
+    // A src-less video records nothing: it is surface-only chrome over
+    // whatever playback the app loaded itself.
+    var chrome_ui = InboxUi.init(arena_state.allocator());
+    _ = chrome_ui.video(.{ .controls = true });
+    try testing.expect(chrome_ui.video_declaration == null);
+}
+
 test "chart builder copies, downsamples, and summarizes series" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1360,7 +1409,6 @@ test "virtualWindow without a source falls back to the request viewport" {
     try testing.expect(ui.virtualWindow(options).isEmpty());
 }
 
-
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {
     // The FULL golden table. `structuralId` hashes `widgetKindCode`, so
     // this table IS the id vocabulary persisted state references:
@@ -1460,4 +1508,3 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
 }
-

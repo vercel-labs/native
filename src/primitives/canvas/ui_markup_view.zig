@@ -233,6 +233,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Series inside a chart are consumed by buildChart.
                 return self.failNode(node, markup.series_parent_message);
             }
+            if (std.mem.eql(u8, node.name, "video")) {
+                return self.buildVideo(ui, scope, node);
+            }
             if (std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
                 // element below; one reaching here is misplaced.
@@ -1136,6 +1139,74 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return ui.chart(options, series);
         }
 
+        // ---------------------------------------------------------- video
+
+        /// `<video src="assets/clips/intro.mp4" controls autoplay/>`:
+        /// the video playback composite, lowered through `Ui.video` so
+        /// markup videos get the same playback surface, house chrome,
+        /// and declaration recording as Zig-built ones. A leaf with a
+        /// closed attribute set; flags accept bare presence (the
+        /// boolean-attribute convention), literals, and bindings.
+        fn buildVideo(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            if (node.children.len > 0) {
+                return self.failNode(node.children[0], markup.video_children_message);
+            }
+            var options: Ui.VideoOptions = .{};
+            for (node.attrs) |attribute| {
+                if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                if (std.mem.eql(u8, attribute.name, "src")) {
+                    options.src = try self.stringAttr(scope, node, attribute, markup.video_src_message);
+                    continue;
+                }
+                if (markup.videoFlagAttrName(attribute.name)) {
+                    const value = try self.videoFlagAttr(scope, node, attribute);
+                    if (std.mem.eql(u8, attribute.name, "controls")) {
+                        options.controls = value;
+                    } else if (std.mem.eql(u8, attribute.name, "autoplay")) {
+                        options.autoplay = value;
+                    } else if (std.mem.eql(u8, attribute.name, "loop")) {
+                        options.loop = value;
+                    } else {
+                        options.muted = value;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "width")) {
+                    options.width = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "height")) {
+                    options.height = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "grow")) {
+                    options.grow = try self.floatAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "label")) {
+                    options.label = try self.stringAttr(scope, node, attribute, "label expects text");
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "key")) {
+                    options.key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "global-key")) {
+                    options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                return self.failNode(node, markup.video_attr_message);
+            }
+            return ui.video(options);
+        }
+
+        /// One video flag's value: bare presence declares true, a
+        /// valued flag evaluates truthy like every other flag attr.
+        fn videoFlagAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, attribute: markup.MarkupAttr) BuildError!bool {
+            if (attribute.value.len == 0) return true;
+            return (try self.evalAttrExpression(scope, node, attribute)).truthy();
+        }
+
         fn buildSeries(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!canvas.ChartSeries {
             if (node.children.len != 0) {
                 return self.failVoid(node.children[0], markup.series_children_message);
@@ -1519,6 +1590,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (std.mem.eql(u8, attribute.name, "surface")) {
                     try self.applySurfaceAttr(scope, node, options, attribute);
                     continue;
+                }
+                if (markup.videoFlagAttrName(attribute.name)) {
+                    // The video element's flags, video-scoped (its own
+                    // build consumed them): anywhere else they would be
+                    // silently inert. Mirrors the validator and the
+                    // compiled engine.
+                    return self.failVoid(node, markup.video_flag_element_message);
                 }
                 if (std.mem.eql(u8, attribute.name, "name")) {
                     // Consumed by the icon branch in buildElement.

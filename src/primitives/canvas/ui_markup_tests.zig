@@ -744,6 +744,48 @@ test "the media-surface surface attribute validates as one binding, required, me
     }
 }
 
+test "the video element validates as a leaf with its closed attribute set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The full declaration (bare flags read as presence-is-true), a
+    // bound src, and the src-less surface-only shape are all legal.
+    const valid = [_][]const u8{
+        "<row>\n  <video src=\"assets/clips/a.mp4\" controls autoplay loop muted/>\n</row>",
+        "<row>\n  <video src=\"{clip}\" controls=\"true\" width=\"320\" height=\"180\" label=\"Trailer\"/>\n</row>",
+        "<row>\n  <video controls grow=\"1\" label=\"Preview\"/>\n</row>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // A leaf like image and icon: widget layout gives the playback
+        // surface no child slots, so nested content would silently
+        // vanish instead of rendering.
+        .{ .source = "<row>\n  <video src=\"a.mp4\"><text>Caption</text></video>\n</row>", .message = markup.video_children_message },
+        // The closed attribute set teaches its vocabulary.
+        .{ .source = "<row>\n  <video src=\"a.mp4\" gap=\"4\"/>\n</row>", .message = markup.video_attr_message },
+        // Events are not part of the set either: the chrome is
+        // runtime-consumed, so there is nothing to bind.
+        .{ .source = "<row>\n  <video src=\"a.mp4\" on-press=\"open\"/>\n</row>", .message = markup.video_attr_message },
+        // The flags are video-scoped: anywhere else they would be
+        // silently inert.
+        .{ .source = "<row>\n  <panel controls=\"true\"/>\n</row>", .message = markup.video_flag_element_message },
+        .{ .source = "<row>\n  <badge muted=\"true\">3</badge>\n</row>", .message = markup.video_flag_element_message },
+        // A malformed flag value errors exactly as flags do.
+        .{ .source = "<row>\n  <video controls=\"{\"/>\n</row>", .message = markup.invalid_expression_message },
+    };
+    for (cases) |case| {
+        var case_parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try case_parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
+    }
+}
+
 test "wrap and issue-link-base validate as vocabulary with teaching errors" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

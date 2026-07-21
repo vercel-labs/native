@@ -622,6 +622,212 @@ test "quit while playing: the stop hook silences video and releases the claim th
     std.testing.allocator.destroy(app_state);
 }
 
+// ------------------------------------------- declarative <video> element
+
+const canvas = @import("canvas");
+
+const DeclModel = struct {
+    show: bool = true,
+    second: bool = false,
+};
+
+const DeclMsg = union(enum) { toggle_show, use_second, noop };
+
+const DeclApp = ui_app_model.UiApp(DeclModel, DeclMsg);
+const DeclEffects = DeclApp.Effects;
+
+fn declUpdate(model: *DeclModel, msg: DeclMsg, fx: *DeclEffects) void {
+    _ = fx;
+    switch (msg) {
+        .toggle_show => model.show = !model.show,
+        .use_second => model.second = true,
+        .noop => {},
+    }
+}
+
+/// A view declaring the playback through `ui.video` (what `<video
+/// src=... controls/>` lowers to in both markup engines): presence IS
+/// playback, and the transport chrome is runtime-consumed.
+fn declView(ui: *DeclApp.Ui, model: *const DeclModel) DeclApp.Ui.Node {
+    if (!model.show) {
+        return ui.column(.{ .padding = 8 }, .{ui.text(.{}, "no video")});
+    }
+    return ui.column(.{ .padding = 8 }, .{
+        ui.video(.{
+            .src = if (model.second) "assets/clips/two.mp4" else "assets/clips/one.mp4",
+            .controls = true,
+            .width = 320,
+            .height = 220,
+            .label = "Clip",
+        }),
+    });
+}
+
+const DeclHarness = struct {
+    harness: *core.TestHarness(),
+    app_state: *DeclApp,
+    app: core.App,
+
+    fn create() !DeclHarness {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        try harness.null_platform.setVideoMeta("one.mp4", 90_000, 640, 360);
+        try harness.null_platform.setVideoMeta("two.mp4", 60_000, 640, 360);
+        const app_state = try std.testing.allocator.create(DeclApp);
+        errdefer std.testing.allocator.destroy(app_state);
+        app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video-decl",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = declUpdate,
+            .view = declView,
+        });
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try std.testing.expect(app_state.installed);
+        return .{ .harness = harness, .app_state = app_state, .app = app };
+    }
+
+    fn destroy(self: *DeclHarness) void {
+        self.app_state.deinit();
+        std.testing.allocator.destroy(self.app_state);
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    /// The laid-out frame of the first chrome control carrying `verb`,
+    /// straight from the runtime's retained layout.
+    fn controlFrame(self: *DeclHarness, verb: canvas.VideoControlVerb) !geometry.RectF {
+        const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        for (layout.nodes) |node| {
+            if (node.widget.video_control == verb) return node.frame.normalized();
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn clickAt(self: *DeclHarness, x: f32, y: f32) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_down,
+            .x = x,
+            .y = y,
+        } });
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = x,
+            .y = y,
+        } });
+    }
+};
+
+test "a declared <video src> loads on first rebuild, reloads on src change, and stops on removal" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // The installing rebuild reconciled the declaration into the
+    // channel: one load of the declared path onto the framework-owned
+    // playback surface, autoplay honored.
+    try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
+    try std.testing.expectEqualStrings("assets/clips/one.mp4", np.video.path());
+    try std.testing.expect(np.video.playing);
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expectEqual(canvas.video_playback_surface_id, fx.videoSnapshot().surface);
+
+    // A rebuild with the unchanged declaration never reloads — an
+    // unchanged src must not restart the playback.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .noop);
+    try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
+
+    // A changed src replaces the playback whole (loadVideo's replace
+    // semantics: the first playback stops on the way).
+    try h.app_state.dispatch(&h.harness.runtime, 1, .use_second);
+    try std.testing.expectEqual(@as(usize, 2), np.video_load_count);
+    try std.testing.expectEqualStrings("assets/clips/two.mp4", np.video.path());
+    try std.testing.expectEqual(@as(usize, 1), np.video_stop_count);
+
+    // The element leaving the view ends the playback: declarative
+    // ownership stops what it declared.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
+    try std.testing.expectEqual(@as(usize, 2), np.video_stop_count);
+    try std.testing.expect(!np.video.loaded);
+    try std.testing.expect(!fx.videoSnapshot().active);
+
+    // Redeclaring it loads afresh.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
+    try std.testing.expectEqual(@as(usize, 3), np.video_load_count);
+    try std.testing.expect(np.video.loaded);
+}
+
+test "the house chrome toggle pauses and resumes the platform player without an app Msg" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // The loaded acknowledgment reaches the channel with no app
+    // handler bound: the runtime-owned arm publishes and rebuilds, so
+    // the chrome renders enabled against the live duration.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    try std.testing.expectEqual(@as(u64, 90_000), fx.videoSnapshot().duration_ms);
+
+    // A release on the play/pause control drives the channel directly.
+    const toggle_frame = try h.controlFrame(.toggle);
+    try h.clickAt(toggle_frame.x + toggle_frame.width / 2, toggle_frame.y + toggle_frame.height / 2);
+    try std.testing.expectEqual(@as(usize, 1), np.video_pause_count);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+
+    // The rebuild that followed re-rendered the chrome from the moved
+    // mirrors: the glyph is back to play.
+    const paused_frame = try h.controlFrame(.toggle);
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.video_control == .toggle) {
+            try std.testing.expectEqualStrings("play", node.widget.icon);
+        }
+    }
+
+    // Pressing again resumes (autoplay's start was the first play).
+    try h.clickAt(paused_frame.x + paused_frame.width / 2, paused_frame.y + paused_frame.height / 2);
+    try std.testing.expectEqual(@as(usize, 2), np.video_play_count);
+    try std.testing.expect(fx.videoSnapshot().playing);
+}
+
+test "the house chrome slider seeks proportionally into the playback" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+
+    // The duration arrives with the loaded acknowledgment; the seek
+    // maps the slider fraction onto it.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+
+    // A rail click at three quarters seeks to three quarters of the
+    // 90s duration — the proportional mapping, not the raw fraction.
+    const rail = try h.controlFrame(.scrub);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = rail.x + rail.width * 0.75,
+        .y = rail.y + rail.height / 2,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), np.video_seek_count);
+    try std.testing.expectApproxEqAbs(@as(f64, 67_500), @as(f64, @floatFromInt(np.video.position_ms)), 2_000);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = rail.x + rail.width * 0.75,
+        .y = rail.y + rail.height / 2,
+    } });
+}
+
 // ------------------------------------------------------- record / replay
 
 const JournalBuffer = struct {
@@ -740,6 +946,97 @@ test "a recorded video session replays byte-identical with no producer and no pl
         try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(clip_surface) == null);
         try std.testing.expectEqual(@as(usize, 0), harness.null_platform.video_load_count);
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "a handler-less house-chrome session replays with live mirrors and identical fingerprints" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record: the declarative shape — presence loads the playback, no
+    // app Msg handler anywhere, so NO video effect records exist; the
+    // journaled platform `.video` events are the transport's only
+    // record. The chrome's time readouts render from the channel
+    // mirrors, so they are part of every frame's fingerprint.
+    var recorded_position: u64 = 0;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video-decl", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("one.mp4", 90_000, 640, 360);
+        try harness.null_platform.setVideoMeta("two.mp4", 60_000, 640, 360);
+
+        const app_state = try gpa.create(DeclApp);
+        defer gpa.destroy(app_state);
+        app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video-decl",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = declUpdate,
+            .view = declView,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        var frame_index: u64 = 2;
+        while (frame_index < 6) : (frame_index += 1) {
+            try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(500).?);
+            try dispatchFrame(harness, app, frame_index);
+            try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        }
+        try std.testing.expectEqual(@as(u64, 2_000), app_state.effects.videoSnapshot().position_ms);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_position = app_state.effects.videoSnapshot().position_ms;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay on a decoder-less host: the reconciler regenerates the
+    // load (fake, parked), and the replayed platform events steer the
+    // mirrors — the chrome repaints identically, checkpoint by
+    // checkpoint, with zero fed effect records.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(DeclApp);
+        defer gpa.destroy(app_state);
+        app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video-decl",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = declUpdate,
+            .view = declView,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.checkpoints_verified > 0);
+        try std.testing.expectEqual(@as(u64, 0), report.effects_fed);
+        try std.testing.expectEqual(recorded_position, app_state.effects.videoSnapshot().position_ms);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
 }

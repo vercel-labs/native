@@ -6099,16 +6099,35 @@ pub fn Effects(comptime Msg: type) type {
         /// `stopVideo`) or has no handler. Loop-thread only; called by
         /// `UiApp.handleEvent` for `.video` platform events.
         pub fn takeVideoMsg(self: *Self, platform_event: platform.VideoEvent) ?Msg {
-            // Under replay the journaled effect records are the ONLY
-            // Msg source (fed through `feedVideoEvent`); the replayed
-            // platform `.video` events would double-deliver.
-            if (self.replay) return null;
             const kind: EffectVideoEventKind = switch (platform_event.kind) {
                 .loaded => .loaded,
                 .position => .position,
                 .completed => .completed,
                 .failed => .failed,
             };
+            // Under replay the journaled effect records are the ONLY
+            // Msg source (fed through `feedVideoEvent`); the replayed
+            // platform `.video` events must not double-deliver. They DO
+            // still steer the channel mirrors — unlike audio, a video
+            // playback routinely runs with NO Msg handler (the house
+            // chrome renders straight from these mirrors, and a
+            // handler-less delivery journals no effect record), so the
+            // journaled platform events are the mirrors' only replay
+            // source. With a handler both sources apply the same
+            // recorded values, so the end state cannot diverge.
+            if (self.replay) {
+                _ = self.applyVideoEvent(.{
+                    .key = 0,
+                    .kind = kind,
+                    .position_ms = platform_event.position_ms,
+                    .duration_ms = platform_event.duration_ms,
+                    .playing = platform_event.playing,
+                    .buffering = platform_event.buffering,
+                    .width = platform_event.width,
+                    .height = platform_event.height,
+                });
+                return null;
+            }
             const video_fn = self.video.on_event;
             const event = self.applyVideoEvent(.{
                 .key = 0,

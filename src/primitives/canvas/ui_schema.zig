@@ -329,6 +329,18 @@ pub const elements = [_]ElementInfo{
     // falls back to initials instead). Display-only like media-surface
     // and chart (presses fall through); pictorial for the a11y lint.
     .{ .code = 67, .name = "image", .widget_kind = "image", .hit_target = false, .a11y_name = .image },
+    // The video playback element: a leaf compositing the app's SINGLE
+    // video playback (decoded platform-side into the framework-owned
+    // playback surface, `canvas.video_playback_surface_id`) with
+    // optional house transport chrome. `src` declares the source — an
+    // app-assets path or an http(s) URL, the loadVideo cascade's
+    // resolution order — `controls` composes the house chrome
+    // (play/pause, elapsed, seek, duration), and autoplay/loop/muted
+    // shape the fresh playback. A composite: it lowers through
+    // `Ui.video` to existing widgets (media-surface plus the chrome
+    // row), so its rule hook owns the closed attribute set. Pictorial
+    // for the a11y lint, like media-surface and image.
+    .{ .code = 68, .name = "video", .rule_hook = "video", .hit_target = false, .a11y_name = .image },
 };
 
 // ------------------------------------------------------------- attributes
@@ -404,6 +416,10 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 53, .name = "test", .class = .flag, .group = .structure },
     .{ .code = 54, .name = "template", .class = .text, .group = .structure },
     .{ .code = 55, .name = "args", .class = .text, .group = .structure },
+    // Attribute NAMES are unique by registry law, so `src` is stated
+    // once and scoped per element: `<import src>` names the imported
+    // markup file, and the video element's rule hook reuses it for the
+    // playback's source string (an app-assets path or http(s) URL).
     .{ .code = 56, .name = "src", .class = .text, .group = .structure },
     .{ .code = 57, .name = "kind", .class = .text, .group = .structure },
     // Chart composite attributes (fresh codes, assigned at birth).
@@ -493,6 +509,15 @@ pub const attrs = [_]AttrInfo{
     // like an image leaf with id 0), and usable ids stay below the
     // reserved namespace bit (bit 63), which acquire refuses.
     .{ .code = 81, .name = "surface", .class = .binding_only, .group = .element },
+    // Video element attributes (the <video> composite; its rule hook
+    // owns the closed set): controls composes the house transport
+    // chrome, autoplay/loop/muted shape the fresh playback the
+    // element's src declares. All flags — bare presence, a literal
+    // true/false, or a {binding} to a bool.
+    .{ .code = 82, .name = "controls", .class = .flag, .group = .composite },
+    .{ .code = 83, .name = "autoplay", .class = .flag, .group = .composite },
+    .{ .code = 84, .name = "loop", .class = .flag, .group = .composite },
+    .{ .code = 85, .name = "muted", .class = .flag, .group = .composite },
 };
 
 // ----------------------------------------------------------------- events
@@ -543,16 +568,16 @@ pub const control_size_value_names = [_][]const u8{ "default", "sm", "lg", "icon
 pub const text_size_value_names = [_][]const u8{ "heading", "display" };
 
 pub const icon_names = [_][]const u8{
-    "alert",       "archive",       "arrow-down",   "arrow-right",      "arrow-up",
-    "check",       "check-circle",  "chevron-down", "chevron-left",     "chevron-right",
-    "chevron-up",  "circle-dot",    "clock",        "copy",             "download",
-    "edit",        "ellipsis",      "external-link", "eye",             "file-text",
-    "folder",      "folder-open",   "git-branch",    "git-merge",       "git-pull-request",
-    "info",        "menu",          "moon",          "music",           "panel-left",
-    "panel-right", "pause",         "play",          "plus",            "refresh-cw",
-    "repeat",      "save",          "search",        "send",            "settings",
-    "shuffle",     "skip-back",     "skip-forward",  "sun",             "terminal",
-    "trash",       "volume",        "wrench",        "x",               "x-circle",
+    "alert",       "archive",      "arrow-down",    "arrow-right",  "arrow-up",
+    "check",       "check-circle", "chevron-down",  "chevron-left", "chevron-right",
+    "chevron-up",  "circle-dot",   "clock",         "copy",         "download",
+    "edit",        "ellipsis",     "external-link", "eye",          "file-text",
+    "folder",      "folder-open",  "git-branch",    "git-merge",    "git-pull-request",
+    "info",        "menu",         "moon",          "music",        "panel-left",
+    "panel-right", "pause",        "play",          "plus",         "refresh-cw",
+    "repeat",      "save",         "search",        "send",         "settings",
+    "shuffle",     "skip-back",    "skip-forward",  "sun",          "terminal",
+    "trash",       "volume",       "wrench",        "x",            "x-circle",
 };
 
 /// The semantic role vocabulary the `role` attribute accepts: the field

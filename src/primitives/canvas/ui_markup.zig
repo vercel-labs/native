@@ -1255,6 +1255,11 @@ pub const media_surface_surface_message = "surface takes one {binding} to the u6
 pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
 pub const media_surface_missing_surface_message = "media-surface requires surface={binding} naming the u64 surface id its producer targets - without one the surface can never show anything (dead markup, same policy as icon without name)";
 
+pub const video_children_message = "video is a leaf - it takes no children";
+pub const video_attr_message = "unknown attribute for video - it takes src, controls, autoplay, loop, muted, width, height, grow, label, key, and global-key";
+pub const video_src_message = "src on video takes the playback source string - an app-assets path or an http(s) URL (a literal, or one {binding} resolving to a string)";
+pub const video_flag_element_message = "controls, autoplay, loop, and muted are only supported on video - they compose the house transport chrome and shape the fresh playback the element's src declares; anywhere else they would be silently inert";
+
 /// The built-in vector icon vocabulary behind `<icon name="..."/>`.
 /// Registry section mirroring `canvas.icons.known_icon_names` (the
 /// comptime-parsed registry; this layer stays std-only); a test in
@@ -2719,10 +2724,63 @@ fn validateReactions(node: MarkupNode) ?MarkupErrorInfo {
     return null;
 }
 
+/// The video element's flag attributes (controls/autoplay/loop/muted).
+/// Pub and comptime-callable: the validator and BOTH engines share the
+/// set, so the video-only scoping teaching can never drift.
+pub fn videoFlagAttrName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "controls") or std.mem.eql(u8, name, "autoplay") or
+        std.mem.eql(u8, name, "loop") or std.mem.eql(u8, name, "muted");
+}
+
+/// `<video>` — the video playback composite: a LEAF (the playback
+/// surface plus runtime-owned transport chrome; widget layout gives it
+/// no child slots, so nested content would silently vanish — rejected
+/// like image and icon) with a closed attribute set. `src` is OPTIONAL:
+/// a src-less video is surface-only chrome over whatever playback the
+/// app loaded itself, so the dead-markup policy does not apply. Flags
+/// accept bare presence (the boolean-attribute convention), a literal
+/// true/false, or a {binding}.
+fn validateVideo(node: MarkupNode) ?MarkupErrorInfo {
+    for (node.children) |child| {
+        return errorAt(child, video_children_message);
+    }
+    for (node.attrs) |attribute| {
+        if (std.mem.eql(u8, attribute.name, "src")) {
+            if (attrExpressionError(attribute.value, video_src_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            continue;
+        }
+        if (videoFlagAttrName(attribute.name)) {
+            // Bare presence declares true; a valued flag is an
+            // expression like any other flag attribute.
+            if (attribute.value.len == 0) continue;
+            if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            continue;
+        }
+        const known = std.mem.eql(u8, attribute.name, "width") or
+            std.mem.eql(u8, attribute.name, "height") or
+            std.mem.eql(u8, attribute.name, "grow") or
+            std.mem.eql(u8, attribute.name, "label") or
+            std.mem.eql(u8, attribute.name, "key") or
+            std.mem.eql(u8, attribute.name, "global-key");
+        if (!known) {
+            return attrError(node, attribute, video_attr_message);
+        }
+        if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+            return attrError(node, attribute, message);
+        }
+        if (attrCoverageError(node, attribute)) |info| return info;
+    }
+    return null;
+}
+
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" };
+const rule_hook_names = [_][]const u8{ "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2787,6 +2845,7 @@ fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode
         // pass; one reaching the generic pass sits outside a bubble.
         return errorAt(node, reactions_parent_message);
     }
+    if (std.mem.eql(u8, hook, "video")) return validateVideo(node);
     // The comptime check above proves every registry hook lands in one of
     // the branches; a name reaching here is not a registry hook at all.
     unreachable;
@@ -3098,6 +3157,12 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         return attrError(node, attribute, media_surface_surface_message);
                     }
                     continue;
+                }
+                if (videoFlagAttrName(attribute.name)) {
+                    // The video element's flags, video-scoped (its rule
+                    // hook consumed them before this pass): anywhere
+                    // else they would be silently inert.
+                    return attrError(node, attribute, video_flag_element_message);
                 }
                 if (std.mem.eql(u8, attribute.name, "anchor")) {
                     // Anchored floating placement, dropdown-menu-scoped:

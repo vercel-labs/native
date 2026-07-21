@@ -1306,6 +1306,62 @@ test "compiled image leaf binding refuses negative model values instead of trapp
     try testing.expectError(error.OutOfMemory, image_ui.finalize(image_node));
 }
 
+// --------------------------------------------- video playback element
+
+const VideoElementUi = fixture.VideoElementUi;
+const VideoElementInterpreter = markup_view.MarkupView(fixture.VideoElementModel, fixture.VideoElementMsg);
+const VideoElementCompiled = canvas.CompiledMarkupView(fixture.VideoElementModel, fixture.VideoElementMsg, fixture.video_markup_source);
+const VideoElementPlainCompiled = canvas.CompiledMarkupView(fixture.VideoElementModel, fixture.VideoElementMsg, fixture.video_plain_markup_source);
+
+test "compiled video element matches the interpreter and the hand-written ui.video tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.VideoElementModel{};
+
+    var view = try VideoElementInterpreter.init(arena, fixture.video_markup_source);
+    var interpreted_ui = VideoElementUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = VideoElementUi.init(arena);
+    const compiled = try compiled_ui.finalize(VideoElementCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = VideoElementUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handVideoElementView(&hand_ui, &model));
+
+    try expectSameTree(fixture.VideoElementMsg, hand, interpreted);
+    try expectSameTree(fixture.VideoElementMsg, hand, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+
+    // The compiled lowering binds the framework-owned playback surface
+    // and stamps the chrome's runtime-consumed verbs, exactly like the
+    // interpreter and the hand-written builder call.
+    const surface = compiled.root.children[0].children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, surface.image_id);
+    const toggle = fixture.findVideoControl(compiled.root, .toggle) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.button, toggle.kind);
+    const scrub = fixture.findVideoControl(compiled.root, .scrub) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.slider, scrub.kind);
+
+    // Both engines recorded the same declaration for the app loop's
+    // reconcile.
+    const compiled_declaration = compiled_ui.video_declaration orelse return error.TestUnexpectedResult;
+    const interpreted_declaration = interpreted_ui.video_declaration orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(interpreted_declaration.src, compiled_declaration.src);
+    try testing.expectEqual(interpreted_declaration.autoplay, compiled_declaration.autoplay);
+    try testing.expectEqual(interpreted_declaration.loop, compiled_declaration.loop);
+    try testing.expectEqual(interpreted_declaration.muted, compiled_declaration.muted);
+
+    // The controls-less shape compiles to the bare surface: no chrome.
+    var plain_ui = VideoElementUi.init(arena);
+    const plain = try plain_ui.finalize(VideoElementPlainCompiled.build(&plain_ui, &model));
+    try testing.expectEqual(canvas.WidgetKind.media_surface, plain.root.children[0].kind);
+    try testing.expect(fixture.findVideoControl(plain.root, .toggle) == null);
+    try testing.expect(fixture.findVideoControl(plain.root, .scrub) == null);
+}
+
 // ------------------------------------------------------ text wrap parity
 
 const WrapUi = fixture.WrapUi;
