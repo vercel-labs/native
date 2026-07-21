@@ -936,8 +936,10 @@ const ChannelWake = struct {
     /// freed, so a reader either holds the lock the revoke must first
     /// acquire or observes null. What the load PRODUCES — the
     /// `PlatformServices` the poster dereferences with the mutex
-    /// free — is the process-lived snapshot, never Runtime memory
-    /// (see `Effects.wake_services`).
+    /// free — is the published services snapshot, never Runtime
+    /// memory: freed only after a clean teardown proves no poster can
+    /// hold it, and kept process-lived past an abandon (see
+    /// `Effects.wake_snapshot`).
     services: ?*const std.atomic.Value(?*const platform.PlatformServices) = null,
     /// A latched wake has not yet reached a drain pass: the wake
     /// coalescer (`MediaSurfaceWake.pending`, channel-shaped). Set by
@@ -1306,9 +1308,11 @@ fn revokeChannelWake(shared: *ChannelShared) void {
 /// can still dereference now outlives it: the framework's own pieces —
 /// the wake mutex, the in-flight decrement, the generation gate — live
 /// in the process-lifetime header; the `PlatformServices` value it
-/// reads inside `services.wake()` is the process-lived snapshot
-/// `bindServices` published, never the Runtime-owned original (see
-/// `Effects.wake_services`); and the platform the call executes into
+/// reads inside `services.wake()` is the services snapshot its bind
+/// generation published, never the Runtime-owned original — and the
+/// abandon is exactly what makes that snapshot immortal: the ownership
+/// rule at `Effects.wake_snapshot` frees it only on a clean teardown,
+/// and this teardown was not one; and the platform the call executes into
 /// is told to outlive it too (the caller reports the abandon through
 /// `PlatformServices.noteChannelWakeAbandoned`, and the platform's
 /// destruction path skips destruction and leaks BOTH the native host
@@ -2886,15 +2890,19 @@ pub fn Effects(comptime Msg: type) type {
         /// terminals are the only delivery.
         fake_instant_image_bytes: ?[]const u8 = null,
         /// The allocator behind each channel occupancy's
-        /// process-lifetime storage (the `ChannelShared` posting header
-        /// and the staging FIFO). Defaults to `process_allocator`, and
+        /// process-lifetime storage (the `ChannelShared` posting header,
+        /// the staging FIFO, and the services snapshot at
+        /// `wake_snapshot`). Defaults to `process_allocator`, and
         /// any replacement MUST delegate every allocation it does not
         /// refuse to `process_allocator`'s backing: retire and teardown
-        /// free that storage through `process_allocator` directly.
-        /// Swap seam for the channel start-failure tests — `loadImage`
-        /// stages its source buffer from the app allocator, so its
-        /// failure tests inject there; channel storage is
-        /// process-lifetime and needs this explicit seam.
+        /// free the header/FIFO storage through `process_allocator`
+        /// directly (the snapshot is created AND destroyed through this
+        /// seam, which is what lets the snapshot lifetime tests count
+        /// it). Swap seam for the channel start-failure and
+        /// snapshot-lifetime tests — `loadImage` stages its source
+        /// buffer from the app allocator, so its failure tests inject
+        /// there; channel storage is process-lifetime and needs this
+        /// explicit seam.
         channel_storage_allocator: std.mem.Allocator = process_allocator,
         /// Session-record sink: every drain-delivered result is reported
         /// here (loop thread, right before its Msg runs through
@@ -2937,15 +2945,18 @@ pub fn Effects(comptime Msg: type) type {
         /// mirror, never this plain field.
         services: ?*const platform.PlatformServices = null,
         /// The cross-thread mirror of `services` — pointing at the
-        /// process-lived SNAPSHOT `bindServices` copies into
-        /// `process_allocator` storage, never at the caller's (Runtime-
-        /// owned) value: a wake call teardown abandons may dereference
-        /// this pointer after the Runtime is destroyed, so the pointee
-        /// must be memory nothing ever frees (see `bindServices` for
-        /// the immutable-per-bind snapshot design). Written by
-        /// `bindServices` with seq_cst (and cleared by `deinit` with
+        /// SNAPSHOT the bind generation copies into process-lifetime
+        /// storage, never at the caller's (Runtime-owned) value: a wake
+        /// call teardown abandons may dereference this pointer after
+        /// the Runtime is destroyed, so the pointee must outlive every
+        /// possible reader — the ownership rule at `wake_snapshot`:
+        /// freed only on a clean teardown that proved no reader
+        /// remains, leaked process-lived past an abandon. Written by
+        /// the snapshot publication (`materializeWakeSnapshot`, at
+        /// `bindServices` or the first live `openChannel`, whichever
+        /// runs later) with seq_cst (and cleared by `deinit` with
         /// `.release` — teardown needs only the publication half; the
-        /// snapshot itself stays allocated, immortal) and read by
+        /// snapshot's own disposal follows `wake_snapshot`) and read by
         /// posting threads with seq_cst (see `requestHostWake`).
         /// Open-before-bind is supported, so a posting thread can race
         /// the loop thread's bind: the wake mutex alone cannot order
@@ -2962,6 +2973,25 @@ pub fn Effects(comptime Msg: type) type {
         /// the two stores is what guarantees at least one side
         /// observes the other (see `bindServices`).
         wake_services: std.atomic.Value(?*const platform.PlatformServices) = std.atomic.Value(?*const platform.PlatformServices).init(null),
+        /// The snapshot `wake_services` currently publishes, tracked
+        /// for disposal — the OWNERSHIP RULE: a snapshot is alive from
+        /// the publication that materialized it (the first live channel
+        /// wake arm of its bind generation; see
+        /// `materializeWakeSnapshot` — no channel ever opens, no
+        /// snapshot ever allocates) until the clean teardown of the
+        /// Effects lifetime that allocated it, and process-lived —
+        /// deliberately leaked — only past an ABANDON (`deinit`'s
+        /// quiesce missing its deadline), where a stale wake call
+        /// captured the pointer before the revoke and may dereference
+        /// it at any later time. One field tracks every snapshot this
+        /// Effects ever allocated because they cannot accumulate: at
+        /// most one snapshot exists per bind generation (`bindServices`
+        /// is first-bind-sticks and publication is once), and every
+        /// `deinit` disposes the current generation's snapshot — freed
+        /// on a clean teardown, leaked immortal past an abandon —
+        /// before a rebind (the one supported shape: a second bind
+        /// after `deinit`) can allocate the next. Loop-thread only.
+        wake_snapshot: ?*platform.PlatformServices = null,
         /// The runtime's canvas image registry, bound by `UiApp`
         /// alongside the services so `update` can register fetched
         /// pixels synchronously (loop-thread only, not an effect).
@@ -3202,6 +3232,14 @@ pub fn Effects(comptime Msg: type) type {
         /// time, where any service call would dereference freed memory.
         pub fn deinit(self: *Self) void {
             self.shutdown.store(true, .release);
+            // Per-teardown abandon accounting for the services-snapshot
+            // disposal below: only an abandon during THIS teardown's
+            // quiesce sweep leaves a stale call holding THIS
+            // generation's snapshot (an abandoned call from an earlier
+            // lifetime captured the earlier generation's snapshot,
+            // already leaked at its own deinit, and never re-loads the
+            // mirror — see `requestHostWake`'s epilogue).
+            const abandoned_channel_wakes_before = self.abandoned_channel_wakes;
             // Disarm live platform timers (best effort) and clear the table.
             for (&self.timer_slots, 0..) |*timer_slot, index| {
                 if (timer_slot.active and !timer_slot.fake) {
@@ -3540,12 +3578,29 @@ pub fn Effects(comptime Msg: type) type {
             // (main's deferred app deinit runs after the runner's platform
             // teardown), and a severed channel already answers every
             // transport command inert through its existing no-services
-            // paths instead of dereferencing freed memory. The snapshot
-            // the mirror pointed at stays allocated, immortal — an
-            // abandoned wake call may still be about to read it (see
-            // `bindServices`); only the publication is withdrawn.
+            // paths instead of dereferencing freed memory.
             self.services = null;
             self.wake_services.store(null, .release);
+            // Dispose this bind generation's services snapshot (the
+            // ownership rule at `wake_snapshot`). A CLEAN teardown —
+            // the channel sweep above quiesced every wake header with
+            // zero abandons — proves no poster can still reach it: a
+            // poster captures the snapshot pointer only under the wake
+            // mutex with `in_flight` already incremented, every
+            // header's binding is revoked (generation zeroed,
+            // `wake.services` nulled) with its `in_flight` observed at
+            // zero, and the mirror above now publishes null — so no
+            // captured pointer survives and no new capture can happen;
+            // free it. Past an ABANDON the snapshot is deliberately
+            // leaked, process-lived: the abandoned call captured the
+            // pointer before the revoke and may dereference it at any
+            // later time (see `quiesceChannelWake`).
+            if (self.wake_snapshot) |snapshot| {
+                self.wake_snapshot = null;
+                if (self.abandoned_channel_wakes == abandoned_channel_wakes_before) {
+                    self.channel_storage_allocator.destroy(snapshot);
+                }
+            }
             // Sever the host-call binding for the same reason: its
             // context belongs to the embedding host.
             self.host_calls = null;
@@ -3609,40 +3664,106 @@ pub fn Effects(comptime Msg: type) type {
         /// outlives the Runtime: a poster suspended between capturing
         /// the published pointer and dereferencing it inside
         /// `services.wake()` would read freed Runtime memory. So the
-        /// bind copies the value into `process_allocator` storage that
-        /// is NEVER freed — immortal, like the channel headers — and
-        /// publishes the copy's address. Immutable-per-bind is the
-        /// tear-freedom argument: a snapshot, once published, is never
-        /// written again, so there is no rebind race to reason about
-        /// beyond the atomic pointer swap itself — a rebind (a second
-        /// bind after `deinit` cleared the first; mid-life binds are
-        /// first-bind-sticks no-ops) allocates a FRESH snapshot and
-        /// swaps the pointer, and a stale call that captured the old
-        /// pointer keeps reading intact, fully-initialized memory
-        /// forever. Publication safety rides the existing handshake
+        /// bind generation copies the value into process-lifetime
+        /// storage and publishes the copy's address — LAZILY: the
+        /// snapshot exists for producer-thread wakes alone, so it
+        /// materializes at whichever comes LAST of this bind and the
+        /// first live `openChannel` (see `materializeWakeSnapshot`),
+        /// and an app that never opens a channel never allocates one.
+        /// Immutable-per-bind is the tear-freedom argument: a snapshot,
+        /// once published, is never written again, so there is no
+        /// rebind race to reason about beyond the atomic pointer swap
+        /// itself — a rebind (a second bind after `deinit` cleared the
+        /// first; mid-life binds are first-bind-sticks no-ops)
+        /// allocates a FRESH snapshot and swaps the pointer, and a
+        /// stale call that captured the old pointer keeps reading
+        /// intact, fully-initialized memory for as long as it can
+        /// exist. Publication safety rides the existing handshake
         /// unchanged: the copy is fully written before the seq_cst
         /// store, and every reader loads the pointer with seq_cst
-        /// before dereferencing. The leak is bounded: one
-        /// `PlatformServices` per bind, one bind per Effects lifetime.
+        /// before dereferencing. Disposal follows the ownership rule at
+        /// `wake_snapshot`: alive from the first channel wake arm until
+        /// clean teardown frees it; process-lived only past an abandon.
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
             if (self.services != null) return;
             self.services = services;
-            const snapshot = process_allocator.create(platform.PlatformServices) catch {
-                // No storage for the immortal snapshot: leave the
-                // producer-side mirror disarmed (loop-side stages still
-                // wake through the plain `services` field, and
-                // `bindServices` retrying on a later Effects lifetime
-                // starts clean) rather than publish a pointer whose
+            // Open-before-bind: a channel wake header is already armed
+            // and its producer may already be posting, so this bind IS
+            // the publication site. Bind-before-open publishes at the
+            // first live `openChannel` instead (the lazy rule), and
+            // replay never publishes at all — parked handles are inert.
+            if (self.liveChannelWakeArmed()) _ = self.materializeWakeSnapshot();
+            // Sweep unconditionally, snapshot or no snapshot: work
+            // staged BEFORE this bind could never reach the host
+            // (`wakeHost` was a no-op with `services` null), so exactly
+            // one catch-up nudge here covers every stage — the
+            // publisher's load half of the Dekker handshake at
+            // `materializeWakeSnapshot`.
+            if (self.hasPending()) self.wakeHost();
+        }
+
+        /// Whether any channel occupancy currently has an armed wake
+        /// header — a producer that could consume the published
+        /// services snapshot. Replay parks never arm one (their
+        /// handles are inert by construction), and a closed occupancy
+        /// revoked its binding (stale posts fail the open/generation
+        /// gates before reaching the wake, so no snapshot is needed on
+        /// their account). Loop-thread only.
+        fn liveChannelWakeArmed(self: *Self) bool {
+            if (self.replay) return false;
+            for (&self.channel_slots) |*slot| {
+                if (slot.state == .open and slot.shared != null) return true;
+            }
+            return false;
+        }
+
+        /// Allocate and publish the services snapshot producer threads
+        /// dereference inside `services.wake()` — once per bind
+        /// generation, at whichever comes last of `bindServices` and
+        /// the first live `openChannel` (the lazy rule at
+        /// `bindServices`). Storage comes from
+        /// `channel_storage_allocator` (process-lifetime by default;
+        /// the seam the snapshot lifetime tests count through) and is
+        /// disposed by `deinit` under the ownership rule at
+        /// `wake_snapshot`.
+        ///
+        /// THE DEKKER ARGUMENT MOVES WITH THE PUBLICATION, intact: the
+        /// bind/post store-buffer handshake (the four-operation
+        /// argument at `bindServices`) constrains the pair
+        /// publish-then-sweep, not where the pair runs. The store half
+        /// is here (the seq_cst `wake_services` store) and EVERY
+        /// caller supplies the load half — a seq_cst `hasPending`
+        /// sweep after a `true` return — so whichever of {this store,
+        /// a poster's pending increment} is later in the seq_cst total
+        /// order, that thread's subsequent load observes the other
+        /// side's store, and an accepted post always gets a wake from
+        /// one of them. At the `openChannel` site the sweep looks
+        /// redundant (the channel being opened has no handle yet, so
+        /// no producer of its generation can have posted) but is
+        /// load-bearing for the retry story: a publication attempt
+        /// that failed allocation leaves producer wakes disarmed,
+        /// posts accepted in that window latch nothing, and the next
+        /// successful publication's sweep is what un-strands them.
+        /// Returns whether THIS call published.
+        fn materializeWakeSnapshot(self: *Self) bool {
+            if (self.wake_services.load(.seq_cst) != null) return false;
+            const services = self.services orelse return false;
+            const snapshot = self.channel_storage_allocator.create(platform.PlatformServices) catch {
+                // No storage for the snapshot: leave the producer-side
+                // mirror disarmed (loop-side stages still wake through
+                // the plain `services` field, and the next publication
+                // attempt retries) rather than publish a pointer whose
                 // owner can die before an abandoned call dereferences
                 // it.
                 if (comptime builtin.os.tag != .freestanding) {
-                    std.debug.print("effects bindServices: cannot allocate the process-lived services snapshot; producer-thread host wakes stay disarmed\n", .{});
+                    std.debug.print("effects: cannot allocate the process-lived services snapshot; producer-thread host wakes stay disarmed until a later open retries\n", .{});
                 }
-                return;
+                return false;
             };
             snapshot.* = services.*;
+            self.wake_snapshot = snapshot;
             self.wake_services.store(snapshot, .seq_cst);
-            if (self.hasPending()) self.wakeHost();
+            return true;
         }
 
         /// Point spawned children at the host process environment (the
@@ -4466,6 +4587,19 @@ pub fn Effects(comptime Msg: type) type {
             shared.wake.services = &self.wake_services;
             shared.wake.pending.store(false, .seq_cst);
             shared.wake.mutex.unlock();
+            // First live channel wake of this bind generation (or a
+            // retry after a failed publication): materialize the
+            // process-lived snapshot the poster's `requestHostWake`
+            // dereferences — the lazy half of the ownership rule at
+            // `wake_snapshot` — BEFORE the handle escapes to any
+            // producer thread. A no-op when already published or when
+            // no services are bound yet (`bindServices` publishes
+            // then). A publication is followed by its Dekker sweep
+            // (see `materializeWakeSnapshot` — load-bearing only for
+            // posts stranded by an earlier failed publication).
+            if (self.materializeWakeSnapshot()) {
+                if (self.hasPending()) self.wakeHost();
+            }
             return .{ .shared = shared, .generation = generation };
         }
 

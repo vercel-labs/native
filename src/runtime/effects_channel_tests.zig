@@ -1302,14 +1302,15 @@ fn abandonAgainstDyingOwner(
     var host_platform = null_platform.platform();
     host_platform.services.wake_fn = AfterTeardownDerefWake.wake;
     fx.bindServices(&host_platform.services);
-    // The decoupling under test: what the bind PUBLISHED to posting
-    // threads is the process-lived snapshot, never this frame's value.
-    const snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
-    try testing.expect(snapshot != &host_platform.services);
-    snapshot_out.* = snapshot;
 
     const handle = fx.openChannel(.{ .key = 66, .on_event = DirectFx.channelMsg(.event) });
     handle_out.* = handle;
+    // The decoupling under test: what the bind generation PUBLISHED to
+    // posting threads (lazily, at this first open) is the snapshot,
+    // never this frame's value.
+    const snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
+    try testing.expect(snapshot != &host_platform.services);
+    snapshot_out.* = snapshot;
     const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, post_result });
     errdefer AfterTeardownDerefWake.release.store(true, .seq_cst);
     var waited_ms: usize = 0;
@@ -1377,20 +1378,139 @@ test "an abandoned wake call dereferences its context and services snapshot only
     try testing.expectEqual(PostResult.closed, handle.post("after the owners died"));
 }
 
-/// Two conforming counting hooks, one per bind generation, for the
-/// rebind coverage below.
+/// Records every allocation and free routed through the
+/// channel-storage seam, by count and by pointer — the snapshot
+/// lifetime tests' observability: laziness (no allocation while no
+/// channel opens), the clean-teardown free, and the abandon path's
+/// deliberate leak. Forwards everything to the page allocator
+/// (`process_allocator`'s backing), so retire/teardown frees stay
+/// valid.
+const TrackingChannelStorageAllocator = struct {
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    alloc_count: usize = 0,
+    freed_ptrs: [16]usize = @splat(0),
+    freed_len: usize = 0,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *TrackingChannelStorageAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn didFree(self: *const TrackingChannelStorageAllocator, ptr: *const anyopaque) bool {
+        for (self.freed_ptrs[0..self.freed_len]) |freed| {
+            if (freed == @intFromPtr(ptr)) return true;
+        }
+        return false;
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *TrackingChannelStorageAllocator = @ptrCast(@alignCast(ptr));
+        self.alloc_count += 1;
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *TrackingChannelStorageAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *TrackingChannelStorageAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *TrackingChannelStorageAllocator = @ptrCast(@alignCast(ptr));
+        if (self.freed_len < self.freed_ptrs.len) {
+            self.freed_ptrs[self.freed_len] = @intFromPtr(memory.ptr);
+            self.freed_len += 1;
+        }
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "bindServices with no channels allocates nothing: the services snapshot is lazy" {
+    var tracker: TrackingChannelStorageAllocator = .{};
+    var services: platform_mod.PlatformServices = .{};
+    // Repeated app lifetimes that never open a channel — the test-suite
+    // and embed-host cycling shape: bind + teardown, several rounds.
+    // The process-lived snapshot must never materialize, so repeated
+    // app creation accumulates nothing.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        var fx = DirectFx.init(testing.allocator);
+        fx.executor = .fake;
+        fx.channel_storage_allocator = tracker.allocator();
+        fx.bindServices(&services);
+        // The bind recorded the loop-thread services pointer but
+        // published no snapshot: no channel wake exists to consume one.
+        try testing.expect(fx.services != null);
+        try testing.expectEqual(@as(?*const platform_mod.PlatformServices, null), fx.wake_services.load(.seq_cst));
+        fx.deinit();
+    }
+    try testing.expectEqual(@as(usize, 0), tracker.alloc_count);
+}
+
+test "a channel that opens and tears down cleanly frees the services snapshot" {
+    // The immortality exemption is gone from the healthy path: the
+    // snapshot materializes at the first live open (lazily — the bind
+    // alone published nothing) and a clean teardown, having quiesced
+    // every wake header with zero abandons, proves no poster can still
+    // reach it and frees it.
+    var tracker: TrackingChannelStorageAllocator = .{};
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    fx.channel_storage_allocator = tracker.allocator();
+    const null_platform = try testing.allocator.create(platform_mod.NullPlatform);
+    defer testing.allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    const host_platform = null_platform.platform();
+
+    fx.bindServices(&host_platform.services);
+    try testing.expectEqual(@as(?*const platform_mod.PlatformServices, null), fx.wake_services.load(.seq_cst));
+    const handle = fx.openChannel(.{ .key = 69, .on_event = DirectFx.channelMsg(.event) });
+    const snapshot = fx.wake_snapshot orelse return error.TestExpectedSnapshot;
+    try testing.expectEqual(@as(?*const platform_mod.PlatformServices, snapshot), fx.wake_services.load(.seq_cst));
+    // The snapshot is live plumbing, not bookkeeping: a producer post
+    // wakes the host through it.
+    try testing.expectEqual(PostResult.accepted, handle.post("healthy"));
+    try testing.expect(null_platform.wake_count.load(.acquire) >= 1);
+    _ = try expectData(&fx, 69, "healthy");
+
+    fx.deinit();
+    try testing.expectEqual(@as(u32, 0), fx.abandoned_channel_wakes);
+    try testing.expect(fx.wake_snapshot == null);
+    try testing.expect(tracker.didFree(snapshot));
+}
+
+/// The rebind coverage's two hooks: the FIRST generation's hook parks
+/// until released — so its teardown ABANDONS the in-flight call, which
+/// is now the ONE shape that makes a generation's snapshot immortal —
+/// and the second is a plain conforming counter.
 const RebindWakes = struct {
-    var first_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+    var loop_thread: std.Thread.Id = 0;
+    var entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
     var second_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
 
     fn reset() void {
-        first_count.store(0, .seq_cst);
+        loop_thread = 0;
+        entered.store(false, .seq_cst);
+        release.store(false, .seq_cst);
         second_count.store(0, .seq_cst);
     }
 
     fn first(context: ?*anyopaque) anyerror!void {
         _ = context;
-        _ = first_count.fetchAdd(1, .seq_cst);
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        entered.store(true, .seq_cst);
+        while (!release.load(.seq_cst)) std.atomic.spinLoopHint();
     }
 
     fn second(context: ?*anyopaque) anyerror!void {
@@ -1399,66 +1519,105 @@ const RebindWakes = struct {
     }
 };
 
-/// First bind generation in a frame that dies: bind, prove the wake
-/// routes through the published snapshot, tear down, then poison the
-/// frame-owned services value before returning the snapshot pointer a
-/// stale call of this generation would still hold.
-fn bindFirstGeneration(fx: *DirectFx) !*const platform_mod.PlatformServices {
+/// First bind generation in a frame that dies, ending in an ABANDON:
+/// bind, open, park a producer's wake call inside the stuck hook, tear
+/// down past the deadline (the abandon is what keeps this generation's
+/// snapshot immortal), then poison the frame-owned services value
+/// before returning the snapshot pointer the stale call still holds.
+fn bindFirstGeneration(fx: *DirectFx, post_result: *PostResult) !struct {
+    snapshot: *const platform_mod.PlatformServices,
+    producer: std.Thread,
+} {
     var services: platform_mod.PlatformServices = .{ .wake_fn = RebindWakes.first };
     fx.bindServices(&services);
+    const handle = fx.openChannel(.{ .key = 67, .on_event = DirectFx.channelMsg(.event) });
     const snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
     try testing.expect(snapshot != &services);
 
-    const handle = fx.openChannel(.{ .key = 67, .on_event = DirectFx.channelMsg(.event) });
-    try testing.expectEqual(PostResult.accepted, handle.post("first generation"));
-    try testing.expect(RebindWakes.first_count.load(.seq_cst) >= 1);
-    _ = try expectData(fx, 67, "first generation");
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, post_result });
+    errdefer RebindWakes.release.store(true, .seq_cst);
+    var waited_ms: usize = 0;
+    while (!RebindWakes.entered.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedWakeEntry;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
 
     fx.deinit();
+    try testing.expectEqual(@as(u32, 1), fx.abandoned_channel_wakes);
     @memset(std.mem.asBytes(&services), 0xAA);
-    return snapshot;
+    return .{ .snapshot = snapshot, .producer = producer };
 }
 
-test "a rebind publishes a fresh snapshot and the previous generation stays intact for stale calls" {
+test "a rebind publishes a fresh snapshot and an abandoned generation's snapshot stays intact for stale calls" {
     // The one supported rebind shape: `bindServices` after `deinit`
     // cleared the first binding (mid-life binds are first-bind-sticks
     // no-ops). Immutable-per-bind is the whole race story — the rebind
     // never writes the old snapshot, it atomically swaps in a fresh
     // allocation, so there is no tear window: a stale call that
     // captured the old pointer before the swap keeps reading the OLD
-    // table, intact, forever, while new posts route through the new
-    // one.
+    // table intact, for as long as it can exist — which, past the
+    // abandon that generation ended in, is forever — while new posts
+    // route through the new one. Both snapshots stay valid side by
+    // side while the second generation's channels are live, and the
+    // final CLEAN teardown frees exactly the generation it quiesced.
+    var tracker: TrackingChannelStorageAllocator = .{};
     var fx = DirectFx.init(testing.allocator);
     fx.executor = .fake;
+    fx.channel_wake_join_deadline_ms = 50;
     RebindWakes.reset();
     defer RebindWakes.reset();
+    RebindWakes.loop_thread = std.Thread.getCurrentId();
+    fx.channel_storage_allocator = tracker.allocator();
 
-    const first_snapshot = try bindFirstGeneration(&fx);
-    const first_wakes = RebindWakes.first_count.load(.seq_cst);
+    var post_result: PostResult = .closed;
+    const first = try bindFirstGeneration(&fx, &post_result);
+    var joined = false;
+    errdefer RebindWakes.release.store(true, .seq_cst);
+    defer if (!joined) first.producer.join();
+    // The abandoned generation's snapshot was NOT freed at its own
+    // teardown: the stale call parked inside the first hook still
+    // holds it.
+    try testing.expect(!tracker.didFree(first.snapshot));
 
     // REBIND: a second generation against the same Effects value, its
-    // services owned by this (still living) frame.
+    // services owned by this (still living) frame. The bind itself
+    // publishes nothing (no channel is open); the snapshot
+    // materializes at the generation's first live open.
     var second_services: platform_mod.PlatformServices = .{ .wake_fn = RebindWakes.second };
     fx.bindServices(&second_services);
+    try testing.expectEqual(@as(?*const platform_mod.PlatformServices, null), fx.wake_services.load(.seq_cst));
+    const handle = fx.openChannel(.{ .key = 68, .on_event = DirectFx.channelMsg(.event) });
     const second_snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
-    try testing.expect(second_snapshot != first_snapshot);
+    try testing.expect(second_snapshot != first.snapshot);
     try testing.expect(second_snapshot != &second_services);
 
-    // The swap wrote nothing into the first generation: a stale call
-    // still holding the old pointer reads the FIRST table intact —
-    // its own hook, not the poison pattern its dead owner left and
-    // not the second generation's hook.
-    try testing.expect(first_snapshot.wake_fn == RebindWakes.first);
+    // BOTH snapshots valid side by side: the swap wrote nothing into
+    // the first generation — the stale call's pointer reads the FIRST
+    // table intact (its own hook, not the poison pattern its dead
+    // owner left and not the second generation's hook) — while the
+    // live channel's posts route through the second.
+    try testing.expect(first.snapshot.wake_fn == RebindWakes.first);
     try testing.expect(second_snapshot.wake_fn == RebindWakes.second);
-
-    // And the new generation routes: a fresh channel's post wakes the
-    // second hook, never the first.
-    const handle = fx.openChannel(.{ .key = 68, .on_event = DirectFx.channelMsg(.event) });
     try testing.expectEqual(PostResult.accepted, handle.post("second generation"));
     try testing.expect(RebindWakes.second_count.load(.seq_cst) >= 1);
-    try testing.expectEqual(first_wakes, RebindWakes.first_count.load(.seq_cst));
     _ = try expectData(&fx, 68, "second generation");
+
+    // Release the parked call: it finishes against the process-lived
+    // pieces of its own generation, and its post answers honestly.
+    RebindWakes.release.store(true, .seq_cst);
+    first.producer.join();
+    joined = true;
+    try testing.expectEqual(PostResult.accepted, post_result);
+
+    // The final teardown is CLEAN (no new abandon), so it frees
+    // exactly the generation it quiesced: the second snapshot — never
+    // the abandoned first, whose immortality outlives every later
+    // lifetime of this Effects.
     fx.deinit();
+    try testing.expectEqual(@as(u32, 1), fx.abandoned_channel_wakes);
+    try testing.expect(tracker.didFree(second_snapshot));
+    try testing.expect(!tracker.didFree(first.snapshot));
+    try testing.expect(first.snapshot.wake_fn == RebindWakes.first);
 }
 
 // ---------------------------------------------- record/replay acceptance
