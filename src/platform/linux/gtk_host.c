@@ -3765,6 +3765,21 @@ int native_sdk_gtk_update_view(native_sdk_gtk_host_t *host, uint64_t window_id, 
     return 1;
 }
 
+/* Struct-by-pointer entry points (see gtk_host.h): the Zig platform layer
+ * calls these instead of the wide positional functions to dodge the
+ * self-hosted x86_64 SysV miscompile. C->C delegation is correctly compiled. */
+int native_sdk_gtk_create_view_desc(native_sdk_gtk_host_t *host, const native_sdk_gtk_view_desc_t *d) {
+    return native_sdk_gtk_create_view(host, d->window_id, d->label, d->label_len, d->kind, d->parent, d->parent_len, d->x, d->y, d->width, d->height, d->layer, d->visible, d->enabled, d->role, d->role_len, d->accessibility_label, d->accessibility_label_len, d->text, d->text_len, d->command, d->command_len);
+}
+
+int native_sdk_gtk_update_view_patch(native_sdk_gtk_host_t *host, const native_sdk_gtk_view_patch_t *p) {
+    return native_sdk_gtk_update_view(host, p->window_id, p->label, p->label_len, p->has_frame, p->x, p->y, p->width, p->height, p->has_layer, p->layer, p->has_visible, p->visible, p->has_enabled, p->enabled, p->has_role, p->role, p->role_len, p->has_accessibility_label, p->accessibility_label, p->accessibility_label_len, p->has_text, p->text, p->text_len, p->has_command, p->command, p->command_len);
+}
+
+int native_sdk_gtk_present_gpu_surface_pixels_desc(native_sdk_gtk_host_t *host, const native_sdk_gtk_gpu_present_desc_t *d) {
+    return native_sdk_gtk_present_gpu_surface_pixels(host, d->window_id, d->label, d->label_len, d->width, d->height, d->scale, d->has_dirty_rect, d->dirty_x, d->dirty_y, d->dirty_width, d->dirty_height, d->rgba8, d->rgba8_len);
+}
+
 int native_sdk_gtk_set_view_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {
     return native_sdk_gtk_update_view(host, window_id, label, label_len, 1, x, y, width, height, 0, 0, 0, 1, 0, 1, 0, "", 0, 0, "", 0, 0, "", 0, 0, "", 0);
 }

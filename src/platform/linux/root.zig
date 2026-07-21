@@ -129,14 +129,90 @@ extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
 extern fn native_sdk_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_minimize_window(host: *GtkHost, window_id: u64) c_int;
-extern fn native_sdk_gtk_create_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
-extern fn native_sdk_gtk_update_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
+// Struct-by-pointer view create/update (see gtk_host.h). The wide positional
+// externs are miscompiled by Zig 0.16.0's self-hosted x86_64 backend (SysV
+// stack-arg placement), so the host call crosses the boundary through a single
+// descriptor pointer instead. Field order/types must match the C structs.
+const GtkViewDesc = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    kind: c_int,
+    parent: [*]const u8,
+    parent_len: usize,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    layer: c_int,
+    visible: c_int,
+    enabled: c_int,
+    role: [*]const u8,
+    role_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+    text: [*]const u8,
+    text_len: usize,
+    command: [*]const u8,
+    command_len: usize,
+};
+const GtkViewPatch = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    has_frame: c_int,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    has_layer: c_int,
+    layer: c_int,
+    has_visible: c_int,
+    visible: c_int,
+    has_enabled: c_int,
+    enabled: c_int,
+    has_role: c_int,
+    role: [*]const u8,
+    role_len: usize,
+    has_accessibility_label: c_int,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+    has_text: c_int,
+    text: [*]const u8,
+    text_len: usize,
+    has_command: c_int,
+    command: [*]const u8,
+    command_len: usize,
+};
+extern fn native_sdk_gtk_create_view_desc(host: *GtkHost, desc: *const GtkViewDesc) c_int;
+extern fn native_sdk_gtk_update_view_patch(host: *GtkHost, patch: *const GtkViewPatch) c_int;
 extern fn native_sdk_gtk_set_view_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_gtk_set_view_visible(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
 extern fn native_sdk_gtk_focus_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_close_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_request_gpu_surface_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_present_gpu_surface_pixels(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+// Descriptor twin of the present call above: the wide positional signature
+// (interleaved size_t/double/int/pointer) is mis-lowered by the self-hosted
+// x86_64 backend — rgba8_len lands a stack slot off, so present is silently
+// rejected. Pass one struct pointer instead; the C wrapper unpacks it. Same
+// seam fix as GtkViewDesc.
+const GtkGpuPresentDesc = extern struct {
+    window_id: u64,
+    label: [*]const u8,
+    label_len: usize,
+    width: usize,
+    height: usize,
+    scale: f64,
+    has_dirty_rect: c_int,
+    dirty_x: f64,
+    dirty_y: f64,
+    dirty_width: f64,
+    dirty_height: f64,
+    rgba8: [*]const u8,
+    rgba8_len: usize,
+};
+extern fn native_sdk_gtk_present_gpu_surface_pixels_desc(host: *GtkHost, desc: *const GtkGpuPresentDesc) c_int;
 extern fn native_sdk_gtk_create_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_gtk_set_webview_frame(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_gtk_navigate_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -866,30 +942,30 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     const frame = options.frame;
     const parent = options.parent orelse "";
-    if (native_sdk_gtk_create_view(
-        self.host,
-        options.window_id,
-        options.label.ptr,
-        options.label.len,
-        viewKindInt(options.kind),
-        parent.ptr,
-        parent.len,
-        frame.x,
-        frame.y,
-        frame.width,
-        frame.height,
-        options.layer,
-        if (options.visible) 1 else 0,
-        if (options.enabled) 1 else 0,
-        options.role.ptr,
-        options.role.len,
-        options.accessibility_label.ptr,
-        options.accessibility_label.len,
-        options.text.ptr,
-        options.text.len,
-        options.command.ptr,
-        options.command.len,
-    ) == 0) return error.CreateFailed;
+    const desc = GtkViewDesc{
+        .window_id = options.window_id,
+        .label = options.label.ptr,
+        .label_len = options.label.len,
+        .kind = viewKindInt(options.kind),
+        .parent = parent.ptr,
+        .parent_len = parent.len,
+        .x = frame.x,
+        .y = frame.y,
+        .width = frame.width,
+        .height = frame.height,
+        .layer = options.layer,
+        .visible = if (options.visible) 1 else 0,
+        .enabled = if (options.enabled) 1 else 0,
+        .role = options.role.ptr,
+        .role_len = options.role.len,
+        .accessibility_label = options.accessibility_label.ptr,
+        .accessibility_label_len = options.accessibility_label.len,
+        .text = options.text.ptr,
+        .text_len = options.text.len,
+        .command = options.command.ptr,
+        .command_len = options.command.len,
+    };
+    if (native_sdk_gtk_create_view_desc(self.host, &desc) == 0) return error.CreateFailed;
 }
 
 fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, patch: platform_mod.ViewPatch) anyerror!void {
@@ -901,35 +977,35 @@ fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []c
     const accessibility_label = patch.accessibility_label orelse "";
     const text = patch.text orelse "";
     const command = patch.command orelse "";
-    if (native_sdk_gtk_update_view(
-        self.host,
-        window_id,
-        label.ptr,
-        label.len,
-        if (patch.frame != null) 1 else 0,
-        frame.x,
-        frame.y,
-        frame.width,
-        frame.height,
-        if (patch.layer != null) 1 else 0,
-        patch.layer orelse 0,
-        if (patch.visible != null) 1 else 0,
-        if (patch.visible orelse false) 1 else 0,
-        if (patch.enabled != null) 1 else 0,
-        if (patch.enabled orelse false) 1 else 0,
-        if (patch.role != null) 1 else 0,
-        role.ptr,
-        role.len,
-        if (patch.accessibility_label != null) 1 else 0,
-        accessibility_label.ptr,
-        accessibility_label.len,
-        if (patch.text != null) 1 else 0,
-        text.ptr,
-        text.len,
-        if (patch.command != null) 1 else 0,
-        command.ptr,
-        command.len,
-    ) == 0) return error.ViewNotFound;
+    const view_patch = GtkViewPatch{
+        .window_id = window_id,
+        .label = label.ptr,
+        .label_len = label.len,
+        .has_frame = if (patch.frame != null) 1 else 0,
+        .x = frame.x,
+        .y = frame.y,
+        .width = frame.width,
+        .height = frame.height,
+        .has_layer = if (patch.layer != null) 1 else 0,
+        .layer = patch.layer orelse 0,
+        .has_visible = if (patch.visible != null) 1 else 0,
+        .visible = if (patch.visible orelse false) 1 else 0,
+        .has_enabled = if (patch.enabled != null) 1 else 0,
+        .enabled = if (patch.enabled orelse false) 1 else 0,
+        .has_role = if (patch.role != null) 1 else 0,
+        .role = role.ptr,
+        .role_len = role.len,
+        .has_accessibility_label = if (patch.accessibility_label != null) 1 else 0,
+        .accessibility_label = accessibility_label.ptr,
+        .accessibility_label_len = accessibility_label.len,
+        .has_text = if (patch.text != null) 1 else 0,
+        .text = text.ptr,
+        .text_len = text.len,
+        .has_command = if (patch.command != null) 1 else 0,
+        .command = command.ptr,
+        .command_len = command.len,
+    };
+    if (native_sdk_gtk_update_view_patch(self.host, &view_patch) == 0) return error.ViewNotFound;
 }
 
 fn setViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {
@@ -966,22 +1042,22 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedViewKind;
     const dirty_bounds = if (pixels.dirty_bounds) |bounds| bounds.normalized() else geometry.RectF{};
-    if (native_sdk_gtk_present_gpu_surface_pixels(
-        self.host,
-        pixels.window_id,
-        pixels.label.ptr,
-        pixels.label.len,
-        pixels.width,
-        pixels.height,
-        pixels.scale_factor,
-        if (pixels.dirty_bounds != null) 1 else 0,
-        dirty_bounds.x,
-        dirty_bounds.y,
-        dirty_bounds.width,
-        dirty_bounds.height,
-        pixels.rgba8.ptr,
-        pixels.rgba8.len,
-    ) == 0) return error.ViewNotFound;
+    const desc = GtkGpuPresentDesc{
+        .window_id = pixels.window_id,
+        .label = pixels.label.ptr,
+        .label_len = pixels.label.len,
+        .width = pixels.width,
+        .height = pixels.height,
+        .scale = pixels.scale_factor,
+        .has_dirty_rect = if (pixels.dirty_bounds != null) 1 else 0,
+        .dirty_x = dirty_bounds.x,
+        .dirty_y = dirty_bounds.y,
+        .dirty_width = dirty_bounds.width,
+        .dirty_height = dirty_bounds.height,
+        .rgba8 = pixels.rgba8.ptr,
+        .rgba8_len = pixels.rgba8.len,
+    };
+    if (native_sdk_gtk_present_gpu_surface_pixels_desc(self.host, &desc) == 0) return error.ViewNotFound;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
