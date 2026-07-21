@@ -4327,7 +4327,20 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effect_channel_bytes` for memory safety only — the
         /// replay damage gate refuses over-bound records before they
         /// reach here, and no recorder-produced journal carries one.
-        pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull }!void {
+        ///
+        /// Terminals feed only into PARKED (or already-retired-header)
+        /// occupancies — the shapes replay constructs, where the
+        /// posting handle is inert by construction and no accepted
+        /// post can exist. Feeding a terminal into a LIVE occupancy
+        /// (an open posting header, a staged backlog, or an armed
+        /// close marker) answers `error.ChannelLiveFeed` instead of
+        /// racing the producer: the fed terminal's delivery retires
+        /// the slot and destroys the staging FIFO, so a post accepted
+        /// after the drain snapshot but before the terminal processes
+        /// would be silently destroyed with its `hasPending` count
+        /// stranded — a permanent busy signal. Live occupancies end
+        /// through `closeChannel`, never through the feed seam.
+        pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull, ChannelLiveFeed }!void {
             const slot_index = blk: {
                 for (&self.channel_slots, 0..) |*slot, index| {
                     if (slot.state != .idle and slot.key == key) break :blk index;
@@ -4335,6 +4348,7 @@ pub fn Effects(comptime Msg: type) type {
                 return error.EffectNotFound;
             };
             const slot = &self.channel_slots[slot_index];
+            if (kind != .data and channelSlotLive(slot)) return error.ChannelLiveFeed;
             // A replay-parked open resolves its pending-order
             // reservation from the feed's evidence (`ParkOrderState`):
             // the journaled REFUSAL reclaims the stamp — it delivers
@@ -6845,6 +6859,23 @@ pub fn Effects(comptime Msg: type) type {
                 if (!entry.regenerates and entry.retire_slot == null and entry.event.key == key) return true;
             }
             return false;
+        }
+
+        /// Whether a channel slot is a LIVE occupancy from the feed
+        /// seam's view (`feedChannelEvent`'s terminal gate): an open
+        /// posting header (posts may still land), a staging FIFO still
+        /// installed (accepted posts may be waiting to drain), or an
+        /// armed close marker (`closeChannel`'s counted terminal).
+        /// Replay-parked occupancies — which never install staging and
+        /// whose handles are inert — answer false, as does a header
+        /// left over from an earlier occupancy that already retired.
+        /// Loop-thread only.
+        fn channelSlotLive(slot: *ChannelSlot) bool {
+            if (slot.closed_staged) return true;
+            const shared = slot.shared orelse return false;
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+            return shared.open or shared.staging != null;
         }
 
         /// Retire a channel occupancy at terminal delivery: free the

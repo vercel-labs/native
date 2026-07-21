@@ -2348,3 +2348,54 @@ test "live table capacity counts the alloc-failed open's reservation so replay a
     try testing.expectEqual(@as(u32, 0), recorded.model.data_events);
 }
 
+// ------------------------------------------------ live-feed restriction
+
+test "feeding a terminal into a live channel answers ChannelLiveFeed instead of racing the producer" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // Pre-restriction this interleaving destroyed a staged post and
+    // stranded its pending count forever: feed a terminal into the
+    // LIVE channel, land an accepted post AFTER the drain snapshot but
+    // BEFORE the queued terminal processes — the pass skips the post
+    // (stamped past the boundary), the terminal's delivery retires the
+    // slot and destroys the staging FIFO with the post inside, and
+    // `hasPending` reads true forever. The feed seam now refuses the
+    // live target outright.
+    const handle = fx.openChannel(.{ .key = 23, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectError(error.ChannelLiveFeed, fx.feedChannelEvent(23, .closed, "", 0, 0));
+    try testing.expectError(error.ChannelLiveFeed, fx.feedChannelEvent(23, .rejected, "", 0, 0));
+
+    // The occupancy is untouched by the refusal: posts still land and
+    // the ordinary lifecycle completes with an honest pending count.
+    try testing.expectEqual(PostResult.accepted, handle.post("still live"));
+    _ = try expectData(&fx, 23, "still live");
+
+    // A `.closing` occupancy is equally live — its armed close marker
+    // is counted, so a fed terminal would strand that count too.
+    try testing.expectEqual(PostResult.accepted, handle.post("flush me"));
+    fx.closeChannel(23);
+    try testing.expectError(error.ChannelLiveFeed, fx.feedChannelEvent(23, .closed, "", 0, 0));
+    while (fx.takeMsg()) |_| {}
+    try testing.expect(!fx.hasPending());
+}
+
+test "teardown with staged entries reconciles the pending count: hasPending never permanently lies" {
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+
+    const handle = fx.openChannel(.{ .key = 29, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("staged at teardown"));
+    try testing.expectEqual(PostResult.accepted, handle.post("also staged"));
+    fx.closeChannel(29);
+    try testing.expect(fx.hasPending());
+
+    // Teardown discards the staged backlog AND the close marker (the
+    // families' no-Msg teardown discipline) — the count reconciles to
+    // zero with them, so a caller polling `hasPending` after teardown
+    // reads idle, never a permanent busy signal.
+    fx.deinit();
+    try testing.expect(!fx.hasPending());
+    try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
+}
