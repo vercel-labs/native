@@ -550,7 +550,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/runtime/media_surface_tests.zig", .pattern = "producer: media.MediaSurfaceProducer" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-session-replay-image-codec", "Verify the replay runner installs the host image codec headlessly (the desktop arms cannot link in unit tests; the null-fallback arm is covered in session_tests.zig)", &.{
-        .{ .path = "src/app_runner/root.zig", .pattern = "native_sdk.platform.installHeadlessImageCodec(build_options.platform, &null_platform, &replay_platform.services);" },
+        .{ .path = "src/app_runner/root.zig", .pattern = "native_sdk.platform.installHeadlessImageCodec(build_options.platform, null_platform, &replay_platform.services);" },
         .{ .path = "src/platform/macos/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
         .{ .path = "src/platform/linux/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
         .{ .path = "src/platform/windows/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },

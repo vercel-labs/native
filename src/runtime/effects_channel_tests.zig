@@ -1221,6 +1221,220 @@ test "a conforming enqueue-only wake at teardown quiesces fast and platform dest
     try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
 }
 
+/// A wake hook stuck past the deadline whose FIRST context dereference
+/// happens only after it is released — which the test arranges to be
+/// strictly after teardown completed, the platform destroy path ran,
+/// and the stack frame that owned the bound services value unwound.
+/// The abandon doctrine's whole claim ("may execute at any later
+/// time") is that this dereference reads valid memory; the two earlier
+/// abandon tests could not see it because their hooks ignore context
+/// and rejoin while every owner is still alive.
+const AfterTeardownDerefWake = struct {
+    var loop_thread: std.Thread.Id = 0;
+    var entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    /// What the resumed hook read through its context AFTER teardown:
+    /// the leaked platform's latched abandon flag. Valid (leaked)
+    /// memory reads true; a freed or reused wrapper could read
+    /// anything, so the assertion is on the value, not just on not
+    /// crashing.
+    var observed_latch: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+    fn reset() void {
+        loop_thread = 0;
+        entered.store(false, .seq_cst);
+        release.store(false, .seq_cst);
+        observed_latch.store(false, .seq_cst);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        entered.store(true, .seq_cst);
+        while (!release.load(.seq_cst)) std.atomic.spinLoopHint();
+        // Resumed after teardown: the one dereference the abandon-leak
+        // doctrine exists to keep valid.
+        const stale_platform: *platform_mod.NullPlatform = @ptrCast(@alignCast(context.?));
+        observed_latch.store(stale_platform.channel_wake_abandoned.load(.seq_cst), .seq_cst);
+    }
+};
+
+/// The dying-owner scope for the after-teardown test: the `Platform`
+/// value whose services table `bindServices` receives lives in THIS
+/// frame — standing in for the heap Runtime the real runners bind
+/// against, destroyed right after effects teardown — and the frame
+/// poisons it (0xAA) before returning, so any pointer into it held
+/// past this function reads the pattern, never a valid table. Returns
+/// with teardown complete, the abandon counted, and the stale call
+/// still parked inside the stuck hook.
+fn abandonAgainstDyingOwner(
+    fx: *DirectFx,
+    null_platform: *platform_mod.NullPlatform,
+    post_result: *PostResult,
+    handle_out: *effects_mod.ChannelHandle,
+    snapshot_out: **const platform_mod.PlatformServices,
+) !std.Thread {
+    var host_platform = null_platform.platform();
+    host_platform.services.wake_fn = AfterTeardownDerefWake.wake;
+    fx.bindServices(&host_platform.services);
+    // The decoupling under test: what the bind PUBLISHED to posting
+    // threads is the process-lived snapshot, never this frame's value.
+    const snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
+    try testing.expect(snapshot != &host_platform.services);
+    snapshot_out.* = snapshot;
+
+    const handle = fx.openChannel(.{ .key = 66, .on_event = DirectFx.channelMsg(.event) });
+    handle_out.* = handle;
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, post_result });
+    errdefer AfterTeardownDerefWake.release.store(true, .seq_cst);
+    var waited_ms: usize = 0;
+    while (!AfterTeardownDerefWake.entered.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedWakeEntry;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    // Bounded quiesce meets the deadline against the parked hook:
+    // ABANDON, latch, warn — teardown completes while the call is
+    // still inside `wake_fn`.
+    fx.deinit();
+    try testing.expectEqual(@as(u32, 1), fx.abandoned_channel_wakes);
+    // The frame is about to die; poison the services value it owned so
+    // a stale pointer into it reads a deterministic pattern instead of
+    // whatever the dead frame happens to leave behind.
+    @memset(std.mem.asBytes(&host_platform), 0xAA);
+    return producer;
+}
+
+test "an abandoned wake call dereferences its context and services snapshot only after teardown and the owning scopes died" {
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    fx.channel_wake_join_deadline_ms = 50;
+    AfterTeardownDerefWake.reset();
+    defer AfterTeardownDerefWake.reset();
+    AfterTeardownDerefWake.loop_thread = std.Thread.getCurrentId();
+    // The wrapper through the runners' own lifetime seam: heap-allocated
+    // by `createWithOptions`, retired by `destroy`, the latch-gated free.
+    const null_platform = try platform_mod.NullPlatform.createWithOptions(.{}, .system, .{});
+    var post_result: PostResult = .closed;
+    var handle: effects_mod.ChannelHandle = undefined;
+    var snapshot: *const platform_mod.PlatformServices = undefined;
+    const producer = try abandonAgainstDyingOwner(&fx, null_platform, &post_result, &handle, &snapshot);
+    var joined = false;
+    errdefer AfterTeardownDerefWake.release.store(true, .seq_cst);
+    defer if (!joined) producer.join();
+
+    // Teardown is complete and the frame that owned the bound services
+    // value unwound, poisoned. The runner-shaped destroy runs next:
+    // the abandon latched, so deinit skips destruction AND the storage
+    // free is skipped — wrapper and host leaked, process-lived. The
+    // reads below stay valid BECAUSE of that leak.
+    try testing.expect(null_platform.channel_wake_abandoned.load(.seq_cst));
+    null_platform.destroy();
+    try testing.expect(!null_platform.destroyed);
+
+    // What a poster suspended between capturing the published services
+    // pointer and dereferencing it inside `services.wake()` reads NOW,
+    // after the owner died: the immortal snapshot with the bound table
+    // intact — never the poisoned frame value.
+    try testing.expect(snapshot.wake_fn == AfterTeardownDerefWake.wake);
+    try testing.expect(snapshot.context == @as(?*anyopaque, null_platform));
+
+    // Release the parked call: it resumes and dereferences its CONTEXT
+    // for the first time — strictly after teardown, destroy, and the
+    // owner frame's death — and must read the leaked platform's latched
+    // flag from valid memory. Its post still answers honestly, and the
+    // handle stays a safe `.closed` forever.
+    AfterTeardownDerefWake.release.store(true, .seq_cst);
+    producer.join();
+    joined = true;
+    try testing.expect(AfterTeardownDerefWake.observed_latch.load(.seq_cst));
+    try testing.expectEqual(PostResult.accepted, post_result);
+    try testing.expectEqual(PostResult.closed, handle.post("after the owners died"));
+}
+
+/// Two conforming counting hooks, one per bind generation, for the
+/// rebind coverage below.
+const RebindWakes = struct {
+    var first_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+    var second_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+
+    fn reset() void {
+        first_count.store(0, .seq_cst);
+        second_count.store(0, .seq_cst);
+    }
+
+    fn first(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        _ = first_count.fetchAdd(1, .seq_cst);
+    }
+
+    fn second(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        _ = second_count.fetchAdd(1, .seq_cst);
+    }
+};
+
+/// First bind generation in a frame that dies: bind, prove the wake
+/// routes through the published snapshot, tear down, then poison the
+/// frame-owned services value before returning the snapshot pointer a
+/// stale call of this generation would still hold.
+fn bindFirstGeneration(fx: *DirectFx) !*const platform_mod.PlatformServices {
+    var services: platform_mod.PlatformServices = .{ .wake_fn = RebindWakes.first };
+    fx.bindServices(&services);
+    const snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
+    try testing.expect(snapshot != &services);
+
+    const handle = fx.openChannel(.{ .key = 67, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("first generation"));
+    try testing.expect(RebindWakes.first_count.load(.seq_cst) >= 1);
+    _ = try expectData(fx, 67, "first generation");
+
+    fx.deinit();
+    @memset(std.mem.asBytes(&services), 0xAA);
+    return snapshot;
+}
+
+test "a rebind publishes a fresh snapshot and the previous generation stays intact for stale calls" {
+    // The one supported rebind shape: `bindServices` after `deinit`
+    // cleared the first binding (mid-life binds are first-bind-sticks
+    // no-ops). Immutable-per-bind is the whole race story — the rebind
+    // never writes the old snapshot, it atomically swaps in a fresh
+    // allocation, so there is no tear window: a stale call that
+    // captured the old pointer before the swap keeps reading the OLD
+    // table, intact, forever, while new posts route through the new
+    // one.
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    RebindWakes.reset();
+    defer RebindWakes.reset();
+
+    const first_snapshot = try bindFirstGeneration(&fx);
+    const first_wakes = RebindWakes.first_count.load(.seq_cst);
+
+    // REBIND: a second generation against the same Effects value, its
+    // services owned by this (still living) frame.
+    var second_services: platform_mod.PlatformServices = .{ .wake_fn = RebindWakes.second };
+    fx.bindServices(&second_services);
+    const second_snapshot = fx.wake_services.load(.seq_cst) orelse return error.TestExpectedSnapshot;
+    try testing.expect(second_snapshot != first_snapshot);
+    try testing.expect(second_snapshot != &second_services);
+
+    // The swap wrote nothing into the first generation: a stale call
+    // still holding the old pointer reads the FIRST table intact —
+    // its own hook, not the poison pattern its dead owner left and
+    // not the second generation's hook.
+    try testing.expect(first_snapshot.wake_fn == RebindWakes.first);
+    try testing.expect(second_snapshot.wake_fn == RebindWakes.second);
+
+    // And the new generation routes: a fresh channel's post wakes the
+    // second hook, never the first.
+    const handle = fx.openChannel(.{ .key = 68, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("second generation"));
+    try testing.expect(RebindWakes.second_count.load(.seq_cst) >= 1);
+    try testing.expectEqual(first_wakes, RebindWakes.first_count.load(.seq_cst));
+    _ = try expectData(&fx, 68, "second generation");
+    fx.deinit();
+}
+
 // ---------------------------------------------- record/replay acceptance
 
 const channel_canvas_label = "channel-session-canvas";

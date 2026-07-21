@@ -646,6 +646,37 @@ pub const NullPlatform = struct {
         return .{ .surface_value = surface_value, .web_engine = web_engine, .app_info = app_info };
     }
 
+    /// Heap-allocate the wrapper (process allocator) and initialize it
+    /// in place — the reference model of the real hosts'
+    /// `createWithOptions`. Runners must use this over a stack
+    /// `initWithOptions` value: `platform().services.context` is this
+    /// wrapper's ADDRESS, worker threads dereference it inside the
+    /// channel wake path (the null wake counts into `wake_count`, a
+    /// wrapper field), and a wake call teardown abandons may do so at
+    /// any later time — after a runner's stack frame would have
+    /// unwound. Pair with `destroy`, the latch-gated free. Tests that
+    /// own the wrapper's lifetime themselves keep using the stack
+    /// initializers.
+    pub fn createWithOptions(surface_value: Surface, web_engine: WebEngine, app_info: AppInfo) std.mem.Allocator.Error!*NullPlatform {
+        const self = try std.heap.page_allocator.create(NullPlatform);
+        self.* = initWithOptions(surface_value, web_engine, app_info);
+        return self;
+    }
+
+    /// `deinit` plus the wrapper's own storage, gated by the same
+    /// latch: an abandoned channel wake call dereferences this wrapper
+    /// (its context) the moment it resumes, so on abandon the storage
+    /// is leaked, process-lived — deinit-gating extended to
+    /// lifetime-gating, the reference model of the real hosts'
+    /// `destroy`. No cross-thread race on the gate: the latch is set
+    /// synchronously on the loop thread during effects teardown, which
+    /// runs before the runner's deferred destroy.
+    pub fn destroy(self: *NullPlatform) void {
+        self.deinit();
+        if (self.channel_wake_abandoned.load(.seq_cst)) return;
+        std.heap.page_allocator.destroy(self);
+    }
+
     /// The reference model of the real hosts' destroy gate (`MacPlatform`
     /// / `LinuxPlatform` / `WindowsPlatform` `deinit`): destruction is
     /// SKIPPED — the platform deliberately leaked, process-lived, with

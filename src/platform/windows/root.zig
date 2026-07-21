@@ -253,7 +253,12 @@ pub const WindowsPlatform = struct {
     /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
     /// call still holds this platform as its context and may execute
     /// into it at any later time, so `deinit` must skip destruction
-    /// and leak the host, process-lived.
+    /// and leak the host, process-lived — and the wrapper struct the
+    /// context actually points at (the wake thunk casts to
+    /// `*WindowsPlatform` before reaching the host) must outlive the
+    /// call too, which is why runners allocate it through
+    /// `createWithOptions` and retire it through `destroy`, the
+    /// latch-gated free.
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!WindowsPlatform {
@@ -293,6 +298,34 @@ pub const WindowsPlatform = struct {
         };
     }
 
+    /// Heap-allocate the wrapper (process allocator) and initialize it
+    /// in place. Runners must use this over a stack `initWithOptions`
+    /// value: `platform().services.context` is this wrapper's ADDRESS,
+    /// worker threads dereference it inside the channel wake path, and
+    /// a wake call teardown abandons may do so at any later time —
+    /// after a runner's stack frame would have unwound. Pair with
+    /// `destroy`, the latch-gated free.
+    pub fn createWithOptions(size: geometry.SizeF, web_engine: platform_mod.WebEngine, app_info: platform_mod.AppInfo) Error!*WindowsPlatform {
+        const self = std.heap.page_allocator.create(WindowsPlatform) catch return error.CreateFailed;
+        errdefer std.heap.page_allocator.destroy(self);
+        self.* = try initWithOptions(size, web_engine, app_info);
+        return self;
+    }
+
+    /// `deinit` plus the wrapper's own storage, gated by the same
+    /// latch: an abandoned channel wake call dereferences this wrapper
+    /// (its context) BEFORE it reaches the native host, so on abandon
+    /// both are leaked, process-lived — deinit-gating extended to
+    /// lifetime-gating, the honest completion of the abandoned-worker
+    /// idiom. No cross-thread race on the gate: the latch is set
+    /// synchronously on the loop thread during effects teardown, which
+    /// runs before the runner's deferred destroy.
+    pub fn destroy(self: *WindowsPlatform) void {
+        self.deinit();
+        if (self.channel_wake_abandoned.load(.seq_cst)) return;
+        std.heap.page_allocator.destroy(self);
+    }
+
     pub fn deinit(self: *WindowsPlatform) void {
         // An abandoned channel wake call may still enter this host at
         // any later time (see `channel_wake_abandoned`): destroying it
@@ -300,7 +333,7 @@ pub const WindowsPlatform = struct {
         // host is deliberately leaked, process-lived — the
         // abandoned-worker idiom, applied to the platform itself.
         if (self.channel_wake_abandoned.load(.seq_cst)) {
-            std.debug.print("windows platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
+            std.debug.print("windows platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
         native_sdk_windows_destroy(self.host);

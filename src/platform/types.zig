@@ -2268,17 +2268,27 @@ pub const PlatformServices = struct {
     /// when the wake violates its enqueue-only contract above — is
     /// abandoned, and it still holds `context` and may execute into the
     /// platform at ANY later time. The runtime reports that abandon
-    /// here, synchronously, while the platform is still alive. A
-    /// platform receiving this call must latch it, and its destruction
-    /// path must consult the latch: destruction is SKIPPED and the
-    /// platform deliberately leaked, process-lived, so the stale call
-    /// can never execute into freed host state (the abandoned-worker
-    /// idiom the effect workers already follow). Every first-party
-    /// platform wires this seam and gates its `deinit` on the latch;
-    /// embedders providing their own `Platform` must do the same — or
-    /// guarantee a conforming `wake_fn`, under which the teardown
-    /// deadline is never met and this is never called. Loop-thread,
-    /// teardown-only, unlike `wake_fn` itself.
+    /// here, synchronously, while the platform is still alive — and
+    /// keeps its own half of the bargain: the `PlatformServices` VALUE
+    /// the stale call reads on resume is a process-lived snapshot the
+    /// runtime published at bind, never runtime-owned storage (see
+    /// `Effects.bindServices`). A platform receiving this call must
+    /// latch it, and its destruction path must consult the latch:
+    /// destruction is SKIPPED and the platform deliberately leaked,
+    /// process-lived, so the stale call can never execute into freed
+    /// host state (the abandoned-worker idiom the effect workers
+    /// already follow). The leak must cover EVERYTHING `context`
+    /// transitively reaches — for the first-party desktop platforms
+    /// that is the wrapper struct itself plus the native host behind
+    /// it, which is why runners heap-allocate the wrapper
+    /// (`createWithOptions`) and gate its free on the latch
+    /// (`destroy`), never leaving it on a stack frame that unwinds at
+    /// runner return. Every first-party platform wires this seam and
+    /// gates both `deinit` and its storage on the latch; embedders
+    /// providing their own `Platform` must do the same — or guarantee
+    /// a conforming `wake_fn`, under which the teardown deadline is
+    /// never met and this is never called. Loop-thread, teardown-only,
+    /// unlike `wake_fn` itself.
     note_channel_wake_abandoned_fn: ?*const fn (context: ?*anyopaque) void = null,
     /// Ask the platform loop, from ANY thread, to deliver ONE
     /// `frame_requested` event on its loop thread soon — the same event a

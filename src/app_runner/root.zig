@@ -457,7 +457,12 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `NullPlatform.createWithOptions`/`destroy`).
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -515,8 +520,12 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
-    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer mac_platform.deinit();
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `MacPlatform.createWithOptions`/`destroy`).
+    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer mac_platform.destroy();
     native_sdk.runtime.launch_timing.lap("host_ready");
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
@@ -573,8 +582,12 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
-    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer linux_platform.deinit();
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `LinuxPlatform.createWithOptions`/`destroy`).
+    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -629,8 +642,12 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
-    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer windows_platform.deinit();
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `WindowsPlatform.createWithOptions`/`destroy`).
+    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -772,7 +789,12 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
 
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `NullPlatform.createWithOptions`/`destroy`).
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     null_platform.gpu_surfaces = true;
     var replay_platform = null_platform.platform();
     // Same-platform replay must mirror the RECORDING host's rendering
@@ -792,7 +814,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     // (and every replayed screenshot with an image in it) drops its
     // pixels. Journaled bytes stay the only input — the codec is a pure
     // bytes-to-pixels call and the network stays absent.
-    native_sdk.platform.installHeadlessImageCodec(build_options.platform, &null_platform, &replay_platform.services);
+    native_sdk.platform.installHeadlessImageCodec(build_options.platform, null_platform, &replay_platform.services);
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
     // Fonts registered at startup and media-surface texture buffers

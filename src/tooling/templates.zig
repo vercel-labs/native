@@ -2582,7 +2582,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `NullPlatform.createWithOptions`/`destroy`).
+    \\    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    \\    defer null_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -2631,8 +2636,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer mac_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `MacPlatform.createWithOptions`/`destroy`).
+    \\    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer mac_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -2681,8 +2690,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer linux_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `LinuxPlatform.createWithOptions`/`destroy`).
+    \\    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer linux_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -2731,8 +2744,12 @@ fn runnerZig() []const u8 {
     \\    var buffers: StateBuffers = undefined;
     \\    var app_info = options.appInfo(&buffers);
     \\    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    \\    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    \\    defer windows_platform.deinit();
+    \\    // Heap wrapper, latch-gated free: worker threads hold this address
+    \\    // as the channel wake context and an abandoned wake call may
+    \\    // dereference it after this frame unwinds (see
+    \\    // `WindowsPlatform.createWithOptions`/`destroy`).
+    \\    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    \\    defer windows_platform.destroy();
     \\    var trace_sink = StdoutTraceSink{};
     \\    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     \\    const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
