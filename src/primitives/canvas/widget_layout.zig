@@ -337,29 +337,50 @@ pub fn anchoredWidgetFrame(
     height = clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height);
 
     const offset = nonNegative(anchor.offset);
-    const space_below = window.maxY() - anchor_frame.maxY() - offset;
-    const space_above = anchor_frame.y - window.y - offset;
-    const preferred_space = switch (anchor.placement) {
-        .below => space_below,
-        .above => space_above,
-    };
-    const other_space = switch (anchor.placement) {
-        .below => space_above,
-        .above => space_below,
-    };
-    const flipped = height > preferred_space and other_space > preferred_space;
-    const below = (anchor.placement == .below) != flipped;
-    const side_space = @max(0, if (below) space_below else space_above);
-    height = @min(height, side_space);
+    switch (anchor.placement) {
+        .below, .above => {
+            // Main axis Y: prefer the named side, flip when the surface
+            // doesn't fit and the other side has more room, clamp height to
+            // the chosen side. Cross axis X aligns against the anchor.
+            const space_below = window.maxY() - anchor_frame.maxY() - offset;
+            const space_above = anchor_frame.y - window.y - offset;
+            const prefer_below = anchor.placement == .below;
+            const preferred = if (prefer_below) space_below else space_above;
+            const other = if (prefer_below) space_above else space_below;
+            const below = prefer_below != (height > preferred and other > preferred);
+            height = @min(height, @max(0, if (below) space_below else space_above));
 
-    const y = if (below) anchor_frame.maxY() + offset else anchor_frame.y - offset - height;
-    var x = switch (anchor.alignment) {
-        .start, .stretch => anchor_frame.x,
-        .end => anchor_frame.maxX() - width,
-    };
-    x = std.math.clamp(x, window.x, @max(window.x, window.maxX() - width));
-    const clamped_y = std.math.clamp(y, window.y, @max(window.y, window.maxY() - height));
-    return geometry.RectF.init(x, clamped_y, width, height);
+            const y = if (below) anchor_frame.maxY() + offset else anchor_frame.y - offset - height;
+            var x = switch (anchor.alignment) {
+                .start, .stretch => anchor_frame.x,
+                .end => anchor_frame.maxX() - width,
+            };
+            x = std.math.clamp(x, window.x, @max(window.x, window.maxX() - width));
+            const cy = std.math.clamp(y, window.y, @max(window.y, window.maxY() - height));
+            return geometry.RectF.init(x, cy, width, height);
+        },
+        .right, .left => {
+            // Same rule on the X axis: clamp width to the chosen side, align
+            // height against the anchor on the cross axis Y.
+            height = @min(height, window.height);
+            const space_right = window.maxX() - anchor_frame.maxX() - offset;
+            const space_left = anchor_frame.x - window.x - offset;
+            const prefer_right = anchor.placement == .right;
+            const preferred = if (prefer_right) space_right else space_left;
+            const other = if (prefer_right) space_left else space_right;
+            const to_right = prefer_right != (width > preferred and other > preferred);
+            width = @min(width, @max(0, if (to_right) space_right else space_left));
+
+            const x = if (to_right) anchor_frame.maxX() + offset else anchor_frame.x - offset - width;
+            var y = switch (anchor.alignment) {
+                .start, .stretch => anchor_frame.y,
+                .end => anchor_frame.maxY() - height,
+            };
+            y = std.math.clamp(y, window.y, @max(window.y, window.maxY() - height));
+            const cx = std.math.clamp(x, window.x, @max(window.x, window.maxX() - width));
+            return geometry.RectF.init(cx, y, width, height);
+        },
+    }
 }
 
 const LayoutAxis = enum {

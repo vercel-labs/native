@@ -73,6 +73,44 @@ test "anchored frame clamps into the window horizontally and by offset" {
     try std.testing.expectEqual(@as(f32, 58), frame.y); // 20 + 28 + 10
 }
 
+test "anchored frame places to the right of the anchor with the default offset" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    const frame = anchoredFrame(child, .{ .placement = .right }, geometry.RectF.init(20, 20, 120, 28));
+    try std.testing.expectEqual(@as(f32, 144), frame.x); // 20 + 120 + 4
+    try std.testing.expectEqual(@as(f32, 20), frame.y); // start-aligned to the anchor top
+    try std.testing.expectEqual(@as(f32, 140), frame.width);
+    try std.testing.expectEqual(@as(f32, 90), frame.height);
+}
+
+test "anchored frame flips left when right does not fit and left has more room" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // Anchor near the right edge: right space = 400 - 380 - 4 = 16 < 140; left = 336.
+    const frame = anchoredFrame(child, .{ .placement = .right }, geometry.RectF.init(340, 20, 40, 28));
+    try std.testing.expectEqual(@as(f32, 340 - 4 - 140), frame.x);
+    try std.testing.expectEqual(@as(f32, 140), frame.width);
+}
+
+test "anchored frame prefers left and flips right symmetrically" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    const left = anchoredFrame(child, .{ .placement = .left }, geometry.RectF.init(200, 20, 40, 28));
+    try std.testing.expectEqual(@as(f32, 200 - 4 - 140), left.x);
+    // Anchor near the left edge: left has no room, right does — flip.
+    const flipped = anchoredFrame(child, .{ .placement = .left }, geometry.RectF.init(10, 20, 40, 28));
+    try std.testing.expectEqual(@as(f32, 10 + 40 + 4), flipped.x);
+}
+
+test "horizontal anchor clamps width to the chosen side and aligns height on the cross axis" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 500, 40) };
+    const anchor_rect = geometry.RectF.init(60, 100, 40, 28);
+    // right space = 400 - 100 - 4 = 296; the over-wide surface clamps to it.
+    const start = anchoredFrame(child, .{ .placement = .right }, anchor_rect);
+    try std.testing.expectEqual(@as(f32, 296), start.width);
+    try std.testing.expectEqual(@as(f32, 100), start.y); // start → anchor top
+    // end alignment drops the surface's bottom to the anchor's bottom.
+    const end = anchoredFrame(child, .{ .placement = .right, .alignment = .end }, anchor_rect);
+    try std.testing.expectEqual(@as(f32, 128 - 40), end.y); // anchor.maxY - height
+}
+
 test "anchored children consume no flow space and float against the parent" {
     const menu_items = [_]Widget{.{ .id = 4, .kind = .menu_item, .text = "One" }};
     const dropdown = Widget{

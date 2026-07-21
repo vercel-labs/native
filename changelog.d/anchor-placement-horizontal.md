@@ -1,0 +1,1 @@
+feature: **Horizontal anchor placement**: `anchor="right"` and `anchor="left"` float a dropdown-menu or tooltip beside its trigger, mirroring the vertical `below`/`above` contract — the surface auto-flips to the other side when it doesn't fit and that side has more room, clamps its width to the chosen side, and aligns its height against the anchor.
