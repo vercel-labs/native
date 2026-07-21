@@ -895,9 +895,10 @@ const ChannelWake = struct {
     /// The owning Effects' ATOMIC services mirror (`wake_services` — a
     /// pointer to the mirror, so a channel opened before
     /// `bindServices` still wakes once the binding publishes), or null
-    /// while disarmed. Posting threads load through it with
-    /// `.acquire`, pairing with the bind's `.release` store; the plain
-    /// `services` field stays loop-thread-only.
+    /// while disarmed. Posting threads load through it with seq_cst —
+    /// the load side of the bind/post store-buffer handshake (see
+    /// `Effects.bindServices` for why release/acquire cannot carry
+    /// it); the plain `services` field stays loop-thread-only.
     services: ?*const std.atomic.Value(?*const platform.PlatformServices) = null,
     /// A latched wake has not yet reached a drain pass: the wake
     /// coalescer (`MediaSurfaceWake.pending`, channel-shaped). Set by
@@ -1089,7 +1090,13 @@ pub const ChannelHandle = struct {
             staging.seqs[index] = seq;
             @memcpy(staging.data[index][0..bytes.len], bytes);
             staging.len += 1;
-            _ = owner.pending.fetchAdd(1, .monotonic);
+            // seq_cst: the poster's STORE side of the bind/post
+            // store-buffer handshake — this increment must precede the
+            // `wake_services` load below it in the seq_cst total order,
+            // or a concurrent `bindServices` can miss the post in its
+            // sweep while this post misses the binding (see
+            // `Effects.bindServices` for the four-operation argument).
+            _ = owner.pending.fetchAdd(1, .seq_cst);
         }
         // New work is staged: wake the host loop OUTSIDE the staging
         // mutex (the lock-order invariant at `ChannelShared.mutex`) and
@@ -1127,10 +1134,15 @@ pub const ChannelHandle = struct {
         // Disarmed, or no host services bound yet: nothing to call and
         // nothing latched — `bindServices` sweeps staged work with one
         // catch-up wake when it lands, and any later post retries too.
-        // `.acquire` pairs with the bind's `.release` store (see
-        // `Effects.wake_services` for the publication argument).
+        // seq_cst, not acquire: the poster's LOAD side of the bind/post
+        // store-buffer handshake. The pending increment in `post` is a
+        // seq_cst store before this load, and the bind's seq_cst store
+        // precedes its `hasPending` sweep — the total order over the
+        // two stores guarantees whichever side ran second observes the
+        // other, so an accepted post always gets a wake from one of
+        // them (see `Effects.bindServices` for the full argument).
         const services_ref = wake.services orelse return;
-        const services = services_ref.load(.acquire) orelse return;
+        const services = services_ref.load(.seq_cst) orelse return;
         // Latch BEFORE the call — MediaSurfaceWake latches after, but
         // its hosts never re-enter the producer; this seam is test-
         // injectable, and the pre-latch is what makes a reentrant post
@@ -2735,21 +2747,24 @@ pub fn Effects(comptime Msg: type) type {
         /// go through `wake_services`, the atomically published
         /// mirror, never this plain field.
         services: ?*const platform.PlatformServices = null,
-        /// The cross-thread mirror of `services`, written only by
-        /// `bindServices`/`deinit` with `.release` and read by posting
-        /// threads with `.acquire` (see `requestHostWake`).
-        /// Open-before-bind is supported, so a posting thread can race
-        /// the loop thread's bind: the wake mutex alone cannot order
-        /// that pair (the bind path never takes it), and an
-        /// unsynchronized read of the plain field would be a data
-        /// race. The release/acquire pair is the standard publication
-        /// contract — every loop-thread write that initialized the
-        /// `PlatformServices` value happens-before any producer that
-        /// observes the non-null pointer, so the producer's
-        /// `services.wake()` call runs against fully constructed host
-        /// state. Nothing stronger is needed: no other variable's
-        /// order depends on this one (the wake coalescer's seq_cst
-        /// protocol is its own, on `ChannelWake.pending`).
+        /// The cross-thread mirror of `services`, written by
+        /// `bindServices` with seq_cst (and cleared by `deinit` with
+        /// `.release` — teardown needs only the publication half) and
+        /// read by posting threads with seq_cst (see
+        /// `requestHostWake`). Open-before-bind is supported, so a
+        /// posting thread can race the loop thread's bind: the wake
+        /// mutex alone cannot order that pair (the bind path never
+        /// takes it), and an unsynchronized read of the plain field
+        /// would be a data race. Publication safety alone would take
+        /// release/acquire — every loop-thread write that initialized
+        /// the `PlatformServices` value happens-before any producer
+        /// that observes the non-null pointer — but the bind/post
+        /// HANDSHAKE needs more: bind stores here then loads the
+        /// pending mirror, a post stores the pending mirror then loads
+        /// here, and release/acquire never orders a store before the
+        /// same thread's subsequent load of a different location. The
+        /// seq_cst total order over the two stores is what guarantees
+        /// at least one side observes the other (see `bindServices`).
         wake_services: std.atomic.Value(?*const platform.PlatformServices) = std.atomic.Value(?*const platform.PlatformServices).init(null),
         /// The runtime's canvas image registry, bound by `UiApp`
         /// alongside the services so `update` can register fetched
@@ -3291,18 +3306,39 @@ pub fn Effects(comptime Msg: type) type {
         /// Point workers at the platform's wake service. Loop-thread
         /// only; the first bind sticks (the services value lives on the
         /// runtime and is stable for its lifetime). Publishes the
-        /// binding to posting threads (`wake_services`, `.release`) and
-        /// sweeps: work staged BEFORE the binding could never reach the
-        /// host — open-before-bind is supported, so a pre-bind post is
+        /// binding to posting threads (`wake_services`) and sweeps:
+        /// work staged BEFORE the binding could never reach the host —
+        /// open-before-bind is supported, so a pre-bind post is
         /// `.accepted` with `requestHostWake` finding no services and
         /// latching nothing, and every loop-side stage's `wakeHost` was
         /// a no-op — so without one catch-up nudge here a one-shot
         /// producer that posted early strands forever. One host wake
         /// covers everything staged: the drain pass sweeps all stages.
+        ///
+        /// SEQ_CST, NOT RELEASE — the bind/post handshake is a
+        /// store-buffer (Dekker) pairing across two locations. Binder:
+        /// store `wake_services`, then load the pending mirror
+        /// (`hasPending`). Poster: store the pending mirror
+        /// (`channel_pending_count`), then load `wake_services`
+        /// (`requestHostWake`). Acquire/release cannot repair this
+        /// shape: release/acquire only orders a load AFTER the store it
+        /// pairs with — it never orders a thread's own store before its
+        /// own SUBSEQUENT load of a DIFFERENT location, so both sides
+        /// may read the stale value (binder sees no work, poster sees
+        /// no services) and an accepted post strands with no wake ever
+        /// coming. The correctness argument is seq_cst's total order
+        /// over the two stores: whichever store is later in that order,
+        /// the storing thread's subsequent load is later still and sees
+        /// the other side's store — so at least one side always acts
+        /// (the poster wakes, or the binder sweeps). All four
+        /// participating operations carry seq_cst: this store, the
+        /// loads in `hasPending`, the pending increment in
+        /// `ChannelHandle.post`, and the services load in
+        /// `requestHostWake`.
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
             if (self.services != null) return;
             self.services = services;
-            self.wake_services.store(services, .release);
+            self.wake_services.store(services, .seq_cst);
             if (self.hasPending()) self.wakeHost();
         }
 
@@ -5046,12 +5082,17 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// True when a drain would dispatch at least one Msg.
+        /// The atomic loads are seq_cst: this is the binder's load side
+        /// of the bind/post store-buffer handshake (see `bindServices`
+        /// for the full four-operation argument) — an acquire load here
+        /// could read a pre-post zero even though the poster's own load
+        /// missed the just-published services, stranding the post.
         pub fn hasPending(self: *const Self) bool {
             return self.pending_exit_len > 0 or
                 self.pending_image_len > 0 or
                 self.pending_channel_len > 0 or
-                self.channel_pending_count.load(.acquire) > 0 or
-                self.queue_count.load(.acquire) > 0;
+                self.channel_pending_count.load(.seq_cst) > 0 or
+                self.queue_count.load(.seq_cst) > 0;
         }
 
         /// One drain pass's causal boundary: a snapshot of the

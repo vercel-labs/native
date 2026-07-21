@@ -583,6 +583,70 @@ test "an idle bind sweeps nothing" {
     while (fx.takeMsg()) |_| {}
 }
 
+/// An atomic wake counter plus a start gate for the concurrent
+/// bind/post handshake test below: the wake hook runs on whichever
+/// thread posted, so the counter must be an atomic, not `WakeCounter`'s
+/// loop-thread-only plain var.
+const RaceWake = struct {
+    var calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        _ = calls.fetchAdd(1, .seq_cst);
+    }
+};
+
+const RacePoster = struct {
+    fn run(handle: effects_mod.ChannelHandle, start: *std.atomic.Value(bool)) void {
+        while (!start.load(.acquire)) std.atomic.spinLoopHint();
+        _ = handle.post("racing sample");
+    }
+};
+
+test "a post racing bindServices is never stranded: one side always wakes" {
+    // The bind/post handshake is a store-buffer (Dekker) pairing over
+    // two atomics: the binder stores `wake_services` then loads the
+    // pending count (`hasPending`), while a poster increments the
+    // pending count then loads `wake_services`. Unless all four
+    // operations are seq_cst, both sides can read the stale value —
+    // the poster sees no services (wakes nobody), the binder sees no
+    // pending work (sweeps nothing) — and an ACCEPTED post strands
+    // until unrelated traffic. This test is probabilistic-but-real
+    // for that race class: it aligns one post against one bind per
+    // iteration and asserts the handshake's invariant — at least one
+    // side always acts, so a wake is observed and the post drains.
+    // A bounded iteration count keeps the suite fast; a regression
+    // here may pass on hardware/toolchains where the reorder happens
+    // not to bite, but the seq_cst repair is what the memory model
+    // itself guarantees.
+    var iteration: usize = 0;
+    while (iteration < 300) : (iteration += 1) {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        RaceWake.calls.store(0, .seq_cst);
+
+        const handle = fx.openChannel(.{ .key = 61, .on_event = DirectFx.channelMsg(.event) });
+        const services: platform_mod.PlatformServices = .{ .wake_fn = RaceWake.wake };
+
+        var start = std.atomic.Value(bool).init(false);
+        const poster = try std.Thread.spawn(.{}, RacePoster.run, .{ handle, &start });
+        start.store(true, .release);
+        fx.bindServices(&services);
+        poster.join();
+
+        // The post was accepted (open channel, empty stage), so it
+        // must never strand: either the poster observed the published
+        // services and latched its own wake, or the binder observed
+        // the staged post and swept — one host wake either way.
+        try testing.expect(RaceWake.calls.load(.seq_cst) >= 1);
+        // And the staged work is drainable at that wake.
+        _ = try expectData(&fx, 61, "racing sample");
+        fx.closeChannel(61);
+        while (fx.takeMsg()) |_| {}
+    }
+}
+
 /// A wake hook that posts back into the channel that woke it — the
 /// reentrant shape a real hook must never have (host wake
 /// implementations are enqueue-only by contract), turned into the
