@@ -892,10 +892,13 @@ const ChannelWake = struct {
     /// stale producer of a closed — or reopened — channel can never
     /// wake the loop spuriously.
     generation: u32 = 0,
-    /// The owning Effects' services binding (a pointer to the field,
-    /// so a channel opened before `bindServices` still wakes), or null
-    /// while disarmed.
-    services: ?*const ?*const platform.PlatformServices = null,
+    /// The owning Effects' ATOMIC services mirror (`wake_services` — a
+    /// pointer to the mirror, so a channel opened before
+    /// `bindServices` still wakes once the binding publishes), or null
+    /// while disarmed. Posting threads load through it with
+    /// `.acquire`, pairing with the bind's `.release` store; the plain
+    /// `services` field stays loop-thread-only.
+    services: ?*const std.atomic.Value(?*const platform.PlatformServices) = null,
     /// A latched wake has not yet reached a drain pass: the wake
     /// coalescer (`MediaSurfaceWake.pending`, channel-shaped). Set by
     /// the first accepted post, suppressing further host wakes until
@@ -1087,10 +1090,13 @@ pub const ChannelHandle = struct {
         if (wake.generation != generation) return;
         // Lost the race to another poster: its latched wake covers us.
         if (wake.pending.load(.seq_cst)) return;
-        // Disarmed, or no host services bound yet: nothing to call
-        // (and nothing latched — a later `bindServices` post retries).
+        // Disarmed, or no host services bound yet: nothing to call and
+        // nothing latched — `bindServices` sweeps staged work with one
+        // catch-up wake when it lands, and any later post retries too.
+        // `.acquire` pairs with the bind's `.release` store (see
+        // `Effects.wake_services` for the publication argument).
         const services_ref = wake.services orelse return;
-        const services = services_ref.* orelse return;
+        const services = services_ref.load(.acquire) orelse return;
         // Latch BEFORE the call — MediaSurfaceWake latches after, but
         // its hosts never re-enter the producer; this seam is test-
         // injectable, and the pre-latch is what makes a reentrant post
@@ -2681,8 +2687,27 @@ pub fn Effects(comptime Msg: type) type {
         replay_env_len: usize = 0,
         /// Set once from the loop thread before the first dispatch;
         /// workers call `services.wake()` through it (the one
-        /// thread-safe PlatformServices entry).
+        /// thread-safe PlatformServices entry). Loop-thread reads only
+        /// — cross-thread readers (channel posts in `requestHostWake`)
+        /// go through `wake_services`, the atomically published
+        /// mirror, never this plain field.
         services: ?*const platform.PlatformServices = null,
+        /// The cross-thread mirror of `services`, written only by
+        /// `bindServices`/`deinit` with `.release` and read by posting
+        /// threads with `.acquire` (see `requestHostWake`).
+        /// Open-before-bind is supported, so a posting thread can race
+        /// the loop thread's bind: the wake mutex alone cannot order
+        /// that pair (the bind path never takes it), and an
+        /// unsynchronized read of the plain field would be a data
+        /// race. The release/acquire pair is the standard publication
+        /// contract — every loop-thread write that initialized the
+        /// `PlatformServices` value happens-before any producer that
+        /// observes the non-null pointer, so the producer's
+        /// `services.wake()` call runs against fully constructed host
+        /// state. Nothing stronger is needed: no other variable's
+        /// order depends on this one (the wake coalescer's seq_cst
+        /// protocol is its own, on `ChannelWake.pending`).
+        wake_services: std.atomic.Value(?*const platform.PlatformServices) = std.atomic.Value(?*const platform.PlatformServices).init(null),
         /// The runtime's canvas image registry, bound by `UiApp`
         /// alongside the services so `update` can register fetched
         /// pixels synchronously (loop-thread only, not an effect).
@@ -3182,6 +3207,7 @@ pub fn Effects(comptime Msg: type) type {
             // transport command inert through its existing no-services
             // paths instead of dereferencing freed memory.
             self.services = null;
+            self.wake_services.store(null, .release);
             // Sever the host-call binding for the same reason: its
             // context belongs to the embedding host.
             self.host_calls = null;
@@ -3208,9 +3234,20 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Point workers at the platform's wake service. Loop-thread
         /// only; the first bind sticks (the services value lives on the
-        /// runtime and is stable for its lifetime).
+        /// runtime and is stable for its lifetime). Publishes the
+        /// binding to posting threads (`wake_services`, `.release`) and
+        /// sweeps: work staged BEFORE the binding could never reach the
+        /// host — open-before-bind is supported, so a pre-bind post is
+        /// `.accepted` with `requestHostWake` finding no services and
+        /// latching nothing, and every loop-side stage's `wakeHost` was
+        /// a no-op — so without one catch-up nudge here a one-shot
+        /// producer that posted early strands forever. One host wake
+        /// covers everything staged: the drain pass sweeps all stages.
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
-            if (self.services == null) self.services = services;
+            if (self.services != null) return;
+            self.services = services;
+            self.wake_services.store(services, .release);
+            if (self.hasPending()) self.wakeHost();
         }
 
         /// Point spawned children at the host process environment (the
@@ -4027,7 +4064,7 @@ pub fn Effects(comptime Msg: type) type {
             // fails its generation gate.
             shared.wake.mutex.lock();
             shared.wake.generation = generation;
-            shared.wake.services = &self.services;
+            shared.wake.services = &self.wake_services;
             shared.wake.pending.store(false, .seq_cst);
             shared.wake.mutex.unlock();
             return .{ .shared = shared, .generation = generation };

@@ -385,7 +385,7 @@ test "the staging mutex is never held across the host wake hook" {
     defer WakeProbe.reset();
 
     const services: platform_mod.PlatformServices = .{ .wake_fn = WakeProbe.wake };
-    fx.services = &services;
+    fx.bindServices(&services);
 
     const handle = fx.openChannel(.{ .key = 51, .on_event = DirectFx.channelMsg(.event) });
     WakeProbe.shared_under_probe = handle.shared;
@@ -424,7 +424,7 @@ test "a burst of accepted posts latches exactly one host wake" {
     fx.executor = .fake;
     WakeCounter.reset();
     const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
-    fx.services = &services;
+    fx.bindServices(&services);
 
     const handle = fx.openChannel(.{ .key = 52, .on_event = DirectFx.channelMsg(.event) });
 
@@ -462,7 +462,7 @@ test "a post racing the drain lands after the coalescer clear and still wakes" {
     fx.executor = .fake;
     WakeCounter.reset();
     const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
-    fx.services = &services;
+    fx.bindServices(&services);
 
     const handle = fx.openChannel(.{ .key = 53, .on_event = DirectFx.channelMsg(.event) });
     try testing.expectEqual(PostResult.accepted, handle.post("before the pass"));
@@ -491,6 +491,58 @@ test "a post racing the drain lands after the coalescer clear and still wakes" {
     try testing.expectEqualStrings("during the pass", second.event.bytes);
 
     fx.closeChannel(53);
+    while (fx.takeMsg()) |_| {}
+}
+
+test "a post accepted before services bind is delivered by the bind sweep with no further post" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeCounter.reset();
+
+    // Open-before-bind is supported: the channel is live and posts are
+    // ACCEPTED — but no host services exist to wake, and nothing is
+    // latched (a latch with no wake behind it would suppress the real
+    // wake later).
+    const handle = fx.openChannel(.{ .key = 55, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("early sample"));
+    try testing.expectEqual(@as(usize, 0), WakeCounter.calls);
+
+    // Binding sweeps: the pre-bind staged post gets its one catch-up
+    // host wake at bind time, with NO further post. (Pre-sweep, a
+    // one-shot producer stranded here forever: `.accepted` with no
+    // wake, and nothing else ever nudging the host.)
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
+    fx.bindServices(&services);
+    try testing.expectEqual(@as(usize, 1), WakeCounter.calls);
+
+    // The wake's drain pass delivers the pre-bind post.
+    var boundary = fx.drainBoundary();
+    const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
+    try testing.expectEqualStrings("early sample", msg.event.bytes);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsgWithin(&boundary));
+
+    // And the post-bind path is the ordinary latched wake.
+    try testing.expectEqual(PostResult.accepted, handle.post("late sample"));
+    try testing.expectEqual(@as(usize, 2), WakeCounter.calls);
+    fx.closeChannel(55);
+    while (fx.takeMsg()) |_| {}
+}
+
+test "an idle bind sweeps nothing" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeCounter.reset();
+
+    // A channel is open but nothing is staged: binding must NOT wake —
+    // the sweep answers staged work, not open occupancies, so an idle
+    // app pays no spurious host-queue entry at startup.
+    _ = fx.openChannel(.{ .key = 56, .on_event = DirectFx.channelMsg(.event) });
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
+    fx.bindServices(&services);
+    try testing.expectEqual(@as(usize, 0), WakeCounter.calls);
+    fx.closeChannel(56);
     while (fx.takeMsg()) |_| {}
 }
 
@@ -525,7 +577,7 @@ test "a wake hook that posts back into the same channel coalesces instead of dea
     ReentrantPoster.reset();
     defer ReentrantPoster.reset();
     const services: platform_mod.PlatformServices = .{ .wake_fn = ReentrantPoster.wake };
-    fx.services = &services;
+    fx.bindServices(&services);
 
     const handle = fx.openChannel(.{ .key = 54, .on_event = DirectFx.channelMsg(.event) });
     ReentrantPoster.handle = handle;
