@@ -116,6 +116,10 @@ test "stop closes the channel: the terminal lands and later posts answer closed"
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
     const handle = captured_handle orelse return error.TestExpectedHandle;
     try testing.expectEqual(PostResult.accepted, handle.post("sample 1"));
+    // One refused post so this run ends with a nonzero drop total —
+    // the restart below must not inherit it.
+    const oversized: [native_sdk.max_effect_channel_bytes + 1]u8 = @splat('x');
+    try testing.expectEqual(PostResult.dropped_oversized, handle.post(&oversized));
     try h.drainWakes();
 
     try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
@@ -125,15 +129,25 @@ test "stop closes the channel: the terminal lands and later posts answer closed"
     try h.drainWakes();
     try testing.expect(!h.app_state.model.monitoring);
     try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
+    // The `.closed` terminal carried the run's final drop total.
+    try testing.expectEqual(@as(u32, 1), h.app_state.model.dropped_total);
 
     // The key is free again: a fresh start opens a fresh occupancy and
     // the OLD handle stays dead.
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    // Per-run counters zero at the restart itself: the drop readout is
+    // this run's, not stale until the first data event overwrites it.
+    try testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_total);
+    try testing.expectEqual(@as(u64, 0), h.app_state.model.total_samples);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqualStrings("monitoring: 0 samples", h.app_state.model.statusText(arena_state.allocator()));
     const fresh = captured_handle orelse return error.TestExpectedHandle;
     try testing.expectEqual(PostResult.closed, handle.post("stale"));
     try testing.expectEqual(PostResult.accepted, fresh.post("sample 1 again"));
     try h.drainWakes();
     try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
+    try testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_total);
 }
 
 test "back-pressure skips samples but never stops the monitor" {

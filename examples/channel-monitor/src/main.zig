@@ -208,6 +208,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.source_failed = false;
             model.total_samples = 0;
             model.visible_count = 0;
+            // Per-run counter like the two above: without the reset a
+            // restart shows the previous run's drop total until the
+            // first data event overwrites it.
+            model.dropped_total = 0;
             // Open the channel and hand its thread-safe handle to the
             // source. A refused open still answers: exactly one
             // `.rejected` event arrives instead of data.
