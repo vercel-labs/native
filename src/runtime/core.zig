@@ -146,6 +146,7 @@ pub const CanvasWidgetAccessibilityAction = runtime_api.CanvasWidgetAccessibilit
 pub const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 pub const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
 pub const CanvasWidgetContextMenuEvent = runtime_api.CanvasWidgetContextMenuEvent;
+pub const CanvasWidgetContextMenuShownEvent = runtime_api.CanvasWidgetContextMenuShownEvent;
 pub const CanvasWidgetContextMenuRequestEvent = runtime_api.CanvasWidgetContextMenuRequestEvent;
 pub const CanvasWidgetDismissEvent = runtime_api.CanvasWidgetDismissEvent;
 pub const CanvasWidgetContextPressEvent = runtime_api.CanvasWidgetContextPressEvent;

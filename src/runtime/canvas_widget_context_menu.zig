@@ -120,7 +120,24 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         .window_id = input_event.window_id,
                         .target_id = widget.id,
                         .kind = .app,
-                    }, point, items[0..count])) return;
+                    }, point, items[0..count])) {
+                        // Presentation is asynchronous on GTK (and the
+                        // snapshot is harmless where the presenter blocks):
+                        // tell the app WHAT is on the glass, keyed by the
+                        // request's token, so the eventual selection
+                        // resolves against the shown items' dispatch
+                        // payloads — never a tree that rebuilt (reordering
+                        // or re-mapping items) while the menu was open.
+                        const pending = self.canvas_widget_context_menu_pending.?;
+                        try self.dispatchEvent(app, .{ .canvas_widget_context_menu_shown = .{
+                            .window_id = input_event.window_id,
+                            .view_label = self.views[index].label,
+                            .target_id = widget.id,
+                            .token = pending.token,
+                            .item_count = count,
+                        } });
+                        return;
+                    }
                 }
                 try self.dispatchEvent(app, .{ .canvas_widget_context_menu_request = .{
                     .window_id = input_event.window_id,
@@ -230,6 +247,9 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     .view_label = self.views[index].label,
                     .target_id = pending.target_id,
                     .item_index = event.item_id - 1,
+                    // The shown snapshot's key: UiApp resolves the
+                    // selection from what was presented under this token.
+                    .token = pending.token,
                 } }),
                 .edit_text => try applyDefaultEditAction(self, app, index, pending.target_id, event.item_id),
                 .static_copy => {

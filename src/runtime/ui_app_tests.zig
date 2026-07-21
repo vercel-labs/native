@@ -3423,6 +3423,159 @@ test "ui app dispatches native context menu selections as typed messages" {
     try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
 }
 
+// --------------------------------------- context-menu rebuild-race fixture
+
+const ReorderModel = struct {
+    reordered: bool = false,
+    completed: u32 = 0,
+    deleted: u32 = 0,
+};
+
+const ReorderMsg = union(enum) {
+    reorder,
+    complete,
+    delete,
+};
+
+const ReorderApp = ui_app_model.UiApp(ReorderModel, ReorderMsg);
+
+fn reorderUpdate(model: *ReorderModel, msg: ReorderMsg) void {
+    switch (msg) {
+        .reorder => model.reordered = true,
+        .complete => model.completed += 1,
+        .delete => model.deleted += 1,
+    }
+}
+
+fn reorderView(ui: *ReorderApp.Ui, model: *const ReorderModel) ReorderApp.Ui.Node {
+    // The conditional-menu shape the rebuild race exists for: an effect
+    // (here a button press standing in for a timer) reorders the row's
+    // declared items while the OS menu is open.
+    const before = [_]ReorderApp.Ui.ContextMenuItem{
+        .{ .label = "Complete", .msg = .complete },
+        .{ .separator = true },
+        .{ .label = "Delete", .msg = .delete },
+    };
+    const after = [_]ReorderApp.Ui.ContextMenuItem{
+        .{ .label = "Delete", .msg = .delete },
+        .{ .separator = true },
+        .{ .label = "Complete", .msg = .complete },
+    };
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = if (model.reordered) &after else &before,
+        }, .{}),
+        ui.button(.{ .on_press = .reorder }, "Reorder"),
+    });
+}
+
+test "a rebuild while the native menu is open never redirects the visible selection" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ReorderApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ReorderApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-context-menu-race",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = reorderUpdate,
+        .view = reorderView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Right-click the row: the platform presents [Complete, —, Delete]
+    // and the pending request is armed with a minted token.
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var row_frame: geometry.RectF = .{};
+    var button_frame: geometry.RectF = .{};
+    for (layout.nodes) |node| {
+        if (node.widget.id == row_id) row_frame = node.frame;
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!row_frame.isEmpty());
+    try std.testing.expect(!button_frame.isEmpty());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    const shown_token = harness.null_platform.context_menu_token;
+    const recorded = harness.null_platform.contextMenuItems();
+    try std.testing.expectEqualStrings("Complete", recorded[0].label);
+
+    // The GTK popover is asynchronous: while it is open, a press
+    // rebuilds the tree with the items REVERSED (a timer or effect
+    // reordering conditional items behaves identically).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 3_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 4_000_000,
+    } });
+    try std.testing.expect(app_state.model.reordered);
+
+    // The user picks the FIRST visible item — the menu still shows
+    // "Complete" there. Resolution must come from the presented menu's
+    // snapshot, never the rebuilt live tree (whose index 0 is now
+    // "Delete").
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.deleted);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.completed);
+
+    // Dismissal after a rebuild stays inert, and the consumed token
+    // cannot resolve again.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 0,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.completed);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.deleted);
+}
+
 // ------------------------------------------------- press fall-through fixture
 
 const RowsModel = struct {

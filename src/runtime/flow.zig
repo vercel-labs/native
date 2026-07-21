@@ -510,6 +510,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_context_menu => {
                     self.invalidateFor(.command, null);
                 },
+                // The shown notice only arms UiApp's selection snapshot:
+                // no visual change (the popover is an OS surface).
+                .canvas_widget_context_menu_shown => {},
                 .canvas_widget_context_menu_request => {
                     // The app loop answers by mounting the anchored
                     // fallback surface: a visual change.

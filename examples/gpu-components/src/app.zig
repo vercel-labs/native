@@ -183,7 +183,7 @@ pub const GpuComponentsApp = struct {
             .canvas_widget_keyboard => |keyboard_event| try self.handleWidgetKeyboard(runtime, keyboard_event),
             .canvas_widget_dismiss => |dismiss_event| try self.handleWidgetDismiss(runtime, dismiss_event),
             .appearance_changed => |appearance| try self.applySystemAppearance(runtime, appearance),
-            .gpu_surface_resized, .gpu_surface_input, .shortcut, .timer, .effects_wake, .audio, .files_dropped, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_request, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
+            .gpu_surface_resized, .gpu_surface_input, .shortcut, .timer, .effects_wake, .audio, .files_dropped, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_request, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
         }
     }
 

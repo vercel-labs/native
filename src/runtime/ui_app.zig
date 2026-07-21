@@ -880,6 +880,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// synthesized surface anchors at the click, not the target's
         /// edge.
         context_menu_fallback_point: geometry.PointF = .{},
+        /// The presented native menu's selection snapshot: the per-item
+        /// dispatch Msgs captured (by value) at present time, keyed by
+        /// the request's token. Native presentation is asynchronous (a
+        /// GTK popover outlives its presenting dispatch), so a rebuild
+        /// while the menu is open — a timer reordering conditional
+        /// items, an effect re-mapping captured messages — must never
+        /// redirect the visible selection: `handleContextMenu` resolves
+        /// a token-matching selection HERE, never through the live
+        /// tree. 0 = no snapshot armed (then the live tree is the shown
+        /// menu: the fallback surface and the automation verb both
+        /// validate against it directly).
+        context_menu_shown_token: u64 = 0,
+        context_menu_shown_count: usize = 0,
+        context_menu_shown_msgs: [platform.max_context_menu_items]?MsgT = undefined,
         /// The windowed virtual lists the LAST build declared
         /// (`Ui.virtualList` records): scroll events on these regions
         /// re-derive the view even without an app `on_scroll` binding,
@@ -2834,6 +2848,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
+                .canvas_widget_context_menu_shown => |shown_event| self.handleContextMenuShown(shown_event),
                 .canvas_widget_context_menu_request => |request_event| try self.handleContextMenuRequest(runtime, request_event),
                 .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
                 .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
@@ -3562,16 +3577,48 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
-        /// A native context-menu selection: resolve the selected
-        /// item's declared `Msg` through the tree's handler table.
+        /// The runtime handed a widget's declared menu to the native
+        /// presenter: capture the shown items' dispatch Msgs (by value)
+        /// keyed by the request's token. Selection resolves from this
+        /// snapshot, so the user always gets the item they SAW even when
+        /// the tree rebuilds under the open menu. Payload lifetime
+        /// matches every deferred Msg's rule: values are copied here,
+        /// so a Msg carrying a slice must point at model-owned storage,
+        /// never the build arena.
+        fn handleContextMenuShown(self: *Self, shown_event: core.CanvasWidgetContextMenuShownEvent) void {
+            const tree = self.treeForViewLabel(shown_event.view_label) orelse return;
+            const count = @min(shown_event.item_count, self.context_menu_shown_msgs.len);
+            for (0..count) |item_index| {
+                self.context_menu_shown_msgs[item_index] = tree.msgForContextMenu(shown_event.target_id, item_index);
+            }
+            self.context_menu_shown_token = shown_event.token;
+            self.context_menu_shown_count = count;
+        }
+
+        /// A native context-menu selection: resolve the selected item's
+        /// declared `Msg`. A selection carrying the presented snapshot's
+        /// token resolves from the snapshot (what the user saw); only a
+        /// snapshot-less dispatch — the automation verb, which validates
+        /// against the live tree itself — resolves through the tree's
+        /// handler table.
         fn handleContextMenu(self: *Self, runtime: *Runtime, menu_event: core.CanvasWidgetContextMenuEvent) anyerror!void {
-            const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
             // A selection on this menu closes it whatever the source: an
             // automation-invoked selection while the fallback surface is
             // open must not leave the surface mounted.
             if (self.context_menu_fallback_target == menu_event.target_id) {
                 self.clearContextMenuFallback();
             }
+            if (menu_event.token != 0 and menu_event.token == self.context_menu_shown_token) {
+                const count = self.context_menu_shown_count;
+                self.context_menu_shown_token = 0;
+                self.context_menu_shown_count = 0;
+                if (menu_event.item_index >= count) return;
+                if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
+                    try self.dispatch(runtime, menu_event.window_id, msg);
+                }
+                return;
+            }
+            const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
             if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
                 try self.dispatch(runtime, menu_event.window_id, msg);
             }
