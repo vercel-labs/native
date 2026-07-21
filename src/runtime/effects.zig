@@ -803,14 +803,15 @@ pub const max_effect_channels: usize = 8;
 /// small-message-shaped (sensor readings, socket frames, watcher
 /// notifications) — the spawn line bound is the honest ceiling, and it
 /// keeps a post inside one completion-queue entry and one inline
-/// journal record. Oversized posts return false and count as drops.
+/// journal record. Oversized posts answer `.dropped_oversized` and
+/// count as drops.
 pub const max_effect_channel_bytes: usize = max_effect_line_bytes;
 
 /// Staged posts one channel holds between drains. The staging FIFO is
 /// NON-LOSSY: nothing already staged is ever evicted — a full stage
-/// makes `post` return false and counts the drop, and the next
-/// delivered event carries the counts (never silence, never a stall of
-/// the posting thread).
+/// makes `post` answer `.dropped_full` and counts the drop, and the
+/// next delivered event carries the counts (never silence, never a
+/// stall of the posting thread).
 pub const max_effect_channel_pending: usize = 32;
 
 /// What one channel event Msg reports. `.data` is one delivered post;
@@ -876,15 +877,15 @@ const ChannelOwnerRefs = struct {
 /// allocated forever. The leak is bounded (one ~200-byte header per
 /// channel slot per Effects instance; the multi-KiB staging FIFO is
 /// separate and freed on close) and the post-after-death answer is a
-/// plain `false` through the header's `open`/`generation` gate, never a
-/// use-after-free.
+/// plain `.closed` through the header's `open`/`generation` gate, never
+/// a use-after-free.
 pub const ChannelShared = struct {
     mutex: SpinMutex = .{},
     /// Posts are accepted only while set. Cleared under the mutex by
     /// every close path before anything a post could reach is freed.
     open: bool = false,
     /// The occupancy this block currently serves; a handle stamped
-    /// with an older generation posts into nothing (returns false).
+    /// with an older generation posts into nothing (answers `.closed`).
     generation: u32 = 0,
     /// The occupancy's effective staging bound (1..max_effect_channel_pending).
     max_pending: u32 = max_effect_channel_pending,
@@ -905,24 +906,55 @@ pub const ChannelShared = struct {
 /// generation-stamped process-lifetime header (`ChannelShared`), never
 /// a raw pointer into a table slot, so a post after `closeChannel`,
 /// after the slot was reused by a later `openChannel`, or after the
-/// runtime itself tore down answers `false` safely instead of touching
-/// freed memory.
+/// runtime itself tore down answers `.closed` safely instead of
+/// touching freed memory.
 pub const ChannelHandle = struct {
     shared: ?*ChannelShared = null,
     generation: u32 = 0,
 
+    /// What one `post` answered — the producer's whole contract in one
+    /// value, because "try again later" and "stop forever" demand
+    /// different responses and a producer must never have to guess.
+    /// The two drop answers are distinct members for the same teaching
+    /// reason `.rejected` is distinct from `.closed`: they name
+    /// different producer mistakes with different remedies — a full
+    /// stage is transient back-pressure (skip this message and keep
+    /// producing; the consumer's next drain relieves it), an oversized
+    /// payload is a programming error no retry will fix (bound your
+    /// bytes at `max_effect_channel_bytes`). Both count into the drop
+    /// counters the next delivered event carries, exactly as before.
+    pub const PostResult = enum {
+        /// Staged: exactly one `.data` event Msg delivers on the next
+        /// drain.
+        accepted,
+        /// The staging FIFO is full (`max_pending`). Transient: nothing
+        /// staged, the drop counted — skip this message and keep going.
+        dropped_full,
+        /// `bytes` exceeds `max_effect_channel_bytes`. Permanent for
+        /// this payload: nothing staged, the drop counted — a retry of
+        /// the same bytes can never land.
+        dropped_oversized,
+        /// The occupancy is over — `closeChannel` ran, the slot was
+        /// reused by a later open, the open itself was refused, the
+        /// runtime tore down, or the session is a replay (the handle is
+        /// inert there; the journaled events are the whole stream).
+        /// Nothing staged, nothing counted: a well-behaved producer
+        /// thread exits its loop on this answer.
+        closed,
+    };
+
     /// Stage `bytes` for delivery as one `.data` event Msg on the next
-    /// drain, and wake the host loop. Callable from ANY thread. Returns
-    /// false — never blocking, never silently dropping a delivered
-    /// event — when the channel is closed (or this handle's occupancy
-    /// is over), when `bytes` exceeds `max_effect_channel_bytes`, or
-    /// when the staging FIFO is full; the bound and capacity refusals
-    /// count into the drop counters the next delivered event carries.
-    pub fn post(handle: ChannelHandle, bytes: []const u8) bool {
-        const shared = handle.shared orelse return false;
+    /// drain, and wake the host loop. Callable from ANY thread. Never
+    /// blocks and never silently drops a delivered event: the answer
+    /// says exactly what happened (see `PostResult`) — `.dropped_full`
+    /// and `.dropped_oversized` count into the drop counters the next
+    /// delivered event carries; `.closed` counts nothing and ends the
+    /// producer's occupancy for good.
+    pub fn post(handle: ChannelHandle, bytes: []const u8) PostResult {
+        const shared = handle.shared orelse return .closed;
         shared.mutex.lock();
         defer shared.mutex.unlock();
-        if (!shared.open or shared.generation != handle.generation) return false;
+        if (!shared.open or shared.generation != handle.generation) return .closed;
         // Open implies the owner references are alive (see
         // `ChannelOwnerRefs`) and staging is installed.
         const owner = shared.owner.?;
@@ -934,7 +966,7 @@ pub const ChannelHandle = struct {
             // event, and a stalled consumer is exactly when the app
             // needs to hear about drops.
             if (owner.services.*) |services| services.wake() catch {};
-            return false;
+            return if (bytes.len > max_effect_channel_bytes) .dropped_oversized else .dropped_full;
         }
         const seq = owner.seq.fetchAdd(1, .monotonic);
         const index = (staging.head + staging.len) % max_effect_channel_pending;
@@ -944,7 +976,7 @@ pub const ChannelHandle = struct {
         staging.len += 1;
         _ = owner.pending.fetchAdd(1, .monotonic);
         if (owner.services.*) |services| services.wake() catch {};
-        return true;
+        return .accepted;
     }
 };
 
@@ -3645,7 +3677,7 @@ pub fn Effects(comptime Msg: type) type {
         /// key, a full channel table, or an executor that could not
         /// stage the channel delivers exactly one `.rejected` event on
         /// the next drain (and the returned handle is dead — posts
-        /// return false). Channel events are journaled as executor
+        /// answer `.closed`). Channel events are journaled as executor
         /// truth at the drain boundary; under session replay the
         /// recorded events feed verbatim and the source is NEVER re-run
         /// — replay needs no source thread at all.
@@ -3726,13 +3758,13 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Close the open channel with `key`: posts stop landing
-        /// immediately (the handle answers false), the staged backlog
-        /// flushes in post order, and exactly one terminal `.closed`
-        /// event (final drop totals aboard) delivers and retires the
-        /// key. Unknown keys — and a key already `.closing` — are a
-        /// no-op, `cancelTimer`'s idle rule; and `cancel(key)` is NOT a
-        /// channel's close (channels end the way audio does: through
-        /// their own verb).
+        /// immediately (the handle answers `.closed`), the staged
+        /// backlog flushes in post order, and exactly one terminal
+        /// `.closed` event (final drop totals aboard) delivers and
+        /// retires the key. Unknown keys — and a key already `.closing`
+        /// — are a no-op, `cancelTimer`'s idle rule; and `cancel(key)`
+        /// is NOT a channel's close (channels end the way audio does:
+        /// through their own verb).
         pub fn closeChannel(self: *Self, key: u64) void {
             const slot = self.findChannelSlot(key) orelse return;
             if (slot.state != .open) return;

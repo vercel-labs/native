@@ -970,8 +970,11 @@ export const Cmd = {
   /// POSTING is deliberately not a TS verb: transpiled cores are
   /// single-threaded, so the TS tier opens, closes, and receives while
   /// the native side feeds. Back-pressure is part of the contract:
-  /// refused posts count into `droppedPending`/`droppedTotal` on the
-  /// next delivered event, never silence. One channel per key at a
+  /// the native `post` answers a four-way `ChannelHandle.PostResult`
+  /// (accepted / dropped_full / dropped_oversized / closed), so a
+  /// producer tells transient back-pressure from closure, and refused
+  /// posts count into `droppedPending`/`droppedTotal` on the next
+  /// delivered event, never silence. One channel per key at a
   /// time — a duplicate live key dispatches state "rejected" — and the
   /// key shares the engine's effect-key space (a same-key fetch is
   /// blocked while the channel lives). Keys are positive integers

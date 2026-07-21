@@ -17,6 +17,7 @@ const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
 
 const testing = std.testing;
+const PostResult = effects_mod.ChannelHandle.PostResult;
 
 // ------------------------------------------------- direct-channel tests
 //
@@ -48,9 +49,9 @@ test "channel lifecycle: open, post, deliver in order, close, reopen" {
     const handle = fx.openChannel(.{ .key = 7, .on_event = DirectFx.channelMsg(.event) });
     try testing.expect(handle.shared != null);
 
-    try testing.expect(handle.post("alpha"));
-    try testing.expect(handle.post("beta"));
-    try testing.expect(handle.post("gamma"));
+    try testing.expectEqual(PostResult.accepted, handle.post("alpha"));
+    try testing.expectEqual(PostResult.accepted, handle.post("beta"));
+    try testing.expectEqual(PostResult.accepted, handle.post("gamma"));
     try testing.expect(fx.hasPending());
 
     _ = try expectData(&fx, 7, "alpha");
@@ -62,7 +63,7 @@ test "channel lifecycle: open, post, deliver in order, close, reopen" {
     fx.closeChannel(7);
     // Posts stop landing the moment close runs — before the terminal
     // even delivers.
-    try testing.expect(!handle.post("late"));
+    try testing.expectEqual(PostResult.closed, handle.post("late"));
     const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
     try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
     try testing.expectEqual(@as(u32, 0), closed.event.dropped_total);
@@ -71,8 +72,8 @@ test "channel lifecycle: open, post, deliver in order, close, reopen" {
     // Delivery of `.closed` retired the key: the same key opens again,
     // and the OLD handle's generation is dead against the reused slot.
     const again = fx.openChannel(.{ .key = 7, .on_event = DirectFx.channelMsg(.event) });
-    try testing.expect(!handle.post("stale generation"));
-    try testing.expect(again.post("fresh"));
+    try testing.expectEqual(PostResult.closed, handle.post("stale generation"));
+    try testing.expectEqual(PostResult.accepted, again.post("fresh"));
     _ = try expectData(&fx, 7, "fresh");
     fx.closeChannel(7);
     _ = fx.takeMsg();
@@ -84,8 +85,8 @@ test "channel posts staged before close flush ahead of the closed terminal" {
     fx.executor = .fake;
 
     const handle = fx.openChannel(.{ .key = 3, .on_event = DirectFx.channelMsg(.event) });
-    try testing.expect(handle.post("one"));
-    try testing.expect(handle.post("two"));
+    try testing.expectEqual(PostResult.accepted, handle.post("one"));
+    try testing.expectEqual(PostResult.accepted, handle.post("two"));
     fx.closeChannel(3);
     _ = try expectData(&fx, 3, "one");
     _ = try expectData(&fx, 3, "two");
@@ -134,14 +135,14 @@ test "a duplicate occupied key rejects the new open with one terminal" {
     // The refused open's handle is dead — never-fails-from-the-caller's
     // view means the terminal is the report, not an error code.
     try testing.expect(dup.shared == null);
-    try testing.expect(!dup.post("nope"));
+    try testing.expectEqual(PostResult.closed, dup.post("nope"));
 
     const rejected = fx.takeMsg() orelse return error.TestExpectedMsg;
     try testing.expectEqual(effects_mod.EffectChannelEventKind.rejected, rejected.event.kind);
     try testing.expectEqual(@as(u64, 5), rejected.event.key);
 
     // The first occupancy is untouched.
-    try testing.expect(first.post("still live"));
+    try testing.expectEqual(PostResult.accepted, first.post("still live"));
     _ = try expectData(&fx, 5, "still live");
     fx.closeChannel(5);
     _ = fx.takeMsg();
@@ -170,12 +171,12 @@ test "back-pressure: a full staging FIFO refuses posts and the next event carrie
     fx.executor = .fake;
 
     const handle = fx.openChannel(.{ .key = 9, .on_event = DirectFx.channelMsg(.event), .max_pending = 2 });
-    try testing.expect(handle.post("kept 1"));
-    try testing.expect(handle.post("kept 2"));
-    // The stage is full: refused posts return false and count — the
-    // staged entries are NEVER evicted for the newcomer.
-    try testing.expect(!handle.post("dropped 1"));
-    try testing.expect(!handle.post("dropped 2"));
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 1"));
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 2"));
+    // The stage is full: refused posts answer `.dropped_full` and
+    // count — the staged entries are NEVER evicted for the newcomer.
+    try testing.expectEqual(PostResult.dropped_full, handle.post("dropped 1"));
+    try testing.expectEqual(PostResult.dropped_full, handle.post("dropped 2"));
 
     const first = try expectData(&fx, 9, "kept 1");
     try testing.expectEqual(@as(u32, 2), first.dropped_pending);
@@ -189,9 +190,9 @@ test "back-pressure: a full staging FIFO refuses posts and the next event carrie
     // Room again: posts land, one more refusal counts, and the NEXT
     // delivered event carries it; the `.closed` terminal reports the
     // final cumulative total.
-    try testing.expect(handle.post("kept 3"));
-    try testing.expect(handle.post("kept 4"));
-    try testing.expect(!handle.post("dropped 3"));
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 3"));
+    try testing.expectEqual(PostResult.accepted, handle.post("kept 4"));
+    try testing.expectEqual(PostResult.dropped_full, handle.post("dropped 3"));
     fx.closeChannel(9);
     const third = try expectData(&fx, 9, "kept 3");
     try testing.expectEqual(@as(u32, 1), third.dropped_pending);
@@ -203,16 +204,16 @@ test "back-pressure: a full staging FIFO refuses posts and the next event carrie
     try testing.expectEqual(@as(u32, 3), closed.event.dropped_total);
 }
 
-test "an oversized post refuses and counts as a drop" {
+test "an oversized post answers dropped_oversized and counts as a drop" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
 
     const handle = fx.openChannel(.{ .key = 4, .on_event = DirectFx.channelMsg(.event) });
     const oversized = [_]u8{'x'} ** (effects_mod.max_effect_channel_bytes + 1);
-    try testing.expect(!handle.post(&oversized));
+    try testing.expectEqual(PostResult.dropped_oversized, handle.post(&oversized));
     const at_bound = [_]u8{'y'} ** effects_mod.max_effect_channel_bytes;
-    try testing.expect(handle.post(&at_bound));
+    try testing.expectEqual(PostResult.accepted, handle.post(&at_bound));
 
     const event = try expectData(&fx, 4, &at_bound);
     try testing.expectEqual(@as(u32, 1), event.dropped_pending);
@@ -221,17 +222,17 @@ test "an oversized post refuses and counts as a drop" {
     _ = fx.takeMsg();
 }
 
-test "teardown closes every channel and post-after-teardown answers false" {
+test "teardown closes every channel and post-after-teardown answers closed" {
     var fx = DirectFx.init(testing.allocator);
     fx.executor = .fake;
 
     const handle = fx.openChannel(.{ .key = 12, .on_event = DirectFx.channelMsg(.event) });
-    try testing.expect(handle.post("staged but never delivered"));
+    try testing.expectEqual(PostResult.accepted, handle.post("staged but never delivered"));
     fx.deinit();
     // The handle resolves through the process-lifetime header, so a
     // source thread that outlives the runtime posts into a closed
-    // channel — false, never a use-after-free.
-    try testing.expect(!handle.post("after teardown"));
+    // channel — `.closed`, never a use-after-free.
+    try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
 }
 
 test "channel keys and slot-family keys share one key space" {
@@ -276,7 +277,7 @@ test "channelHandle resolves the open occupancy and nothing else" {
     try testing.expect(fx.channelHandle(6) == null);
     _ = fx.openChannel(.{ .key = 6, .on_event = DirectFx.channelMsg(.event) });
     const resolved = fx.channelHandle(6) orelse return error.TestExpectedHandle;
-    try testing.expect(resolved.post("via accessor"));
+    try testing.expectEqual(PostResult.accepted, resolved.post("via accessor"));
     fx.closeChannel(6);
     // `.closing` accepts no posts, so the accessor stops resolving.
     try testing.expect(fx.channelHandle(6) == null);
@@ -483,7 +484,7 @@ fn recordChannelSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recorde
     try testing.expectEqual(@as(u32, 1), app_state.model.rejected_events);
 
     // One more accepted post after the drain relieved the stage.
-    try testing.expect(handle.post("reading 4: 45 units"));
+    try testing.expectEqual(PostResult.accepted, handle.post("reading 4: 45 units"));
     try harness.runtime.dispatchPlatformEvent(app, .wake);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
@@ -491,7 +492,7 @@ fn recordChannelSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recorde
     try harness.runtime.dispatchPlatformEvent(app, .wake);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
     try testing.expectEqual(@as(u32, 1), app_state.model.closed_events);
-    try testing.expect(!handle.post("after close"));
+    try testing.expectEqual(PostResult.closed, handle.post("after close"));
 
     recorder.finish();
     try testing.expect(!recorder.failed);

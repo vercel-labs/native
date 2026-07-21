@@ -5,6 +5,8 @@ const main = @import("main.zig");
 const geometry = native_sdk.geometry;
 const testing = std.testing;
 
+const PostResult = native_sdk.ChannelHandle.PostResult;
+
 const Model = main.Model;
 const Msg = main.Msg;
 const MonitorApp = native_sdk.UiApp(Model, Msg);
@@ -91,26 +93,26 @@ test "start opens the channel and posted samples land in the list, no timers arm
     // themselves wake the loop.
     try testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingTimerCount());
 
-    try testing.expect(handle.post("sample 1: uptime 0.5s"));
-    try testing.expect(handle.post("sample 2: uptime 1.0s"));
+    try testing.expectEqual(PostResult.accepted, handle.post("sample 1: uptime 0.5s"));
+    try testing.expectEqual(PostResult.accepted, handle.post("sample 2: uptime 1.0s"));
     try h.drainWakes();
     try testing.expectEqual(@as(u64, 2), h.app_state.model.total_samples);
     try testing.expectEqualStrings("sample 2: uptime 1.0s", h.app_state.model.lineAt(1));
 }
 
-test "stop closes the channel: the terminal lands and later posts answer false" {
+test "stop closes the channel: the terminal lands and later posts answer closed" {
     var h = try Harness.create();
     defer h.destroy();
 
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
     const handle = captured_handle orelse return error.TestExpectedHandle;
-    try testing.expect(handle.post("sample 1"));
+    try testing.expectEqual(PostResult.accepted, handle.post("sample 1"));
     try h.drainWakes();
 
     try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
-    // The worker's wind-down signal: post answers false the moment the
-    // close runs, before the terminal even delivers.
-    try testing.expect(!handle.post("sample 2"));
+    // The worker's wind-down signal: post answers `.closed` the moment
+    // the close runs, before the terminal even delivers.
+    try testing.expectEqual(PostResult.closed, handle.post("sample 2"));
     try h.drainWakes();
     try testing.expect(!h.app_state.model.monitoring);
     try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
@@ -119,10 +121,43 @@ test "stop closes the channel: the terminal lands and later posts answer false" 
     // the OLD handle stays dead.
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
     const fresh = captured_handle orelse return error.TestExpectedHandle;
-    try testing.expect(!handle.post("stale"));
-    try testing.expect(fresh.post("sample 1 again"));
+    try testing.expectEqual(PostResult.closed, handle.post("stale"));
+    try testing.expectEqual(PostResult.accepted, fresh.post("sample 1 again"));
     try h.drainWakes();
     try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
+}
+
+test "back-pressure skips samples but never stops the monitor" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    const handle = captured_handle orelse return error.TestExpectedHandle;
+
+    // Fill the staging FIFO without draining: the next post answers
+    // `.dropped_full` — skip-this-sample, NOT the worker's stop signal.
+    var buffer: [main.max_line_bytes]u8 = undefined;
+    var index: usize = 0;
+    while (index < native_sdk.max_effect_channel_pending) : (index += 1) {
+        const line = try std.fmt.bufPrint(&buffer, "sample {d}", .{index});
+        try testing.expectEqual(PostResult.accepted, handle.post(line));
+    }
+    try testing.expectEqual(PostResult.dropped_full, handle.post("one too many"));
+
+    // The drain relieves the stage: still monitoring, and the delivered
+    // events carried the honest drop count into the status line.
+    try h.drainWakes();
+    try testing.expect(h.app_state.model.monitoring);
+    try testing.expectEqual(@as(u64, native_sdk.max_effect_channel_pending), h.app_state.model.total_samples);
+    try testing.expectEqual(@as(u32, 1), h.app_state.model.dropped_total);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqualStrings("monitoring: 32 samples, 1 dropped", h.app_state.model.statusText(arena_state.allocator()));
+
+    // Sampling continues right through the stall.
+    try testing.expectEqual(PostResult.accepted, handle.post("sample after stall"));
+    try h.drainWakes();
+    try testing.expectEqual(@as(u64, native_sdk.max_effect_channel_pending + 1), h.app_state.model.total_samples);
 }
 
 test "a duplicate start while monitoring is a no-op, and a refused open reports rejected" {
@@ -146,5 +181,5 @@ test "a duplicate start while monitoring is a no-op, and a refused open reports 
     try testing.expect(!h.app_state.model.monitoring);
 
     // The original occupancy is untouched throughout.
-    try testing.expect(handle.post("still live"));
+    try testing.expectEqual(PostResult.accepted, handle.post("still live"));
 }

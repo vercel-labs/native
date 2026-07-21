@@ -1513,7 +1513,7 @@ test "a channel opens, posts route the five-field arm by name, and close retires
     // exactly what an embedder does.
     Host.dispatch(fx, .open_chan);
     const handle = fx.channelHandle(41) orelse return error.TestExpectedHandle;
-    try std.testing.expect(handle.post("cpu 42%"));
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, handle.post("cpu 42%"));
     Host.drain(fx);
     try std.testing.expectEqual(@as(i64, 1), Host.model().chan_events);
     try std.testing.expectEqual(mini_core.ChannelState.data, Host.model().chan_state);
@@ -1531,12 +1531,12 @@ test "a channel opens, posts route the five-field arm by name, and close retires
 
     // close: the staged post flushes ahead of the one closed terminal,
     // which retires the entry and kills the handle.
-    try std.testing.expect(handle.post("last reading"));
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, handle.post("last reading"));
     Host.dispatch(fx, .close_chan);
     Host.drain(fx);
     try std.testing.expectEqual(@as(i64, 4), Host.model().chan_events);
     try std.testing.expectEqual(mini_core.ChannelState.closed, Host.model().chan_state);
-    try std.testing.expect(!handle.post("too late"));
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.closed, handle.post("too late"));
     try std.testing.expect(fx.channelHandle(41) == null);
 
     // The key is free again: a fresh open lands with no rejection.

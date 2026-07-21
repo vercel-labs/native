@@ -7,9 +7,11 @@
 //! the app polls NOTHING: no `fx.startTimer`, no shared-queue sweep,
 //! just events arriving as typed Msgs when the source produces them.
 //! Stop closes the channel through `fx.closeChannel`; the worker
-//! notices its next `post` answer false and winds down on its own (the
-//! handle outliving the channel is safe by construction). The view
-//! never opens anything — effects are update-side only.
+//! notices its next `post` answer `.closed` and winds down on its own
+//! (the handle outliving the channel is safe by construction), while a
+//! transient `.dropped_full` only skips that one sample — back-pressure
+//! never stops the monitor. The view never opens anything — effects
+//! are update-side only.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -83,6 +85,12 @@ pub const Model = struct {
     pub fn statusText(model: *const Model, arena: std.mem.Allocator) []const u8 {
         if (model.rejected) return "channel rejected";
         if (model.monitoring) {
+            // Honesty is this example's teaching job: delivered events
+            // carry the channel's drop counters, so a stalled drain
+            // shows up here instead of a silent "monitoring".
+            if (model.dropped_total > 0) {
+                return std.fmt.allocPrint(arena, "monitoring: {d} samples, {d} dropped", .{ model.total_samples, model.dropped_total }) catch "monitoring";
+            }
             return std.fmt.allocPrint(arena, "monitoring: {d} samples", .{model.total_samples}) catch "monitoring";
         }
         if (model.total_samples > 0) {
@@ -110,9 +118,9 @@ pub var start_source: *const fn (handle: native_sdk.ChannelHandle) void = startS
 
 /// Spawn the sampling thread, DETACHED on purpose: the thread owns its
 /// own wind-down — after `fx.closeChannel` (or app teardown) its next
-/// `post` answers false and it returns. The generation-stamped handle
-/// makes that safe without a join: a post after the channel (or the
-/// whole runtime) is gone touches only the process-lifetime header.
+/// `post` answers `.closed` and it returns. The generation-stamped
+/// handle makes that safe without a join: a post after the channel (or
+/// the whole runtime) is gone touches only the process-lifetime header.
 fn startSamplerThread(handle: native_sdk.ChannelHandle) void {
     const thread = std.Thread.spawn(.{}, samplerMain, .{handle}) catch return;
     thread.detach();
@@ -131,10 +139,24 @@ fn samplerMain(handle: native_sdk.ChannelHandle) void {
         index += 1;
         var buffer: [max_line_bytes]u8 = undefined;
         const line = formatSample(&buffer, index, started_ms);
-        // False means closed (or the staging bound pushed back): the
-        // channel reports drops on the next delivered event, and a
-        // closed channel is this thread's signal to wind down.
-        if (!handle.post(line)) return;
+        // The post's answer is the worker's whole protocol — "retry
+        // later" and "stop forever" are different answers on purpose.
+        switch (handle.post(line)) {
+            // Staged: one `.data` Msg delivers on the next drain.
+            .accepted => {},
+            // Transient back-pressure: THIS sample is dropped and
+            // counted — the next delivered event carries the totals
+            // and the status line reports them — but sampling
+            // continues. A stalled drain is not a stop.
+            .dropped_full => {},
+            // A programming error by construction here: samples are
+            // bounded at max_line_bytes, far under the channel's
+            // post bound — no retry of the same bytes could ever land.
+            .dropped_oversized => unreachable,
+            // The occupancy is over for good — Stop closed the
+            // channel, or the app tore down. Wind down.
+            .closed => return,
+        }
     }
 }
 
