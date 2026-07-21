@@ -171,6 +171,15 @@ pub const max_effect_file_bytes: usize = 1024 * 1024;
 /// meets this bound.
 pub const default_effect_file_join_deadline_ms: u64 = 15_000;
 
+/// Teardown budget for one channel's in-flight host wake call (see
+/// `Effects.channel_wake_join_deadline_ms` and `quiesceChannelWake`).
+/// A healthy `wake_fn` is a bounded enqueue that returns in
+/// microseconds; a hook still inside the call after five seconds is
+/// stuck behind something teardown cannot service (typically a
+/// synchronous marshal against the stopping loop) and is abandoned
+/// with a warning rather than hanging teardown forever.
+pub const default_channel_wake_join_deadline_ms: u64 = 5_000;
+
 /// Maximum clipboard-effect payload: what one `writeClipboard` writes
 /// and the most one `readClipboard` delivers — the platform clipboard
 /// bound (`platform.max_clipboard_data_bytes`). Over-bound writes are
@@ -890,13 +899,17 @@ const ChannelOwnerRefs = struct {
 ///
 /// Ownership story (the abandon-fence doctrine, ditto): `services`
 /// points at the owning Effects' late-bound services field, and the
-/// disarm fence is `in_flight`. Every close path (closeChannel,
-/// terminal retire, teardown) clears the binding under `mutex` AFTER
-/// clearing `open` under the staging mutex, then waits for
-/// `in_flight` to reach zero — so once a disarm returns no post is
-/// inside the host call and none can start one (a later post fails
-/// the generation gate before it could increment): a stale handle's
-/// post can never wake a dead host.
+/// teardown fence is `in_flight`. Every close path (closeChannel,
+/// terminal retire, teardown) REVOKES the binding under `mutex` AFTER
+/// clearing `open` under the staging mutex — a later post fails the
+/// generation gate before it could increment `in_flight`, so no new
+/// host call can start. Only TEARDOWN additionally waits (bounded)
+/// for `in_flight` to reach zero, because only teardown outlives the
+/// host: mid-life closes leave an in-flight `wake_fn` to finish on
+/// its own time against services that stay alive (see
+/// `revokeChannelWake` vs `quiesceChannelWake` for the split and the
+/// marshal deadlock it prevents). Either way a stale handle's post
+/// can never wake a dead host.
 const ChannelWake = struct {
     mutex: SpinMutex = .{},
     /// The occupancy this binding serves (the header's generation): a
@@ -920,21 +933,22 @@ const ChannelWake = struct {
     /// post racing the drain always lands either inside the pass's
     /// snapshot or a fresh wake of its own. Per-channel, like
     /// MediaSurfaceWake's per-slot flag: the coalescer rides the
-    /// binding it guards (same generation fence, same disarm sweep),
+    /// binding it guards (same generation fence, same revoke sweep),
     /// and the drain structure supports it because every pass sweeps
     /// all channel slots at its boundary. Atomic so posts can check it
     /// WITHOUT the wake mutex (see `requestHostWake` for why that
     /// lock-free fast path matters); mutations happen under the mutex.
     pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    /// Posts currently INSIDE the embedder's `wake_fn` — the disarm
+    /// Posts currently INSIDE the embedder's `wake_fn` — the teardown
     /// fence (see the header doc: the host call runs with `mutex`
     /// free). Incremented under `mutex` before the call, decremented
-    /// under `mutex` after it returns; `disarmChannelWake` clears the
-    /// binding under `mutex` and then spin-waits for zero, so "disarm
-    /// returned" still means "no producer is inside the host call". A
-    /// counter, not a flag: the pass-boundary coalescer clear can let
-    /// a second post latch and call while a slow first call is still
-    /// in flight.
+    /// under `mutex` after it returns; `quiesceChannelWake` clears the
+    /// binding under `mutex` and then waits (bounded) for zero, so a
+    /// quiesce that returns true means "no producer is inside the
+    /// host call". Mid-life closes never wait on this counter
+    /// (`revokeChannelWake`). A counter, not a flag: the pass-boundary
+    /// coalescer clear can let a second post latch and call while a
+    /// slow first call is still in flight.
     in_flight: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 };
 
@@ -1070,7 +1084,7 @@ pub const ChannelHandle = struct {
     /// Callable from ANY thread. Never blocks and never silently drops
     /// a delivered event — and the never-blocks contract extends
     /// through the wake: the host `wake_fn` is invoked with NO channel
-    /// lock held (`ChannelWake.in_flight` is the disarm fence, not
+    /// lock held (`ChannelWake.in_flight` is the teardown fence, not
     /// lock tenure), so a post can never hold a lock the loop thread
     /// is waiting on, and an embedder wake that synchronizes with the
     /// loop cannot deadlock a drain, close, or teardown against this
@@ -1140,10 +1154,10 @@ pub const ChannelHandle = struct {
     /// enqueue-only contract, and the loop thread takes this mutex at
     /// every pass boundary (`drainBoundary`), so holding it across the
     /// call would deadlock a wake that synchronizes with the loop (see
-    /// `ChannelWake`). The abandon fence is `in_flight` instead: it
+    /// `ChannelWake`). The teardown fence is `in_flight` instead: it
     /// increments under the mutex before the call and decrements under
-    /// the mutex after, so a disarm still can never complete while a
-    /// call into the host is in flight, and after it returns no call
+    /// the mutex after, so a teardown quiesce can still wait out every
+    /// call into the host, and once the binding is revoked no new call
     /// can start.
     fn requestHostWake(shared: *ChannelShared, generation: u64) void {
         const wake = &shared.wake;
@@ -1185,15 +1199,19 @@ pub const ChannelHandle = struct {
             // of parking a wake that never comes.
             wake.pending.store(true, .seq_cst);
             // Mark in flight under the mutex, then RELEASE for the
-            // call: the disarm fence (`ChannelWake.in_flight`).
+            // call: the teardown fence (`ChannelWake.in_flight`).
             _ = wake.in_flight.fetchAdd(1, .seq_cst);
             break :arm found;
         };
         const failed = if (services.wake()) |_| false else |_| true;
-        // Re-acquire to clear: the decrement is what a waiting disarm
-        // observes, and the failure unlatch stays generation-gated —
-        // a disarm (or reopen) that won the race already reset
-        // `pending` for its own occupancy.
+        // Re-acquire to clear: the decrement is what a waiting
+        // teardown quiesce observes, and the failure unlatch stays
+        // generation-gated — a revoke (which zeroed the generation) or
+        // a reopen (which replaced it) that won the race already reset
+        // `pending` for its own occupancy, and this stale call must
+        // not clear a latch it no longer owns. The decrement itself is
+        // unconditional and safe against any interleaving: it lands in
+        // the process-lifetime header, which outlives every close.
         wake.mutex.lock();
         defer wake.mutex.unlock();
         if (failed and wake.generation == generation) wake.pending.store(false, .seq_cst);
@@ -1201,26 +1219,75 @@ pub const ChannelHandle = struct {
     }
 };
 
-/// Disarm one channel header's wake binding: after this returns, no
-/// post is inside the host wake and none can start one. The fence is
-/// two-step (see `ChannelWake`): clear the binding under the mutex —
-/// any post locking after this fails the generation gate before it
-/// could mark itself in flight — then wait, OUTSIDE the mutex, for
-/// every already-in-flight host call to finish (the caller must not
-/// hold the lock the finishing post re-acquires to decrement). The
-/// wait spins with `spinLoopHint`, the `SpinMutex` idiom, because a
-/// well-behaved `wake_fn` is a bounded enqueue; a blocking embedder
-/// wake stalls only its own channel's close, never a drain. Called by
-/// every close path AFTER `open` cleared under the staging mutex; the
-/// two locks are taken strictly one after the other, never nested.
-fn disarmChannelWake(shared: *ChannelShared) void {
+/// REVOKE one channel header's wake binding, non-blocking: clear the
+/// binding under the wake mutex and return. Any post locking after
+/// this fails the generation gate before it could mark itself in
+/// flight, so no NEW host call can start — but a call already inside
+/// the embedder's `wake_fn` is left to finish on its own time. That is
+/// safe for every mid-life close (closeChannel, terminal retire)
+/// because everything the stale call still touches outlives it: the
+/// host services stay bound and alive past any single channel's close,
+/// its post-call decrement lands in the process-lifetime header, and
+/// the failure unlatch it may attempt is generation-gated
+/// (`requestHostWake` compares against the call's OWN generation,
+/// which this revoke zeroed — and a reopen replaced — so a stale call
+/// can never clear a later occupancy's latched wake). The stale wake
+/// itself is a harmless nudge: the loop drains, finds nothing, moves
+/// on.
+///
+/// Deliberately NOT a wait (`quiesceChannelWake` is): a supported
+/// embedder `wake_fn` may synchronously marshal to the loop thread,
+/// and when the marshaled dispatch delivers a channel message whose
+/// handler calls `closeChannel`, a close that waited for
+/// `in_flight == 0` would spin on the loop thread while the producer
+/// inside `wake_fn` waited for that same loop to service its marshal —
+/// a deterministic deadlock on core supported usage.
+///
+/// Called by every close path AFTER `open` cleared under the staging
+/// mutex; the two locks are taken strictly one after the other, never
+/// nested.
+fn revokeChannelWake(shared: *ChannelShared) void {
     const wake = &shared.wake;
     wake.mutex.lock();
     wake.generation = 0;
     wake.services = null;
     wake.pending.store(false, .seq_cst);
     wake.mutex.unlock();
-    while (wake.in_flight.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+}
+
+/// QUIESCE one channel header's wake binding: revoke, then wait —
+/// OUTSIDE the mutex, which the finishing post re-acquires to
+/// decrement — for every already-in-flight host call to return, up to
+/// `deadline_ms`. Reserved for TEARDOWN (`deinit`'s channel sweep),
+/// the one caller that must not leave a call inside the host: deinit
+/// ends by severing the services binding, and the platform behind it
+/// may be destroyed the moment deinit returns, so an in-flight
+/// `wake_fn` abandoned silently could execute into a freed platform.
+/// Mid-life closes must never wait here (see `revokeChannelWake` for
+/// the marshal deadlock this split exists for).
+///
+/// The wait is BOUNDED because teardown cannot guarantee the loop
+/// thread is not a pending marshal target: deinit runs on the loop
+/// thread as the loop stops pumping dispatches, so a synchronous
+/// marshal already inside `wake_fn` may be waiting for a dispatch this
+/// loop will never service — an unbounded wait would hang teardown
+/// forever behind it. False means the call is ABANDONED, the
+/// abandoned-worker idiom: everything the framework hands the stale
+/// call to touch after it unblocks — the wake mutex, the in-flight
+/// decrement, the generation gate — lives in the process-lifetime
+/// header and stays valid forever; the embedder's own services object
+/// is the one thing outside that invariant, which is why the caller
+/// warns loudly naming the stuck hook.
+fn quiesceChannelWake(shared: *ChannelShared, deadline_ms: u64) bool {
+    revokeChannelWake(shared);
+    const wake = &shared.wake;
+    const start_ns = runtime_clock.monotonicNanoseconds();
+    while (wake.in_flight.load(.seq_cst) != 0) {
+        const elapsed_ms = (runtime_clock.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+        if (elapsed_ms >= deadline_ms) return false;
+        std.atomic.spinLoopHint();
+    }
+    return true;
 }
 
 /// Base platform timer id for fx timers: slot N arms the platform timer
@@ -2913,6 +2980,19 @@ pub fn Effects(comptime Msg: type) type {
         /// bounded, warned leak — see `SpawnWorkerContext`). The seam
         /// tests assert against: zero on every healthy teardown.
         abandoned_spawn_workers: u32 = 0,
+        /// Teardown budget (milliseconds, per channel) for a host wake
+        /// call still inside the embedder's `wake_fn` when the channel
+        /// sweep quiesces it — see `quiesceChannelWake` for why the
+        /// wait must be bounded (a synchronous marshal against the
+        /// stopping loop may never return). A healthy hook is a
+        /// bounded enqueue that never meets this. Injectable so tests
+        /// pin the abandon path with a tiny bound.
+        channel_wake_join_deadline_ms: u64 = default_channel_wake_join_deadline_ms,
+        /// How many in-flight channel wake calls teardown has
+        /// abandoned (each one warned; the header the stale call still
+        /// touches is process-lived — see `quiesceChannelWake`). The
+        /// seam tests assert against: zero on every healthy teardown.
+        abandoned_channel_wakes: u32 = 0,
         /// Injectable concurrent-start switch for fetch supervisors,
         /// following `file_join_interrupt`: always true in real use;
         /// tests disable it to pin the no-capacity rejection path
@@ -3107,13 +3187,40 @@ pub fn Effects(comptime Msg: type) type {
                     shared.staging = null;
                     shared.owner = null;
                     shared.mutex.unlock();
-                    // The wake disarm is the abandon fence: it clears
-                    // the binding under the wake mutex and waits out
-                    // the in-flight count, so after it returns no
-                    // posting thread is inside `wake_fn` and none can
-                    // re-enter — this struct (and the services
-                    // binding) may die safely.
-                    disarmChannelWake(shared);
+                    // The wake QUIESCE is the abandon fence — teardown
+                    // is the one caller that waits (every mid-life
+                    // close only revokes; see `revokeChannelWake` for
+                    // the marshal deadlock the split prevents): it
+                    // clears the binding under the wake mutex and
+                    // waits out the in-flight count, so once it
+                    // returns true no posting thread is inside
+                    // `wake_fn` and none can re-enter — this struct
+                    // (and the services binding severed below) may die
+                    // safely. The wait is BOUNDED because this loop
+                    // thread has stopped servicing dispatches, so
+                    // deinit cannot guarantee it is not the pending
+                    // target of a synchronous marshal inside an
+                    // in-flight `wake_fn` — an unbounded wait would
+                    // hang teardown forever behind a marshal nobody
+                    // will ever service. A hook still stuck at the
+                    // deadline is abandoned, warned, and counted:
+                    // everything the framework hands the stale call
+                    // (the wake mutex, the in-flight decrement, the
+                    // generation gate) lives in the process-lifetime
+                    // header and stays valid forever; only the
+                    // embedder's own services object — which the
+                    // embedder is holding hostage inside its own
+                    // blocked hook — sits outside that invariant,
+                    // which is what the warning names.
+                    if (!quiesceChannelWake(shared, self.channel_wake_join_deadline_ms)) {
+                        self.abandoned_channel_wakes += 1;
+                        if (comptime builtin.os.tag != .freestanding) {
+                            std.debug.print(
+                                "effects teardown: a channel host wake hook is still executing after {d}ms (likely a synchronous marshal against this stopping loop); abandoning the in-flight call — the channel header it can still touch is process-lived, but the platform services it entered through must outlive it\n",
+                                .{self.channel_wake_join_deadline_ms},
+                            );
+                        }
+                    }
                     if (staging) |s| process_allocator.destroy(s);
                 }
                 channel_slot.* = .{};
@@ -4299,11 +4406,13 @@ pub fn Effects(comptime Msg: type) type {
                 shared.mutex.lock();
                 shared.open = false;
                 shared.mutex.unlock();
-                // Disarm AFTER `open` cleared: the disarm waits out
-                // every in-flight host call and gates new ones off the
-                // generation, so no host call outlives this line (see
-                // `ChannelWake`).
-                disarmChannelWake(shared);
+                // Revoke AFTER `open` cleared: no NEW host call can
+                // start past this line (the generation gate), and an
+                // in-flight one finishes against the process-lifetime
+                // header on its own time. Never a quiescing wait here —
+                // this close may BE the dispatch a synchronous-marshal
+                // `wake_fn` is waiting on (see `revokeChannelWake`).
+                revokeChannelWake(shared);
             }
             // Replay mode: the recorded session already journaled this
             // channel's `.closed` terminal, and feeding that record is
@@ -6892,10 +7001,14 @@ pub fn Effects(comptime Msg: type) type {
                 shared.staging = null;
                 shared.owner = null;
                 shared.mutex.unlock();
-                // Usually a no-op (closeChannel already disarmed), but
+                // Usually a no-op (closeChannel already revoked), but
                 // fed terminals can retire a channel that never closed
-                // through the verb — disarm uniformly (idempotent).
-                disarmChannelWake(shared);
+                // through the verb — revoke uniformly (idempotent).
+                // Non-blocking like the close path, and for the same
+                // reason: retire runs at delivery, inside the very
+                // dispatch a synchronous-marshal `wake_fn` may be
+                // waiting on (see `revokeChannelWake`).
+                revokeChannelWake(shared);
                 if (staging) |s| process_allocator.destroy(s);
             }
             slot.state = .idle;

@@ -767,6 +767,302 @@ test "a wake hook that takes the drain's pass boundary completes instead of dead
     while (fx.takeMsg()) |_| {}
 }
 
+/// A wake hook that SYNCHRONOUSLY MARSHALS to the loop thread — the
+/// dispatch-sync shape (macOS `dispatch_sync` onto the main queue,
+/// Win32 `SendMessage`): the hook returns only after the loop thread
+/// has serviced the marshaled dispatch. Supported embedder usage —
+/// `wake_fn` has no enqueue-only contract — and the shape that turned
+/// the close path's blocking in-flight wait into a deadlock: the
+/// marshaled dispatch delivers the channel message, the message's
+/// handler calls `closeChannel`, and a close that waits for
+/// `in_flight == 0` waits on a hook that waits on the loop. The close
+/// path must REVOKE the binding (non-blocking) and let the in-flight
+/// call finish against the process-lifetime header on its own time;
+/// only teardown quiesces (see `quiesceChannelWake`).
+const SyncMarshalWake = struct {
+    var loop_thread: std.Thread.Id = 0;
+    var marshal_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var dispatch_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+    fn reset() void {
+        loop_thread = 0;
+        marshal_requested.store(false, .seq_cst);
+        dispatch_done.store(false, .seq_cst);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        // A wake issued ON the loop thread dispatches inline — the
+        // real synchronous-marshal primitives behave the same way
+        // (dispatch_sync from the target queue would deadlock, so a
+        // real hook checks; `SendMessage` to the calling thread's own
+        // window runs the procedure directly). Only a producer-thread
+        // wake marshals and blocks.
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        marshal_requested.store(true, .seq_cst);
+        // The synchronous marshal: block until the loop thread reports
+        // the dispatched handler ran to completion.
+        while (!dispatch_done.load(.seq_cst)) std.atomic.spinLoopHint();
+    }
+};
+
+const SyncMarshalPoster = struct {
+    fn run(handle: effects_mod.ChannelHandle, result: *PostResult) void {
+        result.* = handle.post("marshal me");
+    }
+};
+
+test "a synchronous-marshal wake whose dispatched handler closes the channel completes instead of deadlocking" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    SyncMarshalWake.reset();
+    defer SyncMarshalWake.reset();
+    SyncMarshalWake.loop_thread = std.Thread.getCurrentId();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = SyncMarshalWake.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 58, .on_event = DirectFx.channelMsg(.event) });
+    var post_result: PostResult = .closed;
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, &post_result });
+    // An error return must still release the marshal and collect the
+    // producer, or the blocked thread would hang the suite behind the
+    // failure.
+    var joined = false;
+    errdefer SyncMarshalWake.dispatch_done.store(true, .seq_cst);
+    defer if (!joined) producer.join();
+
+    // Wait (bounded — fail loud, never hang the suite) for the
+    // producer to reach the inside of `wake_fn`: from here on it is
+    // blocked until the loop services its marshal, with the wake's
+    // in-flight count held at one.
+    var waited_ms: usize = 0;
+    while (!SyncMarshalWake.marshal_requested.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedMarshal;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    // Service the marshaled dispatch on the loop thread: deliver the
+    // channel message, and — as the app's update — close the channel.
+    // Pre-split this deadlocked HERE: `closeChannel`'s disarm spun on
+    // `in_flight == 0` while the producer spun inside `wake_fn`
+    // waiting for this very dispatch to complete.
+    _ = try expectData(&fx, 58, "marshal me");
+    fx.closeChannel(58);
+    try testing.expectEqual(PostResult.closed, handle.post("after close"));
+    SyncMarshalWake.dispatch_done.store(true, .seq_cst);
+    producer.join();
+    joined = true;
+    try testing.expectEqual(PostResult.accepted, post_result);
+
+    // The close delivers its `.closed` terminal exactly once.
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+}
+
+/// A wake hook held OPEN mid-call while the loop closes, drains, and
+/// REOPENS the channel — the stale in-flight call the revoke split
+/// leaves behind on purpose. The gated call FAILS once released, so
+/// its post-call failure unlatch runs against a dead generation: the
+/// gate in `requestHostWake` must keep it from clearing the fresh
+/// occupancy's latched wake, and its decrement must land safely in the
+/// process-lifetime header.
+const StaleWakeCall = struct {
+    var loop_thread: std.Thread.Id = 0;
+    var gate_armed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var blocked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+    fn reset() void {
+        loop_thread = 0;
+        gate_armed.store(false, .seq_cst);
+        blocked.store(false, .seq_cst);
+        release.store(false, .seq_cst);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        if (!gate_armed.swap(false, .seq_cst)) return;
+        blocked.store(true, .seq_cst);
+        while (!release.load(.seq_cst)) std.atomic.spinLoopHint();
+        return error.WakeRefused;
+    }
+};
+
+test "a stale in-flight wake call outliving close and reopen cannot unlatch the fresh occupancy" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StaleWakeCall.reset();
+    defer StaleWakeCall.reset();
+    StaleWakeCall.loop_thread = std.Thread.getCurrentId();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = StaleWakeCall.wake };
+    fx.bindServices(&services);
+
+    const stale = fx.openChannel(.{ .key = 62, .on_event = DirectFx.channelMsg(.event) });
+    StaleWakeCall.gate_armed.store(true, .seq_cst);
+    var post_result: PostResult = .closed;
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ stale, &post_result });
+    var joined = false;
+    errdefer StaleWakeCall.release.store(true, .seq_cst);
+    defer if (!joined) producer.join();
+
+    var waited_ms: usize = 0;
+    while (!StaleWakeCall.blocked.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedBlockedWake;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    // Close and fully retire the first occupancy WHILE the stale call
+    // is still inside the hook (revoke is non-blocking), then reopen
+    // the same key: a fresh generation on the same process-lifetime
+    // header.
+    fx.closeChannel(62);
+    _ = try expectData(&fx, 62, "marshal me");
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    const fresh = fx.openChannel(.{ .key = 62, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(fresh.shared != null);
+
+    // The fresh occupancy latches its own wake (the loop-thread call
+    // dispatches inline and SUCCEEDS, so the latch stays set).
+    try testing.expectEqual(PostResult.accepted, fresh.post("fresh"));
+    try testing.expect(fresh.shared.?.wake.pending.load(.seq_cst));
+
+    // Release the stale call: it fails, and its failure unlatch runs
+    // with the dead generation — the gate must refuse it. The
+    // decrement lands in the process-lifetime header either way.
+    StaleWakeCall.release.store(true, .seq_cst);
+    producer.join();
+    joined = true;
+    try testing.expectEqual(PostResult.accepted, post_result);
+    try testing.expect(fresh.shared.?.wake.pending.load(.seq_cst));
+
+    // The fresh occupancy's staged post is untouched.
+    _ = try expectData(&fx, 62, "fresh");
+    fx.closeChannel(62);
+    while (fx.takeMsg()) |_| {}
+}
+
+/// A wake hook that dawdles inside the call so teardown's quiesce has
+/// something real to wait out: enters, sleeps, marks itself returned.
+const SlowTeardownWake = struct {
+    var loop_thread: std.Thread.Id = 0;
+    var entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var returned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+    fn reset() void {
+        loop_thread = 0;
+        entered.store(false, .seq_cst);
+        returned.store(false, .seq_cst);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        entered.store(true, .seq_cst);
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(100), .awake);
+        returned.store(true, .seq_cst);
+    }
+};
+
+test "teardown quiesces an in-flight wake call before the services binding dies" {
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    SlowTeardownWake.reset();
+    defer SlowTeardownWake.reset();
+    SlowTeardownWake.loop_thread = std.Thread.getCurrentId();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = SlowTeardownWake.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 63, .on_event = DirectFx.channelMsg(.event) });
+    var post_result: PostResult = .closed;
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, &post_result });
+    defer producer.join();
+
+    var waited_ms: usize = 0;
+    while (!SlowTeardownWake.entered.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedWakeEntry;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    // Teardown while the producer is inside `wake_fn`: deinit severs
+    // the services binding, so its channel sweep must WAIT for the
+    // in-flight call — a revoke-only teardown could tear the platform
+    // down under a hook still executing inside it. The quiesce
+    // returning cleanly (no abandon counted) proves the wait covered
+    // the whole call.
+    fx.deinit();
+    try testing.expect(SlowTeardownWake.returned.load(.seq_cst));
+    try testing.expectEqual(@as(u32, 0), fx.abandoned_channel_wakes);
+}
+
+/// A wake hook stuck PAST teardown's deadline — the shape quiesce
+/// cannot wait out (a synchronous marshal against the stopping loop
+/// never returns), pinned with a test-released gate instead.
+const StuckTeardownWake = struct {
+    var loop_thread: std.Thread.Id = 0;
+    var entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    var release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+    fn reset() void {
+        loop_thread = 0;
+        entered.store(false, .seq_cst);
+        release.store(false, .seq_cst);
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        if (std.Thread.getCurrentId() == loop_thread) return;
+        entered.store(true, .seq_cst);
+        while (!release.load(.seq_cst)) std.atomic.spinLoopHint();
+    }
+};
+
+test "teardown abandons a wake call still stuck at the deadline and the stale call stays safe" {
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    // A tiny injected budget so the abandon safety net is reached
+    // deterministically (the real default is generous; see
+    // `default_channel_wake_join_deadline_ms`).
+    fx.channel_wake_join_deadline_ms = 50;
+    StuckTeardownWake.reset();
+    defer StuckTeardownWake.reset();
+    StuckTeardownWake.loop_thread = std.Thread.getCurrentId();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = StuckTeardownWake.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 64, .on_event = DirectFx.channelMsg(.event) });
+    var post_result: PostResult = .closed;
+    const producer = try std.Thread.spawn(.{}, SyncMarshalPoster.run, .{ handle, &post_result });
+    var joined = false;
+    errdefer StuckTeardownWake.release.store(true, .seq_cst);
+    defer if (!joined) producer.join();
+
+    var waited_ms: usize = 0;
+    while (!StuckTeardownWake.entered.load(.seq_cst)) : (waited_ms += 1) {
+        if (waited_ms > 10_000) return error.TestExpectedWakeEntry;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    // Teardown cannot wait this one out — deinit must return within
+    // its bounded budget, warn, and count the abandon rather than
+    // hang the app's exit forever behind a hook nobody will release.
+    fx.deinit();
+    try testing.expectEqual(@as(u32, 1), fx.abandoned_channel_wakes);
+
+    // The abandoned call unblocks LATER and finishes against the
+    // process-lifetime header — a safe decrement, never a
+    // use-after-free — and the post it served still answers honestly.
+    StuckTeardownWake.release.store(true, .seq_cst);
+    producer.join();
+    joined = true;
+    try testing.expectEqual(PostResult.accepted, post_result);
+    try testing.expectEqual(PostResult.closed, handle.post("after teardown"));
+}
+
 // ---------------------------------------------- record/replay acceptance
 
 const channel_canvas_label = "channel-session-canvas";
