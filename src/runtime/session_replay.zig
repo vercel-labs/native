@@ -228,6 +228,20 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Provenance consistency, gated BEFORE the regeneration
+                // skip below: a `.data` or `.closed` channel record
+                // stamped with `.rejected` provenance would be skipped
+                // there and its event silently omitted from the Msg
+                // stream (see `channelRecordProvenanceDamaged` for the
+                // recorder-truth analysis of exactly which pairs a
+                // recording can produce).
+                if (effect.kind == .channel and channelRecordProvenanceDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: channel record for key {d} claims a .{s} event stamped with .{s} provenance - the recorder stamps .rejected only on regenerating .rejected admission refusals and every other channel record keeps .exited, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.channel_kind), @tagName(effect.exit_reason) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effect.kind == .image and imageDimsDamaged(effect)) {
                     std.debug.print(
                         "replay refused after event {d}: image record for id {d} claims .{s} with dimensions {d}x{d} - a recorded .loaded always carries nonzero decoded dimensions within the registered-image pixel budget and every other outcome records 0x0, so the journal is damaged or hand-edited; re-record the session\n",
@@ -365,6 +379,30 @@ fn resolveBlob(
 fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len > runtime_effects.max_effect_channel_bytes) return true;
     return record.channel_kind != .data and record.payload.len > 0;
+}
+
+/// Whether a channel record's provenance stamp contradicts its event
+/// kind — RECORDER TRUTH: channel records journal from exactly two
+/// sites. The live drain (staged posts and the close marker) journals
+/// `.data` and `.closed` events and never touches `exit_reason`, so
+/// they always carry `.exited`; the pending-terminal ring journals only
+/// `.rejected` events, stamped `.rejected` when the refusal is
+/// regenerating loop-side admission validation and left `.exited` when
+/// it is executor truth (an open that could not stage its channel). The
+/// legal pairs are therefore exactly (.data, .exited),
+/// (.closed, .exited), (.rejected, .exited), (.rejected, .rejected).
+/// The forward mismatch is the dangerous one: a `.data` or `.closed`
+/// record stamped `.rejected` sails into the regeneration skip and is
+/// silently OMITTED — with verification disabled, replay succeeds with
+/// a different Msg stream. The reverse direction needs no twin gate
+/// beyond the range check: `.rejected` with `.exited` is exactly the
+/// executor-truth rejection and must feed; and no recorder site can
+/// write any other exit reason on a channel record, so a decoded
+/// `.signaled`/`.cancelled`/`.spawn_failed` (valid members for SPAWN
+/// records) is hand-editing.
+fn channelRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
+    if (record.exit_reason == .rejected) return record.channel_kind != .rejected;
+    return record.exit_reason != .exited;
 }
 
 fn imageDimsDamaged(record: journal.EffectResultRecord) bool {

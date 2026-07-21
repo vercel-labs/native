@@ -2331,6 +2331,68 @@ test "a channel terminal claiming payload bytes refuses replay as damage" {
     try testing.expectError(error.ReplayDamagedRecord, result);
 }
 
+test "a channel .data record stamped with rejected provenance refuses replay as damage" {
+    // The recorder stamps `.rejected` provenance only on regenerating
+    // admission refusals, whose event kind is always `.rejected`. A
+    // `.data` record wearing that stamp would be silently skipped by
+    // the regeneration filter — with verification disabled, replay
+    // would succeed with a different Msg stream — so the mismatch is
+    // damage, refused before the skip decision.
+    const result = replayChannelDamageRecord(.{
+        .kind = .channel,
+        .key = session_channel_key,
+        .payload = "reading 1: 42 units",
+        .channel_kind = .data,
+        .exit_reason = .rejected,
+    });
+    try testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "a channel .closed record stamped with rejected provenance refuses replay as damage" {
+    // The `.data` mismatch's terminal twin: a skipped `.closed` would
+    // leave the replayed channel parked forever with its key occupied.
+    const result = replayChannelDamageRecord(.{
+        .kind = .channel,
+        .key = session_channel_key,
+        .channel_kind = .closed,
+        .exit_reason = .rejected,
+    });
+    try testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "a channel record with provenance outside the recorder's range refuses replay as damage" {
+    // Channel records journal from exactly two sites, and neither can
+    // write any exit reason but `.exited` or `.rejected`; a decoded
+    // `.cancelled` (a valid enum member for SPAWN records) on a
+    // channel record is hand-editing.
+    const result = replayChannelDamageRecord(.{
+        .kind = .channel,
+        .key = session_channel_key,
+        .payload = "reading 1: 42 units",
+        .channel_kind = .data,
+        .exit_reason = .cancelled,
+    });
+    try testing.expectError(error.ReplayDamagedRecord, result);
+}
+
+test "an executor-truth channel rejection record still feeds and retires the parked open" {
+    // The reverse direction's positive pin: `.rejected` kind with
+    // `.exited` provenance is exactly what the recorder writes for an
+    // open that could not stage its channel (executor truth) — it must
+    // FEED, never refuse and never skip. The damage journal's one
+    // `app_start` event opens nothing, so the fed record simply finds
+    // no park — the gate letting it THROUGH to the feed (EffectNotFound
+    // surfacing as the divergence report, not ReplayDamagedRecord) is
+    // the pin.
+    const result = replayChannelDamageRecord(.{
+        .kind = .channel,
+        .key = session_channel_key,
+        .channel_kind = .rejected,
+        .exit_reason = .exited,
+    });
+    try testing.expectError(error.ReplayEffectDivergence, result);
+}
+
 // ------------------- table capacity: the start-failure reservation
 
 /// Fails exactly the next channel-storage allocation and delegates
