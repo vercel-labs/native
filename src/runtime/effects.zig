@@ -1012,6 +1012,32 @@ pub const ChannelHandle = struct {
         closed,
     };
 
+    /// Whether this handle can CURRENTLY accept posts: the channel is
+    /// open and the occupancy is this handle's. False for a refused
+    /// open's dead handle, a closed (or reused) occupancy, a torn-down
+    /// runtime — and for every handle `openChannel` returns under
+    /// SESSION REPLAY, where the open parks and the journaled events
+    /// are the whole stream. That last answer is the method's reason
+    /// to exist: it is the producer-launch check. A replayed session
+    /// re-executes the update that opened the channel, so a producer
+    /// launched unconditionally really starts — socket connects and
+    /// blocking setup before its first post DO happen — and is only
+    /// stopped when that first post answers `.closed`. A producer that
+    /// consults `live()` before launching skips all of it and keeps
+    /// replay fully offline.
+    ///
+    /// ADVISORY for that launch decision, never a gate on posting:
+    /// the channel can close between this answer and the next post,
+    /// so the post's own `PostResult` remains the authoritative answer
+    /// and a producer loop still exits on `.closed`.
+    /// Callable from any thread.
+    pub fn live(handle: ChannelHandle) bool {
+        const shared = handle.shared orelse return false;
+        shared.mutex.lock();
+        defer shared.mutex.unlock();
+        return shared.open and shared.generation == handle.generation;
+    }
+
     /// Stage `bytes` for delivery as one `.data` event Msg on the next
     /// drain, and — for an ACCEPTED post only — wake the host loop.
     /// Wakes COALESCE: the first accepted post latches one host wake
@@ -3965,12 +3991,20 @@ pub fn Effects(comptime Msg: type) type {
         /// the next drain (and the returned handle is dead — posts
         /// answer `.closed`). Channel events are journaled as executor
         /// truth at the drain boundary; under session replay the
-        /// recorded events feed verbatim and the source is NEVER
-        /// re-run: the replayed open PARKS the occupancy (the key
+        /// recorded events feed verbatim and the source is never
+        /// NEEDED: the replayed open PARKS the occupancy (the key
         /// registers exactly as live, so duplicate opens reject
         /// symmetrically) and returns an INERT handle whose every post
-        /// answers `.closed` — a re-run source thread exits on its
-        /// first post instead of interleaving with the fed stream.
+        /// answers `.closed`. Honesty about what re-runs: the update
+        /// that calls this openChannel re-executes under replay — app
+        /// code is app code — so a producer launched unconditionally
+        /// really starts, and any connect or blocking setup before its
+        /// first post really happens; the inert handle only stops it
+        /// AT that first post. Consult `ChannelHandle.live()` before
+        /// launching (the channel-monitor example's pattern) and the
+        /// producer never starts at all, keeping replay fully offline
+        /// — the Msg stream is identical either way, because the
+        /// journaled events are the whole stream on both paths.
         pub fn openChannel(self: *Self, options: OpenChannelOptions) ChannelHandle {
             self.reclaimSlots();
             const dead: ChannelHandle = .{};

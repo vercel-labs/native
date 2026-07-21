@@ -203,6 +203,24 @@ test "a failed source start never claims monitoring: the channel closes and the 
     try testing.expectEqual(@as(u64, 1), h.app_state.model.total_samples);
 }
 
+test "under session replay the start path never launches the sampler: live() gates the spawn" {
+    var h = try Harness.create();
+    defer h.destroy();
+    h.app_state.effects.armReplay();
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    // The replayed open PARKS and its handle answers `live() == false`,
+    // so the source seam is never invoked — no thread, no pre-post
+    // work: replay stays fully offline. In a real replay the journaled
+    // events are the whole stream.
+    try testing.expect(captured_handle == null);
+    // The dispatch itself behaves exactly as the recording's did — the
+    // model claims monitoring off the same code path, because nothing
+    // model-visible branches on `live()`.
+    try testing.expect(h.app_state.model.monitoring);
+    try testing.expect(!h.app_state.model.source_failed);
+}
+
 test "a duplicate start while monitoring is a no-op, and a refused open reports rejected" {
     var h = try Harness.create();
     defer h.destroy();

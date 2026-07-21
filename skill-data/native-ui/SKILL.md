@@ -751,9 +751,13 @@ pub const Msg = union(enum) {
         .on_event = Effects.channelMsg(.sample),
         .max_pending = 8,                     // staging bound, clamped 1..32 (default 32)
     });
-    // Hand `handle` to the source thread. Posting is thread-safe and
-    // never blocks: handle.post(bytes) answers .accepted,
-    // .dropped_full, .dropped_oversized, or .closed.
+    // Launch the source only for a LIVE handle — under session replay
+    // the open parks and handle.live() answers false, so the producer
+    // never starts (the journaled events are the whole stream either
+    // way). Posting from the source thread is thread-safe and never
+    // blocks: handle.post(bytes) answers .accepted, .dropped_full,
+    // .dropped_oversized, or .closed.
+    if (handle.live()) startSampler(handle);
 },
 .stop => fx.closeChannel(monitor_key),
 .sample => |event| switch (event.kind) {
@@ -763,7 +767,7 @@ pub const Msg = union(enum) {
 },
 ```
 
-Channel rules: `handle.post` answers a four-way `PostResult`, and the producer contract reads directly off it — `.accepted` (exactly one `.data` event delivers on the next drain), `.dropped_full` (transient back-pressure: skip this message and keep producing; the consumer's next drain relieves it), `.dropped_oversized` (a programming error no retry fixes: bound your bytes at `max_effect_channel_bytes`, 4 KiB), `.closed` (the occupancy is over: exit the producer loop for good — the handle is generation-stamped, so posting after close, after the slot was reused, or after runtime teardown is always memory-safe and always `.closed`). The back-pressure contract in one line: refused posts are never silent — they count into the event's `dropped_pending`/`dropped_total` counters and ride the next delivered event, and a refused post never wakes the host, so a producer storming a full stage cannot grow the loop's queue. The replay story in one line: channel events journal at the effect boundary, so a recorded session replays the whole stream offline — under replay `openChannel` parks the occupancy and returns an inert handle whose every post answers `.closed`, making a re-run source thread exit on its first post. `fx.closeChannel(key)` flushes the staged backlog, delivers the one `.closed` terminal, and frees the key at that delivery; `fx.channelHandle(key)` re-resolves the open channel's handle loop-side. See `examples/channel-monitor` for the complete worker-loop pattern, including the wind-down discipline.
+Channel rules: `handle.post` answers a four-way `PostResult`, and the producer contract reads directly off it — `.accepted` (exactly one `.data` event delivers on the next drain), `.dropped_full` (transient back-pressure: skip this message and keep producing; the consumer's next drain relieves it), `.dropped_oversized` (a programming error no retry fixes: bound your bytes at `max_effect_channel_bytes`, 4 KiB), `.closed` (the occupancy is over: exit the producer loop for good — the handle is generation-stamped, so posting after close, after the slot was reused, or after runtime teardown is always memory-safe and always `.closed`). The back-pressure contract in one line: refused posts are never silent — they count into the event's `dropped_pending`/`dropped_total` counters and ride the next delivered event, and a refused post never wakes the host, so a producer storming a full stage cannot grow the loop's queue. The replay story, honestly: channel events journal at the effect boundary, so a recorded session replays the whole stream from the journal and never NEEDS the source — under replay `openChannel` parks the occupancy and returns an inert handle whose every post answers `.closed`. But the opening update re-executes (app code is app code), so a producer launched unconditionally really starts — connects and blocking setup before its first post included — and is only stopped AT that first post; `handle.live()` is the producer-launch check (false for parked replay handles, refused opens, and closed occupancies — advisory only, the post's own answer stays authoritative), so a producer gated on it never starts and replay stays fully offline. `fx.closeChannel(key)` flushes the staged backlog, delivers the one `.closed` terminal, and frees the key at that delivery; `fx.channelHandle(key)` re-resolves the open channel's handle loop-side. See `examples/channel-monitor` for the complete worker-loop pattern, including the wind-down discipline.
 
 Test effects with the fake executor — deterministic, no processes, no network:
 

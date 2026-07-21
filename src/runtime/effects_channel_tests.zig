@@ -3,8 +3,11 @@
 //! and its post-close/post-teardown safety, back-pressure drop
 //! accounting, the shared key space with the slot-backed families, and
 //! the record/replay acceptance story: a session recorded WITH a live
-//! posting thread replays fingerprint-identical OFFLINE with no source
-//! thread at all (the journaled events are the whole stream).
+//! posting thread replays fingerprint-identical with no source thread
+//! NEEDED — the journaled events are the whole stream. Producers that
+//! consult `ChannelHandle.live()` before launching never start under
+//! replay (fully offline); producers that launch unconditionally are
+//! stopped at their first post. Both shapes are pinned below.
 
 const std = @import("std");
 const geometry = @import("geometry");
@@ -270,6 +273,38 @@ test "channel keys and slot-family keys share one key space" {
     try testing.expectEqual(@as(u64, 33), channel_rejected.event.key);
 }
 
+test "live() answers the producer-launch question for every handle shape" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // The zero handle (and a refused open's dead handle) can accept
+    // nothing.
+    const zero: effects_mod.ChannelHandle = .{};
+    try testing.expect(!zero.live());
+
+    const handle = fx.openChannel(.{ .key = 71, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(handle.live());
+    const dup = fx.openChannel(.{ .key = 71, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(!dup.live());
+
+    // Advisory, not a gate: `live()` flips false the moment close runs
+    // (posts stop landing before the terminal delivers), and the
+    // post's own answer remains authoritative.
+    fx.closeChannel(71);
+    try testing.expect(!handle.live());
+    try testing.expectEqual(PostResult.closed, handle.post("late"));
+    while (fx.takeMsg()) |_| {}
+
+    // A reused slot's fresh occupancy: the stale handle stays dead,
+    // the fresh one answers for itself.
+    const again = fx.openChannel(.{ .key = 71, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(!handle.live());
+    try testing.expect(again.live());
+    fx.closeChannel(71);
+    while (fx.takeMsg()) |_| {}
+}
+
 test "channelHandle resolves the open occupancy and nothing else" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
@@ -295,10 +330,12 @@ test "under replay openChannel parks the occupancy and hands back an inert handl
     // The parked occupancy registers exactly as a live open...
     const handle = fx.openChannel(.{ .key = 17, .on_event = DirectFx.channelMsg(.event) });
     try testing.expect(fx.channelHandle(17) != null);
-    // ...but the handle is INERT: every post answers `.closed`
-    // immediately — nothing staged, no drop counted, nothing to
-    // journal — so a well-behaved producer thread exits on its first
-    // post.
+    // ...but the handle is INERT: `live()` answers false — the
+    // producer-launch check that keeps replay fully offline — and
+    // every post answers `.closed` immediately (nothing staged, no
+    // drop counted, nothing to journal), so a producer launched
+    // unconditionally exits on its first post.
+    try testing.expect(!handle.live());
     try testing.expectEqual(PostResult.closed, handle.post("never lands"));
     try testing.expect(!fx.hasPending());
     try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
@@ -860,17 +897,25 @@ test "a recorded channel session replays fingerprint-identical offline with no s
 //
 // The channel-monitor example's documented shape: ONE update handler
 // both opens the channel and spawns the worker thread that posts into
-// it. A replayed session re-executes that update — so replay must park
-// the channel and hand back an INERT handle whose every post answers
-// closed, making the re-spawned worker exit on its FIRST post. The fed
-// journal events are the only event stream; a live re-run source would
-// interleave with them and diverge the fingerprint.
+// it. A replayed session re-executes that update, and BOTH producer
+// disciplines must replay the identical stream from one recording:
+// the example's `handle.live()` gate skips the spawn entirely (the
+// parked handle answers false — replay fully offline), and an
+// unconditional launch really starts but exits on its FIRST post
+// against the inert handle. The fed journal events are the only event
+// stream either way; a live re-run source would interleave with them
+// and diverge the fingerprint.
 
 const monitor_channel_key: u64 = 61;
 
 var monitor_thread: ?std.Thread = null;
 var monitor_posts_made: u32 = 0;
 var monitor_first_post_closed: bool = false;
+var monitor_spawns: u32 = 0;
+/// The producer discipline under test: true mirrors the example's
+/// `live()` gate; false is the unconditional launcher the inert
+/// handle must stop at its first post.
+var monitor_consults_live = true;
 
 /// The worker the update handler spawns — the example's sampling loop,
 /// bounded at three samples so record-side staging is deterministic.
@@ -909,10 +954,17 @@ fn monitorUpdate(model: *ChannelSessionModel, msg: ChannelSessionMsg, fx: *Chann
                 .key = monitor_channel_key,
                 .on_event = ChannelSessionApp.Effects.channelMsg(.event),
             });
-            monitor_thread = std.Thread.spawn(.{}, MonitorWorker.run, .{handle}) catch null;
-            if (monitor_thread) |thread| {
-                thread.join();
-                monitor_thread = null;
+            // The example's launch discipline (when consulted): spawn
+            // only for a live handle. The model never reads `live()`,
+            // so the Msg stream — and the model — stay identical
+            // across both disciplines and both sides of the journal.
+            if (!monitor_consults_live or handle.live()) {
+                monitor_spawns += 1;
+                monitor_thread = std.Thread.spawn(.{}, MonitorWorker.run, .{handle}) catch null;
+                if (monitor_thread) |thread| {
+                    thread.join();
+                    monitor_thread = null;
+                }
             }
         },
         .open_dup => _ = fx.openChannel(.{
@@ -989,28 +1041,84 @@ fn recordMonitorSession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !Recorde
     };
 }
 
-test "replaying an open-and-spawn session parks the channel: the re-spawned worker exits on its first post and the fed stream is the only stream" {
+fn resetMonitorGlobals() void {
+    monitor_thread = null;
+    monitor_posts_made = 0;
+    monitor_first_post_closed = false;
+    monitor_spawns = 0;
+}
+
+test "replaying an open-and-spawn session with the live() gate never creates the sampler thread" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
     buffer.len = 0;
 
-    monitor_thread = null;
-    monitor_posts_made = 0;
-    monitor_first_post_closed = false;
+    resetMonitorGlobals();
+    monitor_consults_live = true;
+    defer monitor_consults_live = true;
     const recorded = try recordMonitorSession(gpa, buffer);
     try testing.expectEqual(@as(u32, 3), recorded.model.data_events);
     try testing.expectEqual(@as(u32, 1), recorded.model.closed_events);
+    // The recording side is live: `live()` answered true, the worker
+    // spawned and posted its three samples.
+    try testing.expectEqual(@as(u32, 1), monitor_spawns);
     try testing.expectEqual(@as(u32, 3), monitor_posts_made);
 
-    // Replay re-executes the SAME open-and-spawn update. The worker
-    // thread really spawns — app code is app code — but the parked
-    // channel's inert handle answers closed on its first post, the
-    // worker exits (joined before the report below), nothing is staged
-    // or journaled, and the fed events replay the recorded stream
-    // byte-identical.
-    monitor_posts_made = 0;
-    monitor_first_post_closed = false;
+    // Replay re-executes the SAME open-and-spawn update, but the
+    // example's `live()` gate sees the parked handle answer false: the
+    // sampler thread is NEVER created — no spawn, no pre-post work,
+    // replay fully offline — and the fed events replay the recorded
+    // stream byte-identical.
+    resetMonitorGlobals();
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(ChannelSessionApp);
+    defer gpa.destroy(app_state);
+    app_state.* = ChannelSessionApp.init(std.heap.page_allocator, .{}, monitorOptions());
+    defer app_state.deinit();
+
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try testing.expectEqual(@as(u32, 0), monitor_spawns);
+    try testing.expectEqual(@as(u32, 0), monitor_posts_made);
+    try testing.expect(monitor_thread == null);
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    // Three fed data events plus the fed closed terminal — and NOTHING
+    // else: the never-launched worker contributed no events and no
+    // journal records.
+    try testing.expectEqual(@as(u64, 4), report.effects_fed);
+    try testing.expectEqual(@as(u64, 0), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+    // The fed closed terminal retired the parked occupancy.
+    try testing.expect(app_state.effects.channelHandle(monitor_channel_key) == null);
+}
+
+test "replaying the same session with an unconditional launcher stops the re-run worker at its first post" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    resetMonitorGlobals();
+    monitor_consults_live = true;
+    defer monitor_consults_live = true;
+    const recorded = try recordMonitorSession(gpa, buffer);
+    try testing.expectEqual(@as(u32, 3), monitor_posts_made);
+
+    // The safety net behind the honesty teaching: a producer that
+    // launches WITHOUT consulting `live()` really starts under replay
+    // — app code is app code — but the parked channel's inert handle
+    // answers closed on its first post, the worker exits (joined
+    // before the report below), nothing is staged or journaled, and
+    // the SAME journal replays the identical stream.
+    resetMonitorGlobals();
+    monitor_consults_live = false;
     const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(gpa);
     harness.null_platform.gpu_surfaces = true;
@@ -1024,21 +1132,17 @@ test "replaying an open-and-spawn session parks the channel: the re-spawned work
         .require_same_platform = false,
     });
     try testing.expect(monitor_thread == null);
-    // The worker exited on its FIRST post: the inert handle answered
-    // closed immediately.
+    // The worker spawned and exited on its FIRST post: the inert
+    // handle answered closed immediately.
+    try testing.expectEqual(@as(u32, 1), monitor_spawns);
     try testing.expectEqual(@as(u32, 1), monitor_posts_made);
     try testing.expect(monitor_first_post_closed);
     try testing.expect(report.ok());
     try testing.expect(report.checkpoints_verified > 0);
-    // Three fed data events plus the fed closed terminal — and NOTHING
-    // else: the re-run worker contributed no events and no journal
-    // records.
     try testing.expectEqual(@as(u64, 4), report.effects_fed);
     try testing.expectEqual(@as(u64, 0), report.effects_skipped);
     try testing.expectEqualDeep(recorded.model, app_state.model);
     try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
-    // The fed closed terminal retired the parked occupancy.
-    try testing.expect(app_state.effects.channelHandle(monitor_channel_key) == null);
 }
 
 // --------------------------------------------- wake back-pressure gate

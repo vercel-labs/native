@@ -11,7 +11,10 @@
 //! (the handle outliving the channel is safe by construction), while a
 //! transient `.dropped_full` only skips that one sample — back-pressure
 //! never stops the monitor. The view never opens anything — effects
-//! are update-side only.
+//! are update-side only. The launch is gated on `handle.live()`: under
+//! session replay the open parks and the gate answers false, so the
+//! sampler never spawns and replay stays fully offline — the journaled
+//! events are the whole stream either way.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -212,16 +215,31 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .key = monitor_key,
                 .on_event = Effects.channelMsg(.sample),
             });
-            // Start the source BEFORE claiming "monitoring": a monitor
-            // whose producer never started must never report otherwise.
-            // On failure the open occupancy would sit idle forever, so
-            // close it again — the `.closed` terminal retires the key
-            // for a retry — and put the failure where the UI renders it.
-            start_source(handle) catch {
-                model.source_failed = true;
-                fx.closeChannel(monitor_key);
-                return;
-            };
+            // Launch the sampler only when the handle can accept posts
+            // (`handle.live()` — the producer-launch check). Under
+            // session replay this dispatch re-executes but the open
+            // PARKS and `live()` answers false, so no thread spawns
+            // and none of its pre-post work runs — replay stays fully
+            // offline. The Msg stream is IDENTICAL either way (the
+            // journaled events are the whole stream), and the model
+            // stays identical too because everything below reacts to
+            // the channel's events, never to `live()` itself. A
+            // refused open's dead handle also answers false: its one
+            // `.rejected` event still reports, with no doomed sampler
+            // spawned just to exit on its first post.
+            if (handle.live()) {
+                // Start the source BEFORE claiming "monitoring": a
+                // monitor whose producer never started must never
+                // report otherwise. On failure the open occupancy
+                // would sit idle forever, so close it again — the
+                // `.closed` terminal retires the key for a retry — and
+                // put the failure where the UI renders it.
+                start_source(handle) catch {
+                    model.source_failed = true;
+                    fx.closeChannel(monitor_key);
+                    return;
+                };
+            }
             model.monitoring = true;
         },
         .stop => fx.closeChannel(monitor_key),
