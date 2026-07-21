@@ -4,13 +4,16 @@
 // subscription, the named engine ops (readFile/writeFile/fetch/
 // clipboard) plus the one-shot delay, and the streaming ops (a real
 // subprocess spawn with line/exit routing and mid-stream cancel, and
-// the audio event stream with its control verbs). Transpiled at build
-// time by the repo's own transpiler (never committed as Zig) and driven
-// through the real runtime by tests/ts-core/host_e2e_tests.zig.
+// the audio and video event streams with their control verbs).
+// Transpiled at build time by the repo's own transpiler (never committed
+// as Zig) and driven through the real runtime by
+// tests/ts-core/host_e2e_tests.zig.
 
 import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
 
 export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
 export type ImageState =
   | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
@@ -40,6 +43,13 @@ export interface Model {
   readonly playing: boolean;
   readonly bands: Uint8Array;
   readonly audioEvents: number;
+  readonly videoState: VideoState;
+  readonly vPosMs: number;
+  readonly vDurMs: number;
+  readonly vPlaying: boolean;
+  readonly vW: number;
+  readonly vH: number;
+  readonly videoEvents: number;
   readonly cover: number;
   readonly coverW: number;
   readonly coverH: number;
@@ -106,6 +116,10 @@ export type Msg =
   | { readonly kind: "set_volume" }
   | { readonly kind: "stop_music" }
   | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "play_clip" }
+  | { readonly kind: "pause_clip" }
+  | { readonly kind: "stop_clip" }
+  | { readonly kind: "video_evt"; readonly state: VideoState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
   | { readonly kind: "show_cover" }
   | { readonly kind: "show_cover_again" }
   | { readonly kind: "load_next" }
@@ -149,6 +163,13 @@ export function initialModel(): [Model, Cmd<Msg>] {
       playing: false,
       bands: new Uint8Array(0),
       audioEvents: 0,
+      videoState: "rejected",
+      vPosMs: -1,
+      vDurMs: -1,
+      vPlaying: false,
+      vW: -1,
+      vH: -1,
+      videoEvents: 0,
       cover: 0,
       coverW: -1,
       coverH: -1,
@@ -253,6 +274,26 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         playing: msg.playing,
         bands: msg.bands,
         audioEvents: model.audioEvents + 1,
+      };
+    case "play_clip":
+      // The media-surface id a video widget would bind: the decoded
+      // frames feed that texture channel platform-side; only the
+      // transport events below reach the core.
+      return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("media/clip.mp4") }, { event: "video_evt" })];
+    case "pause_clip":
+      return [model, Cmd.videoPause("clip")];
+    case "stop_clip":
+      return [model, Cmd.videoStop("clip")];
+    case "video_evt":
+      return {
+        ...model,
+        videoState: msg.state,
+        vPosMs: msg.positionMs,
+        vDurMs: msg.durationMs,
+        vPlaying: msg.playing,
+        vW: msg.width,
+        vH: msg.height,
+        videoEvents: model.videoEvents + 1,
       };
     case "show_cover":
       // The runtime ImageId the views bind; the model only adopts it

@@ -3512,6 +3512,25 @@ const channelTail = `
 }
 `;
 
+// The video fixture: the five-state union and the seven-field event arm
+// videoLoad routes.
+const videoMsg = `
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+export interface Model { readonly pos: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "video_evt"; readonly state: VideoState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
+  | { readonly kind: "failed"; readonly why: Uint8Array };
+export function initialModel(): Model { return { pos: 0, errs: 0 }; }
+`;
+
+const videoTail = `
+    case "video_evt": return { ...model, pos: msg.positionMs };
+    case "failed": return { ...model, errs: model.errs + 1 };
+  }
+}
+`;
+
 // Slice E: grammar-completeness round — the new statement/operator/
 // declaration mappings in REALISTIC combinations (the minimal per-production
 // pins live in grammar_matrix.test.ts), plus the new teaching gates.
@@ -4240,6 +4259,130 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.imageUnregister(9007199254740992)];
 ${imageTail}
+`,
+  },
+  {
+    name: "the video verbs emit in their documented shapes",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("media/clip.mp4") }, { event: "video_evt" })];
+      if (msg.which === 1) return [model, Cmd.videoLoad("clip", { surface: model.pos + 1, url: asciiBytes("https://cdn.test/clip.mp4"), autoplay: false, loop: true, muted: true }, { event: "video_evt" })];
+      if (msg.which === 2) return [model, Cmd.batch([Cmd.videoPlay("clip"), Cmd.videoPause("clip")])];
+      if (msg.which === 3) return [model, Cmd.videoSeek("clip", 45000)];
+      if (msg.which === 4) return [model, Cmd.videoSetVolume("clip", 0.5)];
+      if (msg.which === 5) return [model, Cmd.videoSetMuted("clip", model.errs > 0)];
+      if (msg.which === 6) return [model, Cmd.videoSetLoop("clip", model.errs === 0)];
+      return [model, Cmd.videoStop("clip")];
+${videoTail}
+`,
+  },
+  {
+    name: "a video event arm whose state union misses a member is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type VideoEventKind } from "@native-sdk/core";
+export type NarrowState = "loaded" | "position" | "completed" | "failed";
+export interface Model { readonly pos: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "video_evt"; readonly state: NarrowState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
+  | { readonly kind: "failed"; readonly why: Uint8Array };
+export function initialModel(): Model { return { pos: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "video_evt" as VideoEventKind<Msg> })];
+    case "video_evt": return { ...model, pos: msg.positionMs };
+    case "failed": return { ...model, errs: model.errs + 1 };
+  }
+}
+`,
+  },
+  {
+    name: "a video event arm with a wrong field shape is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type VideoEventKind } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "failed" as VideoEventKind<Msg> })];
+${videoTail}
+`,
+  },
+  {
+    name: "a video source without a path or url is taught (nothing could play)",
+    gate: "NS1029",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5 }, { event: "video_evt" })];
+${videoTail}
+`,
+  },
+  {
+    name: "a video source without a surface is taught (the frames need a texture channel)",
+    gate: "NS1029",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { path: asciiBytes("clip.mp4") } as never, { event: "video_evt" })];
+${videoTail}
+`,
+  },
+  {
+    name: "a dynamic videoLoad option boolean is taught (the flags byte is build-time data)",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4"), loop: model.errs > 0 }, { event: "video_evt" })];
+${videoTail}
+`,
+  },
+  {
+    name: "a dynamic video key is taught (keys are compile-time routing data)",
+    gate: "NS1027",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoPause(model.errs > 0 ? "a" : "b")];
+${videoTail}
+`,
+  },
+  {
+    name: "a video volume literal outside 0..1 stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoSetVolume("clip", 1.5)];
+${videoTail}
+`,
+  },
+  {
+    name: "a negative video seek literal stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoSeek("clip", -250)];
+${videoTail}
 `,
   },
 ];
@@ -9974,6 +10117,41 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.audioPlay("player", { path: asciiBytes("a.mp3") }, { event: "audio_evt" })];
 ${streamTail}
+`);
+  assert.equal(result.typeErrors.length, 0, `tsc errors\n${result.typeErrors.join("\n")}`);
+  assert.equal(result.ok, true, "the exact union must keep transpiling");
+});
+
+test("a narrower video state union fails VideoEventKind in tsc itself", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export type NarrowState = "loaded" | "position" | "completed" | "failed";
+export interface Model { readonly pos: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "video_evt"; readonly state: NarrowState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
+  | { readonly kind: "failed"; readonly why: Uint8Array };
+export function initialModel(): Model { return { pos: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "video_evt" })];
+    case "video_evt": return { ...model, pos: msg.positionMs };
+    case "failed": return { ...model, errs: model.errs + 1 };
+  }
+}
+`);
+  assert.ok(result.typeErrors.length > 0, "tsc must refuse the narrower state union (VideoEventKind resolves it to never)");
+  assert.ok(result.typeErrors.some((e) => e.includes("never")), `the refusal is the never-resolution\n${result.typeErrors.join("\n")}`);
+});
+
+test("the exact five-member video state union still satisfies VideoEventKind in tsc", () => {
+  const result = transpile(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${videoMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "video_evt" })];
+${videoTail}
 `);
   assert.equal(result.typeErrors.length, 0, `tsc errors\n${result.typeErrors.join("\n")}`);
   assert.equal(result.ok, true, "the exact union must keep transpiling");

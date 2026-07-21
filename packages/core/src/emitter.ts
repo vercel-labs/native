@@ -218,6 +218,7 @@ const MAX_SPAWN_ARGV_BYTES = 2048;
 const MAX_SPAWN_STDIN_BYTES = 4096;
 const MAX_AUDIO_PATH_BYTES = 1024;
 const MAX_IMAGE_PATH_BYTES = 1024;
+const MAX_VIDEO_PATH_BYTES = 1024;
 
 /// The closed `Cmd.fetch` verb set, wire value = position.
 const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -226,6 +227,11 @@ const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
 /// engine's event vocabulary, matched by member NAME (declaration order is
 /// the app's own).
 const AUDIO_STATES = ["loaded", "position", "completed", "failed", "rejected", "spectrum"];
+
+/// The video event states an event arm's `state` union must carry — the
+/// engine's event vocabulary, matched by member NAME (declaration order is
+/// the app's own).
+const VIDEO_STATES = ["loaded", "position", "completed", "failed", "rejected"];
 
 /// The image load result states an event arm's `state` union must carry —
 /// the engine's outcome vocabulary, matched by member NAME (declaration
@@ -259,6 +265,17 @@ const AUDIO_VERBS: Record<string, string> = {
   audioStop: ".stop",
   audioSeek: ".seek",
   audioSetVolume: ".volume",
+};
+
+/// The `Cmd.video*` control verbs and their zig enum literals.
+const VIDEO_VERBS: Record<string, string> = {
+  videoPlay: ".play",
+  videoPause: ".pause",
+  videoStop: ".stop",
+  videoSeek: ".seek",
+  videoSetVolume: ".volume",
+  videoSetMuted: ".muted",
+  videoSetLoop: ".loop",
 };
 
 export class Emitter {
@@ -2320,6 +2337,12 @@ export class Emitter {
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
+      if (method === "videoLoad") {
+        return this.emitVideoLoadCmd(e, ctx);
+      }
+      if (method in VIDEO_VERBS) {
+        return this.emitVideoCtlCmd(e, method, ctx);
+      }
       if (method === "showWindow") {
         // Window labels are declarations (app.zon / the scene), so the
         // verb takes the label as a string literal — the same discipline
@@ -2344,7 +2367,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, videoLoad, videoPlay, videoPause, videoStop, videoSeek, videoSetVolume, videoSetMuted, videoSetLoop, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");
@@ -2922,6 +2945,192 @@ export class Emitter {
       value = this.emitExpr(volArg, ctx, { k: "f64" }).code;
     }
     return `rt.cmdAudioCtl("${escapeZigString(keyArg.text)}", ${AUDIO_VERBS[method]}, ${value})`;
+  }
+
+  /// `Cmd.videoLoad(key, source, route)`: a string-literal key, an inline
+  /// `{ surface, path?, url?, autoplay?, loop?, muted? }` source (at least
+  /// one of path/url; the option booleans are literals — they encode into
+  /// the wire record's flags byte at build time), and `{ event }` routing
+  /// onto the seven-field video event arm.
+  private emitVideoLoadCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const keyArg = e.arguments[0];
+    if (!keyArg || !ts.isStringLiteral(keyArg)) {
+      this.fail(e, `\`Cmd.videoLoad\` takes its key as a string literal`, "NS1027");
+    }
+    if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.videoLoad key over 255 bytes");
+
+    let source = e.arguments[1];
+    while (source && (ts.isParenthesizedExpression(source) || ts.isAsExpression(source) || ts.isSatisfiesExpression(source))) source = source.expression;
+    if (!source || !ts.isObjectLiteralExpression(source)) {
+      this.fail(
+        e.arguments[1] ?? e,
+        `\`Cmd.videoLoad\` takes an inline \`{ surface, path?, url?, autoplay?, loop?, muted? }\` source object`,
+        "NS1029",
+      );
+    }
+    let surface: string | null = null;
+    let video_path = '""';
+    let url = '""';
+    // Wire flags: bit0 = autoplay (default on), bit1 = loop, bit2 = muted.
+    let flags = 1;
+    let has_source = false;
+    for (const p of source.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.videoLoad\` source member \`${p.getText()}\` is not a plain property`, "NS1029");
+      }
+      const name = p.name.text;
+      if (name === "surface") {
+        // A compile-time-known surface id the engine is certain to
+        // refuse stops the build (the imageLoad id gate: 0 is the
+        // no-surface sentinel, and past 2^53 the f64 wire cannot carry
+        // the id exactly). Dynamic ids stay the host's to validate
+        // through the "rejected" event state.
+        const literal = this.numberLiteralValue(p.initializer);
+        if (literal !== null && !(Number.isSafeInteger(literal) && literal >= 1)) {
+          this.fail(p.initializer, `\`Cmd.videoLoad\` surface ${literal} is not a positive integer media-surface id below 2^53`, "NS1030");
+        }
+        surface = this.emitExpr(p.initializer, ctx, { k: "f64" }).code;
+      } else if (name === "path") {
+        video_path = this.effectBytesArg(e, p.initializer, "Cmd.videoLoad path", MAX_VIDEO_PATH_BYTES, ctx);
+        has_source = true;
+      } else if (name === "url") {
+        url = this.effectBytesArg(e, p.initializer, "Cmd.videoLoad url", MAX_VIDEO_PATH_BYTES, ctx);
+        has_source = true;
+      } else if (name === "autoplay" || name === "loop" || name === "muted") {
+        // The option booleans encode into the wire record's flags byte
+        // at build time, so they are literals — a dynamic switch
+        // belongs on the control verbs (videoSetMuted/videoSetLoop
+        // drive the open stream).
+        let v: ts.Expression = p.initializer;
+        while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+        if (v.kind !== ts.SyntaxKind.TrueKeyword && v.kind !== ts.SyntaxKind.FalseKeyword) {
+          this.fail(p.initializer, `\`Cmd.videoLoad\` ${name} must be the literal \`true\` or \`false\``, "NS1030");
+        }
+        const bit = name === "autoplay" ? 1 : name === "loop" ? 2 : 4;
+        flags = v.kind === ts.SyntaxKind.TrueKeyword ? flags | bit : flags & ~bit;
+      } else {
+        this.fail(p, `\`Cmd.videoLoad\` source member \`${name}\``, "NS1029");
+      }
+    }
+    if (surface === null) {
+      this.fail(source, `\`Cmd.videoLoad\` source without a \`surface\` — the media-surface id the decoded frames feed`, "NS1029");
+    }
+    if (!has_source) {
+      this.fail(source, `\`Cmd.videoLoad\` source without a \`path\` or a \`url\` — nothing could play`, "NS1029");
+    }
+
+    let route = e.arguments[2];
+    while (route && (ts.isParenthesizedExpression(route) || ts.isAsExpression(route) || ts.isSatisfiesExpression(route))) route = route.expression;
+    if (!route || !ts.isObjectLiteralExpression(route)) {
+      this.fail(e.arguments[2] ?? e, `\`Cmd.videoLoad\` routing is an inline \`{ event }\` object`, "NS1027");
+    }
+    let event: ts.StringLiteral | null = null;
+    for (const p of route.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.videoLoad\` routing member \`${p.getText()}\` is not a plain property`, "NS1027");
+      }
+      let v: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+      if (p.name.text !== "event") {
+        this.fail(p, `\`Cmd.videoLoad\` routing member \`${p.name.text}\``, "NS1027");
+      }
+      if (!ts.isStringLiteral(v)) {
+        this.fail(p.initializer, `\`Cmd.videoLoad\` event arm is not a string literal`, "NS1027");
+      }
+      event = v;
+    }
+    if (!event) this.fail(route, `\`Cmd.videoLoad\` routing without an \`event\` arm`, "NS1027");
+    const tag = this.videoEventArmTag(event, ctx);
+    return `rt.cmdVideoLoad("${escapeZigString(keyArg.text)}", ${tag}, ${surface}, ${video_path}, ${url}, ${flags})`;
+  }
+
+  /// Resolve the video event arm: exactly the seven SDK-fixed fields,
+  /// matched by NAME — state (a named literal-union alias carrying exactly
+  /// the five video states, any order), positionMs/durationMs (numbers),
+  /// playing/buffering (booleans), width/height (numbers).
+  private videoEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const unionName = ctx.cmdReturn!.msgUnion;
+    const info = this.table.unions.get(unionName);
+    if (!info) this.fail(arg, `unknown union ${unionName}`);
+    const arm = info.arms.find((a) => a.tag === arg.text);
+    if (!arm) {
+      this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
+    }
+    const shape =
+      "the seven video event fields — state (a named alias of exactly " +
+      VIDEO_STATES.map((s) => `"${s}"`).join(" | ") +
+      "), positionMs: number, durationMs: number, playing: boolean, buffering: boolean, width: number, height: number";
+    const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const state = fieldsByName.get("state");
+    const position = fieldsByName.get("positionMs");
+    const duration = fieldsByName.get("durationMs");
+    const playing = fieldsByName.get("playing");
+    const buffering = fieldsByName.get("buffering");
+    const width = fieldsByName.get("width");
+    const height = fieldsByName.get("height");
+    const stateOk =
+      state !== undefined &&
+      state.type.k === "enum" &&
+      state.type.members.length === VIDEO_STATES.length &&
+      VIDEO_STATES.every((s) => state.type.k === "enum" && state.type.members.includes(s));
+    const matches =
+      arm.fields.length === 7 &&
+      stateOk &&
+      position !== undefined &&
+      isNumber(position.type.k) &&
+      duration !== undefined &&
+      isNumber(duration.type.k) &&
+      playing !== undefined &&
+      playing.type.k === "bool" &&
+      buffering !== undefined &&
+      buffering.type.k === "bool" &&
+      width !== undefined &&
+      isNumber(width.type.k) &&
+      height !== undefined &&
+      isNumber(height.type.k);
+    if (!matches) {
+      this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
+    }
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
+  }
+
+  /// The `Cmd.videoPlay/Pause/Stop/Seek/SetVolume/SetMuted/SetLoop`
+  /// control verbs: a string-literal key plus the seek position / volume /
+  /// switch value where the verb takes one.
+  private emitVideoCtlCmd(e: ts.CallExpression, method: string, ctx: Ctx): string {
+    const keyArg = e.arguments[0];
+    if (!keyArg || !ts.isStringLiteral(keyArg)) {
+      this.fail(e, `\`Cmd.${method}\` takes its key as a string literal`, "NS1027");
+    }
+    if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, `Cmd.${method} key over 255 bytes`);
+    let value = "0";
+    if (method === "videoSeek") {
+      const msArg = e.arguments[1];
+      if (!msArg) this.fail(e, "Cmd.videoSeek position (milliseconds)");
+      const literal = this.numberLiteralValue(msArg);
+      if (literal !== null && !(literal >= 0 && Number.isFinite(literal))) {
+        this.fail(msArg, `\`Cmd.videoSeek\` position ${literal} is not a millisecond offset`, "NS1030");
+      }
+      value = this.emitExpr(msArg, ctx, { k: "f64" }).code;
+    } else if (method === "videoSetVolume") {
+      const volArg = e.arguments[1];
+      if (!volArg) this.fail(e, "Cmd.videoSetVolume volume (0..1)");
+      const literal = this.numberLiteralValue(volArg);
+      if (literal !== null && !(literal >= 0 && literal <= 1)) {
+        this.fail(volArg, `\`Cmd.videoSetVolume\` volume ${literal} is outside 0..1`, "NS1030");
+      }
+      value = this.emitExpr(volArg, ctx, { k: "f64" }).code;
+    } else if (method === "videoSetMuted" || method === "videoSetLoop") {
+      // The switch verbs take any boolean expression — applying runtime
+      // state to the open stream is what they exist for (the load-time
+      // literals cover the start-muted/start-looping cases). It rides
+      // the value field as 0/1, the audioSeek dynamic-value discipline.
+      const boolArg = e.arguments[1];
+      if (!boolArg) this.fail(e, `Cmd.${method} switch (a boolean)`);
+      value = `@floatFromInt(@intFromBool(${this.emitExpr(boolArg, ctx, { k: "bool" }).code}))`;
+    }
+    return `rt.cmdVideoCtl("${escapeZigString(keyArg.text)}", ${VIDEO_VERBS[method]}, ${value})`;
   }
 
   /// Resolve a `Cmd.now`/`Cmd.delay`/`Sub.timer` target arm to its tag,

@@ -103,6 +103,23 @@
 //                                forget control verbs whose consequences arrive
 //                                on the event stream; aimed at a key with no
 //                                open stream they no-op.
+//   Cmd.videoLoad(key, { surface, path?, url?, autoplay?, loop?, muted? }, { event })
+//                                open (or replace — one player is the whole
+//                                surface) the video event stream feeding the
+//                                media-surface `surface` names (the same
+//                                model-owned id the markup binds): every
+//                                playback event dispatches the `event` arm (the
+//                                seven-field record below) until Cmd.videoStop
+//                                closes the stream. Pixels never ride the
+//                                events — decoded frames flow platform-side
+//                                into the bound surface.
+//   Cmd.videoPlay(key) / videoPause(key) / videoStop(key)
+//   Cmd.videoSeek(key, ms) / Cmd.videoSetVolume(key, volume)
+//   Cmd.videoSetMuted(key, muted) / Cmd.videoSetLoop(key, loop)
+//                                drive the open playback in place — fire-and-
+//                                forget control verbs whose consequences arrive
+//                                on the event stream; aimed at a key with no
+//                                open stream they no-op.
 //   Cmd.imageLoad(id, { path?, url?, cachePath?, expectedBytes? }, { event })
 //                                load an image at runtime by its model-owned
 //                                numeric ImageId (the id markup binds:
@@ -188,8 +205,8 @@
 // only in that function's return path (NS1025). Sub and the streaming Cmds
 // are different animals on purpose: a Sub is DECLARED from the model (the
 // host starts/stops it by reconciliation; the app never opens one), while
-// spawn/audioPlay streams are Cmd-INITIATED — imperative opens with a keyed
-// lifecycle the app drives and cancels.
+// spawn/audioPlay/videoLoad streams are Cmd-INITIATED — imperative opens
+// with a keyed lifecycle the app drives and cancels.
 //
 // The factories return plain frozen-shape objects so the same core runs
 // under node: a dev harness can interpret the `op` tags directly.
@@ -327,6 +344,54 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish
     ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">]
       ? M extends Msgish & AudioEventArm
         ? [AudioState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The video event states, the audio vocabulary without spectrum: `loaded`
+/// acknowledges a successful load with the player's duration estimate and
+/// the stream's decoded pixel dimensions; `position` ticks at the
+/// platform's honest cadence (~500ms) while playing; `completed` fires
+/// exactly once when a NON-LOOPING playback reaches its natural end (a
+/// looping playback wraps and never completes); `failed` reports a
+/// load/decode/device failure; `rejected` a command the effects layer
+/// refused (an empty or over-long source, a non-http(s) url, an invalid
+/// surface id).
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+
+/// The payload shape of a video event arm — seven fields, matched by NAME
+/// (the AudioEventArm convention). `state` must be a named
+/// string-literal-union alias carrying exactly the five VideoState members
+/// (any declaration order — the host matches members by name).
+/// `positionMs`/`durationMs` are milliseconds; `playing` is the player's
+/// transport state; `buffering` is true while a streamed source is stalled
+/// waiting for network bytes; `width`/`height` are the stream's decoded
+/// pixel dimensions (delivered on "loaded", 0 elsewhere).
+export type VideoEventArm = {
+  readonly state: VideoState;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly width: number;
+  readonly height: number;
+};
+
+/// The Msg arms a video event stream may target: arms whose payload is
+/// exactly the seven VideoEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to VideoState, and the tuple-wrapped reverse check
+/// holds VideoState to the arm's states — a narrower union would
+/// silently drop event states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type VideoEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof VideoEventArm]
+    ? [keyof VideoEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & VideoEventArm
+        ? [VideoState] extends [M["state"]]
           ? M["kind"]
           : never
         : never
@@ -531,6 +596,30 @@ export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
 }
 
+/// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
+/// the markup binds — the texture channel the decoded frames feed. The
+/// local `path` is tried first; a missing file falls through to `url`
+/// (streamed progressively, playable before the download finishes). At
+/// least one of path/url must be present. `autoplay` (default true) starts
+/// playback as soon as the load lands — false loads paused at position
+/// zero, the poster-frame shape; `loop` wraps from the natural end back to
+/// zero (a looping playback never delivers "completed"); `muted` starts
+/// the audio track muted, independent of the remembered volume.
+export interface VideoSource {
+  readonly surface: number;
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly autoplay?: boolean;
+  readonly loop?: boolean;
+  readonly muted?: boolean;
+}
+
+/// `Cmd.videoLoad` routing: every playback event dispatches the `event`
+/// arm (the seven-field VideoEventArm record, matched by field name).
+export interface VideoRoute<M extends Msgish> {
+  readonly event: VideoEventKind<M>;
+}
+
 /// A `Cmd.imageLoad` source: the audio cascade's shape exactly. The local
 /// `path` is tried first; a missing file falls through to `url` (fetched
 /// whole, installed at `cachePath` when given and verified against
@@ -645,6 +734,25 @@ export type Cmd<M extends Msgish> =
       readonly key: string;
       readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
       /// Seek position (ms) / volume (0..1); 0 for the value-less verbs.
+      readonly value: number;
+    }
+  | {
+      readonly op: "video_load";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly surface: number;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly autoplay: boolean;
+      readonly loop: boolean;
+      readonly muted: boolean;
+    }
+  | {
+      readonly op: "video_ctl";
+      readonly key: string;
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      /// Seek position (ms) / volume (0..1) / the muted-loop switch
+      /// (0 = off, 1 = on); 0 for the value-less verbs.
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
@@ -888,6 +996,78 @@ export const Cmd = {
   /// next audioPlay re-applies it.
   audioSetVolume(key: string, volume: number): Cmd<never> {
     return { op: "audio_ctl", key, verb: "volume", value: volume };
+  },
+
+  /// Open (or replace — one player is the whole surface) the keyed video
+  /// event stream: claim the media-surface the source names, resolve the
+  /// source cascade (local path, then url) and start playback (autoplay,
+  /// the default). Every playback event dispatches the `event` arm until
+  /// `Cmd.videoStop(key)` closes the stream. Pixels never ride the
+  /// events: decoded frames flow platform-side into the bound surface.
+  /// Failure is never silent: an unplayable source arrives as a "failed"
+  /// event, a refused command as "rejected".
+  videoLoad<M extends Msgish>(key: string, source: VideoSource, route: VideoRoute<M>): Cmd<M> {
+    return {
+      op: "video_load",
+      key,
+      eventKind: route.event,
+      surface: source.surface,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      autoplay: source.autoplay ?? true,
+      loop: source.loop ?? false,
+      muted: source.muted ?? false,
+    };
+  },
+
+  /// Start or resume the loaded playback — the poster-frame counterpart
+  /// of `autoplay: false`, and un-pause. A key with no open stream
+  /// no-ops; a player that can no longer start reports one "failed"
+  /// event on the stream instead of silence.
+  videoPlay(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "play", value: 0 };
+  },
+
+  /// Pause the keyed playback in place; the surface keeps its last frame
+  /// (no event echo — the caller commanded it). A key with no open
+  /// stream no-ops.
+  videoPause(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "pause", value: 0 };
+  },
+
+  /// Stop the keyed playback, release the surface claim, and CLOSE its
+  /// event stream: no events for the key after this. Stop is the video
+  /// stream's cancel, exactly `Cmd.audioStop`'s discipline.
+  videoStop(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "stop", value: 0 };
+  },
+
+  /// Jump the keyed playback to `ms` (the platform clamps to the
+  /// duration; a paused seek still pushes the sought frame, so scrubbing
+  /// is visible). No event echo — the next position tick reports from
+  /// there.
+  videoSeek(key: string, ms: number): Cmd<never> {
+    return { op: "video_ctl", key, verb: "seek", value: ms };
+  },
+
+  /// Set playback volume, clamped to 0..1 and remembered across loads:
+  /// the next videoLoad re-applies it. Independent of mute.
+  videoSetVolume(key: string, volume: number): Cmd<never> {
+    return { op: "video_ctl", key, verb: "volume", value: volume };
+  },
+
+  /// Mute or unmute the playback's audio track without touching the
+  /// remembered volume (a fresh load's `muted` option is the way to
+  /// start muted).
+  videoSetMuted(key: string, muted: boolean): Cmd<never> {
+    return { op: "video_ctl", key, verb: "muted", value: muted ? 1 : 0 };
+  },
+
+  /// Enable or disable looping on the open playback (a fresh load's
+  /// `loop` option covers the start-looping case). A looping playback
+  /// never delivers "completed".
+  videoSetLoop(key: string, loop: boolean): Cmd<never> {
+    return { op: "video_ctl", key, verb: "loop", value: loop ? 1 : 0 };
   },
 
   /// Show the window with the declared `label`: un-hide + activate — the

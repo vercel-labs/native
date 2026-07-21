@@ -1061,6 +1061,11 @@ pub fn Kernel(comptime opts: Options) type {
         //   image_unregister [op 0x14][id f64 LE]
         //   channel_open [op 0x15][key f64 LE][event_tag u8]
         //   channel_close [op 0x16][key f64 LE]
+        //   video_load [op 0x17][key_len u8][key][event_tag u8]
+        //              [surface f64 LE][path_len u32 LE][path]
+        //              [url_len u32 LE][url][flags u8]
+        //              (flags bit0 = autoplay, bit1 = loop, bit2 = muted)
+        //   video_ctl  [op 0x18][key_len u8][key][verb u8][value f64 LE]
         //
         // v2 is additive over v1: the 0x01-0x03 records are byte-identical to v1,
         // so a v1 effect log replays under a v2 reader unchanged. The named-op
@@ -1071,7 +1076,8 @@ pub fn Kernel(comptime opts: Options) type {
         // 0x15-0x16 are additive within v3
         // the same way: every existing record is byte-identical, new opcodes
         // only (a host predating an opcode refuses it loudly, naming this
-        // version).
+        // version). The video records 0x17-0x18 join additively under
+        // the same rule.
         //
         // `method` is the closed HTTP verb set in declaration order of `CmdFetchMethod`
         // (GET 0, POST 1, PUT 2, DELETE 3, PATCH 4, HEAD 5). `timeout_ms` 0 means
@@ -1275,6 +1281,38 @@ pub fn Kernel(comptime opts: Options) type {
         //               no open stream is a no-op (the playback it aimed at
         //               is already gone). `stop` closes the stream: no
         //               events for that key after it.
+        //   video_load  open (or replace — one player is the whole surface)
+        //               the keyed video EVENT STREAM: claim the media-surface
+        //               texture channel `surface` names (the SAME model-owned
+        //               id a video widget binds — decoded frames flow
+        //               platform-side into it, never through this channel),
+        //               resolve the source cascade (local `path` first, then
+        //               `url`; empty fields = absent) and start playback per
+        //               `flags` (bit0 = autoplay, bit1 = loop, bit2 = muted).
+        //               Every playback event — loaded, position ticks,
+        //               completed, failed, rejected — then dispatches the
+        //               `event_tag` arm until `video_ctl` stop (or a
+        //               replacing video_load) closes the stream. The arm is
+        //               a seven-field record built by name: `state` (an enum
+        //               whose members are exactly loaded/position/completed/
+        //               failed/rejected, matched by member NAME so
+        //               declaration order is the app's), positionMs and
+        //               durationMs (numbers), playing and buffering
+        //               (booleans), and width and height (numbers: the
+        //               stream's decoded pixel dimensions on "loaded", 0
+        //               elsewhere). Failure is never silent: an unplayable
+        //               source is one `.failed` event, a refused command one
+        //               `.rejected`.
+        //   video_ctl   drive the open stream's playback in place, by verb
+        //               (`CmdVideoVerb` declaration order): play 0, pause 1,
+        //               stop 2, seek 3 (`value` = position ms), volume 4
+        //               (`value` clamped 0..1), muted 5 and loop 6 (`value`
+        //               0 = off, non-zero = on). `value` is 0 when the verb
+        //               takes none. Control verbs are fire-and-forget —
+        //               their consequences arrive on the keyed event stream
+        //               — and a verb whose key names no open stream is a
+        //               no-op. `stop` closes the stream: no events for that
+        //               key after it.
         //   window_show fire-and-forget window verb, LABEL-addressed (the
         //               declared window label, the same address the Zig
         //               tier's `fx.showWindow` takes): un-hide + activate
@@ -1298,15 +1336,16 @@ pub fn Kernel(comptime opts: Options) type {
         // the duplicate (err arm "rejected"): a running subprocess is never
         // killed implicitly — cancel it first. audio_play also replaces on
         // key reuse, per the engine underneath: one player is the whole
-        // surface.
+        // surface — and video_load keeps the same rule on its own single
+        // player.
         //
         // Sub vs streams, the design line: `Sub` descriptors are DECLARATIVE
         // recurring effects derived from the model after every commit (the
-        // host reconciles them; the app never opens or closes one). spawn and
-        // audio_play are Cmd-INITIATED STREAMS: imperative opens with a keyed
-        // lifecycle the app drives (cancel / audio_ctl stop), delivering many
-        // results until their terminal (spawn) or close (audio) retires the
-        // key.
+        // host reconciles them; the app never opens or closes one). spawn,
+        // audio_play, and video_load are Cmd-INITIATED STREAMS: imperative
+        // opens with a keyed lifecycle the app drives (cancel / audio_ctl
+        // stop / video_ctl stop), delivering many results until their
+        // terminal (spawn) or close (audio, video) retires the key.
         //
         // Host record payload encoding (the `Cmd.host`/`Cmd.request` record form,
         // produced identically by the SDK under node and by emitted Zig): fields
@@ -1347,6 +1386,8 @@ pub fn Kernel(comptime opts: Options) type {
             image_unregister = 0x14,
             channel_open = 0x15,
             channel_close = 0x16,
+            video_load = 0x17,
+            video_ctl = 0x18,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1367,6 +1408,17 @@ pub fn Kernel(comptime opts: Options) type {
             stop = 2,
             seek = 3,
             volume = 4,
+        };
+
+        /// The video_ctl verb set, wire value = declaration order.
+        pub const CmdVideoVerb = enum(u8) {
+            play = 0,
+            pause = 1,
+            stop = 2,
+            seek = 3,
+            volume = 4,
+            muted = 5,
+            loop = 6,
         };
 
         /// The closed HTTP verb set of the fetch record, wire value =
@@ -1698,6 +1750,50 @@ pub fn Kernel(comptime opts: Options) type {
             const out = frameAlloc(u8, 1 + 8);
             out[0] = @intFromEnum(CmdOp.channel_close);
             std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
+            return out;
+        }
+
+        pub fn cmdVideoLoad(
+            key: []const u8,
+            event_tag: u8,
+            surface: f64,
+            path: []const u8,
+            url: []const u8,
+            flags: u8,
+        ) Cmd {
+            // The emitter's byte gate on the literal key is the
+            // build-time teaching; this is the loud runtime backstop.
+            // A std.debug.assert compiles out of ReleaseFast, where the
+            // @intCast below would then truncate the length byte and
+            // corrupt the wire record silently — panic in every build
+            // mode instead.
+            if (key.len > 255) @panic("Cmd.videoLoad key over 255 bytes");
+            std.debug.assert(path.len <= std.math.maxInt(u32));
+            std.debug.assert(url.len <= std.math.maxInt(u32));
+            const out = frameAlloc(u8, 2 + key.len + 1 + 8 + 4 + path.len + 4 + url.len + 1);
+            out[0] = @intFromEnum(CmdOp.video_load);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            var off: usize = 2 + key.len;
+            out[off] = event_tag;
+            std.mem.writeInt(u64, out[off + 1 ..][0..8], @bitCast(surface), .little);
+            off += 9;
+            off = writeLongBytes(out, off, path);
+            off = writeLongBytes(out, off, url);
+            out[off] = flags;
+            return out;
+        }
+
+        pub fn cmdVideoCtl(key: []const u8, verb: CmdVideoVerb, value: f64) Cmd {
+            // The same loud backstop as cmdVideoLoad: the length byte
+            // must never truncate silently in ReleaseFast.
+            if (key.len > 255) @panic("Cmd.video verb key over 255 bytes");
+            const out = frameAlloc(u8, 2 + key.len + 1 + 8);
+            out[0] = @intFromEnum(CmdOp.video_ctl);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            out[2 + key.len] = @intFromEnum(verb);
+            std.mem.writeInt(u64, out[2 + key.len + 1 ..][0..8], @bitCast(value), .little);
             return out;
         }
 

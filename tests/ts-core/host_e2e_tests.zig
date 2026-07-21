@@ -8,8 +8,8 @@
 //! session recorder. Timers fire, requests round-trip, replace/cancel
 //! keep the wire contract, `Cmd.now` stamps synchronously, a REAL
 //! subprocess streams lines into the core (and dies to a mid-stream
-//! cancel), audio events flow the soundboard way (the fake channel's
-//! scripted feed), and recorded sessions — streams included — replay
+//! cancel), audio and video events flow the soundboard way (the fake
+//! channel's scripted feed), and recorded sessions — streams included — replay
 //! to identical state without a host call or a process launch.
 //!
 //! The markup-view / automation / pixel-fingerprint guarantees run in
@@ -77,6 +77,9 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.pause")) return .pause_music;
     if (std.mem.eql(u8, name, "core.volume")) return .set_volume;
     if (std.mem.eql(u8, name, "core.stopmusic")) return .stop_music;
+    if (std.mem.eql(u8, name, "core.vplay")) return .play_clip;
+    if (std.mem.eql(u8, name, "core.vpause")) return .pause_clip;
+    if (std.mem.eql(u8, name, "core.vstop")) return .stop_clip;
     if (std.mem.eql(u8, name, "core.cover")) return .show_cover;
     if (std.mem.eql(u8, name, "core.coveragain")) return .show_cover_again;
     if (std.mem.eql(u8, name, "core.covernext")) return .load_next;
@@ -683,6 +686,47 @@ test "audio playback streams events into the transpiled core through the fake ch
     try std.testing.expect(!fx.audioSnapshot().active);
     try std.testing.expectError(error.EffectNotFound, fx.feedAudioEvent(.position, 3_000, 183_000, true));
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().audioEvents), 3), Bridge.model().audioEvents);
+}
+
+test "video playback streams events into the transpiled core through the fake channel" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // play opens the stream: the engine channel records the request
+    // whole under the bridge's video key, the media-surface id included.
+    try h.menu("core.vplay");
+    const request = fx.pendingVideo().?;
+    try std.testing.expectEqual(runtime_ns.ts_core_video_key_base, request.key);
+    try std.testing.expectEqual(@as(u64, 5), request.surface);
+    try std.testing.expectEqualStrings("media/clip.mp4", request.path);
+    try std.testing.expect(request.playing);
+
+    // The scripted event feed routes the seven-field arm: loaded
+    // carries the decoded dimensions, then position ticks keep flowing.
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 640, 360);
+    try h.wake();
+    try std.testing.expect(Bridge.model().videoState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vDurMs), 12_000), Bridge.model().vDurMs);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vW), 640), Bridge.model().vW);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vH), 360), Bridge.model().vH);
+    try std.testing.expect(Bridge.model().vPlaying);
+
+    try fx.feedVideoEvent(.position, 1_500, 12_000, true, false, 0, 0);
+    try h.wake();
+    try std.testing.expect(Bridge.model().videoState == .position);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vPosMs), 1_500), Bridge.model().vPosMs);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().videoEvents), 2), Bridge.model().videoEvents);
+
+    // Control verbs drive the channel in place; stop closes the stream
+    // — a later feed finds no playback to receive it.
+    try h.menu("core.vpause");
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try h.menu("core.vstop");
+    try std.testing.expect(!fx.videoSnapshot().active);
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoEvent(.position, 3_000, 12_000, true, false, 0, 0));
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().videoEvents), 2), Bridge.model().videoEvents);
 }
 
 test "image loads route their one terminal into the transpiled core through the fake channel" {

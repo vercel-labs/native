@@ -74,6 +74,9 @@ const mini_core = struct {
     /// The image outcome states the mixed-rejection tests observe,
     /// shuffled off the engine order like the other two.
     pub const ImageState = enum { rejected, loaded };
+    /// The video event state union, scrambled against the engine's
+    /// `EffectVideoEventKind` for the same by-NAME pin.
+    pub const VideoState = enum { completed, loaded, rejected, position, failed };
 
     pub const Model = struct {
         polling: bool,
@@ -112,6 +115,15 @@ const mini_core = struct {
         // Rejection delivery order probe: one mark per rejection Msg
         // ('S' spawn, 'I' image, 'C' channel), in dispatch order.
         order: []const u8,
+        // Video stream mirrors.
+        video_state: VideoState,
+        v_pos: f64,
+        v_dur: f64,
+        v_playing: bool,
+        v_buffering: bool,
+        v_w: f64,
+        v_h: f64,
+        video_events: i64,
     };
 
     pub const Msg = union(enum) {
@@ -201,6 +213,26 @@ const mini_core = struct {
         // channel_open 7 -> chan_evt2] while image id 7 holds the raw key
         mix_dup_then_engine, // 55: batch [channel_open 41 -> chan_evt2
         // (bridge dup), channel_open 7 -> chan_evt (engine cross-family)]
+        vload, // 56: video_load "clip" (surface 5, local path, autoplay)
+        vload_url, // 57: video_load "clip" (url, autoplay off, loop + muted)
+        video_evt: struct { // 58: the seven-field video event arm (the
+            // emitted shape — payload fields keep their TS names)
+            state: VideoState,
+            positionMs: f64,
+            durationMs: f64,
+            playing: bool,
+            buffering: bool,
+            width: f64,
+            height: f64,
+        },
+        vplay_it, // 59: video_ctl play "clip"
+        vpause_it, // 60: video_ctl pause "clip"
+        vstop_it, // 61: video_ctl stop "clip"
+        vseek_it, // 62: video_ctl seek "clip" 45000ms
+        vvol_it, // 63: video_ctl volume "clip" 0.25
+        vmute_it, // 64: video_ctl muted "clip" 1
+        vloop_it, // 65: video_ctl loop "clip" 1
+        vctl_stray, // 66: video_ctl pause "other" (key gate no-op)
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -245,6 +277,14 @@ const mini_core = struct {
                 .img_state = .loaded,
                 .img_events = 0,
                 .order = "",
+                .video_state = .rejected,
+                .v_pos = -1,
+                .v_dur = -1,
+                .v_playing = false,
+                .v_buffering = false,
+                .v_w = -1,
+                .v_h = -1,
+                .video_events = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -459,6 +499,29 @@ const mini_core = struct {
                 @memcpy(out[first.len..], second);
                 return .{ .model = model, .cmd = out };
             },
+            // flags bit0 = autoplay, bit1 = loop, bit2 = muted.
+            .vload => return .{ .model = model, .cmd = cmdVideoLoad("clip", 58, 5, "media/clip.mp4", "", 0b001) },
+            .vload_url => return .{ .model = model, .cmd = cmdVideoLoad("clip", 58, 5, "", "https://cdn.test/clip.mp4", 0b110) },
+            .video_evt => |event| {
+                const out = frameCreate(model.*);
+                out.video_state = event.state;
+                out.v_pos = event.positionMs;
+                out.v_dur = event.durationMs;
+                out.v_playing = event.playing;
+                out.v_buffering = event.buffering;
+                out.v_w = event.width;
+                out.v_h = event.height;
+                out.video_events = model.video_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .vplay_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 0, 0) },
+            .vpause_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 1, 0) },
+            .vstop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 2, 0) },
+            .vseek_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 45_000) },
+            .vvol_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 4, 0.25) },
+            .vmute_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 5, 1) },
+            .vloop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 6, 1) },
+            .vctl_stray => return .{ .model = model, .cmd = cmdVideoCtl("other", 1, 0) },
         }
     }
 
@@ -663,6 +726,31 @@ const mini_core = struct {
     fn cmdAudioCtl(key: []const u8, verb: u8, value: f64) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8);
         out[0] = 0x0F;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = verb;
+        std.mem.writeInt(u64, out[2 + key.len + 1 ..][0..8], @bitCast(value), .little);
+        return out;
+    }
+
+    fn cmdVideoLoad(key: []const u8, event_tag: u8, surface: f64, video_path: []const u8, url: []const u8, flags: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8 + 4 + video_path.len + 4 + url.len + 1);
+        out[0] = 0x17;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var off: usize = 2 + key.len;
+        out[off] = event_tag;
+        std.mem.writeInt(u64, out[off + 1 ..][0..8], @bitCast(surface), .little);
+        off += 9;
+        off = writeLongBytes(out, off, video_path);
+        off = writeLongBytes(out, off, url);
+        out[off] = flags;
+        return out;
+    }
+
+    fn cmdVideoCtl(key: []const u8, verb: u8, value: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8);
+        out[0] = 0x18;
         out[1] = @intCast(key.len);
         @memcpy(out[2..][0..key.len], key);
         out[2 + key.len] = verb;
@@ -1551,6 +1639,99 @@ test "a replacing audio_play re-keys the stream and the url source decodes whole
     try std.testing.expectEqual(mini_core.AudioState.failed, Host.model().audio_state);
     Host.dispatch(fx, .pause_it);
     try std.testing.expect(!fx.audioSnapshot().playing);
+}
+
+// ------------------------------------------------------- video stream
+
+test "video_load decodes whole and events route the seven-field arm by name" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    const request = fx.pendingVideo().?;
+    try std.testing.expectEqual(ts_core_host.video_key_base, request.key);
+    try std.testing.expectEqual(@as(u64, 5), request.surface);
+    try std.testing.expectEqualStrings("media/clip.mp4", request.path);
+    try std.testing.expectEqualStrings("", request.url);
+    try std.testing.expect(request.playing); // autoplay flag
+    try std.testing.expect(!request.looping);
+    try std.testing.expect(!request.muted);
+
+    // The loaded acknowledgment routes the event arm with the decoded
+    // dimensions; the state member is matched by NAME (the mini core
+    // scrambles its declaration order on purpose).
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);
+    try std.testing.expectEqual(@as(f64, 12_000), Host.model().v_dur);
+    try std.testing.expectEqual(@as(f64, 1920), Host.model().v_w);
+    try std.testing.expectEqual(@as(f64, 1080), Host.model().v_h);
+    try std.testing.expect(Host.model().v_playing);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().video_events);
+
+    // Position ticks keep flowing through the same non-retiring entry,
+    // the buffering flag riding along.
+    try fx.feedVideoEvent(.position, 1_500, 12_000, true, false, 0, 0);
+    try fx.feedVideoEvent(.position, 2_000, 12_000, true, true, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.position, Host.model().video_state);
+    try std.testing.expectEqual(@as(f64, 2_000), Host.model().v_pos);
+    try std.testing.expect(Host.model().v_buffering);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().video_events);
+
+    // completed does NOT close the stream (apps start the next clip
+    // from it); the entry keeps routing.
+    try fx.feedVideoEvent(.completed, 12_000, 12_000, false, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.completed, Host.model().video_state);
+    try std.testing.expect(!Host.model().v_playing);
+    try std.testing.expectEqual(@as(i64, 4), Host.model().video_events);
+
+    // A replacing video_load re-keys the stream in place and the url
+    // record's option flags decode whole (autoplay off, loop + muted).
+    Host.dispatch(fx, .vload_url);
+    const replaced = fx.pendingVideo().?;
+    try std.testing.expectEqualStrings("", replaced.path);
+    try std.testing.expectEqualStrings("https://cdn.test/clip.mp4", replaced.url);
+    try std.testing.expect(!replaced.playing);
+    try std.testing.expect(replaced.looping);
+    try std.testing.expect(replaced.muted);
+}
+
+test "video_ctl verbs drive the engine channel, gated by the wire key" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    // A verb aimed at a key that is not the open stream is a no-op.
+    Host.dispatch(fx, .vctl_stray);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    Host.dispatch(fx, .vplay_it);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    Host.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 45_000), fx.videoSnapshot().position_ms);
+
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);
+
+    Host.dispatch(fx, .vmute_it);
+    try std.testing.expect(fx.videoSnapshot().muted);
+    Host.dispatch(fx, .vloop_it);
+    try std.testing.expect(fx.videoSnapshot().looping);
+
+    // stop closes the stream: the channel idles, the entry retires,
+    // and a straggler feed finds nothing.
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(!fx.videoSnapshot().active);
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoEvent(.position, 5_000, 12_000, true, false, 0, 0));
 }
 
 test "boot commits the model before any effects and performBoot fires the boot command once" {
