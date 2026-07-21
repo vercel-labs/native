@@ -400,6 +400,151 @@ test "the staging mutex is never held across the host wake hook" {
     _ = fx.takeMsg();
 }
 
+// ------------------------------------------------- wake coalescer gates
+
+/// A counting host wake hook for the direct-channel coalescer tests:
+/// stands where the null platform's atomic wake counter stands, close
+/// enough to the posting seam to observe every individual host call.
+const WakeCounter = struct {
+    var calls: usize = 0;
+
+    fn reset() void {
+        calls = 0;
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        calls += 1;
+    }
+};
+
+test "a burst of accepted posts latches exactly one host wake" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeCounter.reset();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
+    fx.services = &services;
+
+    const handle = fx.openChannel(.{ .key = 52, .on_event = DirectFx.channelMsg(.event) });
+
+    // Fill the whole default stage: one wake, not max_effect_channel_pending.
+    var index: usize = 0;
+    while (index < effects_mod.max_effect_channel_pending) : (index += 1) {
+        try testing.expectEqual(PostResult.accepted, handle.post("burst"));
+    }
+    try testing.expectEqual(@as(usize, 1), WakeCounter.calls);
+
+    // The drain pass unlatches at its boundary and delivers the whole
+    // eligible backlog — one wake answered every staged entry.
+    var boundary = fx.drainBoundary();
+    var delivered: usize = 0;
+    while (fx.takeMsgWithin(&boundary)) |msg| {
+        try testing.expect(msg == .event);
+        delivered += 1;
+    }
+    try testing.expectEqual(effects_mod.max_effect_channel_pending, delivered);
+
+    // Refill after the drain: the unlatched coalescer wakes exactly
+    // once again — the fill/drain/refill cycle costs one wake per
+    // drain, never a standing backlog of host-queue entries.
+    try testing.expectEqual(PostResult.accepted, handle.post("refill"));
+    try testing.expectEqual(PostResult.accepted, handle.post("refill"));
+    try testing.expectEqual(@as(usize, 2), WakeCounter.calls);
+
+    fx.closeChannel(52);
+    while (fx.takeMsg()) |_| {}
+}
+
+test "a post racing the drain lands after the coalescer clear and still wakes" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeCounter.reset();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
+    fx.services = &services;
+
+    const handle = fx.openChannel(.{ .key = 53, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("before the pass"));
+    try testing.expectEqual(@as(usize, 1), WakeCounter.calls);
+
+    // The pass boundary clears the latch BEFORE snapshotting the post
+    // order (`drainBoundary`). A post landing after the boundary — the
+    // closest deterministic stand-in for one racing the clear/snapshot
+    // window, which has no injectable seam between its two lines —
+    // must observe the cleared latch and land a FRESH wake, because
+    // this pass's snapshot excludes it. Were the clear ordered after
+    // the snapshot instead, a racing post would coalesce into a wake
+    // this very pass consumes and stall until unrelated traffic.
+    var boundary = fx.drainBoundary();
+    try testing.expectEqual(PostResult.accepted, handle.post("during the pass"));
+    try testing.expectEqual(@as(usize, 2), WakeCounter.calls);
+
+    // The pass delivers only the pre-boundary post...
+    const first = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
+    try testing.expectEqualStrings("before the pass", first.event.bytes);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsgWithin(&boundary));
+
+    // ...and the racing post's fresh wake has a pass of its own.
+    var next = fx.drainBoundary();
+    const second = fx.takeMsgWithin(&next) orelse return error.TestExpectedMsg;
+    try testing.expectEqualStrings("during the pass", second.event.bytes);
+
+    fx.closeChannel(53);
+    while (fx.takeMsg()) |_| {}
+}
+
+/// A wake hook that posts back into the channel that woke it — the
+/// reentrant shape a real hook must never have (host wake
+/// implementations are enqueue-only by contract), turned into the
+/// strongest available deadlock gate: pre-split this deadlocked on the
+/// staging mutex; with the wake half alone it would deadlock on the
+/// wake mutex; the coalescer's pre-latched flag is what lets the inner
+/// post coalesce lock-free and return.
+const ReentrantPoster = struct {
+    var handle: ?effects_mod.ChannelHandle = null;
+    var inner_result: ?PostResult = null;
+
+    fn reset() void {
+        handle = null;
+        inner_result = null;
+    }
+
+    fn wake(context: ?*anyopaque) anyerror!void {
+        _ = context;
+        const h = handle orelse return;
+        if (inner_result != null) return;
+        inner_result = h.post("reentrant");
+    }
+};
+
+test "a wake hook that posts back into the same channel coalesces instead of deadlocking" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    ReentrantPoster.reset();
+    defer ReentrantPoster.reset();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = ReentrantPoster.wake };
+    fx.services = &services;
+
+    const handle = fx.openChannel(.{ .key = 54, .on_event = DirectFx.channelMsg(.event) });
+    ReentrantPoster.handle = handle;
+
+    // The outer post latches the wake, then runs the hook; the hook's
+    // inner post stages (the staging mutex is free — the lock-order
+    // invariant) and coalesces on the latched flag without touching
+    // the wake mutex the outer post still holds.
+    try testing.expectEqual(PostResult.accepted, handle.post("outer"));
+    try testing.expectEqual(@as(?PostResult, .accepted), ReentrantPoster.inner_result);
+
+    // Both entries ride the one latched wake, in post order.
+    ReentrantPoster.handle = null;
+    _ = try expectData(&fx, 54, "outer");
+    _ = try expectData(&fx, 54, "reentrant");
+    fx.closeChannel(54);
+    while (fx.takeMsg()) |_| {}
+}
+
 // ---------------------------------------------- record/replay acceptance
 
 const channel_canvas_label = "channel-session-canvas";
@@ -873,12 +1018,16 @@ test "rejected posts never wake the host: the pending-wake count stays flat unde
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "channel.open", .window_id = 1 } });
     const handle = session_handle orelse return error.TestExpectedHandle;
 
-    // Accepted posts wake: each staged entry nudges the host exactly
-    // once, so delivery latency never depends on unrelated traffic.
+    // Accepted posts wake, COALESCED: the first accepted post latches
+    // exactly one host wake and the rest of the burst rides it — one
+    // wake drains the whole eligible backlog, so a fill/drain/refill
+    // producer can never park a backlog of redundant host-queue
+    // entries behind the one drain that answers them all.
     const before_accepted = harness.null_platform.pendingWakeCount();
     try testing.expectEqual(PostResult.accepted, handle.post("kept 1"));
+    try testing.expectEqual(before_accepted + 1, harness.null_platform.pendingWakeCount());
     try testing.expectEqual(PostResult.accepted, handle.post("kept 2"));
-    try testing.expectEqual(before_accepted + 2, harness.null_platform.pendingWakeCount());
+    try testing.expectEqual(before_accepted + 1, harness.null_platform.pendingWakeCount());
 
     // The stage is full (max_pending = 2). A refused post stages
     // nothing, so it must NOT wake: the staged entries' own accepted
@@ -903,8 +1052,10 @@ test "rejected posts never wake the host: the pending-wake count stays flat unde
     try testing.expectEqual(@as(u32, 2), app_state.model.data_events);
     try testing.expectEqual(@as(u32, 65), app_state.model.dropped_total_last);
 
-    // Non-regression: with the stage relieved, an accepted post wakes
-    // exactly once, same as before.
+    // Delivery latency: the drain unlatched the coalescer, so an
+    // accepted post after the idle period wakes immediately — one
+    // wake per drain, never fewer (the stall the latch must not
+    // introduce) and never a backlog.
     const before_relieved = harness.null_platform.pendingWakeCount();
     try testing.expectEqual(PostResult.accepted, handle.post("kept 3"));
     try testing.expectEqual(before_relieved + 1, harness.null_platform.pendingWakeCount());

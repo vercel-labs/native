@@ -896,6 +896,20 @@ const ChannelWake = struct {
     /// so a channel opened before `bindServices` still wakes), or null
     /// while disarmed.
     services: ?*const ?*const platform.PlatformServices = null,
+    /// A latched wake has not yet reached a drain pass: the wake
+    /// coalescer (`MediaSurfaceWake.pending`, channel-shaped). Set by
+    /// the first accepted post, suppressing further host wakes until
+    /// `drainBoundary` clears it BEFORE snapshotting the post order —
+    /// so a burst of accepted posts costs at most one host wake, and a
+    /// post racing the drain always lands either inside the pass's
+    /// snapshot or a fresh wake of its own. Per-channel, like
+    /// MediaSurfaceWake's per-slot flag: the coalescer rides the
+    /// binding it guards (same generation fence, same disarm sweep),
+    /// and the drain structure supports it because every pass sweeps
+    /// all channel slots at its boundary. Atomic so posts can check it
+    /// WITHOUT the wake mutex (see `requestHostWake` for why that
+    /// lock-free fast path matters); mutations happen under the mutex.
+    pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 /// The thread-shared half of one channel table slot — the block a
@@ -989,6 +1003,10 @@ pub const ChannelHandle = struct {
 
     /// Stage `bytes` for delivery as one `.data` event Msg on the next
     /// drain, and — for an ACCEPTED post only — wake the host loop.
+    /// Wakes COALESCE: the first accepted post latches one host wake
+    /// and a burst rides it (the drain unlatches before it snapshots),
+    /// so a fast producer costs the host loop's queue at most one
+    /// entry per drain, never a backlog of redundant wakes.
     /// Callable from ANY thread. Never blocks and never silently drops
     /// a delivered event: the answer says exactly what happened (see
     /// `PostResult`) — `.dropped_full` and `.dropped_oversized` count
@@ -1014,7 +1032,7 @@ pub const ChannelHandle = struct {
                 // NO wake for a refusal — the invariant of this whole post
                 // site is that a wake is issued only when a post makes new
                 // work drainable. A full stage proves staged entries exist
-                // whose accepted posts already woke the loop, and the drop
+                // whose accepted posts already latched the wake, and the drop
                 // counters ride the next delivered event with no extra
                 // nudge; an oversized post stages nothing, so there is
                 // nothing to drain. Waking here would let a producer that
@@ -1025,7 +1043,10 @@ pub const ChannelHandle = struct {
                 // reason: nothing staged, nothing to drain.)
                 return if (bytes.len > max_effect_channel_bytes) .dropped_oversized else .dropped_full;
             }
-            const seq = owner.seq.fetchAdd(1, .monotonic);
+            // seq_cst: the coalescer's correctness argument orders this
+            // stamp against the drain's clear-then-snapshot (see
+            // `requestHostWake` and `drainBoundary`).
+            const seq = owner.seq.fetchAdd(1, .seq_cst);
             const index = (staging.head + staging.len) % max_effect_channel_pending;
             staging.lens[index] = @intCast(bytes.len);
             staging.seqs[index] = seq;
@@ -1049,14 +1070,35 @@ pub const ChannelHandle = struct {
     /// after it returns no call can start.
     fn requestHostWake(shared: *ChannelShared, generation: u32) void {
         const wake = &shared.wake;
+        // Coalesce, LOCK-FREE: a latched flag means a host wake is in
+        // flight whose drain pass clears the flag before snapshotting
+        // the post order — the entry staged above is inside that
+        // snapshot (both sides are seq_cst: this load observing true
+        // orders our seq stamp before the drain's clear, and the clear
+        // before its snapshot, so the snapshot covers our stamp; see
+        // `drainBoundary`). Checking without the mutex is also what
+        // keeps a wake hook that posts back into the SAME channel safe:
+        // the flag latches below BEFORE the host call, so a reentrant
+        // post coalesces here instead of deadlocking on the wake mutex.
+        if (wake.pending.load(.seq_cst)) return;
         wake.mutex.lock();
         defer wake.mutex.unlock();
         // Stale occupancy (closed, reopened, or torn down): no wake.
         if (wake.generation != generation) return;
-        // Disarmed, or no host services bound yet: nothing to call.
+        // Lost the race to another poster: its latched wake covers us.
+        if (wake.pending.load(.seq_cst)) return;
+        // Disarmed, or no host services bound yet: nothing to call
+        // (and nothing latched — a later `bindServices` post retries).
         const services_ref = wake.services orelse return;
         const services = services_ref.* orelse return;
-        services.wake() catch {};
+        // Latch BEFORE the call — MediaSurfaceWake latches after, but
+        // its hosts never re-enter the producer; this seam is test-
+        // injectable, and the pre-latch is what makes a reentrant post
+        // coalesce (above) instead of relocking. A refused wake
+        // unlatches so the next post retries instead of parking a wake
+        // that never comes.
+        wake.pending.store(true, .seq_cst);
+        services.wake() catch wake.pending.store(false, .seq_cst);
     }
 };
 
@@ -1071,6 +1113,7 @@ fn disarmChannelWake(shared: *ChannelShared) void {
     defer wake.mutex.unlock();
     wake.generation = 0;
     wake.services = null;
+    wake.pending.store(false, .seq_cst);
 }
 
 /// Base platform timer id for fx timers: slot N arms the platform timer
@@ -3875,6 +3918,7 @@ pub fn Effects(comptime Msg: type) type {
             shared.wake.mutex.lock();
             shared.wake.generation = generation;
             shared.wake.services = &self.services;
+            shared.wake.pending.store(false, .seq_cst);
             shared.wake.mutex.unlock();
             return .{ .shared = shared, .generation = generation };
         }
@@ -4800,18 +4844,39 @@ pub fn Effects(comptime Msg: type) type {
             queue_budget: usize,
             /// Channel posts (and close markers) stamped before the
             /// pass: `channel_seq` stamps below this deliver. A post
-            /// landing mid-pass waits for the wake it already nudged —
-            /// the same causality cut the other two fields make.
+            /// landing mid-pass waits for the fresh wake it latched —
+            /// the coalescer cleared at the pass boundary guarantees
+            /// one — the same causality cut the other two fields make.
             channel_before: u64,
         };
 
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            // Drain the channel wake coalescers BEFORE snapshotting the
+            // post order — `adoptMediaSurfaceFrames`' clear-before-
+            // sample placement, matched exactly (it clears each slot's
+            // `MediaSurfaceWake.pending` before sampling the staged
+            // flag): a post whose latched-flag check observed true
+            // stamped its entry before this clear, so the seq_cst
+            // snapshot below covers it and this pass delivers it; a
+            // post racing the drain and landing after the clear
+            // observes the flag clear and latches a fresh wake for the
+            // pass that will. Either interleaving, nothing staged is
+            // ever left wakeless.
+            for (&self.channel_slots) |*slot| {
+                const shared = slot.shared orelse continue;
+                shared.wake.mutex.lock();
+                shared.wake.pending.store(false, .seq_cst);
+                shared.wake.mutex.unlock();
+            }
             return .{
                 .pending_before = self.pending_seq,
                 .queue_budget = self.queue_count.load(.acquire),
-                .channel_before = self.channel_seq.load(.acquire),
+                // seq_cst, paired with the post's seq_cst stamp and
+                // flag check (see `requestHostWake`): a post ordered
+                // before the clear above is inside this snapshot.
+                .channel_before = self.channel_seq.load(.seq_cst),
             };
         }
 
