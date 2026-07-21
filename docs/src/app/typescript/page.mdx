@@ -303,6 +303,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>Load an image at runtime under the model-owned numeric ImageId your markup binds; one <code>event</code> result — <code>loaded</code> with the decoded width/height, or a failure class. <code>imageCancel</code> ends a live load loudly (state <code>cancelled</code>) and frees the id; <code>imageUnregister</code> releases a loaded image's registry slot (no result — synchronous, like registration) — see <a href="/dynamic-images">Dynamic Images</a></td>
     </tr>
     <tr>
+      <td><code>Cmd.channelOpen(key, &#123; event &#125;)</code> / <code>channelClose(key)</code></td>
+      <td>Open an external-source channel under an app-chosen numeric key: the native side holds the posting handle and feeds bytes from its own threads, and every post arrives through the one <code>event</code> arm with the back-pressure counters aboard. <code>channelClose</code> flushes staged posts, dispatches exactly one <code>closed</code> event with the final drop totals, and frees the key</td>
+    </tr>
+    <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
       <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
     </tr>
@@ -357,6 +361,56 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 ```
 
+External sources — sockets, file watchers, native worker threads — reach `update` through a channel. `Cmd.channelOpen(key, { event })` opens a long-lived stream under an app-chosen numeric key, and every event dispatches the one `event` arm as a five-field record; `state` must be a named string-literal-union alias carrying exactly the three members — a narrower union would silently drop states the host emits, so the build refuses it. Posting is not a TS verb: transpiled cores are single-threaded by design, so the posting handle lives on the native side (`Effects.channelHandle(key)`), where embedders and platform-services extensions post bytes from their own threads. Back-pressure is honest — posts the native handle refused count into `droppedPending`/`droppedTotal` on the next delivered event, never silence — and a duplicate open on a live key dispatches `rejected`. `Cmd.channelClose(key)` ends the stream: staged posts flush, exactly one `closed` event carries the final totals, and the key frees.
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export type ChannelState = "data" | "closed" | "rejected";
+
+export interface Model {
+  readonly samples: number;
+  readonly dropped: number;
+  readonly live: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "start" }
+  | { readonly kind: "stop" }
+  | {
+      readonly kind: "feed";
+      readonly key: number;
+      readonly state: ChannelState;
+      readonly bytes: Uint8Array;
+      readonly droppedPending: number;
+      readonly droppedTotal: number;
+    };
+
+export const viewUnbound = ["feed"] as const;
+
+export function initialModel(): Model {
+  return { samples: 0, dropped: 0, live: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start":
+      return [{ ...model, live: true }, Cmd.channelOpen(1, { event: "feed" })];
+    case "stop":
+      return [model, Cmd.channelClose(1)];
+    case "feed":
+      switch (msg.state) {
+        case "data":
+          return { ...model, samples: model.samples + 1, dropped: msg.droppedTotal };
+        case "closed":
+          return { ...model, live: false, dropped: msg.droppedTotal };
+        case "rejected":
+          return { ...model, live: false };
+      }
+  }
+}
+```
+
 ## Subscriptions are Sub data
 
 Recurring effects are declared, not issued: export `subscriptions(model): Sub<Msg>` and return descriptors derived from the current model. After every commit the host reconciles the returned set against its active timers by key — a new key (or a changed interval) arms a timer, a missing key cancels it — so starting, stopping, and re-tuning timers is just returning different data:
@@ -401,7 +455,7 @@ export function subscriptions(model: Model): Sub<Msg> {
 }
 ```
 
-Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
+Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
 
 ## Text input from markup
 

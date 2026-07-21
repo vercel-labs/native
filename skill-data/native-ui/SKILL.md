@@ -737,6 +737,34 @@ pub const Msg = union(enum) {
 
 Audio rules: `event.kind` is explicit — `.loaded` acknowledges a successful load (position ticks and `.completed` follow only after it), `.position` is a coarse honest readout (~500ms cadence — a readout, not a frame clock; drive animations from your model, not from tick density), `.completed` fires exactly once with position pinned to the duration, `.failed` reports an unreadable file with no url fallback, an async decode error, a network failure mid-stream (or offline with a cold cache), or a platform without audio playback (GTK/Win32 today — named unsupported, not half-implemented), `.rejected` reports loop-side validation (path and url both empty, or any string over `max_effect_audio_path_bytes`). `event.buffering` is the stream's honest stall flag — true while an un-paused stream waits for network bytes (local files and cache hits never buffer); show it as its own UI state, distinct from playing and paused. All payload fields are plain data — safe to store in the model, no drain-scratch copying. Pause/stop/seek/volume never echo events (the caller commanded them); seek and volume work mid-stream; volume is remembered across tracks. The streamed bytes cache at `cache_path` — key it by URL hash with `native_sdk.audioCachePath(&buffer, cache_dir, url)` under the app_dirs `.cache` directory (macOS `~/Library/Caches/<app>/audio/`, Linux `$XDG_CACHE_HOME/<app>/audio/`), so clearing the cache is deleting that one directory. The automation snapshot reports playback honestly (`audio key=... state=playing|paused|buffering source=local|cache|stream position_ms=... duration_ms=...`) — an advancing `position_ms` is the automation-visible evidence music is actually playing, and `source=` proves the resolution order. In the fake executor, `pendingAudio()` records the single channel's `key`/`path`/`url`/`cache_path`/`expected_bytes`/`playing`/`volume`, `feedAudioEvent(.position, 1_500, 89_160, true)` feeds any event by hand (draining through the same `.wake` path; `feedAudioEventBuffering` adds the stall flag), and `audioSnapshot()` exposes the mirrors; under the real executor the test harness's null platform is a deterministic fake player — `setAudioDuration(suffix, ms)` seeds durations, `takeAudioLoaded()` / `advanceAudio(delta_ms)` / `stallAudio()` synthesize the platform events a live host would deliver, position never advances on its own, `audio_local_files = false` models the assets-absent machine (local loads answer `AudioSourceNotFound`, which is what sends the cascade to the url), and a streamed track that runs to completion flips into the fake cache so the next play of the same url resolves `.cache`.
 
+`fx.openChannel` is the external-source seam — the one sanctioned way an app-owned thread (a socket reader, a file watcher, a sampling worker) feeds the UI. Reach for it when the data originates OUTSIDE update and arrives on its own schedule: open a channel under a caller-chosen `u64` key, hand the returned thread-safe `ChannelHandle` to the source thread, and every accepted `handle.post(bytes)` arrives as one `on_event` Msg — no timer polling anywhere, the post itself wakes the loop. Channels are their own fixed table (8, `max_effect_channels`) and consume none of the 16 effect slots, but the key shares the effect families' one key space (a same-key fetch is blocked while the channel lives):
+
+```zig
+pub const Msg = union(enum) {
+    sample: native_sdk.EffectChannelEvent,   // the fixed payload type
+    ...
+};
+
+.start => {
+    const handle = fx.openChannel(.{
+        .key = monitor_key,                   // echoed in every event
+        .on_event = Effects.channelMsg(.sample),
+        .max_pending = 8,                     // staging bound, clamped 1..32 (default 32)
+    });
+    // Hand `handle` to the source thread. Posting is thread-safe and
+    // never blocks: handle.post(bytes) answers .accepted,
+    // .dropped_full, .dropped_oversized, or .closed.
+},
+.stop => fx.closeChannel(monitor_key),
+.sample => |event| switch (event.kind) {
+    .data => model.recordSample(event.bytes),                // drain scratch — copy what the model keeps
+    .closed => model.noteMonitorStopped(event.dropped_total), // exactly once, final totals aboard
+    .rejected => model.noteMonitorUnavailable(),              // duplicate live key or no idle slot
+},
+```
+
+Channel rules: `handle.post` answers a four-way `PostResult`, and the producer contract reads directly off it — `.accepted` (exactly one `.data` event delivers on the next drain), `.dropped_full` (transient back-pressure: skip this message and keep producing; the consumer's next drain relieves it), `.dropped_oversized` (a programming error no retry fixes: bound your bytes at `max_effect_channel_bytes`, 4 KiB), `.closed` (the occupancy is over: exit the producer loop for good — the handle is generation-stamped, so posting after close, after the slot was reused, or after runtime teardown is always memory-safe and always `.closed`). The back-pressure contract in one line: refused posts are never silent — they count into the event's `dropped_pending`/`dropped_total` counters and ride the next delivered event, and a refused post never wakes the host, so a producer storming a full stage cannot grow the loop's queue. The replay story in one line: channel events journal at the effect boundary, so a recorded session replays the whole stream offline — under replay `openChannel` parks the occupancy and returns an inert handle whose every post answers `.closed`, making a re-run source thread exit on its first post. `fx.closeChannel(key)` flushes the staged backlog, delivers the one `.closed` terminal, and frees the key at that delivery; `fx.channelHandle(key)` re-resolves the open channel's handle loop-side. See `examples/channel-monitor` for the complete worker-loop pattern, including the wind-down discipline.
+
 Test effects with the fake executor — deterministic, no processes, no network:
 
 ```zig
@@ -771,6 +799,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 > - Host commands: `pendingHostAt(index: usize) ?HostRequest` · `feedHostResult(key: u64, ok: bool, bytes: []const u8)`.
 > - Timers: `pendingTimerAt(index: usize) ?TimerRequest` · `fireTimer(key: u64)` (one-shot slots retire after the fire).
 > - Audio (one channel): `pendingAudio() ?AudioRequest` · `feedAudioEvent(kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool)` · `feedAudioEventBuffering(kind, position_ms, duration_ms, playing, buffering: bool)` · `feedAudioSpectrum(bands: [32]u8, position_ms: u64, duration_ms: u64)` · `audioSnapshot() AudioSnapshot`.
+> - Channels: `channelHandle(key: u64) ?ChannelHandle` (post from the test exactly as a source thread would — no feed needed for live posts) · `feedChannelEvent(key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{EffectNotFound, EffectQueueFull}!void` (hand-feeds an event, the replay path's seam).
 >
 > After feeding, drain with `try harness.runtime.dispatchPlatformEvent(app, .wake);` — results become Msgs through the same path live platforms use.
 

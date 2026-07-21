@@ -1806,9 +1806,9 @@ pub fn Effects(comptime Msg: type) type {
             on_event: ChannelMsgFn,
             /// Back-pressure bound: staged posts held between drains,
             /// clamped to 1..`max_effect_channel_pending`. Posts past
-            /// it return false and count as drops — deterministic
-            /// arithmetic on the wire value, so replay clamps
-            /// identically.
+            /// it answer `.dropped_full` and count as drops —
+            /// deterministic arithmetic on the wire value, so replay
+            /// clamps identically.
             max_pending: u32 = max_effect_channel_pending,
         };
 
