@@ -2972,8 +2972,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const declaration = self.video_build_declaration orelse {
                 if (self.video_declared) {
                     self.video_declared = false;
+                    const declared_key = std.hash.Wyhash.hash(0x76696465, self.video_declared_src_buffer[0..self.video_declared_src_len]) | 1;
                     self.video_declared_src_len = 0;
-                    self.effects.stopVideo();
+                    // Stop ONLY the playback this reconciler started:
+                    // an update handler may have replaced it with its
+                    // own load (a different key) between rebuilds, and
+                    // declarative ownership must never kill a playback
+                    // it does not own.
+                    const snapshot = self.effects.videoSnapshot();
+                    if (snapshot.active and snapshot.key == declared_key) {
+                        self.effects.stopVideo();
+                    }
                     self.publishAudioState(runtime);
                 }
                 return;
@@ -3011,7 +3020,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return;
             }
             // Same src: apply flag deltas in place — a reload would
-            // restart the playback the declaration did not change.
+            // restart the playback the declaration did not change. Only
+            // while the declared playback still OWNS the channel: an
+            // update handler that replaced it (its own key) took the
+            // single player over, and the reconciler yields until the
+            // declaration itself changes.
+            const declared_key = std.hash.Wyhash.hash(0x76696465, src) | 1;
+            const snapshot = self.effects.videoSnapshot();
+            if (!snapshot.active or snapshot.key != declared_key) return;
             if (declaration.loop != self.video_declared_loop) {
                 self.video_declared_loop = declaration.loop;
                 self.effects.setVideoLoop(declaration.loop);
