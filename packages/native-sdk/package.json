@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "The Native SDK: the complete toolkit for building native desktop applications — declarative markup, native rendering, WebView surfaces, and OS capabilities",
   "type": "module",
   "bin": {
@@ -32,14 +32,14 @@
     "@typescript/typescript6": "6.0.2"
   },
   "optionalDependencies": {
-    "@native-sdk/cli-darwin-arm64": "0.5.3",
-    "@native-sdk/cli-darwin-x64": "0.5.3",
-    "@native-sdk/cli-linux-arm64-gnu": "0.5.3",
-    "@native-sdk/cli-linux-arm64-musl": "0.5.3",
-    "@native-sdk/cli-linux-x64-gnu": "0.5.3",
-    "@native-sdk/cli-linux-x64-musl": "0.5.3",
-    "@native-sdk/cli-win32-arm64": "0.5.3",
-    "@native-sdk/cli-win32-x64": "0.5.3"
+    "@native-sdk/cli-darwin-arm64": "0.5.4",
+    "@native-sdk/cli-darwin-x64": "0.5.4",
+    "@native-sdk/cli-linux-arm64-gnu": "0.5.4",
+    "@native-sdk/cli-linux-arm64-musl": "0.5.4",
+    "@native-sdk/cli-linux-x64-gnu": "0.5.4",
+    "@native-sdk/cli-linux-x64-musl": "0.5.4",
+    "@native-sdk/cli-win32-arm64": "0.5.4",
+    "@native-sdk/cli-win32-x64": "0.5.4"
   },
   "repository": {
     "type": "git",
