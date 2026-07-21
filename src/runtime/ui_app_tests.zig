@@ -3588,6 +3588,13 @@ const ArenaPayloadModel = struct {
 const ArenaPayloadMsg = union(enum) {
     bump,
     send: []const u8,
+    /// The error-union shape: the snapshot copy must recurse through a
+    /// successful payload's slices too. (Aligned and MUTABLE slice
+    /// payloads are exercised directly against the copy helper in
+    /// runtime.ui_app — the markup interpreter compiled for every
+    /// UiApp Msg only constructs plain `[]const u8` slice payloads, so
+    /// such arms cannot instantiate a UiApp at all.)
+    send_result: error{Overloaded}![]const u8,
 };
 
 const ArenaPayloadApp = ui_app_model.UiApp(ArenaPayloadModel, ArenaPayloadMsg);
@@ -3595,17 +3602,17 @@ const ArenaPayloadApp = ui_app_model.UiApp(ArenaPayloadModel, ArenaPayloadMsg);
 fn arenaPayloadUpdate(model: *ArenaPayloadModel, msg: ArenaPayloadMsg) void {
     switch (msg) {
         .bump => model.generation += 1,
-        .send => |bytes| {
-            const len = @min(bytes.len, model.received_storage.len);
-            @memcpy(model.received_storage[0..len], bytes[0..len]);
-            model.received_len = len;
-            model.sends += 1;
-        },
+        .send => |bytes| recordArenaPayload(model, bytes),
+        .send_result => |result| recordArenaPayload(model, result catch &.{}),
     }
 }
 
-const arena_payload_original = "menu-payload-original";
-const arena_payload_sentinel = "!!!!!!!!!!!!!!!!!!!!!";
+fn recordArenaPayload(model: *ArenaPayloadModel, bytes: []const u8) void {
+    const len = @min(bytes.len, model.received_storage.len);
+    @memcpy(model.received_storage[0..len], bytes[0..len]);
+    model.received_len = len;
+    model.sends += 1;
+}
 
 fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) ArenaPayloadApp.Ui.Node {
     // Pin the build arena to one address-stable chunk: the first
@@ -3618,16 +3625,16 @@ fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) Ar
     @memset(slab, '!');
     // The documented Msg-payload shape: a display string formatted into
     // the BUILD ARENA and carried by a context-menu item's Msg. Every
-    // rebuild formats a same-length payload, so the reset arena places
-    // it exactly where a stale present-time slice points — generation
-    // > 0 overwrites the original bytes with sentinels.
-    comptime std.debug.assert(arena_payload_original.len == arena_payload_sentinel.len);
-    const payload = ui.fmt("{s}", .{if (model.generation == 0) arena_payload_original else arena_payload_sentinel});
+    // build formats a same-length, generation-stamped payload, so after
+    // the arena reset the next build's bytes land exactly where a stale
+    // present-time slice points.
+    const payload = ui.fmt("payload-gen-{d:0>4}", .{model.generation});
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
         ui.el(.list_item, .{
             .text = "Ship the release",
             .context_menu = &.{
                 .{ .label = "Send", .msg = .{ .send = payload } },
+                .{ .label = "Send result", .msg = .{ .send_result = payload } },
             },
         }, .{}),
         ui.button(.{ .on_press = .bump }, "Rebuild"),
@@ -3676,8 +3683,12 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     try std.testing.expect(!row_frame.isEmpty());
     try std.testing.expect(!button_frame.isEmpty());
 
-    // Present the menu. GTK popovers are asynchronous: the menu stays
-    // on the glass while the app keeps rebuilding underneath.
+    // Round 1 — the plain const slice. Present the menu (GTK popovers
+    // are asynchronous: it stays on the glass while the app keeps
+    // rebuilding underneath), then rebuild TWICE: view builds
+    // double-buffer two arenas, so the second rebuild resets the arena
+    // the presented tree was built in and overwrites the payload's
+    // storage with the next generation's bytes.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -3691,10 +3702,6 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     const shown_token = harness.null_platform.context_menu_token;
     try std.testing.expect(shown_token != 0);
 
-    // TWO rebuilds while the menu is open: view builds double-buffer
-    // two arenas, so the second rebuild resets the arena the presented
-    // tree was built in and overwrites the payload's storage with
-    // sentinel bytes.
     for (0..2) |press| {
         const base: u64 = 3_000_000 + @as(u64, @intCast(press)) * 2_000_000;
         try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
@@ -3726,13 +3733,11 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
         .item_id = 1,
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
-    try std.testing.expectEqualStrings(arena_payload_original, app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expectEqualStrings("payload-gen-0000", app_state.model.received_storage[0..app_state.model.received_len]);
 
-    // Supersession and dismissal both release their snapshot copies: a
-    // re-presented menu replaces the previous snapshot, its successor is
-    // dismissed without a selection, and teardown (the deferred deinit)
-    // frees whatever is still armed — the backing allocator reports any
-    // copy that escapes.
+    // Round 2 — the error-union payload: the snapshot copy must recurse
+    // through the success arm, so the same two-rebuild race dispatches
+    // the presented generation's bytes, not the arena's current ones.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -3742,6 +3747,45 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
         .y = row_frame.y + 4,
         .timestamp_ns = 8_000_000,
     } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    const result_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(result_token != shown_token);
+
+    for (0..2) |press| {
+        const base: u64 = 9_000_000 + @as(u64, @intCast(press)) * 2_000_000;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_down,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = button_frame.x + 4,
+            .y = button_frame.y + 4,
+            .timestamp_ns = base + 1_000_000,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 4), app_state.model.generation);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = result_token,
+        .item_id = 2,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-gen-0002", app_state.model.received_storage[0..app_state.model.received_len]);
+
+    // Round 3 — supersession and dismissal both release their snapshot
+    // copies: a re-presented menu replaces the previous snapshot, its
+    // successor is dismissed without a selection, and teardown (the
+    // deferred deinit) frees whatever is still armed — the backing
+    // allocator reports any copy that escapes.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -3749,18 +3793,26 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
         .button = 1,
         .x = row_frame.x + 4,
         .y = row_frame.y + 4,
-        .timestamp_ns = 9_000_000,
+        .timestamp_ns = 15_000_000,
     } });
-    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.context_menu_request_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 16_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 4), harness.null_platform.context_menu_request_count);
     const superseding_token = harness.null_platform.context_menu_token;
-    try std.testing.expect(superseding_token != shown_token);
     try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
         .window_id = 1,
         .view_label = canvas_label,
         .token = superseding_token,
         .item_id = 0,
     } });
-    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
 }
 
 // ------------------------------------------------- press fall-through fixture

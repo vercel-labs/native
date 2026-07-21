@@ -3609,9 +3609,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (0..count) |item_index| {
                 self.context_menu_shown_msgs[item_index] = blk: {
                     const msg = tree.msgForContextMenu(shown_event.target_id, item_index) orelse break :blk null;
-                    // OOM: swallow the item rather than snapshot a slice
-                    // that may dangle by selection time.
-                    break :blk dupeSlicesDeep(MsgT, snapshot_arena, msg) catch null;
+                    // OOM: disarm THIS item, loudly, rather than
+                    // snapshot a slice that may dangle by selection
+                    // time — and keep the rest of the snapshot armed
+                    // (dropping the whole snapshot would resolve every
+                    // item through the live tree, the misdirection this
+                    // snapshot exists to prevent).
+                    break :blk dupeSlicesDeep(MsgT, snapshot_arena, msg) catch {
+                        ui_app_log.warn(
+                            "context menu snapshot: out of memory copying item {d}'s Msg payload; selecting that item will dispatch nothing",
+                            .{item_index},
+                        );
+                        break :blk null;
+                    };
                 };
             }
             self.context_menu_shown_token = shown_event.token;
@@ -3759,23 +3769,33 @@ fn effectsQuitApp(context: *anyopaque) bool {
     return true;
 }
 
-/// Deep-copy every slice reachable in `value` into `allocator`-owned
-/// storage, returning a value that no longer aliases the source's slice
-/// payloads. The context-menu snapshot uses this at present time: a
-/// declared item's Msg may carry build-arena slices (the documented
-/// payload shape), and a native menu stays open across arbitrarily many
-/// rebuilds while the build arenas double-buffer only two. Non-slice
-/// pointers pass through by reference — a Msg payload's contract points
-/// them at static or model-owned storage — and untagged unions cannot
-/// be walked, so they pass through by value.
+/// Deep-copy every CONST slice reachable in `value` into
+/// `allocator`-owned storage, returning a value that no longer aliases
+/// the source's const slice payloads. The context-menu snapshot uses
+/// this at present time: a declared item's Msg may carry build-arena
+/// slices (the documented payload shape — `ui.fmt` strings and
+/// allocator-form bindings, always const), and a native menu stays open
+/// across arbitrarily many rebuilds while the build arenas
+/// double-buffer only two. MUTABLE slices pass through by reference: a
+/// `[]u8` payload aliases app-owned storage by contract (a build cannot
+/// produce a mutable arena slice through the const model reference),
+/// and the app's `update` may write THROUGH it — a copy would swallow
+/// those writes into discarded snapshot storage. Non-slice pointers
+/// pass through by reference for the same reason, and untagged unions
+/// cannot be walked, so they pass through by value.
 fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) error{OutOfMemory}!T {
     switch (@typeInfo(T)) {
         .pointer => |pointer_info| switch (pointer_info.size) {
             .slice => {
-                const copy = if (comptime pointer_info.sentinel()) |sentinel_value|
-                    try allocator.allocSentinel(pointer_info.child, value.len, sentinel_value)
-                else
-                    try allocator.alloc(pointer_info.child, value.len);
+                if (comptime !pointer_info.is_const) return value;
+                // The copy keeps the declared alignment and sentinel, so
+                // it coerces back to the payload's exact slice type.
+                const copy = try allocator.allocWithOptions(
+                    pointer_info.child,
+                    value.len,
+                    comptime std.mem.Alignment.fromByteUnitsOptional(pointer_info.alignment),
+                    comptime pointer_info.sentinel(),
+                );
                 for (copy, value) |*element, source| {
                     element.* = try dupeSlicesDeep(pointer_info.child, allocator, source);
                 }
@@ -3804,6 +3824,10 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
             const payload = value orelse return null;
             return try dupeSlicesDeep(@TypeOf(payload), allocator, payload);
         },
+        .error_union => {
+            const payload = value catch |err| return @as(T, err);
+            return @as(T, try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
+        },
         .array => |array_info| {
             var copy = value;
             for (&copy, value) |*element, source| {
@@ -3813,4 +3837,59 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
         },
         else => return value,
     }
+}
+
+test "dupeSlicesDeep copies const slices with their alignment and sentinel, aliases mutable ones, and recurses error unions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Payload = struct {
+        name: []const u8,
+        aligned: []align(64) const u8,
+        mutable: []u8,
+        maybe: ?[]const u8,
+        result: error{Overloaded}![]const u8,
+        terminated: [:0]const u8,
+    };
+
+    var mutable_storage: [4]u8 = .{ 1, 2, 3, 4 };
+    const aligned_storage: [8]u8 align(64) = @splat(7);
+    const source: Payload = .{
+        .name = "model-name",
+        .aligned = &aligned_storage,
+        .mutable = &mutable_storage,
+        .maybe = "maybe",
+        .result = "ok",
+        .terminated = "zed",
+    };
+
+    const copy = try dupeSlicesDeep(Payload, allocator, source);
+
+    // Const slices are copied...
+    try std.testing.expect(copy.name.ptr != source.name.ptr);
+    try std.testing.expectEqualStrings(source.name, copy.name);
+    // ...keeping an explicit alignment (the copy IS the declared type,
+    // so this also fails loudly at compile time if the alloc widens)...
+    try std.testing.expect(copy.aligned.ptr != source.aligned.ptr);
+    try std.testing.expect(std.mem.isAligned(@intFromPtr(copy.aligned.ptr), 64));
+    try std.testing.expectEqualSlices(u8, source.aligned, copy.aligned);
+    // ...and a sentinel.
+    try std.testing.expect(copy.terminated.ptr != source.terminated.ptr);
+    try std.testing.expectEqualStrings(source.terminated, copy.terminated);
+    try std.testing.expectEqual(@as(u8, 0), copy.terminated[copy.terminated.len]);
+    // Optionals and SUCCESSFUL error unions recurse into their payloads.
+    try std.testing.expect(copy.maybe.?.ptr != source.maybe.?.ptr);
+    try std.testing.expectEqualStrings("maybe", copy.maybe.?);
+    const copied_result = try copy.result;
+    try std.testing.expect(copied_result.ptr != (source.result catch unreachable).ptr);
+    try std.testing.expectEqualStrings("ok", copied_result);
+    // Mutable slices pass by REFERENCE: they alias app-owned storage
+    // that `update` may write through, so a copy would swallow writes.
+    try std.testing.expect(copy.mutable.ptr == &mutable_storage);
+
+    // A failed error union passes the error through as the value.
+    const failing: error{Overloaded}![]const u8 = error.Overloaded;
+    const copied_failing = try dupeSlicesDeep(error{Overloaded}![]const u8, allocator, failing);
+    try std.testing.expectError(error.Overloaded, copied_failing);
 }
