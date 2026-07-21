@@ -291,13 +291,16 @@ pub const WidgetCrossAlignment = enum {
     end,
 };
 
-/// Preferred side of an anchored floating widget relative to its anchor.
-/// Either side flips to the other when the surface does not fit and the
-/// opposite side has more room (the auto-flip contract); the height then
-/// clamps to the chosen side's space.
+/// Preferred side of an anchored floating widget relative to its anchor:
+/// vertical (below/above) or horizontal (right/left). Either side flips to
+/// the other when the surface doesn't fit and the opposite side has more
+/// room (the auto-flip contract); the surface then clamps to the chosen
+/// side's space along that axis.
 pub const WidgetAnchorPlacement = enum {
     below,
     above,
+    right,
+    left,
 };
 
 /// Horizontal alignment of an anchored floating widget against its

@@ -1141,7 +1141,7 @@ pub const on_dismiss_element_message = "on-dismiss is only supported on dismissi
 pub const known_anchor_element_names = schema.anchor_element_names;
 
 pub const anchor_element_message = "anchor is only supported on dropdown-menu and tooltip - it floats the surface against its PARENT's frame (put the dropdown or tooltip beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
-pub const anchor_value_message = "anchor takes a literal placement: below or above (either side flips automatically when the surface does not fit and the other side has more room)";
+pub const anchor_value_message = "anchor takes a literal placement: below, above, right, or left (either side flips automatically when the surface does not fit and the other side has more room)";
 pub const anchor_alignment_value_message = "anchor-alignment takes a literal alignment: start, end, or stretch (stretch also widens the surface to at least the anchor's width)";
 pub const anchor_offset_value_message = "anchor-offset takes a literal number: the gap in points between the anchor edge and the surface";
 pub const anchor_dependent_attr_message = "anchor-alignment and anchor-offset only apply together with anchor - add anchor=\"below\" (or \"above\") to float this surface";
@@ -3106,7 +3106,10 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (!nameInList(node.name, &known_anchor_element_names)) {
                         return attrError(node, attribute, anchor_element_message);
                     }
-                    if (!std.mem.eql(u8, attribute.value, "below") and !std.mem.eql(u8, attribute.value, "above")) {
+                    const v = attribute.value;
+                    if (!std.mem.eql(u8, v, "below") and !std.mem.eql(u8, v, "above") and
+                        !std.mem.eql(u8, v, "right") and !std.mem.eql(u8, v, "left"))
+                    {
                         return attrError(node, attribute, anchor_value_message);
                     }
                     continue;
