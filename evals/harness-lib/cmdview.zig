@@ -31,6 +31,8 @@ pub const Op = union(enum) {
     image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     image_cancel: struct { id: f64 },
     image_unregister: struct { id: f64 },
+    channel_open: struct { key: f64, event_tag: u8 },
+    channel_close: struct { key: f64 },
 
     pub const Host = struct {
         name: []const u8,
@@ -252,6 +254,23 @@ pub const CmdIter = struct {
                 off += 8;
                 break :blk .{ .image_unregister = .{ .id = id } };
             },
+            // channel_open [op][key f64 LE][event_tag u8] — the bytes
+            // rt.zig's cmdChannelOpen builds (ts_core_host.zig, 0x15).
+            // No max_pending rides the wire: the host opens with the
+            // engine default.
+            0x15 => blk: {
+                const key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const event_tag = b[off];
+                off += 1;
+                break :blk .{ .channel_open = .{ .key = key, .event_tag = event_tag } };
+            },
+            // channel_close [op][key f64 LE] (ts_core_host.zig, 0x16).
+            0x16 => blk: {
+                const key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .channel_close = .{ .key = key } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -407,5 +426,41 @@ test "the image records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 7), cancelled.image_cancel.id);
     const evicted = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 15), evicted.image_unregister.id);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "the channel records decode, alone and inside a batch" {
+    // channel_open: [op 0x15][key f64 LE][event_tag u8] — the bytes
+    // rt.zig's cmdChannelOpen pins (no max_pending on the wire).
+    var open_bytes: [10]u8 = undefined;
+    open_bytes[0] = 0x15;
+    open_bytes[1..9].* = @bitCast(@as(f64, 41));
+    open_bytes[9] = 5; // event_tag
+    const opened = findOp(&open_bytes, .channel_open) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 41), opened.key);
+    try std.testing.expectEqual(@as(u8, 5), opened.event_tag);
+
+    // channel_close: [op 0x16][key f64 LE].
+    var close_bytes: [9]u8 = undefined;
+    close_bytes[0] = 0x16;
+    close_bytes[1..9].* = @bitCast(@as(f64, 41));
+    const closed = findOp(&close_bytes, .channel_close) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 41), closed.key);
+
+    // A batch of open + close + a trailing now record: each record must
+    // advance the iterator exactly its own length (ten bytes, then
+    // nine) for the tail to decode.
+    var batch: [21]u8 = undefined;
+    batch[0..10].* = open_bytes;
+    batch[10..19].* = close_bytes;
+    batch[19] = 0x02;
+    batch[20] = 7;
+    var iter = CmdIter.init(&batch);
+    const first = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 41), first.channel_open.key);
+    const second = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 41), second.channel_close.key);
+    const third = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
