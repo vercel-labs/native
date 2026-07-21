@@ -16,7 +16,7 @@
 #   4. gpu_nonblank=true              (real pixels were presented)
 #   5. widget-click "Add task" -> '4 open'   (automation input mutates state)
 #   6. a real X11 right-click opens a task row's declared context menu and
-#      keyboard-selecting its item dispatches the Msg ('1 done')
+#      clicking its item dispatches the Msg ('1 done')
 #   7. automate screenshot renders a non-empty PNG
 #   8. ZERO WebKit helper processes for the whole run (a native-only app
 #      has no web layer to boot WebKit with)
@@ -76,7 +76,24 @@ diagnostics() {
   head -20 "$app_log" 2>/dev/null | sed 's/^/  /'
   echo "-- app log tail ($app_log):"
   tail -40 "$app_log" 2>/dev/null | sed 's/^/  /'
+  # The X window list names what is actually on the glass — the context
+  # menu popover is an override-redirect X window that never appears in
+  # the automation snapshot, so this is the only record of whether it
+  # (or anything else) was mapped when a step failed.
+  echo "-- X windows (xwininfo -root -children):"
+  if [ -n "${DISPLAY:-}" ] && command -v xwininfo >/dev/null 2>&1; then
+    xwininfo -root -children 2>/dev/null | sed 's/^/  /'
+  else
+    echo "  (no DISPLAY or xwininfo not installed)"
+  fi
   echo "---------------------"
+}
+
+# The hex ids of every child of the root window, popovers included
+# (override-redirect windows never pass through a window manager — Xvfb
+# has none anyway — but they are always children of the root).
+x_window_ids() {
+  xwininfo -root -children 2>/dev/null | grep -oE '0x[0-9a-f]+'
 }
 
 fail() {
@@ -160,19 +177,27 @@ echo "== open after click: $(grep -oE '[0-9]+ open' "$snap" | head -1)"
 # What this proves: an X-level SECONDARY-button press (GDK button 3)
 # travels the whole GTK path — click gesture -> button mapping -> runtime
 # secondary check -> declared-menu lookup -> native popover — and
-# keyboard-selecting the popover's "Toggle done" item dispatches the
-# row's Msg, observable as the model change '1 done' in the snapshot
-# (the popover itself is an OS surface and never appears in the
-# snapshot, so the dispatched selection is the provable signal).
+# clicking the popover's "Toggle done" item dispatches the row's Msg,
+# observable as the model change '1 done' in the snapshot (the popover
+# itself is an OS surface and never appears in the snapshot, so the
+# dispatched selection is the provable signal).
+# The menu is driven by POINTER, never keyboard: under Xvfb there is no
+# window manager, so the popover's X window never receives keyboard
+# focus and `xdotool key Down/Return` dies on the canvas beneath it —
+# but pointer events resolve by position (and the popover holds the
+# pointer grab), so a click on the popover surface reaches the item. The
+# popover is an override-redirect X window of its own: it is found by
+# diffing the root's children across the right-click, and because the
+# row declares exactly one item and the popover draws no arrow, the
+# center of that new window IS "Toggle done".
 # Regression coverage: the swapped GDK button mapping this smoke was
 # blind to made every right-click arrive as MIDDLE and never open the
-# menu — under that defect the popover never presents, Down/Return land
-# on the canvas, and '1 done' never appears.
+# menu — under that defect the popover window never appears and the
+# step fails at the popover lookup, before any selection.
 # Limit: '1 done' proves the toggle Msg dispatched; it cannot attribute
 # the dispatch to the popover VISUALLY (no snapshot record of the OS
-# menu), so a hypothetical non-menu path that also toggles task 1 on
-# Down+Return would false-pass. No such path exists today (canvas arrow
-# keys do not focus checkboxes, and Return without focus is inert).
+# menu), but the click lands on the popover's own X window, so no
+# canvas-level path can consume it — the canvas never sees the press.
 echo "== done before right-click: $(grep -oE '[0-9]+ done' "$snap" | head -1)"
 row_line=$(grep -o 'widget @w1/inbox-canvas#[0-9]*[^|]*context_menu=\["Toggle done"\][^|]*' "$snap" | head -1)
 [ -n "$row_line" ] || fail "no task row with the declared context menu in snapshot"
@@ -198,13 +223,44 @@ y_off=$((HEIGHT - client_h))
 cx=$(awk "BEGIN{printf \"%d\", $X + $bx + $bw / 2}")
 cy=$(awk "BEGIN{printf \"%d\", $Y + $y_off + $by + $bh / 2}")
 xdotool windowactivate "$win" >/dev/null 2>&1 || xdotool windowfocus "$win" >/dev/null 2>&1
+command -v xwininfo >/dev/null 2>&1 || fail "xwininfo not installed (x11-utils) — required to locate the popover's X window"
+# xdotool reports decimal window ids, xwininfo hexadecimal; compare in hex.
+win_hex=$(printf '0x%x' "$win")
+pre_windows=" $(x_window_ids | tr '\n' ' ') "
 echo "== right-clicking task row $bounds at ($cx,$cy)"
 xdotool mousemove "$cx" "$cy" click 3
-sleep 1
-# The popover holds the keyboard grab: Down focuses its first item,
-# Return activates "Toggle done" for the row.
-xdotool key Down
-xdotool key Return
+# Wait for the popover's X window: a viewable, non-trivial root child
+# that did not exist before the right-click.
+popover=""
+popover_geom=""
+for _ in $(seq 1 50); do
+  # Root children list in stacking order (bottom to top): scan top-down
+  # so the just-mapped popover wins over any other new surface.
+  for w in $(x_window_ids | tac); do
+    case "$pre_windows" in *" $w "*) continue ;; esac
+    [ "$w" = "$win_hex" ] && continue
+    geom=$(xwininfo -id "$w" 2>/dev/null)
+    echo "$geom" | grep -q 'Map State: IsViewable' || continue
+    pw=$(echo "$geom" | sed -n 's/^ *Width: *\([0-9]*\).*/\1/p')
+    ph=$(echo "$geom" | sed -n 's/^ *Height: *\([0-9]*\).*/\1/p')
+    [ -n "$pw" ] && [ -n "$ph" ] && [ "$pw" -gt 10 ] && [ "$ph" -gt 10 ] || continue
+    popover="$w"
+    popover_geom="$geom"
+    break
+  done
+  [ -n "$popover" ] && break
+  sleep 0.2
+done
+[ -n "$popover" ] || fail "context-menu popover X window never appeared after the right-click"
+px=$(echo "$popover_geom" | sed -n 's/^ *Absolute upper-left X: *\(-*[0-9]*\).*/\1/p')
+py=$(echo "$popover_geom" | sed -n 's/^ *Absolute upper-left Y: *\(-*[0-9]*\).*/\1/p')
+pw=$(echo "$popover_geom" | sed -n 's/^ *Width: *\([0-9]*\).*/\1/p')
+ph=$(echo "$popover_geom" | sed -n 's/^ *Height: *\([0-9]*\).*/\1/p')
+[ -n "$px" ] && [ -n "$py" ] || fail "could not parse popover geometry for $popover"
+mx=$((px + pw / 2))
+my=$((py + ph / 2))
+echo "== popover $popover at ${pw}x${ph}+${px}+${py}; clicking its only item at ($mx,$my)"
+xdotool mousemove "$mx" "$my" click 1
 "$cli" automate assert --timeout-ms 30000 '1 done' \
   || fail "right-click menu selection did not dispatch the toggle Msg ('1 done')"
 echo "== done after menu selection: $(grep -oE '[0-9]+ done' "$snap" | head -1)"

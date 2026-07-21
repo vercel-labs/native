@@ -187,8 +187,11 @@ jobs:
       # only succeed if nothing in a native-only app needs the WebKitGTK
       # headers or pkg-config entry. (The seam under webkit-PRESENT
       # conditions is the linux-webkitgtk job's ELF cross-audit.)
-      - name: Install GTK, Xvfb, and xdotool
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool
+      # x11-utils provides xwininfo, which the smoke script uses to find
+      # the context-menu popover's override-redirect X window (and to
+      # dump the X window list in failure diagnostics).
+      - name: Install GTK, Xvfb, xdotool, and x11-utils
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool x11-utils
       # The stub is the expected, configured state of every native-only
       # Linux app, so compiling the GTK host with the stub define must be
       # diagnostic-FREE, not merely successful: zig renders every clang
@@ -220,8 +223,8 @@ jobs:
       # built binary carries no WebKitGTK reference, and ZERO WebKit
       # helper processes (canvas apps never boot WebKit). A11y env, the widened cold-start
       # readiness budget (shared runners stall ~27 s before the first
-      # runtime event), and failure forensics (dump snapshot + app log)
-      # all live in the script.
+      # runtime event), and failure forensics (dump snapshot, app log,
+      # and X window list) all live in the script.
       - name: Build and drive ui-inbox headless
         run: .github/scripts/linux-canvas-smoke.sh
       # Durable receipt for the GLib 2.72 fallback (the pre-2.74
