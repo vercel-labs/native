@@ -2569,6 +2569,17 @@ pub fn Effects(comptime Msg: type) type {
         /// seam only; never set under session replay, where journaled
         /// terminals are the only delivery.
         fake_instant_image_bytes: ?[]const u8 = null,
+        /// The allocator behind each channel occupancy's
+        /// process-lifetime storage (the `ChannelShared` posting header
+        /// and the staging FIFO). Defaults to `process_allocator`, and
+        /// any replacement MUST delegate every allocation it does not
+        /// refuse to `process_allocator`'s backing: retire and teardown
+        /// free that storage through `process_allocator` directly.
+        /// Swap seam for the channel start-failure tests — `loadImage`
+        /// stages its source buffer from the app allocator, so its
+        /// failure tests inject there; channel storage is
+        /// process-lifetime and needs this explicit seam.
+        channel_storage_allocator: std.mem.Allocator = process_allocator,
         /// Session-record sink: every drain-delivered result is reported
         /// here (loop thread, right before its Msg runs through
         /// `update`). Null outside recording.
@@ -3841,6 +3852,30 @@ pub fn Effects(comptime Msg: type) type {
                 self.rejectChannel(options.key, options.on_event, true);
                 return dead;
             };
+            // TABLE CAPACITY obeys the replay-hold invariant: any
+            // resource replay holds until a terminal feeds, live must
+            // hold until that terminal drains. An alloc-failed open
+            // (below) stages an executor-truth `.rejected` and claims
+            // no slot — but its replay twin PARKS a REAL slot until
+            // that journaled terminal feeds, so live must keep the
+            // open counted against the table through the same window
+            // or live accepts an open whose replay answer is a
+            // regenerating table-full reject, leaving the accepted
+            // open's journaled terminals with no parked request to
+            // feed (`ReplayEffectDivergence`).
+            // `stagedChannelOccupiesKey` holds the KEY through this
+            // window; the reservation count holds the CAPACITY. The
+            // asymmetry with the refusal one line up is deliberate and
+            // is the same regenerating/non-regenerating line the key
+            // window draws: a table-full (or occupied-key) reject is
+            // REGENERATING — replay re-derives it against the parked
+            // table and stages its own, no slot held on either side —
+            // so it must NOT reserve; only executor-truth rejections
+            // reserve.
+            if (self.idleChannelSlotCount() <= self.stagedChannelReservationCount()) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return dead;
+            }
             const slot = &self.channel_slots[slot_index];
             // Session replay: PARK the occupancy instead of arming a
             // live channel — the fake-slot discipline, channel-shaped.
@@ -3876,7 +3911,7 @@ pub fn Effects(comptime Msg: type) type {
             // allocation-failure classification), and the staged
             // rejection holds the key until it drains.
             const shared = slot.shared orelse blk: {
-                const created = process_allocator.create(ChannelShared) catch {
+                const created = self.channel_storage_allocator.create(ChannelShared) catch {
                     self.rejectChannel(options.key, options.on_event, false);
                     return dead;
                 };
@@ -3884,7 +3919,7 @@ pub fn Effects(comptime Msg: type) type {
                 slot.shared = created;
                 break :blk created;
             };
-            const staging = process_allocator.create(ChannelStaging) catch {
+            const staging = self.channel_storage_allocator.create(ChannelStaging) catch {
                 self.rejectChannel(options.key, options.on_event, false);
                 return dead;
             };
@@ -6371,6 +6406,36 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.state == .idle) return index;
             }
             return null;
+        }
+
+        fn idleChannelSlotCount(self: *Self) usize {
+            var count: usize = 0;
+            for (&self.channel_slots) |*slot| {
+                if (slot.state == .idle) count += 1;
+            }
+            return count;
+        }
+
+        /// Staged EXECUTOR-TRUTH channel rejections (`regenerates =
+        /// false`) — each one an open that could not stage its channel
+        /// storage. Each reserves one slot of live table capacity
+        /// until it drains (see `openChannel`'s admission gate): the
+        /// same open PARKS a real slot under replay until the
+        /// journaled terminal feeds, and the drain's pop
+        /// (`takePendingChannel`, before the Msg reaches update) is
+        /// the live instant matching the fed terminal's
+        /// `retireChannelSlot`. Regenerating refusals never appear in
+        /// this count — replay stages its own with no slot held on
+        /// either side.
+        fn stagedChannelReservationCount(self: *Self) usize {
+            const storage = self.pendingChannelStorage();
+            var count: usize = 0;
+            var index: usize = 0;
+            while (index < self.pending_channel_len) : (index += 1) {
+                const entry = &storage[(self.pending_channel_head + index) % storage.len];
+                if (!entry.regenerates) count += 1;
+            }
+            return count;
         }
 
         /// A channel occupies its key from open through the `.closing`

@@ -1147,3 +1147,357 @@ test "a channel terminal claiming payload bytes refuses replay as damage" {
     });
     try testing.expectError(error.ReplayDamagedRecord, result);
 }
+
+// ------------------- table capacity: the start-failure reservation
+
+/// Fails exactly the next channel-storage allocation and delegates
+/// everything else to the page allocator — `process_allocator`'s
+/// backing, which keeps retire/teardown's `process_allocator` frees
+/// valid for every allocation that succeeds. The seam
+/// (`channel_storage_allocator`) is consulted ONLY by `openChannel`'s
+/// posting-header and staging-FIFO creates, so failing the next call
+/// through it is exactly one open's start failure — the surgical
+/// one-shot the image tests get from their buffer-size-matched
+/// wrapper (`ImageBufferFailingAllocator` in the session tests).
+const ChannelStorageFailingAllocator = struct {
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    armed: bool = false,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *ChannelStorageFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ChannelStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        if (self.armed) {
+            self.armed = false;
+            return null;
+        }
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ChannelStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ChannelStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ChannelStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+fn expectRejected(fx: *DirectFx, key: u64) !void {
+    const msg = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expect(msg == .event);
+    try testing.expectEqual(key, msg.event.key);
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.rejected, msg.event.kind);
+}
+
+test "an alloc-failed open reserves table capacity until its rejection drains" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    fx.channel_storage_allocator = failing.allocator();
+
+    // Six live occupancies (6 of the 8 slots).
+    var index: u64 = 0;
+    while (index < 6) : (index += 1) {
+        const handle = fx.openChannel(.{ .key = 200 + index, .on_event = DirectFx.channelMsg(.event) });
+        try testing.expect(handle.shared != null);
+    }
+
+    // The alloc-failed open claims no slot, but its staged
+    // executor-truth `.rejected` reserves one slot of capacity —
+    // replay parks this open in a REAL slot until the terminal feeds.
+    failing.armed = true;
+    const failed = fx.openChannel(.{ .key = 300, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(failed.shared == null);
+    try testing.expect(!failing.armed);
+
+    // 6 slots + 1 reservation = 7: a different key still fits...
+    const seventh = fx.openChannel(.{ .key = 301, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(seventh.shared != null);
+    // ...but 7 slots + 1 reservation = 8: the next open answers
+    // table-full while the reservation's terminal is pending.
+    const overflow = fx.openChannel(.{ .key = 302, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(overflow.shared == null);
+
+    // Deliver the alloc-failed open's terminal: the reservation drains
+    // with it...
+    try expectRejected(&fx, 300);
+    // ...and the key that just answered table-full claims the real 8th
+    // slot — even though its own table-full refusal is still staged
+    // (regenerating refusals never reserve).
+    const eighth = fx.openChannel(.{ .key = 302, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(eighth.shared != null);
+    // The earlier table-full refusal's terminal still delivers exactly
+    // once.
+    try expectRejected(&fx, 302);
+}
+
+test "regenerating channel refusals do not reserve table capacity" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // Seven live occupancies.
+    var index: u64 = 0;
+    while (index < 7) : (index += 1) {
+        const handle = fx.openChannel(.{ .key = 400 + index, .on_event = DirectFx.channelMsg(.event) });
+        try testing.expect(handle.shared != null);
+    }
+
+    // Three duplicate-key refusals stage regenerating `.rejected`
+    // terminals. They must NOT reserve: replay re-derives each from
+    // the parked occupancy with no slot held on either side, so the
+    // 8th slot stays claimable while all three are pending.
+    index = 0;
+    while (index < 3) : (index += 1) {
+        const dup = fx.openChannel(.{ .key = 400, .on_event = DirectFx.channelMsg(.event) });
+        try testing.expect(dup.shared == null);
+    }
+    const eighth = fx.openChannel(.{ .key = 500, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(eighth.shared != null);
+
+    // The table is honestly full: N table-full refusals (regenerating
+    // too — replay's parked table re-derives them) while full...
+    index = 0;
+    while (index < 3) : (index += 1) {
+        const over = fx.openChannel(.{ .key = 600 + index, .on_event = DirectFx.channelMsg(.event) });
+        try testing.expect(over.shared == null);
+    }
+
+    // ...leave the accounting unchanged: close ONE occupancy, drain
+    // every staged refusal and the closed terminal, and exactly one
+    // slot's worth of capacity is back — not one slot minus phantom
+    // reservations.
+    fx.closeChannel(400);
+    var rejected_count: u32 = 0;
+    var closed_count: u32 = 0;
+    while (fx.takeMsg()) |msg| {
+        switch (msg.event.kind) {
+            .rejected => rejected_count += 1,
+            .closed => closed_count += 1,
+            .data => return error.TestUnexpectedData,
+        }
+    }
+    try testing.expectEqual(@as(u32, 6), rejected_count);
+    try testing.expectEqual(@as(u32, 1), closed_count);
+    const refill = fx.openChannel(.{ .key = 700, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(refill.shared != null);
+    const full_again = fx.openChannel(.{ .key = 701, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(full_again.shared == null);
+    _ = fx.takeMsg();
+}
+
+test "teardown with a reservation pending closes cleanly and discards the stage" {
+    var fx = DirectFx.init(testing.allocator);
+    fx.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    fx.channel_storage_allocator = failing.allocator();
+
+    const live = fx.openChannel(.{ .key = 30, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(live.shared != null);
+    failing.armed = true;
+    const failed = fx.openChannel(.{ .key = 31, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(failed.shared == null);
+    try testing.expect(fx.hasPending());
+
+    // Teardown with the reservation's terminal still staged: the sweep
+    // closes the live channel and discards the stage — reservation
+    // aboard — with nothing left to deliver or leak.
+    fx.deinit();
+    try testing.expect(!fx.hasPending());
+    try testing.expectEqual(PostResult.closed, live.post("after teardown"));
+    // Idempotent repeat (the teardown ordering contract).
+    fx.deinit();
+}
+
+// The record/replay boundary: live capacity accounting must agree with
+// replay's parked table at every position. Replay parks EVERY open in
+// a real slot until its journaled terminal feeds — including an
+// alloc-failed open, whose replay twin never touches the allocator —
+// so a live table that forgets the alloc-failed open's reservation
+// accepts a 9th open replay answers with a table-full reject, and the
+// 9th open's journaled executor-truth terminals have no parked request
+// to feed (`ReplayEffectDivergence`).
+
+const capacity_key_base: u64 = 70;
+
+const CapacityMsg = union(enum) {
+    open: u64,
+    close: u64,
+    event: effects_mod.EffectChannelEvent,
+};
+
+const CapacityApp = ui_app_mod.UiApp(ChannelSessionModel, CapacityMsg);
+
+fn capacityUpdate(model: *ChannelSessionModel, msg: CapacityMsg, fx: *CapacityApp.Effects) void {
+    switch (msg) {
+        .open => |key| _ = fx.openChannel(.{ .key = key, .on_event = CapacityApp.Effects.channelMsg(.event) }),
+        .close => |key| fx.closeChannel(key),
+        .event => |event| model.record(event),
+    }
+}
+
+fn capacityView(ui: *CapacityApp.Ui, model: *const ChannelSessionModel) CapacityApp.Ui.Node {
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.text(.{}, ui.fmt("{d} data, {d} closed, {d} rejected", .{ model.data_events, model.closed_events, model.rejected_events })),
+        ui.text(.{}, ui.fmt("digest {x} last {s}", .{ model.payload_digest, model.lastLine() })),
+    });
+}
+
+/// "cap.open-N" / "cap.close-N" for a single digit N: key
+/// `capacity_key_base + N`.
+fn capacityCommand(name: []const u8) ?CapacityMsg {
+    const open_prefix = "cap.open-";
+    const close_prefix = "cap.close-";
+    if (std.mem.startsWith(u8, name, open_prefix) and name.len == open_prefix.len + 1) {
+        return .{ .open = capacity_key_base + (name[open_prefix.len] - '0') };
+    }
+    if (std.mem.startsWith(u8, name, close_prefix) and name.len == close_prefix.len + 1) {
+        return .{ .close = capacity_key_base + (name[close_prefix.len] - '0') };
+    }
+    return null;
+}
+
+fn capacityOptions() CapacityApp.Options {
+    return .{
+        .name = "channel-capacity-demo",
+        .scene = channel_session_scene,
+        .canvas_label = channel_canvas_label,
+        .update_fx = capacityUpdate,
+        .view = capacityView,
+        .on_command = capacityCommand,
+    };
+}
+
+fn capacityCommandName(buffer: []u8, comptime verb: []const u8, index: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "cap." ++ verb ++ "-{d}", .{index}) catch unreachable;
+}
+
+/// Record the table-limit boundary reference session: seven live opens,
+/// one alloc-failed open (a staged executor-truth rejection reserving
+/// the 8th slot), and — inside the staged window, before any drain —
+/// the open that would be the table's 9th counting the reservation. It
+/// must answer table-full LIVE, because replay's parked table is full
+/// at that position: seven parked opens plus the parked alloc-failed
+/// one.
+fn recordCapacitySession(gpa: std.mem.Allocator, buffer: *JournalBuffer) !RecordedChannelSession {
+    const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "channel-capacity-demo", .window_width = 400, .window_height = 300 });
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.session_recorder = recorder;
+
+    const app_state = try gpa.create(CapacityApp);
+    defer gpa.destroy(app_state);
+    app_state.* = CapacityApp.init(std.heap.page_allocator, .{}, capacityOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    app_state.effects.channel_storage_allocator = failing.allocator();
+    const app = app_state.app();
+
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = channel_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    var name_buffer: [16]u8 = undefined;
+    var index: u64 = 0;
+    while (index < 7) : (index += 1) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = capacityCommandName(&name_buffer, "open", index), .window_id = 1 } });
+    }
+    // The alloc-failed open: one staged executor-truth `.rejected`.
+    failing.armed = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = capacityCommandName(&name_buffer, "open", 7), .window_id = 1 } });
+    try testing.expect(!failing.armed);
+    // Inside the staged window — no wake between — the would-be 9th.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = capacityCommandName(&name_buffer, "open", 8), .window_id = 1 } });
+    // Closing the refused key is a no-op on both sides. (Under the
+    // pre-reservation accounting the 9th open claimed a real slot
+    // here, this close staged a `.closed` terminal, and the journaled
+    // executor-truth terminals had no replay twin to feed.)
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = capacityCommandName(&name_buffer, "close", 8), .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    // Close the seven live channels: seven executor-truth `.closed`
+    // terminals that feed at replay.
+    index = 0;
+    while (index < 7) : (index += 1) {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = capacityCommandName(&name_buffer, "close", index), .window_id = 1 } });
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    return .{
+        .model = app_state.model,
+        .fingerprint = harness.runtime.sessionStateFingerprint(),
+    };
+}
+
+test "live table capacity counts the alloc-failed open's reservation so replay agrees at the boundary" {
+    const gpa = testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordCapacitySession(gpa, buffer);
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try gpa.create(CapacityApp);
+    defer gpa.destroy(app_state);
+    app_state.* = CapacityApp.init(std.heap.page_allocator, .{}, capacityOptions());
+    defer app_state.deinit();
+
+    // Replay must agree at every position: the alloc-failed open's
+    // `.rejected` feeds and retires its parked slot, the 9th open's
+    // table-full refusal regenerates against the parked table, and the
+    // seven `.closed` terminals feed.
+    const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try testing.expect(report.ok());
+    try testing.expect(report.checkpoints_verified > 0);
+    try testing.expectEqual(@as(u64, 8), report.effects_fed);
+    try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    try testing.expectEqualDeep(recorded.model, app_state.model);
+    try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
+
+    // The recorded shape itself: the alloc-failed open's rejection and
+    // the boundary open's LIVE table-full rejection, seven closes, no
+    // data — the 9th never opened on either side.
+    try testing.expectEqual(@as(u32, 2), recorded.model.rejected_events);
+    try testing.expectEqual(@as(u32, 7), recorded.model.closed_events);
+    try testing.expectEqual(@as(u32, 0), recorded.model.data_events);
+}
