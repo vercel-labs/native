@@ -531,6 +531,101 @@ test "a post racing the drain lands after the coalescer clear and still wakes" {
     while (fx.takeMsg()) |_| {}
 }
 
+test "a bare-takeMsg drain to empty releases the coalescer: the next accepted post wakes" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WakeCounter.reset();
+    const services: platform_mod.PlatformServices = .{ .wake_fn = WakeCounter.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 65, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expectEqual(PostResult.accepted, handle.post("first"));
+    try testing.expectEqual(@as(usize, 1), WakeCounter.calls);
+
+    // The public bare-takeMsg drain — no `drainBoundary` anywhere: the
+    // caller loops to empty, exactly as documented. The sweep that
+    // observes the staged queue empty must release the latch, because
+    // no pass boundary ever will on this path.
+    while (fx.takeMsg()) |_| {}
+
+    // The stranded-event regression: pre-clear, this accepted post saw
+    // the stale latch and never woke — the event sat staged until
+    // unrelated traffic. The observation seam is the host wake count
+    // (`WakeCounter` stands where the null platform's pendingWakeCount
+    // stands): a NEW wake must be issued, and the event must deliver.
+    try testing.expectEqual(PostResult.accepted, handle.post("second"));
+    try testing.expectEqual(@as(usize, 2), WakeCounter.calls);
+    _ = try expectData(&fx, 65, "second");
+
+    fx.closeChannel(65);
+    while (fx.takeMsg()) |_| {}
+}
+
+const StrandProducer = struct {
+    const total: usize = 100;
+
+    fn run(handle: effects_mod.ChannelHandle, stop: *std.atomic.Value(bool)) void {
+        var accepted: usize = 0;
+        while (accepted < total and !stop.load(.acquire)) {
+            switch (handle.post("strand probe")) {
+                .accepted => accepted += 1,
+                // Transient back-pressure: the documented producer
+                // pattern keeps going; the consumer's drain relieves it.
+                .dropped_full => std.Thread.yield() catch {},
+                else => return,
+            }
+        }
+    }
+};
+
+test "an event-driven bare-takeMsg consumer never strands an accepted post" {
+    // The race the empty-observation clear must win, run for real: a
+    // producer thread posts through the coalescer while an
+    // EVENT-DRIVEN consumer drains via bare `takeMsg` — it only
+    // drains when the wake count moves, exactly like an embedder
+    // servicing wake nudges, so a stranded event (an accepted post
+    // whose stale-latch check suppressed the wake AFTER the consumer
+    // drained to empty) parks the consumer forever. The clear/post
+    // race window (between the sweep's latch clear and its re-check)
+    // has no injectable seam, so this pins the invariant
+    // probabilistically-but-real, the bind/post handshake test's
+    // precedent: completion within the bound IS the assertion.
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    RaceWake.calls.store(0, .seq_cst);
+    const services: platform_mod.PlatformServices = .{ .wake_fn = RaceWake.wake };
+    fx.bindServices(&services);
+
+    const handle = fx.openChannel(.{ .key = 66, .on_event = DirectFx.channelMsg(.event) });
+    var stop = std.atomic.Value(bool).init(false);
+    const producer = try std.Thread.spawn(.{}, StrandProducer.run, .{ handle, &stop });
+    defer producer.join();
+    defer stop.store(true, .release);
+
+    var received: usize = 0;
+    var wakes_seen: usize = 0;
+    var waited_ms: usize = 0;
+    while (received < StrandProducer.total) {
+        const wakes = RaceWake.calls.load(.seq_cst);
+        if (wakes > wakes_seen) {
+            wakes_seen = wakes;
+            while (fx.takeMsg()) |msg| {
+                try testing.expect(msg == .event);
+                received += 1;
+            }
+            continue;
+        }
+        waited_ms += 1;
+        if (waited_ms > 30_000) return error.TestStrandedEvent;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+
+    fx.closeChannel(66);
+    while (fx.takeMsg()) |_| {}
+}
+
 test "a post accepted before services bind is delivered by the bind sweep with no further post" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();

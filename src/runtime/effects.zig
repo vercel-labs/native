@@ -6060,6 +6060,43 @@ pub fn Effects(comptime Msg: type) type {
                     if (staging.len > 0) seq = staging.seqs[staging.head];
                 }
                 shared.mutex.unlock();
+                // A staged queue observed EMPTY while the coalescer is
+                // still latched: release the latch HERE, not only at
+                // the pass boundary. `takeMsg` is a public drain entry
+                // with no `drainBoundary` around it, so a bare-takeMsg
+                // caller that drains a wake's entries to empty would
+                // otherwise leave the latch set — and the next
+                // accepted post, seeing the stale latch, would never
+                // wake: a stranded event. Clear-then-recheck, the
+                // boundary clear's ordering (both sides seq_cst): a
+                // post whose latched-flag check observed true stamped
+                // its entry before this clear, so the RE-CHECK below
+                // observes that entry and this sweep delivers it; a
+                // post landing after the clear observes the flag clear
+                // and latches a fresh wake of its own. Either
+                // interleaving, nothing staged is ever left wakeless —
+                // at worst the recheck delivers an entry whose fresh
+                // wake then finds nothing, and one redundant host wake
+                // is the acceptable price (a stranded event is not).
+                // The empty observation is also what keeps this clear
+                // from racing the BOUNDED boundary path into a lost
+                // wake: inside a `drainBoundary` pass the latch is
+                // only re-set by a post stamped AFTER the boundary
+                // snapshot, and such an entry cannot deliver inside
+                // the pass (`candidate >= before` below), so the queue
+                // this sweep observes stays non-empty and the clear
+                // never fires — the post-boundary latch survives for
+                // the pass that will deliver it.
+                if (seq == null and shared.wake.pending.load(.seq_cst)) {
+                    shared.wake.mutex.lock();
+                    shared.wake.pending.store(false, .seq_cst);
+                    shared.wake.mutex.unlock();
+                    shared.mutex.lock();
+                    if (shared.staging) |staging| {
+                        if (staging.len > 0) seq = staging.seqs[staging.head];
+                    }
+                    shared.mutex.unlock();
+                }
                 if (seq == null and slot.state == .closing and slot.closed_staged) {
                     seq = slot.closed_seq;
                     is_closed = true;
