@@ -128,8 +128,10 @@ typedef struct native_sdk_gtk_menu_action {
  * "closed" teardown idle emits the dismissal (item 0) only when no
  * selection did. `popover` and `parent` are weak pointers (GLib nulls
  * them if the widgets die first, e.g. the owning window closes while
- * the menu is up), and `host->context_menu` tracks the single live
- * instance for teardown at destroy. */
+ * the menu is up); `host->context_menu` tracks the single CURRENT
+ * instance and `host->context_menu_teardowns` every state whose
+ * teardown idle is queued, so destroy can cancel each pending source
+ * before the captured pointers go stale. */
 typedef struct native_sdk_gtk_context_menu {
     struct native_sdk_gtk_host *host;
     uint64_t window_id;
@@ -147,6 +149,9 @@ typedef struct native_sdk_gtk_context_menu {
     GtkWidget *parent;
     int emitted;
     guint teardown_idle;
+    /* Link in `host->context_menu_teardowns` while `teardown_idle` is
+     * queued (threaded through the states themselves; no allocation). */
+    struct native_sdk_gtk_context_menu *next_teardown;
 } native_sdk_gtk_context_menu_t;
 
 /* One rectangle of the runtime-pushed window-drag mirror (markup
@@ -398,8 +403,15 @@ struct native_sdk_gtk_host {
     /* The one live context menu (menus are modal-per-pointer, so one at
      * a time); owned here between show and the teardown idle. A
      * superseded menu is no longer pointed to from here but stays alive
-     * until its own teardown idle runs. */
+     * until its own teardown idle runs — tracked below so destroy can
+     * still reach it. */
     native_sdk_gtk_context_menu_t *context_menu;
+    /* Every menu state with a teardown idle queued (the "closed"
+     * handler pushes, native_sdk_context_menu_free unlinks) — tracked
+     * like stop_idle_source so destroy can g_source_remove each pending
+     * receipt and free its captured state inline instead of letting the
+     * idle fire into a freed host. Singly linked through the states. */
+    native_sdk_gtk_context_menu_t *context_menu_teardowns;
     /* Feeds each context menu's per-invocation action-group name. */
     uint64_t context_menu_serial;
     native_sdk_gtk_audio_t audio;
@@ -2901,9 +2913,16 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     }
     /* Before the windows go: an open context menu's popover is owned by
      * a widget inside one of them, and the state's weak pointers must
-     * be unhooked while the objects are still alive. No event — the
-     * host is shutting down. */
+     * be unhooked while the objects are still alive. Then drain the
+     * pending-teardown list: a superseded menu's deferred teardown idle
+     * still captures its state (and this host) raw, so each pending
+     * source is removed and its state freed inline — the weak pointers
+     * only cover the WIDGETS dying first; the host dying is covered
+     * here. Cancelling swallows the superseded request's owed dismissal
+     * event, which is correct: the runtime that would gate on that
+     * token is being torn down with the host. */
     if (host->context_menu) native_sdk_context_menu_free(host->context_menu);
+    while (host->context_menu_teardowns) native_sdk_context_menu_free(host->context_menu_teardowns);
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_clear_window(&host->windows[i]);
     }
@@ -3708,6 +3727,24 @@ static void native_sdk_context_menu_emit(native_sdk_gtk_context_menu_t *menu, ui
     });
 }
 
+/* Drop `menu` from the host's pending-teardown list if it is there.
+ * Called only from native_sdk_context_menu_free, so a state is unlinked
+ * on every exit path — the teardown idle running normally (it frees
+ * as its last act), a supersession freeing a dead-popover state, or
+ * destroy draining the list. */
+static void native_sdk_context_menu_unlink_teardown(native_sdk_gtk_context_menu_t *menu) {
+    if (!menu->host) return;
+    native_sdk_gtk_context_menu_t **cursor = &menu->host->context_menu_teardowns;
+    while (*cursor) {
+        if (*cursor == menu) {
+            *cursor = menu->next_teardown;
+            break;
+        }
+        cursor = &(*cursor)->next_teardown;
+    }
+    menu->next_teardown = NULL;
+}
+
 /* Balanced teardown of one presented menu (NO event emission): remove
  * the per-invocation action group from the presenting widget, drop the
  * weak pointers, unparent the popover (the parent holds the only ref,
@@ -3727,6 +3764,7 @@ static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu) {
         g_source_remove(menu->teardown_idle);
         menu->teardown_idle = 0;
     }
+    native_sdk_context_menu_unlink_teardown(menu);
     if (menu->parent) {
         gtk_widget_insert_action_group(menu->parent, menu->group_name, NULL);
         g_object_remove_weak_pointer(G_OBJECT(menu->parent), (gpointer *)&menu->parent);
@@ -3757,7 +3795,14 @@ static void native_sdk_context_menu_closed(GtkPopover *popover, gpointer data) {
     (void)popover;
     native_sdk_gtk_context_menu_t *menu = data;
     if (!menu->teardown_idle) {
+        /* The idle captures `menu` (and through it the host) raw, so
+         * its receipt goes on the host's pending-teardown list the
+         * moment it exists — `host->context_menu` alone cannot reach a
+         * superseded state, and an idle outliving the host would fire
+         * into freed memory. */
         menu->teardown_idle = g_idle_add(native_sdk_context_menu_teardown_idle, menu);
+        menu->next_teardown = menu->host->context_menu_teardowns;
+        menu->host->context_menu_teardowns = menu;
     }
 }
 
