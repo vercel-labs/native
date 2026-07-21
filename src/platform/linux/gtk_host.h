@@ -29,6 +29,7 @@ typedef enum {
     NATIVE_SDK_GTK_EVENT_TIMER = 15,
     NATIVE_SDK_GTK_EVENT_APPEARANCE = 16,
     NATIVE_SDK_GTK_EVENT_AUDIO = 17,
+    NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION = 18,
 } native_sdk_gtk_event_kind_t;
 
 typedef struct {
@@ -89,7 +90,22 @@ typedef struct {
      * 50 Hz..16 kHz buckets, each linear-in-dB from -60 dBFS at 0 to
      * full scale at 255. All zeros on every other event kind. */
     uint8_t audio_bands[32];
+    /* CONTEXT_MENU_ACTION payload (the macOS host's field names):
+     * widget_id echoes the request's correlation token, menu_item_id is
+     * the selected item's id (0 = dismissed without a selection). */
+    uint64_t widget_id;
+    uint32_t menu_item_id;
 } native_sdk_gtk_event_t;
+
+/* One context-menu entry crossing the C ABI (the same shape the macOS
+ * and Windows hosts take). */
+typedef struct {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int enabled;
+    int separator;
+} native_sdk_gtk_context_menu_item_t;
 
 typedef void (*native_sdk_gtk_event_callback_t)(void *context, const native_sdk_gtk_event_t *event);
 typedef void (*native_sdk_gtk_bridge_callback_t)(void *context, uint64_t window_id, const char *webview_label, size_t webview_label_len, const char *message, size_t message_len, const char *origin, size_t origin_len);
@@ -211,6 +227,14 @@ int native_sdk_gtk_set_view_visible(native_sdk_gtk_host_t *host, uint64_t window
 int native_sdk_gtk_focus_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int native_sdk_gtk_close_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
 int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
+/* Present a native context menu (GtkPopoverMenu) pointing at the given
+ * view-local LOGICAL x/y — the same coordinate space the gpu-surface
+ * input path reports pointer events in, which is the pointing-rect space
+ * GTK expects (widget-local logical coordinates of the popover's
+ * parent). The selection (or dismissal) is reported asynchronously as a
+ * CONTEXT_MENU_ACTION event echoing `token`. Returns 0 when the window
+ * is unknown or `count` is 0. */
+int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count);
 int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len);
 int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled);
 int native_sdk_gtk_set_webview_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);

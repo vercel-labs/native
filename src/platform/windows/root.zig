@@ -1626,6 +1626,7 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .gpu_surfaces));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_playback));
     try std.testing.expect(WindowsPlatform.supportsFeature(&system, .audio_streaming));
+    try std.testing.expect(WindowsPlatform.supportsFeature(&system, .context_menus));
 
     var chromium = testPlatformWithEngine(.chromium);
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .main_webview));
@@ -1637,6 +1638,7 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_playback));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_streaming));
+    try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .context_menus));
 }
 
 test "windows hide-on-close support requires the declared tray (the only re-show affordance)" {

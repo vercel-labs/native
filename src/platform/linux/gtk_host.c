@@ -120,6 +120,27 @@ typedef struct native_sdk_gtk_menu_action {
     struct native_sdk_gtk_host *host;
 } native_sdk_gtk_menu_action_t;
 
+/* One presented context menu (GtkPopoverMenu): its GMenu dispatches
+ * through a per-invocation GSimpleActionGroup inserted on the presenting
+ * widget, so nothing ever lands in the application action map the menu
+ * bar owns. Exactly one CONTEXT_MENU_ACTION event is emitted per
+ * request: the selected item's action sets `emitted`, and the popover's
+ * "closed" teardown idle emits the dismissal (item 0) only when no
+ * selection did. `popover` and `parent` are weak pointers (GLib nulls
+ * them if the widgets die first, e.g. the owning window closes while
+ * the menu is up), and `host->context_menu` tracks the single live
+ * instance for teardown at destroy. */
+typedef struct native_sdk_gtk_context_menu {
+    struct native_sdk_gtk_host *host;
+    uint64_t window_id;
+    char *view_label;
+    uint64_t token;
+    GtkWidget *popover;
+    GtkWidget *parent;
+    int emitted;
+    guint teardown_idle;
+} native_sdk_gtk_context_menu_t;
+
 /* One rectangle of the runtime-pushed window-drag mirror (markup
  * `window-drag="true"`), in the owning gpu_surface view's logical
  * coordinates. Exclusions are the press-claiming widgets INSIDE a drag
@@ -366,10 +387,14 @@ struct native_sdk_gtk_host {
     GMenuModel *menu_model;
     native_sdk_gtk_menu_action_t menu_actions[NATIVE_SDK_MAX_MENU_ITEMS];
     int menu_action_count;
+    /* The one live context menu (menus are modal-per-pointer, so one at
+     * a time); owned here between show and the teardown idle. */
+    native_sdk_gtk_context_menu_t *context_menu;
     native_sdk_gtk_audio_t audio;
 };
 
 static void native_sdk_emit(native_sdk_gtk_host_t *host, native_sdk_gtk_event_t event);
+static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu);
 static gboolean native_sdk_nudge_chrome_requery(gpointer data);
 static gboolean native_sdk_on_file_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data);
 static GtkWindow *native_sdk_parent_window(native_sdk_gtk_host_t *host);
@@ -2862,6 +2887,11 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
         if (host->timers[i].in_use && host->timers[i].source) g_source_remove(host->timers[i].source);
         host->timers[i].in_use = 0;
     }
+    /* Before the windows go: an open context menu's popover is owned by
+     * a widget inside one of them, and the state's weak pointers must
+     * be unhooked while the objects are still alive. No event — the
+     * host is shutting down. */
+    if (host->context_menu) native_sdk_context_menu_free(host->context_menu);
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_clear_window(&host->windows[i]);
     }
@@ -3640,6 +3670,182 @@ int native_sdk_gtk_create_view(native_sdk_gtk_host_t *host, uint64_t window_id, 
     if (kind == NATIVE_SDK_GTK_VIEW_GPU_SURFACE) native_sdk_setup_gpu_surface_view(view);
     win->native_view_count++;
     native_sdk_reorder_overlays(win);
+    return 1;
+}
+
+/* --------------------------------------------------------------------
+ * Native context menus (GtkPopoverMenu).
+ *
+ * GTK-only — deliberately OUTSIDE the WebKit fences, so the menu path
+ * compiles identically in web and native-only (stub) builds.
+ */
+
+/* Emit the one CONTEXT_MENU_ACTION event this request may produce (the
+ * macOS host's payload contract: widget_id echoes the token,
+ * menu_item_id 0 means dismissed). */
+static void native_sdk_context_menu_emit(native_sdk_gtk_context_menu_t *menu, uint32_t item_id) {
+    if (!menu || menu->emitted) return;
+    menu->emitted = 1;
+    native_sdk_emit(menu->host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION,
+        .window_id = menu->window_id,
+        .view_label = menu->view_label ? menu->view_label : "",
+        .view_label_len = menu->view_label ? strlen(menu->view_label) : 0,
+        .widget_id = menu->token,
+        .menu_item_id = item_id,
+    });
+}
+
+/* Balanced teardown of one presented menu (NO event emission): remove
+ * the per-invocation action group from the presenting widget, drop the
+ * weak pointers, unparent the popover (the parent holds the only ref,
+ * so unparent finalizes it), and free the state. */
+static void native_sdk_context_menu_free(native_sdk_gtk_context_menu_t *menu) {
+    if (!menu) return;
+    if (menu->teardown_idle) {
+        g_source_remove(menu->teardown_idle);
+        menu->teardown_idle = 0;
+    }
+    if (menu->parent) {
+        gtk_widget_insert_action_group(menu->parent, "native-sdk-context", NULL);
+        g_object_remove_weak_pointer(G_OBJECT(menu->parent), (gpointer *)&menu->parent);
+    }
+    if (menu->popover) {
+        g_object_remove_weak_pointer(G_OBJECT(menu->popover), (gpointer *)&menu->popover);
+        gtk_widget_unparent(menu->popover);
+    }
+    if (menu->host && menu->host->context_menu == menu) menu->host->context_menu = NULL;
+    free(menu->view_label);
+    free(menu);
+}
+
+/* Runs one main-loop turn after the popover closed: a selection's
+ * action activation (delivered around the close) has already landed by
+ * now, so an un-emitted request is honestly a dismissal — the same
+ * one-turn-later emission discipline the macOS host applies after its
+ * tracking loop ends. */
+static gboolean native_sdk_context_menu_teardown_idle(gpointer data) {
+    native_sdk_gtk_context_menu_t *menu = data;
+    menu->teardown_idle = 0;
+    native_sdk_context_menu_emit(menu, 0);
+    native_sdk_context_menu_free(menu);
+    return G_SOURCE_REMOVE;
+}
+
+static void native_sdk_context_menu_closed(GtkPopover *popover, gpointer data) {
+    (void)popover;
+    native_sdk_gtk_context_menu_t *menu = data;
+    if (!menu->teardown_idle) {
+        menu->teardown_idle = g_idle_add(native_sdk_context_menu_teardown_idle, menu);
+    }
+}
+
+static void native_sdk_context_menu_item_activate(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)parameter;
+    native_sdk_gtk_context_menu_t *menu = data;
+    uint32_t item_id = (uint32_t)GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(action), "native-sdk-item-id"));
+    native_sdk_context_menu_emit(menu, item_id);
+}
+
+int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count) {
+    if (!host || !items || count == 0) return 0;
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win) return 0;
+    /* Present on the view that took the click when the label resolves —
+     * gtk_popover_set_pointing_to takes the PARENT widget's logical
+     * coordinates, which is exactly the space the gpu-surface input
+     * path reported the click's x/y in (widget-local logical doubles,
+     * no scale conversion on either leg). Fall back to the window's
+     * view host, mirroring the macOS contentView fallback. */
+    GtkWidget *parent = win->stack_root;
+    char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
+    native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
+    if (view && view->widget) parent = view->widget;
+    if (!parent) {
+        free(label_copy);
+        return 0;
+    }
+
+    /* A menu already up (re-click while open): dismiss it — its closed
+     * handler schedules its own teardown and dismissal event. A state
+     * whose popover already died with its window (weak pointer nulled,
+     * "closed" never delivered) has no handler coming: free it here. */
+    if (host->context_menu) {
+        if (host->context_menu->popover) {
+            gtk_popover_popdown(GTK_POPOVER(host->context_menu->popover));
+        } else {
+            native_sdk_context_menu_free(host->context_menu);
+        }
+    }
+
+    native_sdk_gtk_context_menu_t *menu_state = calloc(1, sizeof(*menu_state));
+    if (!menu_state) {
+        free(label_copy);
+        return 0;
+    }
+    menu_state->host = host;
+    menu_state->window_id = window_id;
+    menu_state->view_label = label_copy;
+    menu_state->token = token;
+    menu_state->parent = parent;
+    g_object_add_weak_pointer(G_OBJECT(parent), (gpointer *)&menu_state->parent);
+
+    /* The declared items become a sectioned GMenu — separators split
+     * sections, the GMenu convention — wired to a fresh action group
+     * inserted on the presenting widget under the "native-sdk-context"
+     * namespace. Every builder ref is dropped as soon as the next owner
+     * holds its own (the set_menus discipline). */
+    GSimpleActionGroup *group = g_simple_action_group_new();
+    GMenu *menu = g_menu_new();
+    GMenu *section = g_menu_new();
+    for (size_t i = 0; i < count; i++) {
+        if (items[i].separator) {
+            if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0) {
+                g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+            }
+            g_object_unref(section);
+            section = g_menu_new();
+            continue;
+        }
+        char action_name[32];
+        snprintf(action_name, sizeof(action_name), "item-%u", items[i].item_id);
+        GSimpleAction *action = g_simple_action_new(action_name, NULL);
+        g_simple_action_set_enabled(action, items[i].enabled != 0);
+        g_object_set_data(G_OBJECT(action), "native-sdk-item-id", GUINT_TO_POINTER(items[i].item_id));
+        g_signal_connect(action, "activate", G_CALLBACK(native_sdk_context_menu_item_activate), menu_state);
+        g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+        g_object_unref(action); /* the group holds its own ref */
+        char *item_label = native_sdk_strndup(items[i].label ? items[i].label : "", items[i].label_len);
+        char detailed[48];
+        snprintf(detailed, sizeof(detailed), "native-sdk-context.item-%u", items[i].item_id);
+        GMenuItem *gitem = g_menu_item_new(item_label ? item_label : "", detailed);
+        g_menu_append_item(section, gitem);
+        g_object_unref(gitem); /* the section holds its own ref */
+        free(item_label);
+    }
+    if (g_menu_model_get_n_items(G_MENU_MODEL(section)) > 0) {
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+    }
+    g_object_unref(section);
+
+    gtk_widget_insert_action_group(parent, "native-sdk-context", G_ACTION_GROUP(group));
+    g_object_unref(group); /* the widget holds its own ref */
+
+    GtkWidget *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+    g_object_unref(menu); /* the popover holds its own model ref */
+    gtk_widget_set_parent(popover, parent); /* sinks the floating ref; the parent owns it */
+    gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+    GdkRectangle pointing_to = { (int)x, (int)y, 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(popover), &pointing_to);
+    menu_state->popover = popover;
+    g_object_add_weak_pointer(G_OBJECT(popover), (gpointer *)&menu_state->popover);
+    g_signal_connect(popover, "closed", G_CALLBACK(native_sdk_context_menu_closed), menu_state);
+    host->context_menu = menu_state;
+    /* Popovers are asynchronous (no nested tracking loop): popup returns
+     * immediately and the selection arrives through the action group,
+     * so presenting synchronously from the requesting dispatch is safe —
+     * the macOS host defers a turn only because NSMenu's popUp blocks. */
+    gtk_popover_popup(GTK_POPOVER(popover));
     return 1;
 }
 

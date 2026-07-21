@@ -191,8 +191,9 @@ test "a declared context menu presents as the anchored fallback surface on prese
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    // A host without a native menu presenter (Linux GTK, Windows Win32
-    // today). Service pointers are captured at init, so re-capture.
+    // A host without a native menu presenter (the mobile toolkit hosts
+    // and embed hosts today). Service pointers are captured at init, so
+    // re-capture.
     harness.null_platform.context_menus = false;
     harness.runtime.options.platform = harness.null_platform.platform();
 

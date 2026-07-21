@@ -64,9 +64,9 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
     </tr>
     <tr>
       <td>Menus</td>
-      <td><Tier tier="full" note="native app menus and native context menus" /></td>
-      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={5} /></td>
-      <td><Tier tier="caveats" note="native app menus; context menus present as an anchored canvas surface" fn={5} /></td>
+      <td><Tier tier="full" note="native app menus and native context menus (NSMenu)" fn={5} /></td>
+      <td><Tier tier="full" note="native app menus and native context menus (TrackPopupMenu)" fn={5} /></td>
+      <td><Tier tier="full" note="native app menus and native context menus (GtkPopoverMenu)" fn={5} /></td>
       <td><Tier tier="none" /></td>
       <td><Tier tier="none" /></td>
     </tr>
@@ -125,7 +125,7 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
 2. macOS presents through Metal and hands scrolling to OS scroll drivers. Linux and Windows present the deterministic software renderer through the platform blit path and report `backend=software`; a manifest that requests another backend falls back to software there instead of erroring. The iOS toolkit host reads the software renderer's pixels over the ABI and presents them through Metal with the macOS host's presentation discipline — presents are gated on the canvas revision (an idle app acquires no drawables and uploads nothing), the drawable is acquired only after the frame's CPU work is done, and the pump pauses in the background and re-presents the retained canvas on return; the Android toolkit host copies the same pixels into its surface's window buffer (mobile GPU rendering is a later phase); embed hosts present the pixels in their own surfaces.
 3. The SDK's own TrueType pipeline — parsing, outlines, rasterization — is text rendering's shared reference path on every platform (goldens, screenshots, and software presents all ink through it), and apps can [register additional faces](/fonts) (a CJK face is the canonical case) that both renderers resolve exactly like the bundled ones. macOS additionally hands registered bytes to the host at registration, so CoreText measurement and Metal packet text presentation resolve the same face the reference renderer inks. On Windows and Linux the software renderer inks registered outlines directly, and the test suite pins pixel parity between the present path and the reference path for a registered face; the full font-registry suite runs in CI on Linux, and CI additionally runs it natively on a Windows runner, including a receipt test that registers a committed subsetted CJK face and proves Chinese text renders as real glyphs, not tofu. Mobile hosts present the same reference-rendered pixels, but no mobile test registers a font today and the mobile hosts' text measurement has no registered-font seam, so registered fonts there are stated as unverified rather than supported.
 4. Windows maps native IME composition onto the shared IME events, with real-hardware IME verification still pending. The iOS toolkit host forwards touch, the system keyboard, and IME composition, verified with real injected input on the simulator; the Android toolkit host forwards touch, shows and hides the soft keyboard from the runtime's focus state, and routes committed text and IME composition through the same embed IME events, verified with injected input on the emulator.
-5. App menus are native on all three desktops. Hosts without a native context-menu presenter — Linux and Windows today — present the same declared context menu as an anchored canvas surface; authors declare one menu either way.
+5. App menus and context menus are native on all three desktops: macOS presents `NSMenu`, Windows `TrackPopupMenu` (the tray menu's popup path), Linux `GtkPopoverMenu`. Hosts without a native context-menu presenter — the mobile toolkit hosts and embed hosts today — present the same declared context menu as an anchored canvas surface at the click point; authors declare one menu either way.
 6. Tray support is implemented on macOS (`NSStatusItem`) and Windows; Linux tray calls return `UnsupportedService` until a portable status-notifier implementation is selected.
 7. Web engines only apply to apps that embed web content; native-rendered apps carry none. The system WebView is the default engine on every desktop platform; bundled Chromium through CEF is available on macOS only, and Linux/Windows Chromium builds fail early instead of silently substituting an engine. The Windows system engine is WebView2: its Evergreen runtime ships with Windows 11 and current Windows 10 (older machines need the runtime installer; `native doctor` checks for it), and the build stages the vendored loader next to the executable automatically. See [Web Engines](/web-engines). The mobile shell examples embed the platform WebView as the content workspace.
 8. `native package` targets all five platforms: macOS gets a `.app` bundle (plus `zig build dmg`), Linux an install tree, Windows a distributable directory with a per-user file-type registration script, iOS a complete generated Xcode project — toolkit host sources, Info.plist, asset catalog, shared scheme, and the device-slice embed library — that `xcodebuild archive` builds with zero edits (code signing stays a manual step, like notarization), and Android a complete generated host project whose debug APK assembles with zero edits, directly with the SDK's build tools (store signing keys stay a manual step). Every platform's icons generate from one square source image. See [Packaging](/packaging).
@@ -190,9 +190,9 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td>Native context menus</td>
       <td>Supported</td>
       <td>Supported</td>
+      <td>Supported</td>
       <td>Anchored fallback</td>
-      <td>Anchored fallback</td>
-      <td>Anchored fallback</td>
+      <td>Supported</td>
     </tr>
     <tr>
       <td>System tray</td>
@@ -301,7 +301,7 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
   </tbody>
 </table>
 
-"Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface on the widget — because those hosts have no native menu presenter yet (GTK popover menus and the Win32 popup-menu API are the documented future seams). Authors declare one menu either way; the platform decides presentation.
+"Anchored fallback" for native context menus means the declared menu still presents — as an anchored canvas surface at the click point — because that host has no native menu presenter. All three desktop system engines present natively (`NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux). Authors declare one menu either way; the platform decides presentation.
 
 Audio spectrum analysis reads the app's OWN playback and nothing else: macOS taps the app's single player pre-effects, Windows captures the app's own audio session through process-scoped loopback (never system-wide — other apps' audio can never appear in the bands), and Linux analyzes inside the app's own playbin. Hosts that cannot analyze report `audio_spectrum` unsupported and simply never deliver `.spectrum` events; see the capabilities page for the band shape and cadence contract.
 

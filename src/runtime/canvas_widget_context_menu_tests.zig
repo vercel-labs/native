@@ -328,8 +328,9 @@ test "a declared menu on a presenter-less host becomes a fallback request, not a
     const app = app_state.app();
     const harness = try TestHarness().create(std.testing.allocator, .{});
     harness.null_platform.gpu_surfaces = true;
-    // Model a host without a native menu presenter (Linux GTK, Windows
-    // Win32 today): the service is null and the feature reports false.
+    // Model a host without a native menu presenter (the mobile toolkit
+    // hosts and embed hosts today): the service is null and the feature
+    // reports false.
     // Service POINTERS are captured at init, so re-capture after the
     // flip (feature FLAGS like gpu_surfaces read live through context).
     harness.null_platform.context_menus = false;
