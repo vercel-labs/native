@@ -4312,6 +4312,27 @@ pub fn Effects(comptime Msg: type) type {
                 );
                 return error.ReplayVideoDivergence;
             }
+            // Every FED record is one recorded delivery, and the event
+            // during whose dispatch it delivered live sits AFTER it in
+            // the journal — so a fed entry still staged when the
+            // journal ends was never consumed by the stream that
+            // recorded it: the file is truncated or hand-edited (or
+            // the replayed updates issued different effects).
+            // Regenerated loop-side answers (resolve = false) may
+            // honestly outlive the last drain — a recording can end
+            // before the wake that would have delivered them, on both
+            // timelines symmetrically.
+            var offset: usize = 0;
+            const storage = self.pendingVideoStorage();
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const entry = storage[(self.pending_video_head + offset) % storage.len];
+                if (!entry.resolve) continue;
+                std.debug.print(
+                    "session replay: a journaled video result for key {d} was never delivered - the recording's own delivering event follows every record, so the journal is truncated or hand-edited (or the replayed updates issued different effects)\n",
+                    .{entry.event.key},
+                );
+                return error.ReplayVideoDivergence;
+            }
         }
 
         /// Report one delivered result to the bound session recorder.

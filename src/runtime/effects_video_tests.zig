@@ -2234,6 +2234,31 @@ test "a completion handler's chained load replays in recorded order" {
     }
 }
 
+test "an undelivered fed video result fails the finish check" {
+    // A fed record is one recorded delivery, and the event that
+    // consumed it live follows it in every honest journal — so a fed
+    // entry still staged at the journal's end is truncation or
+    // hand-editing, never success.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    fx.pushReplayVideoSource(clip_key, 1, .local, false);
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    try fx.feedVideoRecord(clip_key, 1, .position, 500, 92_500, true, false, 0, 0);
+    try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
+
+    // Delivered, the finish is silent again.
+    var boundary = fx.drainBoundary();
+    const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectVideoEventKind.position, msg.video_event.kind);
+    try fx.finishReplay();
+}
+
 test "retired video identities release at the next drain-pass boundary" {
     // Bare channel, replay-armed: replaced and stopped loads park their
     // identities; a park a journaled record references is consumed by
