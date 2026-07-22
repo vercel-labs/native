@@ -76,6 +76,7 @@ const VideoMsg = union(enum) {
     load_looping,
     load_then_stop,
     load_then_stream,
+    load_source_burst,
     play,
     pause,
     stop,
@@ -206,6 +207,18 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
                 .on_event = VideoEffects.videoMsg(.video_event),
             });
         },
+        // One dispatch, more resolved loads than the replay-side
+        // cascade-resolution queue holds inline: loads per dispatch are
+        // unbounded by contract, so every recorded resolution must
+        // survive to its replayed load.
+        .load_source_burst => for (0..effects_mod.max_effect_replay_video_source_entries + 1) |_| fx.loadVideo(.{
+            .key = clip_key,
+            .surface = clip_surface,
+            .path = clip_path,
+            .url = clip_url,
+            .autoplay = false,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        }),
         .play => fx.playVideo(),
         .pause => fx.pauseVideo(),
         .stop => fx.stopVideo(),
@@ -236,6 +249,7 @@ fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.load-url")) return .load_url;
     if (std.mem.eql(u8, name, "video.load-then-stop")) return .load_then_stop;
     if (std.mem.eql(u8, name, "video.load-then-stream")) return .load_then_stream;
+    if (std.mem.eql(u8, name, "video.load-source-burst")) return .load_source_burst;
     return null;
 }
 
@@ -2086,6 +2100,91 @@ test "the cascade's resolved source replays without the recording host's files" 
         try std.testing.expect(report.ok());
         try std.testing.expect(report.effects_fed > 0);
         try std.testing.expectEqual(recorded_source, app_state.effects.videoSnapshot().source);
+        try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, app_state.effects.videoSnapshot().source);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "a load burst past the resolution queue's inline capacity replays whole" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record on an assets-absent host: one dispatch resolves more
+    // loads than the replay-side cascade-resolution queue holds
+    // inline (each falls through to the url). All the records land
+    // before the dispatch's event, so replay queues every one of them
+    // first — the queue must spill, never refuse.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_local_files = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+        harness.runtime.options.session_recorder = recorder;
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load-source-burst", .window_id = 1, .view_label = canvas_label } });
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        try std.testing.expectEqual(effects_mod.max_effect_replay_video_source_entries + 1, harness.null_platform.video_load_url_count);
+        try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, app_state.effects.videoSnapshot().source);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: no false divergence at the inline capacity, and
+    // the surviving load's resolved source lands.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
         try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, app_state.effects.videoSnapshot().source);
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());

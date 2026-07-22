@@ -1495,11 +1495,13 @@ pub const EffectResultKind = enum(u8) {
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
 
-/// Journaled video cascade resolutions buffered for replay
+/// Inline capacity of the replayed video cascade-resolution queue
 /// (`Effects.pushReplayVideoSource`). Records precede the event whose
 /// dispatch consumes them, so the queue holds at most one dispatch's
-/// loads; more than this many per dispatch is a runaway loop, not a
-/// session shape.
+/// loads — and loads per dispatch are unbounded by contract (the
+/// rejection-burst rule), so a burst past this spills to the heap
+/// instead of refusing: each record is one recorded resolution owed to
+/// exactly one replayed load.
 pub const max_effect_replay_video_source_entries: usize = 64;
 
 /// Journaled launch-env deliveries buffered for replay (the `.env`
@@ -3548,8 +3550,11 @@ pub fn Effects(comptime Msg: type) type {
         retired_video_len: usize = 0,
         /// Journaled `.video_load` cascade resolutions awaiting their
         /// replayed loads (see `pushReplayVideoSource`). Loop-thread
-        /// only, like the replay clock queue.
+        /// only; inline until a burst outgrows it, geometric spill
+        /// after (freed when the queue empties, and at `deinit`) — the
+        /// pending stages' storage discipline.
         replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
+        replay_video_source_spill: []ReplayVideoSource = &.{},
         replay_video_source_len: usize = 0,
         /// Drain-pass counter (incremented in `drainBoundary`): the
         /// retired-video sweep's clock. Loop-thread only.
@@ -3979,6 +3984,12 @@ pub fn Effects(comptime Msg: type) type {
                 self.retired_video_spill = &.{};
             }
             self.retired_video_len = 0;
+            // And the queued replayed cascade resolutions.
+            if (self.replay_video_source_spill.len > 0) {
+                self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = &.{};
+            }
+            self.replay_video_source_len = 0;
             // And undrained caller-staged Msgs.
             if (self.pending_staged_spill.len > 0) {
                 self.allocator.free(self.pending_staged_spill);
@@ -6517,10 +6528,28 @@ pub fn Effects(comptime Msg: type) type {
         /// sequence is deterministic, so each entry pairs with exactly
         /// the load that journaled it, and a load whose cascade failed
         /// live (no record) simply finds no entry.
-        pub fn pushReplayVideoSource(self: *Self, token: u64, source: EffectVideoSource) error{EffectNotFound}!void {
-            if (self.replay_video_source_len >= max_effect_replay_video_source_entries) return error.EffectNotFound;
-            self.replay_video_sources[self.replay_video_source_len] = .{ .token = token, .source = source };
+        pub fn pushReplayVideoSource(self: *Self, token: u64, source: EffectVideoSource) void {
+            const storage = self.replayVideoSourceStorage();
+            if (self.replay_video_source_len == storage.len) {
+                // Loads per dispatch are unbounded by contract, so the
+                // queue grows rather than refusing — the pending
+                // stages' discipline, loud on allocation failure for
+                // the same stranded-consumer reason.
+                const grown = self.allocator.alloc(ReplayVideoSource, storage.len * 2) catch
+                    @panic("effects: out of memory queueing a replayed video cascade resolution - each record is one recorded load's resolution and must never be dropped");
+                @memcpy(grown[0..self.replay_video_source_len], storage[0..self.replay_video_source_len]);
+                if (self.replay_video_source_spill.len > 0) self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = grown;
+            }
+            const active = self.replayVideoSourceStorage();
+            active[self.replay_video_source_len] = .{ .token = token, .source = source };
             self.replay_video_source_len += 1;
+        }
+
+        /// The cascade-resolution queue's current backing storage.
+        fn replayVideoSourceStorage(self: *Self) []ReplayVideoSource {
+            if (self.replay_video_source_spill.len > 0) return self.replay_video_source_spill;
+            return &self.replay_video_sources;
         }
 
         /// Consume the queued cascade resolution for the load just
@@ -6530,12 +6559,13 @@ pub fn Effects(comptime Msg: type) type {
         /// unique and monotone), so the scan drops them on the way —
         /// the queue self-cleans.
         fn takeReplayVideoSource(self: *Self) void {
+            const storage = self.replayVideoSourceStorage();
             var index: usize = 0;
             while (index < self.replay_video_source_len) {
-                const entry = self.replay_video_sources[index];
+                const entry = storage[index];
                 if (entry.token < self.video.token) {
                     self.replay_video_source_len -= 1;
-                    self.replay_video_sources[index] = self.replay_video_sources[self.replay_video_source_len];
+                    storage[index] = storage[self.replay_video_source_len];
                     continue;
                 }
                 if (entry.token == self.video.token) {
@@ -6547,10 +6577,14 @@ pub fn Effects(comptime Msg: type) type {
                     // it does live at this point.
                     if (entry.source == .stream and self.video.playing) self.video.buffering = true;
                     self.replay_video_source_len -= 1;
-                    self.replay_video_sources[index] = self.replay_video_sources[self.replay_video_source_len];
-                    return;
+                    storage[index] = storage[self.replay_video_source_len];
+                    break;
                 }
                 index += 1;
+            }
+            if (self.replay_video_source_len == 0 and self.replay_video_source_spill.len > 0) {
+                self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = &.{};
             }
         }
 
