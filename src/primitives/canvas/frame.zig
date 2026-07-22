@@ -614,7 +614,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         // and the snap keeps the cull region identical to the cleared
         // pixels so a fractional dirty edge cannot erase an unchanged
         // neighbor's boundary-pixel coverage without redrawing it.
-        dirty_bounds = clippedDirtyBounds(bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1), options.surface_size);
+        dirty_bounds = bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1, options.surface_size);
     }
 
     return .{
@@ -661,13 +661,46 @@ fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
 /// `bleedAlignedCanvasDirtyBounds` (see that doc comment): whole device
 /// pixels of AA bleed folded in on integer device boundaries, edges
 /// chosen so the STORED rect's f32 round trip lands exactly on them.
-fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32) ?geometry.RectF {
+fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32, surface_size: geometry.SizeF) ?geometry.RectF {
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const x_edges = dirtyAxisEdges(@floor(normalized.minX() * device) - bleed_pixels, @ceil(normalized.maxX() * device) + bleed_pixels, device);
-    const y_edges = dirtyAxisEdges(@floor(normalized.minY() * device) - bleed_pixels, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    // Surface clipping happens on the integer device boundaries, never
+    // on the finished rect (see the runtime twin's doc comment).
+    const x_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minX() * device) - bleed_pixels,
+        @ceil(normalized.maxX() * device) + bleed_pixels,
+        surface_size.width,
+        device,
+    ) orelse return null;
+    const y_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minY() * device) - bleed_pixels,
+        @ceil(normalized.maxY() * device) + bleed_pixels,
+        surface_size.height,
+        device,
+    ) orelse return null;
+    const x_edges = dirtyAxisEdges(x_boundaries.min, x_boundaries.max, device);
+    const y_edges = dirtyAxisEdges(y_boundaries.min, y_boundaries.max, device);
+    if (x_edges.span <= 0 or y_edges.span <= 0) return null;
     return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
+}
+
+const DirtyBoundaries = struct { min: f32, max: f32 };
+
+/// Clamp one axis' device boundaries to the surface's device
+/// boundaries (see the runtime twin's doc comment).
+fn surfaceClampedDirtyBoundaries(min_boundary: f32, max_boundary: f32, surface_extent: f32, device: f32) ?DirtyBoundaries {
+    var min_b = min_boundary;
+    var max_b = max_boundary;
+    if (std.math.isFinite(surface_extent) and surface_extent > 0) {
+        const surface_boundary = @ceil(surface_extent * device);
+        if (std.math.isFinite(surface_boundary)) {
+            min_b = std.math.clamp(min_b, 0, surface_boundary);
+            max_b = std.math.clamp(max_b, 0, surface_boundary);
+            if (!(max_b > min_b)) return null;
+        }
+    }
+    return .{ .min = min_b, .max = max_b };
 }
 
 const DirtyAxisEdges = struct { min: f32, span: f32 };
@@ -682,21 +715,27 @@ fn dirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) DirtyAxisEd
     if (!walkable) {
         const min_edge = nudgedFiniteDirtyEdge(min_boundary / device, -2);
         const max_edge = nudgedFiniteDirtyEdge(max_boundary / device, 2);
-        return .{ .min = min_edge, .span = @max(0, nudgedFiniteDirtyEdge(max_edge - min_edge, 2)) };
+        var span = @max(0, nudgedFiniteDirtyEdge(max_edge - min_edge, 2));
+        // The reconstructed max edge must stay finite at the f32 range
+        // edge; shave the span until the sum stops overflowing.
+        while (span > 0 and !std.math.isFinite(min_edge + span)) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        return .{ .min = min_edge, .span = span };
     }
     const min_edge = dirtyEdgeForFloorBoundary(min_boundary, device);
     return .{ .min = min_edge, .span = dirtySpanForCeilBoundary(min_edge, max_boundary, device) };
 }
 
-/// Finite superset value (see the runtime twin's doc comment).
+/// Finite superset value (see the runtime twin's doc comment): only
+/// NaN and the infinities are replaced, so far-but-representable
+/// content keeps its damage in place.
 fn nudgedFiniteDirtyEdge(value: f32, ulps: i8) f32 {
-    var result = value;
-    if (std.math.isNan(result)) return 0;
-    result = std.math.clamp(result, -3.0e37, 3.0e37);
+    if (std.math.isNan(value)) return 0;
+    const limit = std.math.floatMax(f32);
+    var result = std.math.clamp(value, -limit, limit);
     var remaining: i8 = if (ulps < 0) -ulps else ulps;
     const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
     while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
-    return result;
+    return std.math.clamp(result, -limit, limit);
 }
 
 /// Smallest representable coordinate whose product with `device`

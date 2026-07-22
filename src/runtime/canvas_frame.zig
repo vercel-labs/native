@@ -1091,12 +1091,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
                             var refined = patch_dirty;
                             if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
-                            const clipped = clippedCanvasDirtyBounds(bleedAlignedCanvasDirtyBounds(refined.bounds, frame_options.scale, 1), frame_options.surface_size);
+                            const clipped = bleedAlignedCanvasDirtyBounds(refined.bounds, frame_options.scale, 1, frame_options.surface_size);
                             // A list of one rect adds nothing over the
                             // scissor; ship it only when it splits.
                             if (clipped != null and refined.rect_count > 1) {
                                 for (refined.rects[0..refined.rect_count]) |rect| {
-                                    const clipped_rect = clippedCanvasDirtyBounds(bleedAlignedCanvasDirtyBounds(rect, frame_options.scale, 1), frame_options.surface_size) orelse continue;
+                                    const clipped_rect = bleedAlignedCanvasDirtyBounds(rect, frame_options.scale, 1, frame_options.surface_size) orelse continue;
                                     dirty_rects[dirty_rect_count] = clipped_rect;
                                     dirty_rect_count += 1;
                                 }
@@ -1106,7 +1106,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         }
                     }
                 }
-                break :dirty clippedCanvasDirtyBounds(bleedAlignedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.scale, 1), frame_options.surface_size);
+                break :dirty bleedAlignedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.scale, 1, frame_options.surface_size);
             };
 
             const canvas_frame = canvas.CanvasFrame{
@@ -1289,10 +1289,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
 fn widenCanvasFrameDirtyForPresentationScale(canvas_frame: *canvas.CanvasFrame, presentation_scale: f32) void {
     if (canvas_frame.full_repaint) return;
     if (presentation_scale == canvas_frame.scale) return;
-    canvas_frame.dirty_bounds = clippedCanvasDirtyBounds(bleedAlignedCanvasDirtyBounds(canvas_frame.dirty_bounds, presentation_scale, 1), canvas_frame.surface_size);
+    canvas_frame.dirty_bounds = bleedAlignedCanvasDirtyBounds(canvas_frame.dirty_bounds, presentation_scale, 1, canvas_frame.surface_size);
     var kept: usize = 0;
     for (canvas_frame.dirty_rects[0..canvas_frame.dirty_rect_count]) |rect| {
-        const widened = clippedCanvasDirtyBounds(bleedAlignedCanvasDirtyBounds(rect, presentation_scale, 1), canvas_frame.surface_size) orelse continue;
+        const widened = bleedAlignedCanvasDirtyBounds(rect, presentation_scale, 1, canvas_frame.surface_size) orelse continue;
         canvas_frame.dirty_rects[kept] = widened;
         kept += 1;
     }

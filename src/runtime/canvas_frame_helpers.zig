@@ -136,13 +136,53 @@ pub fn clippedCanvasDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.
 /// RECONSTRUCTED max edge (`x + width`, the f32 a stored rect yields)
 /// stays on theirs — so consumers re-deriving pixels clear exactly the
 /// pixels command culling admits, in both directions.
-pub fn bleedAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32) ?geometry.RectF {
+pub fn bleedAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32, surface_size: geometry.SizeF) ?geometry.RectF {
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const x_edges = canvasDirtyAxisEdges(@floor(normalized.minX() * device) - bleed_pixels, @ceil(normalized.maxX() * device) + bleed_pixels, device);
-    const y_edges = canvasDirtyAxisEdges(@floor(normalized.minY() * device) - bleed_pixels, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    // Surface clipping happens HERE, on the integer device boundaries,
+    // never on the finished rect: re-encoding an aligned rect through a
+    // rect intersection (even a no-op one) reconstructs its width and
+    // can push the stored edges' round trip off their boundaries by an
+    // ulp. A boundary interval that clips empty means the damage lies
+    // entirely off-surface.
+    const x_boundaries = surfaceClampedCanvasDirtyBoundaries(
+        @floor(normalized.minX() * device) - bleed_pixels,
+        @ceil(normalized.maxX() * device) + bleed_pixels,
+        surface_size.width,
+        device,
+    ) orelse return null;
+    const y_boundaries = surfaceClampedCanvasDirtyBoundaries(
+        @floor(normalized.minY() * device) - bleed_pixels,
+        @ceil(normalized.maxY() * device) + bleed_pixels,
+        surface_size.height,
+        device,
+    ) orelse return null;
+    const x_edges = canvasDirtyAxisEdges(x_boundaries.min, x_boundaries.max, device);
+    const y_edges = canvasDirtyAxisEdges(y_boundaries.min, y_boundaries.max, device);
+    if (x_edges.span <= 0 or y_edges.span <= 0) return null;
     return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
+}
+
+const CanvasDirtyBoundaries = struct { min: f32, max: f32 };
+
+/// Clamp one axis' device boundaries to the surface's own device
+/// boundaries (`[0, ceil(extent * device)]` — the pixels that actually
+/// exist). A non-positive or non-finite surface extent leaves the axis
+/// unbounded: callers with no clipping surface still need the damage
+/// as a repaint region. Null when the interval clips empty.
+fn surfaceClampedCanvasDirtyBoundaries(min_boundary: f32, max_boundary: f32, surface_extent: f32, device: f32) ?CanvasDirtyBoundaries {
+    var min_b = min_boundary;
+    var max_b = max_boundary;
+    if (std.math.isFinite(surface_extent) and surface_extent > 0) {
+        const surface_boundary = @ceil(surface_extent * device);
+        if (std.math.isFinite(surface_boundary)) {
+            min_b = std.math.clamp(min_b, 0, surface_boundary);
+            max_b = std.math.clamp(max_b, 0, surface_boundary);
+            if (!(max_b > min_b)) return null;
+        }
+    }
+    return .{ .min = min_b, .max = max_b };
 }
 
 const CanvasDirtyAxisEdges = struct { min: f32, span: f32 };
@@ -163,23 +203,30 @@ fn canvasDirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) Canva
     if (!walkable) {
         const min_edge = nudgedFiniteCanvasDirtyEdge(min_boundary / device, -2);
         const max_edge = nudgedFiniteCanvasDirtyEdge(max_boundary / device, 2);
-        return .{ .min = min_edge, .span = @max(0, nudgedFiniteCanvasDirtyEdge(max_edge - min_edge, 2)) };
+        var span = @max(0, nudgedFiniteCanvasDirtyEdge(max_edge - min_edge, 2));
+        // The reconstructed max edge must stay finite at the f32 range
+        // edge; shave the span until the sum stops overflowing.
+        while (span > 0 and !std.math.isFinite(min_edge + span)) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        return .{ .min = min_edge, .span = span };
     }
     const min_edge = canvasDirtyEdgeForFloorBoundary(min_boundary, device);
     return .{ .min = min_edge, .span = canvasDirtySpanForCeilBoundary(min_edge, max_boundary, device) };
 }
 
 /// Finite value for the superset fallback: NaN degenerates to zero,
-/// infinities clamp inside f32's range, and `ulps` outward steps absorb
-/// the division/subtraction rounding so the fallback stays a superset.
+/// only INFINITIES clamp (to f32's largest finite value — any tighter
+/// clamp would move the damage away from far-but-representable
+/// content, breaking the superset a scale-overriding present relies
+/// on), and `ulps` outward steps absorb the division/subtraction
+/// rounding.
 fn nudgedFiniteCanvasDirtyEdge(value: f32, ulps: i8) f32 {
-    var result = value;
-    if (std.math.isNan(result)) return 0;
-    result = std.math.clamp(result, -3.0e37, 3.0e37);
+    if (std.math.isNan(value)) return 0;
+    const limit = std.math.floatMax(f32);
+    var result = std.math.clamp(value, -limit, limit);
     var remaining: i8 = if (ulps < 0) -ulps else ulps;
     const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
     while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
-    return result;
+    return std.math.clamp(result, -limit, limit);
 }
 
 /// Smallest representable logical coordinate whose product with

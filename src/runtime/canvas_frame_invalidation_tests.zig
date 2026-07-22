@@ -846,7 +846,12 @@ test "bleed-aligned dirty edges round-trip onto their device boundaries" {
         const w: f32 = @as(f32, @floatFromInt(i % 37)) * 0.61 + 0.4;
         const rect = geometry.RectF.init(x, x * 0.5, w, w * 0.8);
         for (scales) |scale| {
-            const aligned = canvas_frame.bleedAlignedCanvasDirtyBounds(rect, scale, 1).?;
+            const aligned = canvas_frame.bleedAlignedCanvasDirtyBounds(rect, scale, 1, .{}).?;
+            // The surface-clamped path must uphold the same boundaries
+            // when the rect fits well inside the surface: clipping
+            // happens on the boundaries, never as a re-encoding rect
+            // intersection afterwards.
+            const clamped = canvas_frame.bleedAlignedCanvasDirtyBounds(rect, scale, 1, geometry.SizeF.init(4096, 4096)).?;
             const min_boundary = @floor(rect.minX() * scale) - 1;
             const max_boundary = @ceil(rect.maxX() * scale) + 1;
             const min_product = aligned.minX() * scale;
@@ -864,13 +869,19 @@ test "bleed-aligned dirty edges round-trip onto their device boundaries" {
             const max_product64 = (@as(f64, aligned.minX()) + @as(f64, aligned.width)) * @as(f64, scale);
             try std.testing.expect(@floor(min_product64) == min_boundary);
             try std.testing.expect(@ceil(max_product64) == max_boundary);
+            if (rect.maxX() * scale + 2 < 4096) {
+                const clamped_min64 = @as(f64, clamped.minX()) * @as(f64, scale);
+                const clamped_max64 = (@as(f64, clamped.minX()) + @as(f64, clamped.width)) * @as(f64, scale);
+                try std.testing.expect(@floor(clamped_min64) == @max(0, min_boundary));
+                try std.testing.expect(@ceil(clamped_max64) == max_boundary);
+            }
         }
     }
 
     // The double-precision seam's known bad case: [x=1, width=64] at
     // 1.75x — the f32 product of the snapped edge rounds onto 115
     // while its exact product sits at 115.0000019.
-    const seam = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1, 1, 64, 8), 1.75, 1).?;
+    const seam = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1, 1, 64, 8), 1.75, 1, .{}).?;
     const seam_product64 = (@as(f64, seam.minX()) + @as(f64, seam.width)) * 1.75;
     try std.testing.expect(@ceil(seam_product64) <= 115);
 }
@@ -881,12 +892,12 @@ test "bleed alignment stays finite for far off-screen damage" {
     // nextAfter from infinity forever. The clamped result only needs
     // to stay finite and OUTSIDE any presentable surface — surface
     // clipping owns the rest.
-    const negative = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1.0e38, 1.0e38), 2, 1).?;
+    const negative = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1.0e38, 1.0e38), 2, 1, .{}).?;
     try std.testing.expect(std.math.isFinite(negative.minX()));
     try std.testing.expect(std.math.isFinite(negative.maxX()));
     try std.testing.expect(negative.maxX() <= 0);
 
-    const positive = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1.0e38, 1.0e38, 2.0e38, 2.0e38), 2, 1).?;
+    const positive = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1.0e38, 1.0e38, 2.0e38, 2.0e38), 2, 1, .{}).?;
     try std.testing.expect(std.math.isFinite(positive.minX()));
     try std.testing.expect(std.math.isFinite(positive.maxX()));
     try std.testing.expect(positive.minX() >= 16_384);
@@ -895,7 +906,7 @@ test "bleed alignment stays finite for far off-screen damage" {
     // immediately (an offset walk would crawl through denormals
     // without ever moving the sum) into a finite rect on the correct
     // side of the surface.
-    const collapsed = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1, 1), 2, 1).?;
+    const collapsed = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1, 1), 2, 1, .{}).?;
     try std.testing.expect(std.math.isFinite(collapsed.minX()));
     try std.testing.expect(std.math.isFinite(collapsed.maxX()));
     try std.testing.expect(collapsed.maxX() <= 0);
@@ -904,10 +915,19 @@ test "bleed alignment stays finite for far off-screen damage" {
     // NON-COLLAPSED superset: with no clipping surface (the public
     // frame planner's default), an empty rect would report "nothing to
     // repaint" for real content.
-    const far = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(20_000_000, 4, 10, 10), 1, 1).?;
+    const far = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(20_000_000, 4, 10, 10), 1, 1, .{}).?;
     try std.testing.expect(far.width > 0);
     try std.testing.expect(far.minX() <= 20_000_000);
     try std.testing.expect(far.maxX() >= 20_000_000);
+
+    // The superset must stay AT far-but-representable content, not
+    // clamp toward the origin: a present overriding to a tiny scale
+    // makes such coordinates visible, and damage parked orders of
+    // magnitude away would leave their old pixels retained.
+    const very_far = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1.0e38, 4, 1.0e37, 10), 1, 1, .{}).?;
+    try std.testing.expect(very_far.width > 0);
+    try std.testing.expect(very_far.minX() <= 1.0e38);
+    try std.testing.expect(very_far.maxX() >= 1.0e38);
 }
 
 test "reflow damage reaches a whole device pixel past changed bounds at fractional scales" {
