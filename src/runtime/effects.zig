@@ -1553,6 +1553,15 @@ pub const EffectResultRecord = struct {
     video_buffering: bool = false,
     video_width: u64 = 0,
     video_height: u64 = 0,
+    /// `.video` records: the identity of the LOAD that produced the
+    /// event (`VideoChannel.token`). The public key alone cannot name
+    /// a playback — replace semantics reuse app keys — and replay
+    /// re-mints the same deterministic token sequence, so this is how
+    /// `feedVideoRecord` routes each journaled delivery to the load
+    /// that owned it live, never to a same-key replacement. Zero on
+    /// `.rejected` records: a refused load never minted a token (and
+    /// those records regenerate under replay anyway).
+    video_token: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2825,6 +2834,22 @@ pub fn Effects(comptime Msg: type) type {
             token: u64 = 0,
         };
 
+        /// Replay-side identity of a video load the replayed timeline
+        /// has already replaced or stopped: enough to deliver its still
+        /// outstanding journaled terminal (a synchronous `.failed` the
+        /// recording host refused inside the very dispatch that then
+        /// replaced or stopped the playback drains AFTER that dispatch,
+        /// so its record feeds when the channel has moved on). Parked
+        /// by `loadVideo`/`stopVideo` under replay only, consumed by
+        /// `feedVideoRecord` on token match; entries whose load never
+        /// produced a late record simply age in place — a session's
+        /// loads bound the list, and each entry is three words.
+        const RetiredVideo = struct {
+            key: u64,
+            token: u64,
+            video_fn: ?VideoMsgFn,
+        };
+
         /// One loop-side channel `.rejected` terminal awaiting drain —
         /// the channel twin of `PendingImage`, non-lossy for the same
         /// contract (exactly one terminal per refused open, no drop
@@ -3469,6 +3494,12 @@ pub fn Effects(comptime Msg: type) type {
         pending_video_spill: []PendingVideo = &.{},
         pending_video_head: usize = 0,
         pending_video_len: usize = 0,
+        /// Replay-only retired-load identities (see `RetiredVideo`) —
+        /// the image stage's storage discipline: inline until a session
+        /// outgrows it, geometric spill after, freed at `deinit`.
+        retired_videos: [max_effect_pending_images_inline]RetiredVideo = undefined,
+        retired_video_spill: []RetiredVideo = &.{},
+        retired_video_len: usize = 0,
         /// Loop-thread-only caller-staged Msg stage (see
         /// `PendingStaged` for the non-lossy contract) — the image
         /// stage's storage discipline exactly: inline until a burst
@@ -3888,6 +3919,12 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_video_head = 0;
             self.pending_video_len = 0;
+            // And the replay-side retired-load identities.
+            if (self.retired_video_spill.len > 0) {
+                self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = &.{};
+            }
+            self.retired_video_len = 0;
             // And undrained caller-staged Msgs.
             if (self.pending_staged_spill.len > 0) {
                 self.allocator.free(self.pending_staged_spill);
@@ -6011,7 +6048,7 @@ pub fn Effects(comptime Msg: type) type {
 
         pub fn loadVideo(self: *Self, options: LoadVideoOptions) void {
             if (videoLoadRejected(options)) {
-                self.deliverLoopVideo(.{ .key = options.key, .kind = .rejected }, options.on_event);
+                self.deliverLoopVideo(.{ .key = options.key, .kind = .rejected }, options.on_event, 0);
                 return;
             }
             // Replace semantics: end the previous playback whole —
@@ -6020,6 +6057,10 @@ pub fn Effects(comptime Msg: type) type {
             if (self.video.active and !self.video.fake) {
                 if (self.services) |services| services.videoStop() catch {};
             }
+            // Under replay the outgoing load may still be owed one
+            // journaled terminal (see `RetiredVideo`), so its identity
+            // is parked before the replacement overwrites it.
+            self.parkRetiredVideo();
             self.releaseVideoSink();
             const volume = self.video.volume;
             self.video_token_seq += 1;
@@ -6115,6 +6156,9 @@ pub fn Effects(comptime Msg: type) type {
         pub fn stopVideo(self: *Self) void {
             if (!self.video.active) return;
             const fake = self.video.fake;
+            // Under replay the stopped load may still be owed one
+            // journaled terminal (see `RetiredVideo`).
+            self.parkRetiredVideo();
             self.releaseVideoSink();
             const volume = self.video.volume;
             self.video = .{ .volume = volume };
@@ -6226,10 +6270,14 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.pending_video_len > 0) {
                     const head = self.pendingVideoStorage()[self.pending_video_head];
                     // Only a FED entry (a recorded delivery) pairs with
-                    // a platform event; a regenerating loop-side
-                    // rejection the replayed update staged keeps its
-                    // own drain-time position.
-                    if (head.resolve) {
+                    // a platform event — and only THIS load's (the
+                    // token gate, against the event's token: a terminal
+                    // apply above may have reset the channel). A
+                    // regenerating loop-side rejection the replayed
+                    // update staged, or a retired load's stale terminal
+                    // (`RetiredVideo`), keeps its own drain-time
+                    // position.
+                    if (head.resolve and head.token == platform_event.token) {
                         const entry = self.takePendingVideo();
                         const event_fn = entry.video_fn orelse return null;
                         return event_fn(entry.event);
@@ -6249,6 +6297,10 @@ pub fn Effects(comptime Msg: type) type {
                 .height = platform_event.height,
             }) orelse return null;
             const event_fn = video_fn orelse return null;
+            // The token rides the platform event, not the channel: a
+            // terminal apply above resets the channel, and the record
+            // must still name the load that produced the delivery
+            // (`EffectResultRecord.video_token`).
             self.journalNote(.{
                 .kind = .video,
                 .key = event.key,
@@ -6259,6 +6311,7 @@ pub fn Effects(comptime Msg: type) type {
                 .video_buffering = event.buffering,
                 .video_width = event.width,
                 .video_height = event.height,
+                .video_token = platform_event.token,
             });
             return event_fn(event);
         }
@@ -6300,24 +6353,54 @@ pub fn Effects(comptime Msg: type) type {
             };
         }
 
-        /// Fake executor / replay: feed one video event as the platform
-        /// would deliver it — the whole journal shape in one signature
-        /// (dimensions ride only `.loaded` from real hosts; other kinds
-        /// pass 0). The event resolves against the live channel at
-        /// drain time (key and handler from the channel, mirrors
-        /// updated), mirroring `takeVideoMsg` exactly. Fails when no
-        /// playback is active to receive it.
+        /// Fake executor convenience: feed one video event to the
+        /// CURRENT playback as the platform would deliver it — the
+        /// whole journal shape in one signature (dimensions ride only
+        /// `.loaded` from real hosts; other kinds pass 0). Fails when
+        /// no playback is active to receive it. Session replay never
+        /// calls this: a journaled record names the load that produced
+        /// it, and `feedVideoRecord` routes by that identity.
         pub fn feedVideoEvent(self: *Self, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
             if (!self.video.active) return error.EffectNotFound;
+            return self.feedVideoRecord(self.video.key, self.video.token, kind, position_ms, duration_ms, playing, buffering, width, height);
+        }
+
+        /// Session replay: feed one journaled video record, routed by
+        /// the JOURNALED identity exactly as live delivery routed it —
+        /// the record's token names the load that produced the event
+        /// (`EffectResultRecord.video_token`; app keys are reused by
+        /// replace semantics and cannot tell two loads apart), and the
+        /// replayed dispatches re-mint the same deterministic token
+        /// sequence. A token naming the CURRENT playback resolves
+        /// against the live channel at drain time (mirrors updated,
+        /// handler from the channel), mirroring `takeVideoMsg`. A token
+        /// naming a load the replayed timeline already replaced or
+        /// stopped — a synchronous terminal the recording host refused
+        /// inside the very dispatch that then moved on — delivers the
+        /// journaled shape verbatim through the handler that load
+        /// registered (`RetiredVideo`), leaving the live channel alone:
+        /// binding it to the current playback would misattribute the
+        /// Msg and reset a replacement the recording kept playing.
+        /// Fails when the token matches neither (the replayed updates
+        /// issued different loads than the recording).
+        pub fn feedVideoRecord(self: *Self, key: u64, token: u64, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
             // Handler captured NOW, not at delivery: a fed event is one
             // recorded delivery, and under replay the platform `.video`
             // event that follows this record in the journal can apply a
             // channel-resetting terminal before the drain delivers this
             // entry (see `PendingVideo`).
+            var video_fn: ?VideoMsgFn = undefined;
+            if (self.video.active and self.video.token == token) {
+                video_fn = self.video.on_event;
+            } else if (self.takeRetiredVideo(token)) |retired| {
+                video_fn = retired.video_fn;
+            } else {
+                return error.EffectNotFound;
+            }
             self.stagePendingVideo(.{
                 .seq = self.nextPendingSeq(),
                 .event = .{
-                    .key = self.video.key,
+                    .key = key,
                     .kind = kind,
                     .position_ms = position_ms,
                     .duration_ms = duration_ms,
@@ -6326,9 +6409,9 @@ pub fn Effects(comptime Msg: type) type {
                     .width = width,
                     .height = height,
                 },
-                .video_fn = self.video.on_event,
+                .video_fn = video_fn,
                 .resolve = true,
-                .token = self.video.token,
+                .token = token,
             });
         }
 
@@ -6590,6 +6673,7 @@ pub fn Effects(comptime Msg: type) type {
                                     .video_buffering = event.buffering,
                                     .video_width = event.width,
                                     .video_height = event.height,
+                                    .video_token = entry.token,
                                 });
                             }
                             const event_fn = video_fn orelse continue;
@@ -6603,6 +6687,7 @@ pub fn Effects(comptime Msg: type) type {
                                 .video_buffering = event.buffering,
                                 .video_width = event.width,
                                 .video_height = event.height,
+                                .video_token = entry.token,
                             });
                             return event_fn(event);
                         },
@@ -8282,13 +8367,14 @@ pub fn Effects(comptime Msg: type) type {
         /// hosts without video playback.
         fn failVideoChannel(self: *Self) void {
             const key = self.video.key;
+            const token = self.video.token;
             const on_event = self.video.on_event;
             if (!self.video.fake) {
                 if (self.services) |services| services.videoStop() catch {};
             }
             self.releaseVideoSink();
             self.video = .{ .volume = self.video.volume };
-            self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event);
+            self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event, token);
         }
 
         /// Stage a video event Msg produced on the loop thread
@@ -8300,13 +8386,18 @@ pub fn Effects(comptime Msg: type) type {
         /// still journal — the record is what replays the channel
         /// reset — and the staged delivery's wake is what re-renders
         /// the house chrome from the reset mirrors.
-        fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn) void {
+        /// `token` is the failing load's identity for the journal
+        /// (`EffectResultRecord.video_token`) — passed explicitly
+        /// because `failVideoChannel` resets the channel before staging
+        /// (reading `self.video.token` here would read 0); a rejected
+        /// load passes 0 honestly, it never minted one.
+        fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn, token: u64) void {
             self.stagePendingVideo(.{
                 .seq = self.nextPendingSeq(),
                 .event = event,
                 .video_fn = video_fn,
                 .resolve = false,
-                .token = self.video.token,
+                .token = token,
             });
         }
 
@@ -8516,6 +8607,58 @@ pub fn Effects(comptime Msg: type) type {
             active[(self.pending_video_head + self.pending_video_len) % active.len] = entry;
             self.pending_video_len += 1;
             self.wakeHost();
+        }
+
+        /// Park the CURRENT playback's identity for replay routing
+        /// (see `RetiredVideo`) — called by `loadVideo` and `stopVideo`
+        /// with the outgoing channel still in `self.video`, before the
+        /// replacement (or the reset) overwrites it. Replay-only: live
+        /// and plain-fake sessions never feed by retired identity, so
+        /// they park nothing. Growth is the image stage's discipline —
+        /// never dropping an entry (a lost identity would strand a
+        /// journaled delivery), loud refusal on allocation failure.
+        fn parkRetiredVideo(self: *Self) void {
+            if (!self.replay or !self.video.active) return;
+            const storage = self.retiredVideoStorage();
+            if (self.retired_video_len == storage.len) {
+                const grown = self.allocator.alloc(RetiredVideo, storage.len * 2) catch
+                    @panic("effects: out of memory parking a replayed video load's identity - a journaled delivery routed by it would be stranded");
+                @memcpy(grown[0..self.retired_video_len], storage[0..self.retired_video_len]);
+                if (self.retired_video_spill.len > 0) self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = grown;
+            }
+            const active = self.retiredVideoStorage();
+            active[self.retired_video_len] = .{
+                .key = self.video.key,
+                .token = self.video.token,
+                .video_fn = self.video.on_event,
+            };
+            self.retired_video_len += 1;
+        }
+
+        /// The retired-load list's current backing storage.
+        fn retiredVideoStorage(self: *Self) []RetiredVideo {
+            if (self.retired_video_spill.len > 0) return self.retired_video_spill;
+            return &self.retired_videos;
+        }
+
+        /// Consume the retired-load entry with this token, if one is
+        /// parked. Tokens are unique per load, so removal order does
+        /// not matter (swap-remove); the spill releases when the list
+        /// empties, like the pending stages.
+        fn takeRetiredVideo(self: *Self, token: u64) ?RetiredVideo {
+            const storage = self.retiredVideoStorage();
+            for (storage[0..self.retired_video_len], 0..) |entry, index| {
+                if (entry.token != token) continue;
+                self.retired_video_len -= 1;
+                storage[index] = storage[self.retired_video_len];
+                if (self.retired_video_len == 0 and self.retired_video_spill.len > 0) {
+                    self.allocator.free(self.retired_video_spill);
+                    self.retired_video_spill = &.{};
+                }
+                return entry;
+            }
+            return null;
         }
 
         /// Pop the video stage's head — `takePendingImage`'s twin,

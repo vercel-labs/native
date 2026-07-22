@@ -73,6 +73,8 @@ const VideoMsg = union(enum) {
     load_bad_scheme,
     load_paused,
     load_looping,
+    load_then_stop,
+    load_then_stream,
     play,
     pause,
     stop,
@@ -165,6 +167,37 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             .muted = true,
             .on_event = VideoEffects.videoMsg(.video_event),
         }),
+        // The batch shape: one dispatch loads and immediately stops.
+        // On an assets-absent host the load's synchronous `.failed` is
+        // staged before the stop runs — the terminal outlives the
+        // playback it reports on.
+        .load_then_stop => {
+            fx.loadVideo(.{
+                .key = clip_key,
+                .surface = clip_surface,
+                .path = clip_path,
+                .on_event = VideoEffects.videoMsg(.video_event),
+            });
+            fx.stopVideo();
+        },
+        // The replace shape under the same app key: the first load's
+        // synchronous `.failed` must keep its own identity while the
+        // replacing stream plays on — the key alone cannot tell the
+        // two loads apart.
+        .load_then_stream => {
+            fx.loadVideo(.{
+                .key = clip_key,
+                .surface = clip_surface,
+                .path = clip_path,
+                .on_event = VideoEffects.videoMsg(.video_event),
+            });
+            fx.loadVideo(.{
+                .key = clip_key,
+                .surface = clip_surface,
+                .url = clip_url,
+                .on_event = VideoEffects.videoMsg(.video_event),
+            });
+        },
         .play => fx.playVideo(),
         .pause => fx.pauseVideo(),
         .stop => fx.stopVideo(),
@@ -192,6 +225,8 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
 fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.load")) return .load;
     if (std.mem.eql(u8, name, "video.arm-chain")) return .arm_chain;
+    if (std.mem.eql(u8, name, "video.load-then-stop")) return .load_then_stop;
+    if (std.mem.eql(u8, name, "video.load-then-stream")) return .load_then_stream;
     return null;
 }
 
@@ -1332,11 +1367,210 @@ test "a recorded mid-playback failure replays its Msg and fingerprints identical
     }
 }
 
+test "a batched load and stop replays the recorded synchronous terminal" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record on an assets-absent host: `Cmd.batch([videoLoad, videoStop])`
+    // in one dispatch. The load's synchronous `.failed` stages inside
+    // that dispatch and drains at the next wake — AFTER the stop has
+    // retired the playback it reports on — so its record must route by
+    // the load's identity at replay, where the fake load succeeds and
+    // the stop (not a failure) is what retires the channel.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_local_files = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+        harness.runtime.options.session_recorder = recorder;
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load-then-stop", .window_id = 1, .view_label = canvas_label } });
+        while (np.takeWake()) |_| {}
+        try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try std.testing.expectEqual(clip_key, app_state.model.last_key);
+        try std.testing.expect(!app_state.effects.videoSnapshot().active);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the fed `.failed` record finds its load already
+    // retired by the replayed stop and still delivers the recorded Msg
+    // with the recorded identity — never `EffectNotFound`, never a
+    // binding to whatever the channel holds at feed time.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.effects_fed > 0);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try std.testing.expectEqual(clip_key, app_state.model.last_key);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "a replaced load's terminal keeps its own identity under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record on an assets-absent host: one dispatch loads a local clip
+    // (synchronous `.failed`, staged) and immediately replaces it with
+    // a URL stream UNDER THE SAME APP KEY. The staged terminal belongs
+    // to the first load; at replay the fake first load succeeds and is
+    // replaced in place, so only the journaled load identity — not the
+    // key, which both loads share — can route the record to it. A feed
+    // bound to the channel at feed time would reset the stream the
+    // recording kept playing.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_local_files = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load-then-stream", .window_id = 1, .view_label = canvas_label } });
+        while (np.takeWake()) |_| {}
+        try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(500).?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        // Both deliveries arrived — the first load's failure, then the
+        // stream's acknowledgment and tick — and the stream plays on.
+        try std.testing.expect(app_state.model.event_count >= 3);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.position, app_state.model.last_kind.?);
+        try std.testing.expect(app_state.effects.videoSnapshot().active);
+        try std.testing.expect(app_state.effects.videoSnapshot().playing);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the first load's `.failed` routes to the retired
+    // first load and the stream's records to the live channel — same
+    // Msg stream, same mirrors, stream still active at the end.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.effects_fed > 0);
+        try std.testing.expect(app_state.effects.videoSnapshot().active);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
 /// Overwrite the `video_position_ms` field of the first journaled
 /// video effect record, in place. Per `journal.encodeEffect` the video
-/// fields are the LAST 35 bytes of the effect payload — video_kind
+/// fields are the LAST 43 bytes of the effect payload — video_kind
 /// (1), position (8), duration (8), playing (1), buffering (1), width
-/// (8), height (8) — so the position lives 34 bytes from the end.
+/// (8), height (8), token (8) — so the position lives 42 bytes from
+/// the end.
 /// Framing and every other field stay valid: only replay's damage gate
 /// can catch the value. Returns whether a record was damaged.
 fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
@@ -1349,7 +1583,7 @@ fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video) continue;
-        std.mem.writeInt(u64, payload[payload.len - 34 ..][0..8], position, .little);
+        std.mem.writeInt(u64, payload[payload.len - 42 ..][0..8], position, .little);
         return true;
     }
     return false;

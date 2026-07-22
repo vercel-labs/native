@@ -1228,10 +1228,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
                     // `.video` records feed the whole journaled shape —
-                    // dimensions included — so replay delivers the
-                    // identical Msg stream with NO producer and NO
-                    // platform player behind it.
-                    .video => try self.effects.feedVideoEvent(
+                    // dimensions included — routed by the journaled
+                    // load identity (`video_token`), so replay delivers
+                    // the identical Msg stream with NO producer and NO
+                    // platform player behind it, even when the record's
+                    // load was replaced or stopped by the very dispatch
+                    // that produced it (see `feedVideoRecord`).
+                    .video => try self.effects.feedVideoRecord(
+                        record.key,
+                        record.video_token,
                         record.video_kind,
                         record.video_position_ms,
                         record.video_duration_ms,
