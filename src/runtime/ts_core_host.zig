@@ -552,6 +552,14 @@ pub fn TsCoreHost(comptime core: type) type {
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
         var video_entry: VideoEntry = .{};
+        /// The event tag of the stream video_ctl `stop` closed, until a
+        /// later video_load reopens that tag: `Cmd.videoStop` CLOSES
+        /// the stream ("no events for the key after this"), so a
+        /// staged synchronous terminal from the very batch that
+        /// stopped it must be swallowed at the bridge
+        /// (`videoEventMsg`) — the engine still owes and delivers it,
+        /// but the app cancelled the stream.
+        var video_stopped_tag: ?u8 = null;
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
@@ -625,6 +633,7 @@ pub fn TsCoreHost(comptime core: type) type {
             streams = @splat(.{});
             audio_entry = .{};
             video_entry = .{};
+            video_stopped_tag = null;
             images = @splat(.{});
             channels = @splat(.{});
             clip_write_counter = 0;
@@ -1079,7 +1088,12 @@ pub fn TsCoreHost(comptime core: type) type {
                             // One player is the whole surface: an
                             // accepted load re-keys and re-routes the
                             // single entry in place, exactly as the
-                            // engine replaces its channel.
+                            // engine replaces its channel. Reopening a
+                            // stopped tag lifts its closed-stream
+                            // latch: the fresh load speaks for itself.
+                            if (video_stopped_tag) |stopped| {
+                                if (stopped == event_tag) video_stopped_tag = null;
+                            }
                             video_entry.used = true;
                             video_entry.key_len = key.len;
                             @memcpy(video_entry.key[0..key.len], key);
@@ -1365,6 +1379,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 0 => fx.playVideo(),
                 1 => fx.pauseVideo(),
                 2 => {
+                    video_stopped_tag = video_entry.event_tag;
                     video_entry.used = false;
                     fx.stopVideo();
                 },
@@ -1386,20 +1401,23 @@ pub fn TsCoreHost(comptime core: type) type {
         /// never the mutable entry's tag, which a replacing load in the
         /// same batch may already have re-pointed at another arm while
         /// the replaced playback's staged terminal was still awaiting
-        /// its drain. No entry gate either: a retired entry (video_ctl
-        /// `stop`) can still owe a staged synchronous terminal — a
-        /// `Cmd.batch([videoLoad, videoStop])` on a host whose load
-        /// fails at once stages the `.failed` BEFORE the stop retires
-        /// the entry, and that terminal is the load call's only answer,
-        /// delivered at the next drain. Every event reaching this fn
-        /// was produced by a bridge-issued load (the engine swallows
-        /// its own post-stop stragglers), so the key's tag always
-        /// names the owed arm. The entry never retires here —
-        /// `completed`/`failed` streams may still speak (the app often
-        /// starts the next clip from `completed`), and video_ctl
+        /// its drain (a REPLACED stream still speaks its terminal; only
+        /// stop cancels). A tag video_ctl `stop` closed is swallowed
+        /// instead: `Cmd.videoStop` CLOSES the stream — no events for
+        /// the key after this, the wire contract — so the staged
+        /// synchronous terminal of a `Cmd.batch([videoLoad, videoStop])`
+        /// whose load failed at once never reaches the app, even though
+        /// the engine still delivers it (its own bookkeeping — channel
+        /// reset, surface claim — already ran). The entry never retires
+        /// here — `completed`/`failed` streams may still speak (the app
+        /// often starts the next clip from `completed`), and video_ctl
         /// `stop` is the explicit close.
-        fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
-            return msgFromTagVideo(@intCast(event.key & 0xFF), event);
+        fn videoEventMsg(event: runtime_effects.EffectVideo) ?Msg {
+            const tag: u8 = @intCast(event.key & 0xFF);
+            if (video_stopped_tag) |stopped| {
+                if (stopped == tag) return null;
+            }
+            return msgFromTagVideo(tag, event);
         }
 
         /// Issue one image load. The keyed-effect discipline here is

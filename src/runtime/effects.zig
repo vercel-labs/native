@@ -1823,7 +1823,12 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
-        pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
+        /// Null swallows the delivery: the adapter tier's cancel gate
+        /// (a stream the caller explicitly closed must not speak — see
+        /// the TS bridge's video stop). The house `videoMsg`
+        /// constructor never returns null; Zig-native apps keep the
+        /// one-terminal-per-load delivery whole.
+        pub const VideoMsgFn = *const fn (event: EffectVideo) ?Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
         pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
@@ -1917,7 +1922,7 @@ pub fn Effects(comptime Msg: type) type {
         /// must be `native_sdk.EffectVideo`.
         pub fn videoMsg(comptime tag: std.meta.Tag(Msg)) VideoMsgFn {
             return struct {
-                fn make(event: EffectVideo) Msg {
+                fn make(event: EffectVideo) ?Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -6421,21 +6426,19 @@ pub fn Effects(comptime Msg: type) type {
                     .width = width,
                     .height = height,
                 });
-                if (self.pending_video_len > 0) {
-                    const head = self.pendingVideoStorage()[self.pending_video_head];
-                    // Only a FED entry (a recorded delivery) pairs with
-                    // a platform event — and only THIS load's (the
-                    // token gate, against the event's token: a terminal
-                    // apply above may have reset the channel). A
-                    // regenerating loop-side rejection the replayed
-                    // update staged, or a retired load's stale terminal
-                    // (`RetiredVideo`), keeps its own drain-time
-                    // position.
-                    if (head.resolve and head.token == platform_event.token) {
-                        const entry = self.takePendingVideo();
-                        const event_fn = entry.video_fn orelse return null;
-                        return event_fn(entry.event);
-                    }
+                // Only a FED entry (a recorded delivery) pairs with a
+                // platform event — and only THIS load's (the token
+                // gate, against the event's token: a terminal apply
+                // above may have reset the channel). The entry pairs
+                // from ANY stage position: live, the event's Msg
+                // dispatched synchronously, jumping the loop-side
+                // stage entirely, so a regenerating rejection staged
+                // earlier in the same dispatch (which keeps its own
+                // drain-time order) must not block it — head-only
+                // pairing would reverse the recorded Msg order.
+                if (self.takePendingVideoMatching(platform_event.token)) |entry| {
+                    const event_fn = entry.video_fn orelse return null;
+                    return event_fn(entry.event);
                 }
                 return null;
             }
@@ -6964,7 +6967,10 @@ pub fn Effects(comptime Msg: type) type {
                                 .video_height = event.height,
                                 .video_token = entry.token,
                             });
-                            return event_fn(event);
+                            // A null is the handler's own swallow (the
+                            // adapter cancel gate): skip, never end the
+                            // pass — later entries are still owed.
+                            return event_fn(event) orelse continue;
                         },
                         .image => |entry| {
                             // Journal BEFORE the handler gate: a staged
@@ -8994,6 +9000,37 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(self.retired_video_spill);
                 self.retired_video_spill = &.{};
             }
+        }
+
+        /// Remove and return the earliest FED entry belonging to
+        /// `token`, wherever it sits in the stage (see the replay
+        /// pairing in `takeVideoMsg`). Later entries shift down one
+        /// slot; their relative order — the drain's seq order — is
+        /// untouched. Null when no fed entry names the token.
+        fn takePendingVideoMatching(self: *Self, token: u64) ?PendingVideo {
+            const storage = self.pendingVideoStorage();
+            var offset: usize = 0;
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const index = (self.pending_video_head + offset) % storage.len;
+                const entry = storage[index];
+                if (!entry.resolve or entry.token != token) continue;
+                var hole = offset;
+                while (hole + 1 < self.pending_video_len) : (hole += 1) {
+                    const to = (self.pending_video_head + hole) % storage.len;
+                    const from = (self.pending_video_head + hole + 1) % storage.len;
+                    storage[to] = storage[from];
+                }
+                self.pending_video_len -= 1;
+                if (self.pending_video_len == 0) {
+                    self.pending_video_head = 0;
+                    if (self.pending_video_spill.len > 0) {
+                        self.allocator.free(self.pending_video_spill);
+                        self.pending_video_spill = &.{};
+                    }
+                }
+                return entry;
+            }
+            return null;
         }
 
         /// Pop the video stage's head — `takePendingImage`'s twin,
