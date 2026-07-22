@@ -159,6 +159,29 @@ test "url sources load as streams; a failed decode reports honestly" {
     try testing.expect(std.mem.indexOf(u8, live.app_state.model.statusText(arena_state.allocator()), "failed") != null);
 }
 
+test "committing an empty source stops the playback with the status line" {
+    var live = try Live.start(openedModel(clip_path, .player));
+    defer live.stop();
+    const fx = &live.app_state.effects;
+    fx.executor = .fake;
+
+    try live.dispatch(.show_custom);
+    try fx.feedVideoEvent(.loaded, 0, 92_500, true, false, 1280, 720);
+    try live.wake();
+    try testing.expect(fx.videoSnapshot().active);
+    try testing.expect(live.app_state.model.playing);
+
+    // Clearing the field and committing must stop the playback with
+    // the words: a status line saying "no source" over a still-rolling
+    // player would be a lie.
+    live.app_state.model.source_field.set("");
+    try live.dispatch(.open);
+    try testing.expect(!fx.videoSnapshot().active);
+    try testing.expect(!live.app_state.model.playing);
+    try testing.expectEqual(@as(u64, 0), live.app_state.model.duration_ms);
+    try expectStatusBar(live.app_state.tree.?.root, "no source - pass a file path or http(s) url, or type one above");
+}
+
 test "automation drives the custom transport bar through the real widgets" {
     var live = try Live.start(openedModel(clip_path, .player));
     defer live.stop();

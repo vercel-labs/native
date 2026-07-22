@@ -144,7 +144,19 @@ pub const Effects = PlayerApp.Effects;
 /// URLs, everything else is a local path.
 fn loadCustom(model: *Model, fx: *Effects) void {
     const source = model.opened();
-    if (source.len == 0) return;
+    if (source.len == 0) {
+        // Committing an empty source clears the deck: the current
+        // playback stops and the transport mirrors reset by hand
+        // (stopVideo echoes no event), so the "no source" status line
+        // and the actual player agree.
+        fx.stopVideo();
+        model.status = null;
+        model.playing = false;
+        model.buffering = false;
+        model.position_ms = 0;
+        model.duration_ms = 0;
+        return;
+    }
     const is_url = std.ascii.startsWithIgnoreCase(source, "http://") or
         std.ascii.startsWithIgnoreCase(source, "https://");
     model.status = null;
