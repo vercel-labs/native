@@ -78,6 +78,12 @@ const mini_core = struct {
     /// `EffectVideoEventKind` for the same by-NAME pin.
     pub const VideoState = enum { completed, loaded, rejected, position, failed };
 
+    /// The pty event states and exit reasons, both shuffled off the
+    /// engine order for the same by-NAME matching proof (the pty arm
+    /// carries TWO name-matched unions).
+    pub const PtyState = enum { exit, output };
+    pub const PtyReason = enum { cancelled, exited, rejected, spawn_failed, signaled };
+
     pub const Model = struct {
         polling: bool,
         fast: bool,
@@ -112,6 +118,14 @@ const mini_core = struct {
         // Image event mirrors.
         img_state: ImageState,
         img_events: i64,
+        // Pty event mirrors.
+        pty_state: PtyState,
+        pty_bytes: []const u8,
+        pty_code: i64,
+        pty_reason: PtyReason,
+        pty_signal: i64,
+        pty_dropped: f64,
+        pty_events: i64,
         // Rejection delivery order probe: one mark per rejection Msg
         // ('S' spawn, 'I' image, 'C' channel), in dispatch order.
         order: []const u8,
@@ -250,6 +264,21 @@ const mini_core = struct {
         },
         vseek_far, // 70: video_ctl seek "clip" 1e16ms (past the exact window)
         vseek_inf, // 71: video_ctl seek "clip" Infinity (not an offset at all)
+        open_pty, // 72: pty_spawn key "shell" 120x30 xterm-256color -> pty_evt
+        open_pty_default, // 73: pty_spawn key "shell", wire term "" (engine default)
+        write_pty, // 74: pty_write "shell" "ls\n"
+        resize_pty, // 75: pty_resize "shell" 100x40
+        kill_pty, // 76: pty_kill "shell"
+        pty_evt: struct { // 77: the six-field pty event arm (the emitted
+            // shape — payload fields keep their TS names)
+            state: PtyState,
+            bytes: []const u8,
+            code: f64,
+            reason: PtyReason,
+            signal: f64,
+            droppedWrites: f64,
+        },
+        dup_pty, // 78: two pty spawns under one key in one batch
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -293,6 +322,13 @@ const mini_core = struct {
                 .chan_events = 0,
                 .img_state = .loaded,
                 .img_events = 0,
+                .pty_state = .output,
+                .pty_bytes = "",
+                .pty_code = -1,
+                .pty_reason = .exited,
+                .pty_signal = -1,
+                .pty_dropped = -1,
+                .pty_events = 0,
                 .order = "",
                 .video_state = .rejected,
                 .v_pos = -1,
@@ -553,6 +589,30 @@ const mini_core = struct {
                 out.video2_events = model.video2_events + 1;
                 return .{ .model = out, .cmd = "" };
             },
+            .open_pty => return .{ .model = model, .cmd = cmdPtySpawn("shell", 77, 120, 30, "xterm-256color", &.{ "/bin/zsh", "-l" }) },
+            .open_pty_default => return .{ .model = model, .cmd = cmdPtySpawn("shell", 77, 80, 24, "", &.{"/bin/sh"}) },
+            .write_pty => return .{ .model = model, .cmd = cmdPtyWrite("shell", "ls\n") },
+            .resize_pty => return .{ .model = model, .cmd = cmdPtyResize("shell", 100, 40) },
+            .kill_pty => return .{ .model = model, .cmd = cmdPtyKill("shell") },
+            .pty_evt => |event| {
+                const out = frameCreate(model.*);
+                out.pty_state = event.state;
+                out.pty_bytes = event.bytes;
+                out.pty_code = @intFromFloat(event.code);
+                out.pty_reason = event.reason;
+                out.pty_signal = @intFromFloat(event.signal);
+                out.pty_dropped = event.droppedWrites;
+                out.pty_events = model.pty_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .dup_pty => {
+                const first = cmdPtySpawn("shell", 77, 80, 24, "", &.{"/bin/one"});
+                const second = cmdPtySpawn("shell", 77, 80, 24, "", &.{"/bin/two"});
+                const out = rt.frameAlloc(u8, first.len + second.len);
+                @memcpy(out[0..first.len], first);
+                @memcpy(out[first.len..], second);
+                return .{ .model = model, .cmd = out };
+            },
         }
     }
 
@@ -578,6 +638,7 @@ const mini_core = struct {
         out[0].output = commitBytes(next.output);
         out[0].bands = commitBytes(next.bands);
         out[0].chan_bytes = commitBytes(next.chan_bytes);
+        out[0].pty_bytes = commitBytes(next.pty_bytes);
         out[0].order = commitBytes(next.order);
         return &out[0];
     }
@@ -828,6 +889,54 @@ const mini_core = struct {
         const out = rt.frameAlloc(u8, 1 + 8);
         out[0] = 0x16;
         std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
+        return out;
+    }
+
+    fn cmdPtySpawn(key: []const u8, event_tag: u8, cols: f64, rows: f64, term: []const u8, argv: []const []const u8) []const u8 {
+        var argv_bytes: usize = 0;
+        for (argv) |arg| argv_bytes += 4 + arg.len;
+        const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8 + 8 + 1 + term.len + 1 + argv_bytes);
+        out[0] = 0x19;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var off: usize = 2 + key.len;
+        out[off] = event_tag;
+        std.mem.writeInt(u64, out[off + 1 ..][0..8], @bitCast(cols), .little);
+        std.mem.writeInt(u64, out[off + 9 ..][0..8], @bitCast(rows), .little);
+        off += 17;
+        out[off] = @intCast(term.len);
+        @memcpy(out[off + 1 ..][0..term.len], term);
+        off += 1 + term.len;
+        out[off] = @intCast(argv.len);
+        off += 1;
+        for (argv) |arg| off = writeLongBytes(out, off, arg);
+        return out;
+    }
+
+    fn cmdPtyWrite(key: []const u8, bytes: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 4 + bytes.len);
+        out[0] = 0x1A;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        _ = writeLongBytes(out, 2 + key.len, bytes);
+        return out;
+    }
+
+    fn cmdPtyResize(key: []const u8, cols: f64, rows: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 8 + 8);
+        out[0] = 0x1B;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(cols), .little);
+        std.mem.writeInt(u64, out[2 + key.len + 8 ..][0..8], @bitCast(rows), .little);
+        return out;
+    }
+
+    fn cmdPtyKill(key: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len);
+        out[0] = 0x1C;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
         return out;
     }
 
@@ -2169,4 +2278,161 @@ test "a three-family refused batch pins full stream order across channel, image,
     Host.dispatch(fx, .mix_three);
     Host.drain(fx);
     try std.testing.expectEqualStrings("CIS", Host.model().order);
+}
+
+// -------------------------------------------------------- pty sessions
+
+const shell_pty_key: u64 = ts_core_host.pty_key_base + 0;
+
+test "a pty session decodes whole, routes output batches, and retires on the exit" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_pty);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+    const request = fx.pendingPtyAt(0).?;
+    try std.testing.expectEqual(shell_pty_key, request.key);
+    try std.testing.expectEqual(@as(usize, 2), request.argv.len);
+    try std.testing.expectEqualStrings("/bin/zsh", request.argv[0]);
+    try std.testing.expectEqualStrings("-l", request.argv[1]);
+    try std.testing.expectEqual(@as(u16, 120), request.cols);
+    try std.testing.expectEqual(@as(u16, 30), request.rows);
+    try std.testing.expectEqualStrings("xterm-256color", request.term);
+
+    // The NON-RETIRING contract: output batches route the event arm
+    // across separate drains (state matched by member NAME — the mini
+    // core scrambles both unions' declaration order on purpose) and
+    // the entry stays live between them.
+    try fx.feedPtyOutput(shell_pty_key, "prompt% ");
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().pty_events);
+    try std.testing.expectEqual(mini_core.PtyState.output, Host.model().pty_state);
+    try std.testing.expectEqualStrings("prompt% ", Host.model().pty_bytes);
+    try fx.feedPtyOutput(shell_pty_key, "ls\r\n");
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().pty_events);
+    try std.testing.expectEqualStrings("ls\r\n", Host.model().pty_bytes);
+
+    // Exactly one terminal retires the entry: the exit routes the same
+    // arm with the code/reason/drop counters aboard, and the key is
+    // dead to further feeds.
+    try fx.feedPtyExit(shell_pty_key, 0, 0, .exited, 2);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().pty_events);
+    try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
+    try std.testing.expectEqual(mini_core.PtyReason.exited, Host.model().pty_reason);
+    try std.testing.expectEqual(@as(i64, 0), Host.model().pty_code);
+    try std.testing.expectEqual(@as(f64, 2), Host.model().pty_dropped);
+    try std.testing.expectError(error.EffectNotFound, fx.feedPtyOutput(shell_pty_key, "late"));
+
+    // The wire key is free again for a fresh session in the same slot.
+    Host.dispatch(fx, .open_pty);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+    try std.testing.expectEqual(shell_pty_key, fx.pendingPtyAt(0).?.key);
+}
+
+test "an empty wire TERM opens with the engine default" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // Wire "" = "the engine's default TERM" — the record never bakes
+    // the default in, the fetch-timeout convention.
+    Host.dispatch(fx, .open_pty_default);
+    const request = fx.pendingPtyAt(0).?;
+    try std.testing.expectEqualStrings(@import("pty.zig").default_term, request.term);
+    try std.testing.expectEqual(@as(u16, 80), request.cols);
+    try std.testing.expectEqual(@as(u16, 24), request.rows);
+}
+
+test "pty_write reaches the session and pty_resize mirrors the declared grid" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_pty);
+    Host.dispatch(fx, .write_pty);
+    try std.testing.expectEqualStrings("ls\n", fx.ptyWrittenBytes(shell_pty_key));
+
+    Host.dispatch(fx, .resize_pty);
+    const size = fx.ptySize(shell_pty_key).?;
+    try std.testing.expectEqual(@as(u16, 100), size.cols);
+    try std.testing.expectEqual(@as(u16, 40), size.rows);
+
+    // Both verbs are fire-and-forget: nothing queued, nothing routed.
+    try std.testing.expect(fx.takeMsg() == null);
+    try std.testing.expectEqual(@as(i64, 0), Host.model().pty_events);
+
+    // Aimed at a key with no open session they no-op: retire the
+    // session, then re-issue both — the engine sees nothing.
+    try fx.feedPtyExit(shell_pty_key, 0, 0, .exited, 0);
+    Host.drain(fx);
+    Host.dispatch(fx, .write_pty);
+    Host.dispatch(fx, .resize_pty);
+    try std.testing.expect(fx.takeMsg() == null);
+}
+
+test "pty_kill records the kill and the cancelled exit routes the event arm loudly" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_pty);
+    Host.dispatch(fx, .kill_pty);
+    // The fake pty mirrors the kill; the test answers it by feeding
+    // the exit the real transport would deliver — reason `.cancelled`,
+    // the spawn cancel convention, LOUD through the event arm.
+    try std.testing.expect(fx.ptyKillRequested(shell_pty_key));
+    try fx.feedPtyExit(shell_pty_key, -1, 9, .cancelled, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
+    try std.testing.expectEqual(mini_core.PtyReason.cancelled, Host.model().pty_reason);
+    try std.testing.expectEqual(@as(i64, 9), Host.model().pty_signal);
+
+    // The entry retired and the key is free for a fresh session.
+    Host.dispatch(fx, .open_pty);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+
+    // A kill aimed at a key with no open session no-ops.
+    try fx.feedPtyExit(shell_pty_key, 0, 0, .exited, 0);
+    Host.drain(fx);
+    Host.dispatch(fx, .kill_pty);
+    try std.testing.expect(fx.takeMsg() == null);
+}
+
+test "a duplicate pty key rejects the new spawn through its event arm (the spawn exception)" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // A running terminal's child is a running subprocess: a live wire
+    // key REJECTS the new spawn — kill it first. The rejection Msg
+    // stages into the engine's pending order and delivers at the next
+    // drain (the one rejection stream).
+    Host.dispatch(fx, .dup_pty);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+    try std.testing.expectEqualStrings("/bin/one", fx.pendingPtyAt(0).?.argv[0]);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().pty_events);
+    try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
+    try std.testing.expectEqual(mini_core.PtyReason.rejected, Host.model().pty_reason);
+
+    // The surviving session still delivers normally.
+    try fx.feedPtyExit(shell_pty_key, 0, 0, .exited, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.PtyReason.exited, Host.model().pty_reason);
+}
+
+test "a spawn_failed transport end routes the event arm with the reason" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .open_pty);
+    try fx.feedPtyExit(shell_pty_key, -1, 0, .spawn_failed, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
+    try std.testing.expectEqual(mini_core.PtyReason.spawn_failed, Host.model().pty_reason);
+    try std.testing.expectEqual(@as(i64, -1), Host.model().pty_code);
 }

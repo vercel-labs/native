@@ -174,6 +174,42 @@
 //                                "closed" event (final drop totals)
 //                                dispatches the event arm, and the key
 //                                frees. A key with no open channel no-ops.
+//   Cmd.ptySpawn(argv, { key?, cols?, rows?, term?, event })
+//                                open a PSEUDO-TERMINAL SESSION — a spawn
+//                                with a different transport: run argv on a
+//                                fresh pty whose initial grid is cols x rows
+//                                (80x24 by default) and whose TERM is `term`
+//                                (omitted = the engine's default). Every
+//                                session event dispatches the `event` arm
+//                                (the six-field record below): "output"
+//                                events carry coalesced batches of child
+//                                output across dispatches — feed them to the
+//                                terminal emulator — until the exactly-one
+//                                "exit" terminal (a refused spawn is one
+//                                "exit" with reason "rejected"; a transport
+//                                that could not start, one with
+//                                "spawn_failed"). One session per key at a
+//                                time, never replaced implicitly — kill it
+//                                first, the spawn discipline.
+//   Cmd.ptyWrite(key, bytes)     write bytes toward the session's child —
+//                                keystrokes and pastes, fire-and-forget: a
+//                                key with no open session no-ops, and
+//                                refused payloads count into the exit's
+//                                droppedWrites, never silence.
+//   Cmd.ptyResize(key, cols, rows)
+//                                push a new grid to the session so the child
+//                                receives SIGWINCH — fire-and-forget like
+//                                ptyWrite; a key with no open session
+//                                no-ops.
+//   Cmd.ptyKill(key)             terminate the session's child — LOUD, the
+//                                spawn cancel discipline: the session's one
+//                                "exit" terminal arrives through its own
+//                                event arm with reason "cancelled" and the
+//                                key frees once it lands. A key with no open
+//                                session no-ops. Sessions are their own
+//                                family's to end: the string-keyed
+//                                Cmd.cancel never touches them, the way
+//                                Cmd.audioStop is audio's close.
 //
 // The window verbs (fire-and-forget, no result Msg — the window's own
 // frame event carries the state):
@@ -520,6 +556,75 @@ export interface ChannelRoute<M extends Msgish> {
   readonly event: ChannelEventKind<M>;
 }
 
+/// The pty session event states, mirroring the engine's vocabulary:
+/// "output" is one coalesced batch of child output; "exit" is the
+/// exactly-one terminal every session produces — a clean end, a signal,
+/// a `Cmd.ptyKill`, a refused spawn, or a transport that could not
+/// start (the `reason` field tells which).
+export type PtyState = "output" | "exit";
+
+/// How a pty session ended, the spawn exit vocabulary: "exited" with
+/// the child's code, "signaled" with the signal, "cancelled" after
+/// `Cmd.ptyKill`, "rejected" for a spawn refused before a child existed
+/// (duplicate live key, full table, bad grid), "spawn_failed" when the
+/// pty or exec could not start.
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+
+/// The payload shape of a pty event arm — six fields, matched by NAME
+/// (the AudioEventArm convention). `state` must be a named
+/// string-literal-union alias carrying exactly the two PtyState members
+/// and `reason` one carrying exactly the five PtyExitReason members
+/// (any declaration order — the host matches members by name); `bytes`
+/// is the coalesced output batch ("output" events only, empty
+/// otherwise); `code` is the child's exit code on an "exited" end, -1
+/// otherwise; `signal` is the fatal signal after a "signaled" end, else
+/// 0; `droppedWrites` counts `Cmd.ptyWrite` payloads refused over the
+/// session's life — zero means every write reached the child, never a
+/// silent drop.
+export type PtyEventArm = {
+  readonly state: PtyState;
+  readonly bytes: Uint8Array;
+  readonly code: number;
+  readonly reason: PtyExitReason;
+  readonly signal: number;
+  readonly droppedWrites: number;
+};
+
+/// The Msg arms a pty session may target: arms whose payload is exactly
+/// the six PtyEventArm fields. The `state` and `reason` checks run BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's unions to PtyState/PtyExitReason, and the tuple-wrapped
+/// reverse checks hold them to the arm's — a narrower union would
+/// silently drop events the host emits, so it is refused here, not
+/// discovered at runtime.
+export type PtyEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof PtyEventArm]
+    ? [keyof PtyEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & PtyEventArm
+        ? [PtyState] extends [M["state"]]
+          ? [PtyExitReason] extends [M["reason"]]
+            ? M["kind"]
+            : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// `Cmd.ptySpawn` routing: every session event dispatches the `event`
+/// arm (the six-field PtyEventArm record, matched by field name).
+/// `cols`/`rows` are the initial grid the child observes (80x24 when
+/// omitted); `term` is the TERM the child starts with (omitted = the
+/// engine's default). The optional `key` names the session for
+/// ptyWrite/ptyResize/ptyKill.
+export interface PtyRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly cols?: number;
+  readonly rows?: number;
+  readonly term?: string;
+  readonly event: PtyEventKind<M>;
+}
+
 /// One field of a host record payload; see hostRecordBytes for the encoding.
 export type HostScalar = number | boolean | Uint8Array;
 
@@ -770,6 +875,19 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
   | { readonly op: "channel_close"; readonly key: number }
+  | {
+      readonly op: "pty_spawn";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly cols: number;
+      readonly rows: number;
+      /// "" = the engine's default TERM (the wire never bakes it in).
+      readonly term: string;
+      readonly argv: readonly Uint8Array[];
+    }
+  | { readonly op: "pty_write"; readonly key: string; readonly bytes: Uint8Array }
+  | { readonly op: "pty_resize"; readonly key: string; readonly cols: number; readonly rows: number }
+  | { readonly op: "pty_kill"; readonly key: string }
   | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
 
 /// The wire encoding of a host record payload, byte-identical to what the
@@ -1186,6 +1304,57 @@ export const Cmd = {
   /// audio's.
   channelClose(key: number): Cmd<never> {
     return { op: "channel_close", key };
+  },
+
+  /// Open a pseudo-terminal session — a spawn with a different
+  /// transport: run `argv` on a fresh pty (same argv budgets, same
+  /// child environment policy) whose initial grid is `cols` x `rows`
+  /// (80x24 by default) and whose TERM is `term` (omitted = the
+  /// engine's default). Every session event dispatches the `event` arm:
+  /// "output" events carry coalesced batches of child output across
+  /// dispatches — feed them to the terminal emulator and move on —
+  /// until the exactly-one "exit" terminal retires the session (a
+  /// refused spawn is one "exit" with reason "rejected"; a transport
+  /// that could not start, one with "spawn_failed" — failure is never
+  /// silent). One session per key at a time, never replaced implicitly:
+  /// a running terminal's child is a running subprocess — kill it
+  /// first, the spawn discipline.
+  ptySpawn<M extends Msgish>(argv: readonly Uint8Array[], route: PtyRoute<M>): Cmd<M> {
+    return {
+      op: "pty_spawn",
+      key: route.key ?? "",
+      eventKind: route.event,
+      cols: route.cols ?? 80,
+      rows: route.rows ?? 24,
+      term: route.term ?? "",
+      argv,
+    };
+  },
+
+  /// Write bytes toward the keyed session's child — keystrokes and
+  /// pastes, fire-and-forget: a key with no open session no-ops (the
+  /// exit was already on its way), and refused payloads (over the
+  /// engine's per-write bound, or a child that stopped reading) count
+  /// into the exit event's droppedWrites — never silence.
+  ptyWrite(key: string, bytes: Uint8Array): Cmd<never> {
+    return { op: "pty_write", key, bytes };
+  },
+
+  /// Push a new grid to the keyed session so the child receives
+  /// SIGWINCH — fire-and-forget like ptyWrite; a key with no open
+  /// session no-ops.
+  ptyResize(key: string, cols: number, rows: number): Cmd<never> {
+    return { op: "pty_resize", key, cols, rows };
+  },
+
+  /// Terminate the keyed session's child — LOUD, the spawn cancel
+  /// discipline: the session's one "exit" terminal arrives through its
+  /// own event arm with reason "cancelled" and the key frees once it
+  /// lands. A key with no open session no-ops. Sessions are their own
+  /// family's to end: the string-keyed `Cmd.cancel` never touches them
+  /// — this is their kill, the way `Cmd.audioStop` is audio's close.
+  ptyKill(key: string): Cmd<never> {
+    return { op: "pty_kill", key };
   },
 
   /// Several commands from one dispatch, performed in order.

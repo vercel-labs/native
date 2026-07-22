@@ -3531,6 +3531,22 @@ const videoTail = `
 }
 `;
 
+const ptyMsg = `
+export type PtyState = "output" | "exit";
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export interface Model { readonly chunks: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "pty_evt"; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
+`;
+
+const ptyTail = `
+    case "pty_evt": return msg.state === "output" ? { ...model, chunks: model.chunks + 1 } : { ...model, errs: model.errs + 1 };
+  }
+}
+`;
+
 // Slice E: grammar-completeness round — the new statement/operator/
 // declaration mappings in REALISTIC combinations (the minimal per-production
 // pins live in grammar_matrix.test.ts), plus the new teaching gates.
@@ -4262,6 +4278,7 @@ ${imageTail}
 `,
   },
   {
+<<<<<<< HEAD
     name: "the video verbs emit in their documented shapes",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
@@ -4297,11 +4314,48 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "video_evt" as VideoEventKind<Msg> })];
     case "video_evt": return { ...model, pos: msg.positionMs };
     case "failed": return { ...model, errs: model.errs + 1 };
+=======
+    name: "the pty verbs emit in their documented shapes (defaults, explicit grid, model-expression resize)",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.ptySpawn([asciiBytes("/bin/zsh"), asciiBytes("-l")], { key: "shell", event: "pty_evt" })];
+      if (msg.which === 1) return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", cols: 120, rows: 30, term: "xterm-256color", event: "pty_evt" })];
+      if (msg.which === 2) return [model, Cmd.ptyWrite("shell", asciiBytes("ls\\n"))];
+      if (msg.which === 3) return [model, Cmd.ptyResize("shell", model.chunks + 100, 40)];
+      return [model, Cmd.ptyKill("shell")];
+${ptyTail}
+`,
+  },
+  {
+    // The two-member state set leaves no room for a NARROWER union (a
+    // bare literal type is not a union), so the drift case is a
+    // misnamed member — the same NS1027 teaching.
+    name: "a pty event arm whose state union misnames a member is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
+export type NarrowState = "output" | "done";
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export interface Model { readonly chunks: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "pty_evt"; readonly state: NarrowState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", event: "pty_evt" as PtyEventKind<Msg> })];
+    case "pty_evt": return { ...model, chunks: model.chunks + 1 };
+>>>>>>> ec0c47b6 (Wire the pty command family into the TypeScript tier)
   }
 }
 `,
   },
   {
+<<<<<<< HEAD
     name: "a video event arm with a wrong field shape is taught",
     gate: "NS1027",
     src: `
@@ -4383,6 +4437,101 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.videoSeek("clip", -250)];
 ${videoTail}
+=======
+    name: "a pty event arm whose reason union misses a member is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
+export type PtyState = "output" | "exit";
+export type NarrowReason = "exited" | "cancelled";
+export interface Model { readonly chunks: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "pty_evt"; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: NarrowReason; readonly signal: number; readonly droppedWrites: number };
+export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", event: "pty_evt" as PtyEventKind<Msg> })];
+    case "pty_evt": return { ...model, chunks: model.chunks + 1 };
+  }
+}
+`,
+  },
+  {
+    name: "a pty event arm with a wrong field shape is taught",
+    gate: "NS1027",
+    src: `
+import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", event: "go" as PtyEventKind<Msg> })];
+${ptyTail}
+`,
+  },
+  {
+    name: "a zero pty grid literal stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", cols: 0, event: "pty_evt" })];
+${ptyTail}
+`,
+  },
+  {
+    // Grids are u16 at the transport: the first unrepresentable
+    // dimension stops the build the way the zero does.
+    name: "a pty resize dimension literal past the transport bound stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptyResize("shell", 65536, 40)];
+${ptyTail}
+`,
+  },
+  {
+    name: "an empty pty argv stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([], { key: "shell", event: "pty_evt" })];
+${ptyTail}
+`,
+  },
+  {
+    name: "a pty TERM literal over the engine bound stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", term: "${"x".repeat(33)}", event: "pty_evt" })];
+${ptyTail}
+`,
+  },
+  {
+    // Keystrokes and pastes, not bulk transfers: a compile-time-known
+    // payload over the engine's per-write bound stops the build.
+    name: "a pty write literal over the engine bound stops at compile time",
+    gate: "NS1030",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${ptyMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.ptyWrite("shell", asciiBytes("${"y".repeat(4097)}"))];
+${ptyTail}
+>>>>>>> ec0c47b6 (Wire the pty command family into the TypeScript tier)
 `,
   },
 ];

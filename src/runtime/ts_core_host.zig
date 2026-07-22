@@ -202,6 +202,47 @@
 //!                  a no-op, audio_ctl's idle rule. Channels are keyed
 //!                  numerically, so the string-keyed cancel never
 //!                  touches them — this is their close.
+//!   pty_spawn   -> `fx.ptySpawn` through the PTY table (`pty_key_base`
+//!                  + index) — non-retiring the spawn way: coalesced
+//!                  "output" batches route the event arm across
+//!                  dispatches — a six-field record built by field NAME
+//!                  (state/bytes/code/reason/signal/droppedWrites;
+//!                  `state`'s and `reason`'s enum members are matched
+//!                  by member name, so the app's declaration order is
+//!                  free) — and the exactly-one "exit" terminal retires
+//!                  the entry. An empty wire TERM opens with the
+//!                  engine's default (the fetch-timeout convention);
+//!                  grid dimensions ride the wire as f64 subset numbers
+//!                  and a value the u16 transport cannot carry exactly
+//!                  spawns with dimension 0, which the engine answers
+//!                  with one "rejected" exit — loud, never a guess. A
+//!                  duplicate LIVE wire key rejects the new spawn (the
+//!                  spawn discipline: a running terminal's child is a
+//!                  running subprocess, never killed implicitly),
+//!                  dispatching one "exit" with reason "rejected" at
+//!                  the next drain, in command-stream order with the
+//!                  engine's own refusals; a full bridge table rejects
+//!                  the same way.
+//!   pty_write   -> `fx.ptyWrite` on the live session under the wire
+//!                  key — fire-and-forget (keystrokes): a key naming no
+//!                  open session is a no-op (the exit was already on
+//!                  its way), and refused payloads count into the exit
+//!                  event's droppedWrites, never silence.
+//!   pty_resize  -> `fx.ptyResize` on the live session under the wire
+//!                  key — fire-and-forget like pty_write; a key naming
+//!                  no open session is a no-op, and a grid value the
+//!                  u16 transport cannot carry exactly resizes nothing
+//!                  (the no-op rule: there is no honest grid to push).
+//!   pty_kill    -> `fx.ptyKill` on the live session under the wire key
+//!                  — LOUD, the spawn cancel discipline: the engine
+//!                  ends the child and the session's one "exit"
+//!                  terminal routes its own event arm with reason
+//!                  "cancelled", retiring the entry. A key naming no
+//!                  open session is a no-op. Sessions are keyed by
+//!                  their own family's verbs, so the string-keyed
+//!                  `cancel` record never touches them — pty_kill is
+//!                  their kill, the way audio_ctl stop is audio's
+//!                  close.
 //!   audio_ctl   -> the engine's control verbs (`fx.pauseAudio`/
 //!                  `resumeAudio`/`stopAudio`/`seekAudio`/
 //!                  `setAudioVolume`), gated by the wire key: a verb
@@ -363,6 +404,11 @@ pub const video_key_base: u64 = 0x5453_5649_0000_0000;
 pub fn videoKeyForTag(event_tag: u8) u64 {
     return video_key_base | event_tag;
 }
+
+/// Engine-key namespace for pty sessions ("TSPT"): `base + table
+/// index`, deterministic in issue order. Ptys share the keyed
+/// families' one engine key space without ever colliding on a key.
+pub const pty_key_base: u64 = 0x5453_5054_0000_0000;
 
 /// The spawn wire record's "no line routing" tag sentinel (mirrors
 /// rt.zig's `spawn_no_line_tag`).
@@ -542,6 +588,23 @@ pub fn TsCoreHost(comptime core: type) type {
             event_tag: u8 = 0,
         };
 
+        /// One live pty session — the stream entries' non-retiring
+        /// shape: "output" events route through it repeatedly across
+        /// dispatches, and only the one "exit" terminal retires it. The
+        /// table index IS the engine key (minus `pty_key_base`),
+        /// deterministic in issue order; sized to the engine's pty
+        /// table.
+        const PtyEntry = struct {
+            used: bool = false,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            event_tag: u8 = 0,
+
+            fn wireKey(entry: *const PtyEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         var model_root: *const Model = undefined;
         /// The platform caches directory for URL audio sources, set by
         /// the wiring (`TsUiApp`'s `audio_cache_dir`, or `setAudioCacheDir`
@@ -561,6 +624,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
+        var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -634,6 +698,7 @@ pub fn TsCoreHost(comptime core: type) type {
             video_entry = .{};
             images = @splat(.{});
             channels = @splat(.{});
+            ptys = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
@@ -1106,6 +1171,48 @@ pub fn TsCoreHost(comptime core: type) type {
                         const value_bits = takeBytes(cmd, &at, 8);
                         const value: f64 = @bitCast(std.mem.readInt(u64, value_bits[0..8], .little));
                         runVideoCtl(fx, key, verb, value);
+                    },
+                    // pty_spawn [op][key_len][key][event_tag]
+                    //           [cols f64 LE][rows f64 LE][term_len][term]
+                    //           [argc u8]([arg_len u32 LE][arg])*
+                    0x19 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const cols_bits = takeBytes(cmd, &at, 8);
+                        const cols: f64 = @bitCast(std.mem.readInt(u64, cols_bits[0..8], .little));
+                        const rows_bits = takeBytes(cmd, &at, 8);
+                        const rows: f64 = @bitCast(std.mem.readInt(u64, rows_bits[0..8], .little));
+                        const term = takeShortBytes(cmd, &at);
+                        const argc: usize = takeByte(cmd, &at);
+                        if (argc == 0 or argc > runtime_effects.max_effect_argv) {
+                            @panic("ts core host: a pty_spawn wire record carries more argv elements than the engine accepts - the transpiler's own bound should have stopped this build");
+                        }
+                        var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
+                        for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
+                        issuePtySpawn(fx, key, event_tag, cols, rows, term, argv[0..argc]);
+                    },
+                    // pty_write [op][key_len][key][bytes_len u32 LE][bytes]
+                    0x1A => {
+                        const key = takeShortBytes(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        if (findPty(key)) |index| fx.ptyWrite(pty_key_base + index, bytes);
+                    },
+                    // pty_resize [op][key_len][key][cols f64 LE][rows f64 LE]
+                    0x1B => {
+                        const key = takeShortBytes(cmd, &at);
+                        const cols_bits = takeBytes(cmd, &at, 8);
+                        const cols: f64 = @bitCast(std.mem.readInt(u64, cols_bits[0..8], .little));
+                        const rows_bits = takeBytes(cmd, &at, 8);
+                        const rows: f64 = @bitCast(std.mem.readInt(u64, rows_bits[0..8], .little));
+                        runPtyResize(fx, key, cols, rows);
+                    },
+                    // pty_kill [op][key_len][key]
+                    0x1C => {
+                        const key = takeShortBytes(cmd, &at);
+                        // LOUD: the engine ends the child and the session's
+                        // one "cancelled" exit routes its own event arm,
+                        // retiring the entry in ptyEventMsg.
+                        if (findPty(key)) |index| fx.ptyKill(pty_key_base + index);
                     },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
@@ -1689,6 +1796,121 @@ pub fn TsCoreHost(comptime core: type) type {
             const entry = &channels[index];
             if (event.kind != .data) entry.used = false;
             return msgFromTagChannel(entry.event_tag, event);
+        }
+
+        // -------------------------------------------------- pty sessions
+
+        /// Open a pty session: claim a non-retiring entry (the spawn
+        /// exception, by the same reasoning — a live wire key REJECTS
+        /// the new spawn, because a running terminal's child is a
+        /// running subprocess and is never killed implicitly; kill it
+        /// first) and hand the request to the engine. Everything
+        /// dynamic the engine refuses (argv over the block bound, a
+        /// zero grid, a full engine table) comes back as one
+        /// "rejected" exit through the entry's own event arm — never
+        /// silent — and a transport that could not start as one
+        /// "spawn_failed".
+        fn issuePtySpawn(
+            fx: *Fx,
+            key: []const u8,
+            event_tag: u8,
+            cols: f64,
+            rows: f64,
+            term: []const u8,
+            argv: []const []const u8,
+        ) void {
+            if (key.len > 0 and findPty(key) != null) {
+                fx.stageLoopMsg(msgFromTagPty(event_tag, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                return;
+            }
+            const index = freePtyIndex() orelse {
+                // The bridge table mirrors the engine's pty table, whose
+                // own exhaustion answer is the same rejected exit — one
+                // vocabulary for every refusal, never a crash.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                return;
+            };
+            const entry = &ptys[index];
+            entry.used = true;
+            entry.key_len = key.len;
+            @memcpy(entry.key[0..key.len], key);
+            entry.event_tag = event_tag;
+            if (term.len == 0) {
+                // Wire "" = "the engine's default TERM" — the record
+                // never bakes the default in (the fetch-timeout rule).
+                fx.ptySpawn(.{
+                    .key = pty_key_base + index,
+                    .argv = argv,
+                    .cols = ptyDimension(cols),
+                    .rows = ptyDimension(rows),
+                    .on_event = ptyEventMsg,
+                });
+            } else {
+                fx.ptySpawn(.{
+                    .key = pty_key_base + index,
+                    .argv = argv,
+                    .cols = ptyDimension(cols),
+                    .rows = ptyDimension(rows),
+                    .term = term,
+                    .on_event = ptyEventMsg,
+                });
+            }
+        }
+
+        /// The wire carries the app's f64; the transport's grid is u16.
+        /// Anything that is not a whole dimension in 1..65535 maps to
+        /// 0, which `ptySpawn` answers with one deterministic
+        /// "rejected" exit — loud, never a truncated guess (the emitter
+        /// already stops the literal spellings, NS1030).
+        fn ptyDimension(value: f64) u16 {
+            if (!(std.math.isFinite(value) and value >= 1 and value <= 65535 and @floor(value) == value)) return 0;
+            return @intFromFloat(value);
+        }
+
+        /// The pty_resize record: push a new grid to the live session
+        /// under the wire key, if any — fire-and-forget. A key naming
+        /// no session, or a grid value the u16 transport cannot carry
+        /// exactly, is a no-op (there is no honest grid to push, and
+        /// the engine's clamp would otherwise shrink the child to a
+        /// 1x1 the app never asked for).
+        fn runPtyResize(fx: *Fx, key: []const u8, cols: f64, rows: f64) void {
+            const index = findPty(key) orelse return;
+            const c = ptyDimension(cols);
+            const r = ptyDimension(rows);
+            if (c == 0 or r == 0) return;
+            fx.ptyResize(pty_key_base + index, c, r);
+        }
+
+        fn findPty(key: []const u8) ?usize {
+            if (key.len == 0) return null;
+            for (&ptys, 0..) |*entry, index| {
+                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
+        fn freePtyIndex() ?usize {
+            for (&ptys, 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        /// `PtyMsgFn` for pty sessions: every event routes the entry's
+        /// event arm; the one "exit" terminal retires the entry
+        /// (freeing the wire key for a fresh session), "output"
+        /// batches keep it live — the spawn stream shape.
+        fn ptyEventMsg(event: runtime_effects.EffectPtyEvent) Msg {
+            if (event.key < pty_key_base) {
+                @panic("ts core host: a pty event arrived outside the bridge's pty key namespace");
+            }
+            const index = event.key - pty_key_base;
+            if (index >= ptys.len or !ptys[index].used) {
+                @panic("ts core host: a pty event arrived for a session the bridge is not tracking");
+            }
+            const entry = &ptys[index];
+            if (event.kind == .exit) entry.used = false;
+            return msgFromTagPty(entry.event_tag, event);
         }
 
         /// The wire `cancel` record: first match wins across the four
@@ -2360,6 +2582,90 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: a channel event names a Msg tag outside the union");
+        }
+
+        /// The six-field pty event record, matched by field name —
+        /// `channelArmShape`'s twin: `state` and `reason` (any enums;
+        /// members matched by name at delivery), `bytes` (bytes),
+        /// `code`/`signal`/`droppedWrites` (numbers).
+        fn ptyArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 6) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state") or std.mem.eql(u8, f.name, "reason")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "bytes")) {
+                    if (f.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, f.name, "code") or std.mem.eql(u8, f.name, "signal") or std.mem.eql(u8, f.name, "droppedWrites")) {
+                    if (f.type != i64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine pty event kind,
+        /// matched by member NAME — `channelStateValue`'s twin.
+        fn ptyStateValue(comptime E: type, kind: runtime_effects.EffectPtyEventKind) E {
+            const name = @tagName(kind);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: a pty event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+        }
+
+        /// The arm's `reason` member for an engine exit reason, matched
+        /// by member NAME — the state member's twin.
+        fn ptyReasonValue(comptime E: type, reason: runtime_effects.EffectExitReason) E {
+            const name = @tagName(reason);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: a pty exit reason has no member in the event arm's reason union - the transpiler's own shape check should have stopped this build");
+        }
+
+        /// Build the six-field pty event arm at index `tag` from an
+        /// engine event, by field name. The output bytes copy into the
+        /// core's frame arena like every routed payload (the engine's
+        /// slice is drain scratch); payload-free events — exits, and
+        /// the staged rejection Msgs that must be self-contained across
+        /// the frame reset — carry the static empty slice, the channel
+        /// record's rule.
+        fn msgFromTagPty(tag: u8, event: runtime_effects.EffectPtyEvent) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime ptyArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = ptyStateValue(f.type, event.kind);
+                            } else if (comptime std.mem.eql(u8, f.name, "reason")) {
+                                @field(payload, f.name) = ptyReasonValue(f.type, event.reason);
+                            } else if (comptime std.mem.eql(u8, f.name, "code")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.code) else @intCast(event.code);
+                            } else if (comptime std.mem.eql(u8, f.name, "signal")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.signal) else @intCast(event.signal);
+                            } else if (comptime std.mem.eql(u8, f.name, "droppedWrites")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_writes) else @intCast(event.dropped_writes);
+                            } else if (event.bytes.len == 0) {
+                                @field(payload, f.name) = "";
+                            } else {
+                                const copy = core.rt.frameAlloc(u8, event.bytes.len);
+                                @memcpy(copy, event.bytes);
+                                @field(payload, f.name) = copy;
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: a pty event targets Msg arm '" ++ arm.name ++ "', which is not the six-field pty event record");
+                }
+            }
+            @panic("ts core host: a pty event names a Msg tag outside the union");
         }
 
         /// Build the Msg arm at index `tag` carrying one number (`now`

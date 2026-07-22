@@ -1066,14 +1066,21 @@ pub fn Kernel(comptime opts: Options) type {
         //              [url_len u32 LE][url][flags u8]
         //              (flags bit0 = autoplay, bit1 = loop, bit2 = muted)
         //   video_ctl  [op 0x18][key_len u8][key][verb u8][value f64 LE]
+        //   pty_spawn  [op 0x19][key_len u8][key bytes][event_tag u8]
+        //              [cols f64 LE][rows f64 LE][term_len u8][term bytes]
+        //              then [argc u8] and per argv element:
+        //              [arg_len u32 LE][arg bytes]
+        //   pty_write  [op 0x1A][key_len u8][key bytes][bytes_len u32 LE][bytes]
+        //   pty_resize [op 0x1B][key_len u8][key bytes][cols f64 LE][rows f64 LE]
+        //   pty_kill   [op 0x1C][key_len u8][key bytes]
         //
         // v2 is additive over v1: the 0x01-0x03 records are byte-identical to v1,
         // so a v1 effect log replays under a v2 reader unchanged. The named-op
         // records 0x07-0x0C are additive within v2 the same way, and so are the
         // streaming records 0x0D-0x0F: no existing record's bytes change, new
         // opcodes only. v3 appends the window-verb records 0x10-0x11 under the
-        // same rule, and the image records 0x12-0x14 and channel records
-        // 0x15-0x16 are additive within v3
+        // same rule, and the image records 0x12-0x14, channel records
+        // 0x15-0x16, and pty records 0x19-0x1C are additive within v3
         // the same way: every existing record is byte-identical, new opcodes
         // only (a host predating an opcode refuses it loudly, naming this
         // version). The video records 0x17-0x18 join additively under
@@ -1271,6 +1278,51 @@ pub fn Kernel(comptime opts: Options) type {
         //               keyed by their numeric key, so the string-keyed
         //               `cancel` record never touches them — this is their
         //               close, the way audio_ctl stop is audio's.
+        //   pty_spawn   open a PSEUDO-TERMINAL SESSION — a spawn with a
+        //               different transport: run `argv` (the spawn record's
+        //               argv encoding and budgets) on a fresh pty whose
+        //               initial grid is `cols` x `rows` and whose TERM is
+        //               `term` (empty = the engine's default TERM — the
+        //               fetch-timeout convention: the wire never bakes the
+        //               default in). Non-retiring the spawn way: every
+        //               session event dispatches the `event_tag` arm — a
+        //               six-field record built by name: `state` (an enum
+        //               whose members are exactly output/exit, matched by
+        //               member NAME), `bytes` (a coalesced batch of child
+        //               output; empty outside "output" events), `code` (a
+        //               number, the child's exit code; -1 for every
+        //               non-exited end), `reason` (an enum whose members
+        //               are exactly the five spawn exit reasons —
+        //               exited/signaled/cancelled/rejected/spawn_failed —
+        //               matched by member NAME), `signal` (a number, the
+        //               fatal signal after a signaled end, else 0), and
+        //               `droppedWrites` (a number: pty_write payloads
+        //               refused over the session's life — never silence).
+        //               "output" events flow across dispatches until the
+        //               exactly-one "exit" terminal retires the entry (a
+        //               refused spawn — duplicate live key, full table,
+        //               bad grid — is one "exit" with reason "rejected";
+        //               a transport that could not start is one with
+        //               "spawn_failed"). One session per key at a time,
+        //               never replaced implicitly: kill it first, the
+        //               spawn discipline.
+        //   pty_write   write bytes toward the session's child — keystrokes
+        //               and pastes, fire-and-forget: a key naming no open
+        //               session is a no-op (the exit was already on its
+        //               way), and refused payloads count into the exit's
+        //               `droppedWrites`, never silence.
+        //   pty_resize  push a new grid to the session so the child
+        //               receives SIGWINCH — fire-and-forget like
+        //               pty_write; a key naming no open session is a
+        //               no-op.
+        //   pty_kill    terminate the session's child. LOUD, the spawn
+        //               cancel discipline: the session's one "exit"
+        //               terminal arrives through its own event arm with
+        //               reason "cancelled" and the key frees once it
+        //               lands. A key naming no open session is a no-op.
+        //               Sessions are their own family's to end — the
+        //               string-keyed `cancel` record never touches them,
+        //               the way audio_ctl stop is audio's close.
         //   audio_ctl   drive the open stream's playback in place, by verb
         //               (`CmdAudioVerb` declaration order): pause 0, resume
         //               1, stop 2, seek 3 (`value` = position ms), volume 4
@@ -1388,6 +1440,10 @@ pub fn Kernel(comptime opts: Options) type {
             channel_close = 0x16,
             video_load = 0x17,
             video_ctl = 0x18,
+            pty_spawn = 0x19,
+            pty_write = 0x1A,
+            pty_resize = 0x1B,
+            pty_kill = 0x1C,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1794,6 +1850,71 @@ pub fn Kernel(comptime opts: Options) type {
             @memcpy(out[2..][0..key.len], key);
             out[2 + key.len] = @intFromEnum(verb);
             std.mem.writeInt(u64, out[2 + key.len + 1 ..][0..8], @bitCast(value), .little);
+            return out;
+        }
+
+        pub fn cmdPtySpawn(
+            key: []const u8,
+            event_tag: u8,
+            cols: f64,
+            rows: f64,
+            term: []const u8,
+            argv: []const []const u8,
+        ) Cmd {
+            std.debug.assert(key.len <= 255);
+            std.debug.assert(term.len <= 255);
+            std.debug.assert(argv.len >= 1 and argv.len <= 255);
+            var argv_bytes: usize = 0;
+            for (argv) |arg| {
+                std.debug.assert(arg.len <= std.math.maxInt(u32));
+                argv_bytes += 4 + arg.len;
+            }
+            const out = frameAlloc(u8, 2 + key.len + 1 + 8 + 8 + 1 + term.len + 1 + argv_bytes);
+            out[0] = @intFromEnum(CmdOp.pty_spawn);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            var off: usize = 2 + key.len;
+            out[off] = event_tag;
+            std.mem.writeInt(u64, out[off + 1 ..][0..8], @bitCast(cols), .little);
+            std.mem.writeInt(u64, out[off + 9 ..][0..8], @bitCast(rows), .little);
+            off += 17;
+            out[off] = @intCast(term.len);
+            @memcpy(out[off + 1 ..][0..term.len], term);
+            off += 1 + term.len;
+            out[off] = @intCast(argv.len);
+            off += 1;
+            for (argv) |arg| off = writeLongBytes(out, off, arg);
+            return out;
+        }
+
+        pub fn cmdPtyWrite(key: []const u8, bytes: []const u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            std.debug.assert(bytes.len <= std.math.maxInt(u32));
+            const out = frameAlloc(u8, 2 + key.len + 4 + bytes.len);
+            out[0] = @intFromEnum(CmdOp.pty_write);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            _ = writeLongBytes(out, 2 + key.len, bytes);
+            return out;
+        }
+
+        pub fn cmdPtyResize(key: []const u8, cols: f64, rows: f64) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 2 + key.len + 8 + 8);
+            out[0] = @intFromEnum(CmdOp.pty_resize);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(cols), .little);
+            std.mem.writeInt(u64, out[2 + key.len + 8 ..][0..8], @bitCast(rows), .little);
+            return out;
+        }
+
+        pub fn cmdPtyKill(key: []const u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 2 + key.len);
+            out[0] = @intFromEnum(CmdOp.pty_kill);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
             return out;
         }
 

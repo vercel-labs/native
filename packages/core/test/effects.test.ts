@@ -1026,6 +1026,178 @@ test "channel wire records match rt.zig's documented layout" {
 }
 `;
 
+// --------------------------------------------------------------------- ptys
+
+// Cmd.ptySpawn/ptyWrite/ptyResize/ptyKill end to end: the string-keyed
+// records against the exact wire layout rt.zig documents, and the
+// six-field event arm (state and reason both matched by member name,
+// output bytes, the honest droppedWrites counter) round-tripping as a
+// plain Msg.
+const corePtys = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export type PtyState = "output" | "exit";
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+
+export interface Model { readonly chunks: number; readonly out: Uint8Array; readonly code: number; readonly exits: number; readonly drops: number; }
+
+export type Msg =
+  | { readonly kind: "open" }
+  | { readonly kind: "open_sized" }
+  | { readonly kind: "type_ls" }
+  | { readonly kind: "fit" }
+  | { readonly kind: "end" }
+  | { readonly kind: "pty_evt"; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+
+export function initialModel(): Model {
+  return { chunks: 0, out: new Uint8Array(0), code: -1, exits: 0, drops: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "open": return [model, Cmd.ptySpawn([asciiBytes("/bin/zsh"), asciiBytes("-l")], { key: "shell", event: "pty_evt" })];
+    case "open_sized": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", cols: 120, rows: 30, term: "xterm-256color", event: "pty_evt" })];
+    case "type_ls": return [model, Cmd.ptyWrite("shell", asciiBytes("ls\\n"))];
+    case "fit": return [model, Cmd.ptyResize("shell", model.chunks + 100, 40)];
+    case "end": return [model, Cmd.ptyKill("shell")];
+    case "pty_evt":
+      if (msg.state === "exit") return { ...model, exits: model.exits + 1, code: msg.code, drops: msg.droppedWrites };
+      return { ...model, chunks: model.chunks + 1, out: msg.bytes };
+  }
+}
+`;
+
+const harnessPtys = `
+const std = @import("std");
+const core = @import("core.zig");
+const rt = core.rt;
+
+var g_model: *const core.Model = undefined;
+
+fn dispatch(msg: core.Msg, log: *std.ArrayList(u8)) []const u8 {
+    const r = core.update(g_model, msg);
+    g_model = core.commitModelRoot(r.model);
+    const start = log.items.len;
+    log.appendSlice(std.testing.allocator, r.cmd) catch @panic("oom");
+    rt.frameReset();
+    return log.items[start..];
+}
+
+fn tagOf(comptime arm: []const u8) u8 {
+    return @intFromEnum(@field(std.meta.Tag(core.Msg), arm));
+}
+
+fn expectLong(bytes: []const u8, at: *usize, expected: []const u8) !void {
+    const len = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, @intCast(expected.len)), len);
+    try std.testing.expectEqualStrings(expected, bytes[at.* + 4 ..][0..expected.len]);
+    at.* += 4 + expected.len;
+}
+
+fn expectF64(bytes: []const u8, at: *usize, expected: f64) !void {
+    try std.testing.expectEqual(expected, @as(f64, @bitCast(std.mem.readInt(u64, bytes[at.*..][0..8], .little))));
+    at.* += 8;
+}
+
+test "pty wire records match rt.zig's documented layout" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+
+    rt.resetAll();
+    g_model = core.commitModelRoot(core.initialModel());
+    rt.frameReset();
+
+    // pty_spawn, defaults: [0x19][key][event_tag][cols f64 LE]
+    // [rows f64 LE][term_len][term][argc][arg len u32 LE][arg]* —
+    // omitted cols/rows encode 80x24 and an omitted term encodes ""
+    // (the engine's default TERM, never baked into the wire).
+    const open = dispatch(.open, &log);
+    try std.testing.expectEqual(@as(u8, 0x19), open[0]);
+    try std.testing.expectEqual(@as(u8, 5), open[1]);
+    try std.testing.expectEqualStrings("shell", open[2..7]);
+    try std.testing.expectEqual(tagOf("pty_evt"), open[7]);
+    var at: usize = 8;
+    try expectF64(open, &at, 80);
+    try expectF64(open, &at, 24);
+    try std.testing.expectEqual(@as(u8, 0), open[at]); // term: "" = default
+    at += 1;
+    try std.testing.expectEqual(@as(u8, 2), open[at]); // argc
+    at += 1;
+    try expectLong(open, &at, "/bin/zsh");
+    try expectLong(open, &at, "-l");
+    try std.testing.expectEqual(open.len, at);
+
+    // Output batches route the event arm as plain Msgs and keep
+    // flowing across dispatches (the non-retiring stream shape).
+    _ = dispatch(.{ .pty_evt = .{ .state = .output, .bytes = "prompt% ", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
+    _ = dispatch(.{ .pty_evt = .{ .state = .output, .bytes = "ls\\r\\n", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.chunks), 2), g_model.chunks);
+    try std.testing.expectEqualStrings("ls\\r\\n", g_model.out);
+
+    // pty_spawn with an explicit grid and TERM.
+    const sized = dispatch(.open_sized, &log);
+    at = 8;
+    try expectF64(sized, &at, 120);
+    try expectF64(sized, &at, 30);
+    try std.testing.expectEqual(@as(u8, 14), sized[at]);
+    try std.testing.expectEqualStrings("xterm-256color", sized[at + 1 ..][0..14]);
+    at += 1 + 14;
+    try std.testing.expectEqual(@as(u8, 1), sized[at]);
+    at += 1;
+    try expectLong(sized, &at, "/bin/sh");
+    try std.testing.expectEqual(sized.len, at);
+
+    // pty_write: [0x1A][key][bytes u32-len].
+    const wrote = dispatch(.type_ls, &log);
+    try std.testing.expectEqual(@as(u8, 0x1A), wrote[0]);
+    try std.testing.expectEqual(@as(u8, 5), wrote[1]);
+    try std.testing.expectEqualStrings("shell", wrote[2..7]);
+    at = 7;
+    try expectLong(wrote, &at, "ls\\n");
+    try std.testing.expectEqual(wrote.len, at);
+
+    // pty_resize: [0x1B][key][cols f64 LE][rows f64 LE] — cols is a
+    // model EXPRESSION (grids follow the window): 2 + 100 = 102.
+    const fit = dispatch(.fit, &log);
+    try std.testing.expectEqual(@as(u8, 0x1B), fit[0]);
+    at = 7;
+    try expectF64(fit, &at, 102);
+    try expectF64(fit, &at, 40);
+    try std.testing.expectEqual(fit.len, at);
+
+    // The exit terminal routes the same arm; code and the droppedWrites
+    // counter land in the model.
+    _ = dispatch(.{ .pty_evt = .{ .state = .exit, .bytes = "", .code = 0, .reason = .exited, .signal = 0, .droppedWrites = 3 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.exits), 1), g_model.exits);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.code), 0), g_model.code);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.drops), 3), g_model.drops);
+
+    // pty_kill: [0x1C][key].
+    const end = dispatch(.end, &log);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x1C, 5, 's', 'h', 'e', 'l', 'l' }, end);
+}
+`;
+
+test("ptys: wire bytes through the real dispatch cycle", { skip: !hasZig, timeout: 300_000 }, () => {
+  const result = transpile(corePtys);
+  const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
+  assert.equal(result.ok, true, `transpile failed\n${result.typeErrors.join("\n")}\n${details}`);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-effects-ptys-"));
+  try {
+    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
+    fs.writeFileSync(path.join(work, "core.zig"), result.zig!);
+    fs.writeFileSync(path.join(work, "harness.zig"), harnessPtys);
+    try {
+      execFileSync("zig", ["test", "harness.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
+    } catch (e) {
+      const err = e as { stderr?: string; stdout?: string };
+      assert.fail(`pty harness failed:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
+    }
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("channels: wire bytes through the real dispatch cycle", { skip: !hasZig, timeout: 300_000 }, () => {
   const result = transpile(coreChannels);
   const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");

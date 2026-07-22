@@ -219,6 +219,11 @@ const MAX_SPAWN_STDIN_BYTES = 4096;
 const MAX_AUDIO_PATH_BYTES = 1024;
 const MAX_IMAGE_PATH_BYTES = 1024;
 const MAX_VIDEO_PATH_BYTES = 1024;
+const MAX_PTY_TERM_BYTES = 32;
+const MAX_PTY_WRITE_BYTES = 4096;
+/// Terminal grids ride the wire as f64 subset numbers; the engine's
+/// transport is u16 — the largest grid a pty can declare.
+const MAX_PTY_DIMENSION = 65535;
 
 /// The closed `Cmd.fetch` verb set, wire value = position.
 const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -246,6 +251,16 @@ const IMAGE_STATES = [
 /// union must carry — the engine's vocabulary, matched by member NAME
 /// (declaration order is the app's own).
 const CHANNEL_STATES = ["data", "closed", "rejected"];
+
+/// The pty session event states an event arm's `state` union must carry
+/// — the engine's vocabulary, matched by member NAME (declaration order
+/// is the app's own).
+const PTY_STATES = ["output", "exit"];
+
+/// The pty exit reasons an event arm's `reason` union must carry — the
+/// spawn exit vocabulary, matched by member NAME (declaration order is
+/// the app's own).
+const PTY_EXIT_REASONS = ["exited", "signaled", "cancelled", "rejected", "spawn_failed"];
 
 /// Names the emitted module's own fixtures occupy (header helpers + commit
 /// machinery): module-level claims and function locals unique around them.
@@ -2334,6 +2349,39 @@ export class Emitter {
         const key = this.emitExpr(keyArg, ctx, { k: "f64" }).code;
         return `rt.cmdChannelClose(${key})`;
       }
+      if (method === "ptySpawn") {
+        return this.emitPtySpawnCmd(e, ctx);
+      }
+      if (method === "ptyWrite") {
+        const keyArg = e.arguments[0];
+        if (!keyArg || !ts.isStringLiteral(keyArg)) {
+          this.fail(e, `\`Cmd.ptyWrite\` takes its key as a string literal`, "NS1027");
+        }
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.ptyWrite key over 255 bytes");
+        // Keystrokes and pastes, not bulk transfers: a compile-time-known
+        // payload over the engine's per-write bound stops the build;
+        // dynamic bytes stay the engine's, counted into droppedWrites.
+        const bytes = this.effectBytesArg(e, e.arguments[1], "Cmd.ptyWrite bytes", MAX_PTY_WRITE_BYTES, ctx);
+        return `rt.cmdPtyWrite("${escapeZigString(keyArg.text)}", ${bytes})`;
+      }
+      if (method === "ptyResize") {
+        const keyArg = e.arguments[0];
+        if (!keyArg || !ts.isStringLiteral(keyArg)) {
+          this.fail(e, `\`Cmd.ptyResize\` takes its key as a string literal`, "NS1027");
+        }
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.ptyResize key over 255 bytes");
+        const cols = this.ptyDimensionArg(e, e.arguments[1], "Cmd.ptyResize", "cols", ctx);
+        const rows = this.ptyDimensionArg(e, e.arguments[2], "Cmd.ptyResize", "rows", ctx);
+        return `rt.cmdPtyResize("${escapeZigString(keyArg.text)}", ${cols}, ${rows})`;
+      }
+      if (method === "ptyKill") {
+        const keyArg = e.arguments[0];
+        if (!keyArg || !ts.isStringLiteral(keyArg)) {
+          this.fail(e, `\`Cmd.ptyKill\` takes its key as a string literal`, "NS1027");
+        }
+        if (utf8ByteLength(keyArg.text) > 255) this.fail(keyArg, "Cmd.ptyKill key over 255 bytes");
+        return `rt.cmdPtyKill("${escapeZigString(keyArg.text)}")`;
+      }
       if (method in AUDIO_VERBS) {
         return this.emitAudioCtlCmd(e, method, ctx);
       }
@@ -2367,7 +2415,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, videoLoad, videoPlay, videoPause, videoStop, videoSeek, videoSetVolume, videoSetMuted, videoSetLoop, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, batch)`,
+        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, videoLoad, videoPlay, videoPause, videoStop, videoSeek, videoSetVolume, videoSetMuted, videoSetLoop, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, ptySpawn, ptyWrite, ptyResize, ptyKill, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");
@@ -2863,6 +2911,171 @@ export class Emitter {
       isNumber(droppedPending.type.k) &&
       droppedTotal !== undefined &&
       isNumber(droppedTotal.type.k);
+    if (!matches) {
+      this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
+    }
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
+  }
+
+  /// `Cmd.ptySpawn(argv, route)`: an inline argv array of bytes elements
+  /// (the spawn gates verbatim — same engine budgets, different transport)
+  /// and a `{ key?, cols?, rows?, term?, event }` routing object whose arm
+  /// carries the six SDK-fixed pty event fields.
+  private emitPtySpawnCmd(e: ts.CallExpression, ctx: Ctx): string {
+    let argvArg = e.arguments[0];
+    while (argvArg && (ts.isParenthesizedExpression(argvArg) || ts.isAsExpression(argvArg) || ts.isSatisfiesExpression(argvArg))) {
+      argvArg = argvArg.expression;
+    }
+    if (!argvArg || !ts.isArrayLiteralExpression(argvArg) || argvArg.elements.some((el) => ts.isSpreadElement(el))) {
+      this.fail(
+        e.arguments[0] ?? e,
+        `\`Cmd.ptySpawn\` argv is an inline array literal of bytes elements ([asciiBytes("/bin/zsh"), ...])`,
+        "NS1029",
+      );
+    }
+    if (argvArg.elements.length === 0) {
+      this.fail(argvArg, `\`Cmd.ptySpawn\` argv is empty; the engine needs at least the program name`, "NS1030");
+    }
+    if (argvArg.elements.length > MAX_SPAWN_ARGV) {
+      this.fail(
+        argvArg,
+        `\`Cmd.ptySpawn\` argv carries ${argvArg.elements.length} elements; the engine bound is ${MAX_SPAWN_ARGV}`,
+        "NS1030",
+      );
+    }
+    const args = argvArg.elements.map((el) => this.effectBytesArg(e, el, "Cmd.ptySpawn argv element", null, ctx));
+    // The 2 KiB bound is on the WHOLE argv block; stop the build only when
+    // every element's byte length is knowable (dynamic elements stay the
+    // engine's to validate through the event arm's "rejected" exit).
+    const literalLens = argvArg.elements.map((el) => this.literalBytesLength(el));
+    if (literalLens.every((len) => len !== null)) {
+      const total = literalLens.reduce((n: number, len) => n + (len ?? 0), 0);
+      if (total > MAX_SPAWN_ARGV_BYTES) {
+        this.fail(argvArg, `\`Cmd.ptySpawn\` argv is ${total} bytes; the engine bound is ${MAX_SPAWN_ARGV_BYTES}`, "NS1030");
+      }
+    }
+
+    let route = e.arguments[1];
+    while (route && (ts.isParenthesizedExpression(route) || ts.isAsExpression(route) || ts.isSatisfiesExpression(route))) route = route.expression;
+    if (!route || !ts.isObjectLiteralExpression(route)) {
+      this.fail(
+        e.arguments[1] ?? e,
+        `\`Cmd.ptySpawn\` routing is an inline \`{ key?, cols?, rows?, term?, event }\` object`,
+        "NS1027",
+      );
+    }
+    let key = "";
+    let cols = "80";
+    let rows = "24";
+    let term = "";
+    let event: ts.StringLiteral | null = null;
+    for (const p of route.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) {
+        this.fail(p, `\`Cmd.ptySpawn\` routing member \`${p.getText()}\` is not a plain property`, "NS1027");
+      }
+      const name = p.name.text;
+      let v: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+      if (name === "cols") {
+        cols = this.ptyDimensionArg(e, p.initializer, "Cmd.ptySpawn", "cols", ctx);
+        continue;
+      }
+      if (name === "rows") {
+        rows = this.ptyDimensionArg(e, p.initializer, "Cmd.ptySpawn", "rows", ctx);
+        continue;
+      }
+      if (!ts.isStringLiteral(v)) {
+        this.fail(
+          p.initializer,
+          `\`Cmd.ptySpawn\` routing value \`${p.initializer.getText()}\` is not a string literal`,
+          "NS1027",
+        );
+      }
+      if (name === "key") {
+        if (utf8ByteLength(v.text) > 255) this.fail(v, "Cmd.ptySpawn key over 255 bytes");
+        key = v.text;
+      } else if (name === "term") {
+        // TERM values are declarations like effect keys; an empty one
+        // has nothing to name and the engine bound is small.
+        if (v.text.length === 0) this.fail(v, `\`Cmd.ptySpawn\` term is empty (omit it for the engine default)`, "NS1030");
+        if (utf8ByteLength(v.text) > MAX_PTY_TERM_BYTES) {
+          this.fail(v, `\`Cmd.ptySpawn\` term is over ${MAX_PTY_TERM_BYTES} bytes`, "NS1030");
+        }
+        term = v.text;
+      } else if (name === "event") event = v;
+      else this.fail(p, `\`Cmd.ptySpawn\` routing member \`${name}\``, "NS1027");
+    }
+    if (!event) this.fail(route, `\`Cmd.ptySpawn\` routing without an \`event\` arm`, "NS1027");
+    const tag = this.ptyEventArmTag(event, ctx);
+    return (
+      `rt.cmdPtySpawn("${escapeZigString(key)}", ${tag}, ${cols}, ${rows}, ` +
+      `"${escapeZigString(term)}", &.{ ${args.join(", ")} })`
+    );
+  }
+
+  /// A terminal grid dimension (ptySpawn cols/rows, ptyResize): a
+  /// compile-time-known value outside the transport's 1..65535 integer
+  /// range stops the build; dynamic values stay the host's (an
+  /// unrepresentable spawn grid is one "rejected" exit, an
+  /// unrepresentable resize a documented no-op).
+  private ptyDimensionArg(call: ts.CallExpression, arg: ts.Expression | undefined, factory: string, field: string, ctx: Ctx): string {
+    if (!arg) this.fail(call, `${factory} ${field} (a terminal dimension)`, "NS1029");
+    const literal = this.numberLiteralValue(arg);
+    if (literal !== null && !(Number.isInteger(literal) && literal >= 1 && literal <= MAX_PTY_DIMENSION)) {
+      this.fail(arg, `\`${factory}\` ${field} ${literal} is not a terminal dimension (an integer in 1..${MAX_PTY_DIMENSION})`, "NS1030");
+    }
+    return this.emitExpr(arg, ctx, { k: "f64" }).code;
+  }
+
+  /// Resolve the pty event arm: exactly the six SDK-fixed fields,
+  /// matched by NAME — state (a named literal-union alias carrying
+  /// exactly the two pty states, any order), bytes (the output batch),
+  /// code (number), reason (a named alias carrying exactly the five
+  /// spawn exit reasons, any order), signal and droppedWrites (numbers).
+  private ptyEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const unionName = ctx.cmdReturn!.msgUnion;
+    const info = this.table.unions.get(unionName);
+    if (!info) this.fail(arg, `unknown union ${unionName}`);
+    const arm = info.arms.find((a) => a.tag === arg.text);
+    if (!arm) {
+      this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
+    }
+    const shape =
+      "the six pty event fields — state (a named alias of exactly " +
+      PTY_STATES.map((s) => `"${s}"`).join(" | ") +
+      "), bytes: Uint8Array, code: number, reason (a named alias of exactly " +
+      PTY_EXIT_REASONS.map((s) => `"${s}"`).join(" | ") +
+      "), signal: number, droppedWrites: number";
+    const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const state = fieldsByName.get("state");
+    const bytes = fieldsByName.get("bytes");
+    const code = fieldsByName.get("code");
+    const reason = fieldsByName.get("reason");
+    const signal = fieldsByName.get("signal");
+    const droppedWrites = fieldsByName.get("droppedWrites");
+    const stateOk =
+      state !== undefined &&
+      state.type.k === "enum" &&
+      state.type.members.length === PTY_STATES.length &&
+      PTY_STATES.every((s) => state.type.k === "enum" && state.type.members.includes(s));
+    const reasonOk =
+      reason !== undefined &&
+      reason.type.k === "enum" &&
+      reason.type.members.length === PTY_EXIT_REASONS.length &&
+      PTY_EXIT_REASONS.every((s) => reason.type.k === "enum" && reason.type.members.includes(s));
+    const matches =
+      arm.fields.length === 6 &&
+      stateOk &&
+      reasonOk &&
+      bytes !== undefined &&
+      bytes.type.k === "bytes" &&
+      code !== undefined &&
+      isNumber(code.type.k) &&
+      signal !== undefined &&
+      isNumber(signal.type.k) &&
+      droppedWrites !== undefined &&
+      isNumber(droppedWrites.type.k);
     if (!matches) {
       this.fail(arg, `routing target \`${arg.text}\` does not carry ${shape}`, "NS1027");
     }

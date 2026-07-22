@@ -33,6 +33,10 @@ pub const Op = union(enum) {
     image_unregister: struct { id: f64 },
     channel_open: struct { key: f64, event_tag: u8 },
     channel_close: struct { key: f64 },
+    pty_spawn: PtySpawn,
+    pty_write: struct { key: []const u8, bytes: []const u8 },
+    pty_resize: struct { key: []const u8, cols: f64, rows: f64 },
+    pty_kill: struct { key: []const u8 },
 
     pub const Host = struct {
         name: []const u8,
@@ -77,6 +81,31 @@ pub const Op = union(enum) {
         stdin: []const u8,
 
         pub fn arg(self: Spawn, index: usize) []const u8 {
+            var off: usize = 0;
+            var i: usize = 0;
+            while (true) {
+                const len = std.mem.readInt(u32, self.argv_bytes[off..][0..4], .little);
+                if (i == index) return self.argv_bytes[off + 4 ..][0..len];
+                off += 4 + len;
+                i += 1;
+            }
+        }
+    };
+
+    pub const PtySpawn = struct {
+        key: []const u8,
+        event_tag: u8,
+        /// f64 subset numbers on the wire; the host's transport is u16.
+        cols: f64,
+        rows: f64,
+        /// "" = the engine's default TERM.
+        term: []const u8,
+        arg_count: u8,
+        /// Raw argv block: per element [len u32 LE][bytes] (the spawn
+        /// record's encoding).
+        argv_bytes: []const u8,
+
+        pub fn arg(self: PtySpawn, index: usize) []const u8 {
             var off: usize = 0;
             var i: usize = 0;
             while (true) {
@@ -271,6 +300,50 @@ pub const CmdIter = struct {
                 off += 8;
                 break :blk .{ .channel_close = .{ .key = key } };
             },
+            // pty_spawn [op 0x19][key_len u8][key][event_tag u8]
+            // [cols f64 LE][rows f64 LE][term_len u8][term][argc u8]
+            // ([arg_len u32 LE][arg])* — the spawn record's argv encoding
+            // with the pty grid and TERM aboard (ts_core_host.zig, 0x19;
+            // 0x17-0x18 are reserved).
+            0x19 => blk: {
+                const key = shortBytes(b, &off);
+                const event_tag = b[off];
+                off += 1;
+                const cols: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const rows: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const term = shortBytes(b, &off);
+                const argc = b[off];
+                off += 1;
+                const argv_start = off;
+                var i: usize = 0;
+                while (i < argc) : (i += 1) _ = longBytes(b, &off);
+                const argv_bytes = b[argv_start..off];
+                break :blk .{ .pty_spawn = .{ .key = key, .event_tag = event_tag, .cols = cols, .rows = rows, .term = term, .arg_count = argc, .argv_bytes = argv_bytes } };
+            },
+            // pty_write [op 0x1A][key_len u8][key][bytes_len u32 LE][bytes]
+            // (ts_core_host.zig, 0x1A).
+            0x1A => blk: {
+                const key = shortBytes(b, &off);
+                const bytes = longBytes(b, &off);
+                break :blk .{ .pty_write = .{ .key = key, .bytes = bytes } };
+            },
+            // pty_resize [op 0x1B][key_len u8][key][cols f64 LE][rows f64 LE]
+            // (ts_core_host.zig, 0x1B).
+            0x1B => blk: {
+                const key = shortBytes(b, &off);
+                const cols: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const rows: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .pty_resize = .{ .key = key, .cols = cols, .rows = rows } };
+            },
+            // pty_kill [op 0x1C][key_len u8][key] (ts_core_host.zig, 0x1C).
+            0x1C => blk: {
+                const key = shortBytes(b, &off);
+                break :blk .{ .pty_kill = .{ .key = key } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -462,5 +535,71 @@ test "the channel records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 41), second.channel_close.key);
     const third = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "the pty records decode, alone and inside a batch" {
+    const a = std.testing.allocator;
+
+    // pty_spawn: [op 0x19][key][event_tag][cols f64 LE][rows f64 LE]
+    // [term][argc]([arg len u32 LE][arg])* — the bytes rt.zig's
+    // cmdPtySpawn pins (the same layout
+    // packages/core/test/effects.test.ts asserts).
+    var spawn_bytes: std.ArrayList(u8) = .empty;
+    defer spawn_bytes.deinit(a);
+    try spawn_bytes.append(a, 0x19);
+    try spawn_bytes.append(a, 5);
+    try spawn_bytes.appendSlice(a, "shell");
+    try spawn_bytes.append(a, 4); // event_tag
+    try spawn_bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 120))));
+    try spawn_bytes.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 30))));
+    try spawn_bytes.append(a, 14);
+    try spawn_bytes.appendSlice(a, "xterm-256color");
+    try spawn_bytes.append(a, 2); // argc
+    try spawn_bytes.appendSlice(a, &.{ 8, 0, 0, 0 });
+    try spawn_bytes.appendSlice(a, "/bin/zsh");
+    try spawn_bytes.appendSlice(a, &.{ 2, 0, 0, 0 });
+    try spawn_bytes.appendSlice(a, "-l");
+    const spawned = findOp(spawn_bytes.items, .pty_spawn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("shell", spawned.key);
+    try std.testing.expectEqual(@as(u8, 4), spawned.event_tag);
+    try std.testing.expectEqual(@as(f64, 120), spawned.cols);
+    try std.testing.expectEqual(@as(f64, 30), spawned.rows);
+    try std.testing.expectEqualStrings("xterm-256color", spawned.term);
+    try std.testing.expectEqual(@as(u8, 2), spawned.arg_count);
+    try std.testing.expectEqualStrings("/bin/zsh", spawned.arg(0));
+    try std.testing.expectEqualStrings("-l", spawned.arg(1));
+
+    // pty_write [0x1A][key][bytes u32-len], pty_resize [0x1B][key]
+    // [cols f64 LE][rows f64 LE], pty_kill [0x1C][key], and a trailing
+    // now record in one batch: each record must advance the iterator
+    // exactly its own length for the tail to decode.
+    var batch: std.ArrayList(u8) = .empty;
+    defer batch.deinit(a);
+    try batch.append(a, 0x1A);
+    try batch.append(a, 5);
+    try batch.appendSlice(a, "shell");
+    try batch.appendSlice(a, &.{ 3, 0, 0, 0 });
+    try batch.appendSlice(a, "ls\n");
+    try batch.append(a, 0x1B);
+    try batch.append(a, 5);
+    try batch.appendSlice(a, "shell");
+    try batch.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 100))));
+    try batch.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 40))));
+    try batch.append(a, 0x1C);
+    try batch.append(a, 5);
+    try batch.appendSlice(a, "shell");
+    try batch.appendSlice(a, &.{ 0x02, 7 });
+    var iter = CmdIter.init(batch.items);
+    const wrote = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("shell", wrote.pty_write.key);
+    try std.testing.expectEqualStrings("ls\n", wrote.pty_write.bytes);
+    const resized = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 100), resized.pty_resize.cols);
+    try std.testing.expectEqual(@as(f64, 40), resized.pty_resize.rows);
+    const killed = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("shell", killed.pty_kill.key);
+    const tail = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 7), tail.now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
