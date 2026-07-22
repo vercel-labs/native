@@ -1,0 +1,18 @@
+.{
+    .name = .terminal,
+    .fingerprint = 0x8f7b154131eea8ae,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .native_sdk = .{ .path = "../.." },
+        // libghostty-vt: Ghostty's extracted terminal-state core, consumed
+        // as the `ghostty-vt` Zig module. Pinned to the first upstream
+        // commit that builds under Zig 0.16.0 (the "Update to Zig 0.16.0"
+        // merge); simd is disabled at import so the module stays pure Zig.
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/7aa9591746ffa4d2eee458960c76554352832595.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBC-edJAVXTdYsgHOzIqgAI7hE8VqpmriEi8zgufw2",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "app.zon", "README.md" },
+}

@@ -1327,6 +1327,7 @@ pub fn build(b: *std.Build) void {
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-collapse", "Run split collapse example tests", "examples/split-collapse", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed);
+    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-terminal", "Run terminal example tests", "examples/terminal", .owned);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor-ts", "Run system-monitor-ts example tests", "examples/system-monitor-ts", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed);
     addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-channel-monitor", "Run channel monitor example tests", "examples/channel-monitor", .managed);

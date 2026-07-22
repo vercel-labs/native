@@ -1,0 +1,35 @@
+.{
+    .id = "dev.native_sdk.terminal",
+    .name = "terminal",
+    .display_name = "Terminal",
+    .description = "A recordable terminal: pty sessions rendered on the canvas, replayable byte-identical offline.",
+    .version = "0.1.0",
+    .platforms = .{ "macos", "linux" },
+    .permissions = .{ "view", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Terminal",
+                .width = 980,
+                .height = 640,
+                .min_width = 640,
+                .min_height = 420,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .titlebar = "hidden_inset_tall",
+                .views = .{
+                    .{ .label = "terminal-canvas", .kind = "gpu_surface", .fill = true, .role = "Terminal canvas", .accessibility_label = "Terminal", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+}

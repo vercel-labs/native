@@ -1,6 +1,9 @@
 .DS_Store
 .zig-cache/
 zig-out/
+# Project-local package store for examples with third-party Zig
+# dependencies (zig fetches into it beside the build).
+zig-pkg/
 # CLI-generated build graph for zero-config apps (the examples here) — the
 # same entry `native init` writes into a new app's .gitignore.
 .native/
