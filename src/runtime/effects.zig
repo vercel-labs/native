@@ -6259,6 +6259,24 @@ pub fn Effects(comptime Msg: type) type {
         /// delivers one `.failed` event instead of silence.
         pub fn playVideo(self: *Self) void {
             if (!self.video.active) return;
+            if (self.video.fake and self.video.completed) {
+                // The live hosts retire the player at a non-looping
+                // natural end, so play meets an absent player there:
+                // one `.failed` terminal and the channel resets before
+                // playVideo returns (`failVideoChannel`). The fake
+                // models the same refusal — a snapshot an update reads
+                // right after its own play must answer the same on
+                // every executor. Under replay the journaled terminal
+                // delivers itself, so the reset just parks the
+                // identity it routes by.
+                if (self.replay) {
+                    self.parkRetiredVideo();
+                    self.video = .{ .volume = self.video.volume };
+                } else {
+                    self.failVideoChannel();
+                }
+                return;
+            }
             self.video.playing = true;
             if (self.video.fake) return;
             const services = self.services orelse return self.failVideoChannel();

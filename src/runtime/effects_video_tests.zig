@@ -78,6 +78,7 @@ const VideoMsg = union(enum) {
     load_then_stop,
     load_then_stream,
     load_then_probe,
+    play_then_probe,
     load_source_burst,
     play,
     pause,
@@ -204,6 +205,13 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             });
             model.probed_active = fx.videoSnapshot().active;
         },
+        // The post-completion resume probe: play against a retired
+        // player resets the channel before playVideo returns, and the
+        // probe must read the same answer live and replayed.
+        .play_then_probe => {
+            fx.playVideo();
+            model.probed_active = fx.videoSnapshot().active;
+        },
         // The replace shape under the same app key: the first load's
         // synchronous `.failed` must keep its own identity while the
         // replacing stream plays on — the key alone cannot tell the
@@ -264,6 +272,7 @@ fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.load-url")) return .load_url;
     if (std.mem.eql(u8, name, "video.load-then-stop")) return .load_then_stop;
     if (std.mem.eql(u8, name, "video.load-then-probe")) return .load_then_probe;
+    if (std.mem.eql(u8, name, "video.play-then-probe")) return .play_then_probe;
     if (std.mem.eql(u8, name, "video.load-then-stream")) return .load_then_stream;
     if (std.mem.eql(u8, name, "video.load-source-burst")) return .load_source_burst;
     if (std.mem.eql(u8, name, "video.seek-half")) return .seek_half;
@@ -2718,6 +2727,101 @@ test "stopping a stream cancels only its own staged answers" {
     try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, msg.video_event.kind);
     try std.testing.expectEqual(clip_key, msg.video_event.key);
     try std.testing.expect(fx.takeMsgWithin(&boundary) == null);
+}
+
+test "a post-completion play resets the snapshot identically under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record: the playback completes naturally (the host retires the
+    // player), then an update calls play and probes the snapshot in
+    // the same dispatch. The refusal reset the channel before
+    // playVideo returned, so the probe reads inactive, and the
+    // `.failed` terminal delivers at the next wake.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 10_000, 640, 360);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(10_500).?);
+        try std.testing.expectEqual(@as(usize, 1), app_state.model.completed_count);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.play-then-probe", .window_id = 1, .view_label = canvas_label } });
+        try std.testing.expectEqual(@as(?bool, false), app_state.model.probed_active);
+        while (np.takeWake()) |_| {}
+        try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the fake channel latched the completion, so the
+    // replayed play resets at the same instant and the probe reads the
+    // same inactive snapshot; the journaled terminal delivers itself.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expectEqual(@as(?bool, false), app_state.model.probed_active);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try std.testing.expect(!app_state.effects.videoSnapshot().active);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
 }
 
 test "a past-window host readout clamps at delivery and replays clamped" {
