@@ -254,10 +254,14 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             packet_json_buffer: []u8,
             packet_scale: ?f32,
         ) anyerror!canvas.CanvasGpuPacket {
-            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            var canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
             recordCanvasClearColor(self, window_id, label, clear_color);
+            const presentation_scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
+            // Widen BEFORE the packet build so the scissor-culled
+            // command subset rides the widened scissor.
+            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
             var packet = try canvas_frame.gpuPacket(output);
-            packet.scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
+            packet.scale = presentation_scale;
             if (!packet.requiresRender()) return packet;
             uploadCanvasPacketImages(self, packet) catch |err| {
                 if (err == error.UnsupportedService) {
@@ -302,11 +306,16 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             clear_color: canvas.Color,
             pixel_scale: ?f32,
         ) anyerror!CanvasPresentationResult {
-            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            var canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
             recordCanvasClearColor(self, window_id, label, clear_color);
             if (!canvas_frame.requiresRender()) {
                 return .{ .frame = canvas_frame, .mode = .skipped };
             }
+            const presentation_scale = normalizedCanvasPresentationScale(pixel_scale, canvas_frame.scale);
+            // Widen BEFORE the packet build (and the pixel fallback below)
+            // so the scissor-culled command subset rides the widened
+            // scissor.
+            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
 
             const services = self.options.platform.services;
             const packet_service_available = services.present_gpu_surface_packet_fn != null or
@@ -314,7 +323,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (gpu_commands.len > 0 and packet_json_buffer.len > 0) {
                 if (packet_service_available) {
                     var packet = try canvas_frame.gpuPacket(gpu_commands);
-                    packet.scale = normalizedCanvasPresentationScale(pixel_scale, canvas_frame.scale);
+                    packet.scale = presentation_scale;
                     const result = CanvasPresentationResult{
                         .frame = canvas_frame,
                         .mode = .gpu_packet,
@@ -1257,6 +1266,29 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (!emitted_dirty_region and changes.len > 0) self.invalidateFor(.state, view_frame);
         }
     };
+}
+
+/// Widen a planned frame's incremental damage when the present's
+/// EFFECTIVE scale carries a larger device pixel than the plan's: the
+/// AA bleed allowance was folded in at plan scale
+/// (`canvasDirtyBleedInset`), so a presentation-scale override below it
+/// must add the difference or the one-device-pixel fringe reopens
+/// (e.g. planned at scale 2, presented at scale 1: half a point of
+/// allowance where the host's raster apron spans a full point). No-op
+/// for full repaints, equal or finer presentation scales, and frames
+/// with nothing dirty.
+fn widenCanvasFrameDirtyForPresentationScale(canvas_frame: *canvas.CanvasFrame, presentation_scale: f32) void {
+    if (canvas_frame.full_repaint) return;
+    const extra = canvasDirtyBleedInset(presentation_scale) - canvasDirtyBleedInset(canvas_frame.scale);
+    if (!(extra > 0)) return;
+    canvas_frame.dirty_bounds = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(canvas_frame.dirty_bounds, extra), canvas_frame.surface_size);
+    var kept: usize = 0;
+    for (canvas_frame.dirty_rects[0..canvas_frame.dirty_rect_count]) |rect| {
+        const widened = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, extra), canvas_frame.surface_size) orelse continue;
+        canvas_frame.dirty_rects[kept] = widened;
+        kept += 1;
+    }
+    canvas_frame.dirty_rect_count = if (kept < 2) 0 else kept;
 }
 
 /// What to record when a packet attempt fails: the reason plus the

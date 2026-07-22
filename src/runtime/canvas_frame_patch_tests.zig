@@ -599,6 +599,15 @@ test "rebuild dirty bounds derive from the edit script on small command lists to
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].gpu_present_patch_upsert_count);
 }
 
+fn reflowPillCommand(id: canvas.ObjectId, rect: geometry.RectF) canvas.CanvasCommand {
+    return .{ .fill_rounded_rect = .{
+        .id = id,
+        .rect = rect,
+        .radius = canvas.Radius.all(rect.height * 0.5),
+        .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
+    } };
+}
+
 fn expectDirtyCovers(dirty: geometry.RectF, painted: geometry.RectF) !void {
     // The damage region must cover the painted extent of the rect plus
     // the one-device-pixel AA bleed hosts can ink past its bounds.
@@ -649,17 +658,7 @@ test "reflow damage covers vacated pixels plus the anti-aliasing bleed" {
     const pill_shrunk = geometry.RectF.init(30.4, 60.6, 70.1, 20.3);
     const pill_moved = geometry.RectF.init(90.7, 130.2, 70.1, 20.3);
     const pill_replacement = geometry.RectF.init(42.5, 132.9, 96.6, 22.4);
-
-    const pillAt = struct {
-        fn command(id: canvas.ObjectId, rect: geometry.RectF) canvas.CanvasCommand {
-            return .{ .fill_rounded_rect = .{
-                .id = id,
-                .rect = rect,
-                .radius = canvas.Radius.all(rect.height * 0.5),
-                .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
-            } };
-        }
-    }.command;
+    const pillAt = reflowPillCommand;
 
     // Baseline: two pills; the first present is necessarily full.
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(201, pill_wide), pillAt(202, pill_second) } });
@@ -702,6 +701,50 @@ test "reflow damage covers vacated pixels plus the anti-aliasing bleed" {
         try expectDirtyRectsCover(replaced.frame.dirtyRects(), pill_moved);
         try expectDirtyRectsCover(replaced.frame.dirtyRects(), pill_replacement);
     }
+}
+
+test "a coarser presentation scale widens reflow damage to its device pixel" {
+    // Frames plan at the surface scale, but a present may override the
+    // EFFECTIVE scale downward (`packet_scale`/`pixel_scale`). The AA
+    // bleed allowance was folded in at plan scale, so the present must
+    // widen the damage to the coarser scale's device pixel — half a
+    // point of allowance where the host's raster apron spans a full
+    // point reopens the stale fringe.
+    var app_state: PatchHarnessApp = .{};
+    const harness = try createPatchHarness(&app_state);
+    defer harness.destroy(std.testing.allocator);
+    var buffers = try PresentBuffers.init(std.testing.allocator);
+    defer buffers.deinit(std.testing.allocator);
+
+    const anchor = canvas.CanvasCommand{ .fill_rect = .{
+        .id = 100,
+        .rect = geometry.RectF.init(4, 4, 24, 12),
+        .fill = .{ .color = canvas.Color.rgb8(51, 65, 85) },
+    } };
+    const pill = geometry.RectF.init(30.4, 60.6, 120.2, 24.8);
+    const presentAtScaleOne = struct {
+        fn present(h: anytype, b: *PresentBuffers, frame_index: u64) !CanvasPresentationResult {
+            return h.runtime.presentNextCanvasFrame(1, "canvas", .{
+                .frame_index = frame_index,
+                .timestamp_ns = frame_index * 16_000,
+                .surface_size = geometry.SizeF.init(patch_surface_width, patch_surface_height),
+                .scale = 2,
+            }, canvasFrameScratchStorage(&h.runtime), b.gpu_commands, b.packet_buffer, b.pixels, b.scratch, canvas.Color.rgb8(15, 23, 42), 1);
+        }
+    }.present;
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, reflowPillCommand(401, pill) } });
+    const baseline = try presentAtScaleOne(harness, &buffers, 90);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
+
+    // Removed pill: the damage must carry a FULL point of allowance —
+    // one device pixel at the presented scale (1), not the plan
+    // scale's (2) half point.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{anchor} });
+    const removed = try presentAtScaleOne(harness, &buffers, 91);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, removed.mode);
+    try std.testing.expect(!removed.frame.full_repaint);
+    try expectDirtyCovers(removed.frame.dirty_bounds.?, pill);
 }
 
 test "a host that refuses patches gets a full resync in the same frame" {
