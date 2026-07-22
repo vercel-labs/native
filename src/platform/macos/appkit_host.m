@@ -10205,6 +10205,15 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     size_t fitted_width = 0;
     size_t fitted_height = 0;
     NativeSdkVideoFittedSize(natural.width, natural.height, &fitted_width, &fitted_height);
+    /* The width/height attributes are client REQUIREMENTS on the
+     * vended buffers (AVPlayerItemVideoOutput's pixelBufferAttributes
+     * contract), not hints: the output converts AND scales every frame
+     * to satisfy them, so a 3840x2160 source tapped with fitted
+     * attributes vends fitted-size buffers (verified against a UHD
+     * H.264 asset: requested 1866x1050, vended 1866x1050). The
+     * oversized-frame drop in videoPumpFrame is defense in depth
+     * against a hypothetical host ignoring the attributes, never an
+     * expected path. */
     AVPlayerItemVideoOutput *output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
         (id)kCVPixelBufferWidthKey: @(fitted_width),
