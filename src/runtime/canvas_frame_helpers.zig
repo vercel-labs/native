@@ -177,14 +177,28 @@ fn canvasDirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
 /// f32 a stored rect hands back) keeps its product with `device` at or
 /// under `boundary`. Consumers ceil that product to pick the last
 /// cleared pixel — one ulp past the maximum clears a pixel culling
-/// refuses to repaint — and the MAXIMAL such span admits every command
+/// refuses to repaint — and the maximal such span admits every command
 /// painting into the cleared region: anything larger has a product past
-/// the boundary.
+/// the boundary. The walk steps the EDGE value, never the span: an
+/// edge's ulp is proportional to its magnitude so the walk is a few
+/// steps, while span steps can crawl through denormals without moving
+/// the sum when the min edge dominates it.
 fn canvasDirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
-    var span = @max(0, boundary / device - min_edge);
-    while ((min_edge + span) * device <= boundary) span = std.math.nextAfter(f32, span, std.math.inf(f32));
-    while (span > 0 and (min_edge + span) * device > boundary) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
-    return span;
+    var target = boundary / device;
+    while (target * device <= boundary) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (target * device > boundary) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    if (target <= min_edge) return 0;
+    // Re-encode as the stored span; shrink while the reconstruction
+    // overshoots the target, giving up the sub-ulp sliver when a step
+    // no longer moves the sum (both boundaries collapsed by the
+    // off-screen clamp — surface clipping discards the empty result).
+    var span = target - min_edge;
+    while (span > 0 and min_edge + span > target) {
+        const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        if (min_edge + next == min_edge + span) return 0;
+        span = next;
+    }
+    return @max(0, span);
 }
 
 fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {

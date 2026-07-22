@@ -693,12 +693,19 @@ fn dirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
 
 /// Largest span whose reconstructed max edge (`min_edge + span`) keeps
 /// its product with `device` at or under `boundary` (see the runtime
-/// twin's doc comment).
+/// twin's doc comment); the walk steps the edge value, never the span.
 fn dirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
-    var span = @max(0, boundary / device - min_edge);
-    while ((min_edge + span) * device <= boundary) span = std.math.nextAfter(f32, span, std.math.inf(f32));
-    while (span > 0 and (min_edge + span) * device > boundary) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
-    return span;
+    var target = boundary / device;
+    while (target * device <= boundary) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (target * device > boundary) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    if (target <= min_edge) return 0;
+    var span = target - min_edge;
+    while (span > 0 and min_edge + span > target) {
+        const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        if (min_edge + next == min_edge + span) return 0;
+        span = next;
+    }
+    return @max(0, span);
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {

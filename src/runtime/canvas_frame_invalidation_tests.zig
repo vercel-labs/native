@@ -874,6 +874,15 @@ test "bleed alignment stays finite for far off-screen damage" {
     try std.testing.expect(std.math.isFinite(positive.minX()));
     try std.testing.expect(std.math.isFinite(positive.maxX()));
     try std.testing.expect(positive.minX() >= 16_384);
+
+    // A SMALL far off-screen rect collapses both boundaries onto the
+    // clamp: the span derivation must settle immediately (an offset
+    // walk would crawl through denormals without ever moving the sum)
+    // and yield an empty rect surface clipping discards.
+    const collapsed = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1, 1), 2, 1).?;
+    try std.testing.expect(std.math.isFinite(collapsed.minX()));
+    try std.testing.expect(std.math.isFinite(collapsed.maxX()));
+    try std.testing.expect(collapsed.maxX() <= 0);
 }
 
 test "reflow damage reaches a whole device pixel past changed bounds at fractional scales" {
