@@ -279,18 +279,12 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // SAME-fd dup2 (slave already IS fd 0/1/2, which happens when the
     // host started with standard descriptors closed) is a no-op that
     // leaves the CLOEXEC flag set, so the child's stdio would vanish at
-    // execve. Relocating to a high fd (F_DUPFD_CLOEXEC) guarantees the
-    // dup2 targets are distinct and their CLOEXEC gets cleared.
-    if (slave < 3) {
-        const high = c.fcntl(slave, f_dupfd_cloexec, @as(c_int, 3));
-        if (high < 0) {
-            _ = c.close(slave);
-            _ = c.close(master);
-            return error.PtyOpenFailed;
-        }
-        _ = c.close(slave);
-        slave = high;
-    }
+    // execve. Relocating to a high fd guarantees the dup2 targets are
+    // distinct and their CLOEXEC gets cleared.
+    slave = relocateAboveStdio(slave) orelse {
+        _ = c.close(master);
+        return error.PtyOpenFailed;
+    };
     // Push the initial window size onto the slave (the child's terminal)
     // before the fork so the child's very first TIOCGWINSZ sees the
     // requested grid. `openpty` applied its `winp` to the slave; match
@@ -312,11 +306,32 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // delay that EOF), and the read end must not leak either. The
     // exec-status poll's timeout is the net for Darwin's residual
     // sub-syscall window.
-    const exec_pipe = makePipe(false) catch {
+    const raw_pipe = makePipe(false) catch {
         _ = c.close(master);
         _ = c.close(slave);
         return error.PtyOpenFailed;
     };
+    // The write end must also clear the standard descriptors: `login_tty`
+    // dup2's the slave onto 0/1/2 in the child, and if the write end sat
+    // on fd 1 or 2 that dup2 would clobber it — the child could then
+    // never report an exec failure, so a missing-interpreter exec would
+    // masquerade as a normal exit. (This only bites when the host began
+    // with standard descriptors closed; the relocation is a no-op
+    // otherwise. `relocateAboveStdio` closes the original on both
+    // success and failure.)
+    const exec_read = relocateAboveStdio(raw_pipe[0]) orelse {
+        _ = c.close(master);
+        _ = c.close(slave);
+        _ = c.close(raw_pipe[1]);
+        return error.PtyOpenFailed;
+    };
+    const exec_write = relocateAboveStdio(raw_pipe[1]) orelse {
+        _ = c.close(master);
+        _ = c.close(slave);
+        _ = c.close(exec_read);
+        return error.PtyOpenFailed;
+    };
+    const exec_pipe = [2]c_int{ exec_read, exec_write };
 
     const pid = c.fork();
     if (pid < 0) {
@@ -371,6 +386,21 @@ fn setCloexec(fd: c_int) bool {
     const flags = c.fcntl(fd, f_getfd, @as(c_int, 0));
     if (flags < 0) return false;
     return c.fcntl(fd, f_setfd, flags | fd_cloexec) >= 0;
+}
+
+/// Ensure `fd` is above the standard descriptors (>= 3), close-on-exec.
+/// A descriptor already at 3+ is returned unchanged; a low one is
+/// duplicated to a high, close-on-exec fd and the original is closed.
+/// Returns null on failure, having closed the original either way, so
+/// the caller never double-closes it. This keeps `login_tty`'s dup2
+/// onto 0/1/2 from being a same-fd no-op that would strand the
+/// close-on-exec flag on a descriptor the child must keep.
+fn relocateAboveStdio(fd: c_int) ?c_int {
+    if (fd >= 3) return fd;
+    const high = c.fcntl(fd, f_dupfd_cloexec, @as(c_int, 3));
+    _ = c.close(fd);
+    if (high < 0) return null;
+    return high;
 }
 
 /// Resolve exec status from the self-pipe read end without ever

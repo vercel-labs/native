@@ -362,6 +362,88 @@ test "typing reaches the pty before the first output batch (empty-prompt shell)"
     try testing.expectEqualStrings("whoami", app_state.effects.ptyWrittenBytes(1));
 }
 
+fn startFocusedTerminal(gpa: std.mem.Allocator, harness: anytype) !*TerminalApp {
+    harness.null_platform.gpu_surfaces = true;
+    const session = try createSession(80, 24);
+    const app_state = try gpa.create(TerminalApp);
+    app_state.* = TerminalApp.init(std.heap.page_allocator, .{ .session = session }, app.appOptions());
+    app_state.effects.executor = .fake;
+    const app_iface = app_state.app();
+    try harness.start(app_iface);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_frame = .{
+        .label = "terminal-canvas",
+        .size = geometry.SizeF.init(980, 640),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .frame_requested);
+    // Focus the surface with a click.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .pointer_down,
+        .x = 200,
+        .y = 200,
+    } });
+    return app_state;
+}
+
+test "IME: a preedit is provisional; only the commit reaches the pty" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Compose Japanese: the preedit must NOT reach the pty (provisional).
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b", // か
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+
+    // The host commits the marked text UNCHANGED — an empty commit; the
+    // composed bytes come from the buffered preedit and reach the pty.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
+}
+
+test "restart during starting is a no-op - the original session is not duplicated" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Still .starting (no output yet), one live pty. Cmd+R must not
+    // respawn onto the occupied key.
+    try testing.expectEqual(app.Phase.starting, app_state.model.phase);
+    try testing.expectEqual(@as(usize, 1), app_state.effects.pendingPtyCount());
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "r",
+        .modifiers = .{ .primary = true },
+    } });
+    try testing.expectEqual(app.Phase.starting, app_state.model.phase);
+    try testing.expectEqual(@as(usize, 1), app_state.effects.pendingPtyCount());
+}
+
 test "a recorded terminal session replays byte-identical offline - no shell present" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

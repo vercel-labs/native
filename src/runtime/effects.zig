@@ -4857,6 +4857,39 @@ pub fn Effects(comptime Msg: type) type {
                 for (&self.channel_slots) |*slot| {
                     if (slot.state == .open and slot.shared != null) self.closeChannel(slot.key);
                 }
+                // Running ptys arm the same producer-wake seam and hit
+                // the same dead end: their io thread could never wake
+                // the host. Wind each down — kill the child and wait
+                // (bounded) for the io thread to stage its exit — so the
+                // exit is pending for the catch-up sweep below to
+                // deliver, instead of stranding forever. (Reachable only
+                // when a pty was spawned before `bindServices`, which
+                // the standard startup order never does; contained here
+                // regardless.)
+                if (comptime pty_transport.supported) {
+                    for (&self.pty_slots) |*pty_slot| {
+                        if (!(pty_slot.state == .running and !pty_slot.fake)) continue;
+                        const shared = pty_slot.shared orelse continue;
+                        shared.mutex.lock();
+                        shared.shutdown = true;
+                        shared.kill_requested = true;
+                        if (!(shared.reaping or shared.exit_staged or shared.io_done)) {
+                            if (pty_slot.transport) |transport| transport.kill(false);
+                        }
+                        shared.mutex.unlock();
+                        pty_transport.nudge(pty_slot.wake_pipe[1]);
+                        const start_ns = runtime_clock.monotonicNanoseconds();
+                        while (true) {
+                            shared.mutex.lock();
+                            const done = shared.io_done;
+                            shared.mutex.unlock();
+                            if (done) break;
+                            const elapsed_ms = (runtime_clock.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+                            if (elapsed_ms >= self.spawn_join_deadline_ms) break;
+                            std.atomic.spinLoopHint();
+                        }
+                    }
+                }
             }
             // Sweep unconditionally, snapshot or no snapshot: work
             // staged BEFORE this bind could never reach the host

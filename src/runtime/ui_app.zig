@@ -5123,6 +5123,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (keyboard_event.keyboard.phase == .text_input) {
                 const text_map = self.options.on_text orelse return;
+                // COMMITTED text only. An IME preedit (`set_composition`)
+                // or a cancel is provisional and must never reach a
+                // consumer with no editor state (a terminal) — otherwise
+                // a composition-in-progress routed through a focused
+                // non-text widget would type bytes the user has not
+                // committed and cannot retract. `insert_text` is the
+                // committed insertion (a plain text_input, or the
+                // resolved commit the host delivers as text); every
+                // other edit kind is skipped here.
+                const edit = keyboard_event.keyboard.textEditEvent() orelse return;
+                if (edit != .insert_text) return;
                 if (text_map(keyboard_event.keyboard)) |msg| {
                     try self.dispatch(runtime, keyboard_event.window_id, msg);
                 }

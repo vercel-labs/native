@@ -329,6 +329,17 @@ pub const Runtime = struct {
     /// provenance table exists (builder-only apps, release engines).
     automation_provenance_published: bool = false,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    /// The in-flight IME preedit for the TARGETLESS text path (an app
+    /// consuming committed text with no focused text widget — a terminal
+    /// grid): updated by `ime_set_composition`, delivered as committed
+    /// text on `ime_commit_composition` (the host emits an EMPTY commit
+    /// when the marked text is committed unchanged, so the composed
+    /// bytes live only here), cleared on cancel or a direct text_input.
+    /// Bounded; an over-long preedit truncates rather than growing.
+    /// Focused text widgets never use this — their editor applies the
+    /// composition directly.
+    targetless_ime_preedit: [256]u8 = undefined,
+    targetless_ime_preedit_len: usize = 0,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.

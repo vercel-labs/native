@@ -177,7 +177,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             model.chrome_leading = chrome.insets.left;
         },
         .restart => {
-            if (model.phase == .live) return;
+            // Restart ONLY a genuinely finished session. During
+            // `.starting` (spawned, no output yet) or `.live` the pty
+            // still holds the key, so respawning would collide on the
+            // same key — a rejected exit that strands the running
+            // original with no input.
+            if (model.phase != .ended and model.phase != .failed) return;
             spawnShell(model, fx);
         },
     }
@@ -235,7 +240,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
         copySelection(model, fx);
         return;
     }
-    if (primary and keyIs(event.key, "r") and model.phase != .live) {
+    if (primary and keyIs(event.key, "r") and (model.phase == .ended or model.phase == .failed)) {
         update(model, .restart, fx);
         return;
     }

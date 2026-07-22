@@ -448,27 +448,62 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             if (widget_text_input_event) |text_input_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
-            } else if (input_event.kind == .text_input and !widget_surface_dismissed) {
-                // No focused text widget consumed this committed text:
-                // it still reaches the app, as a TARGET-LESS text
-                // event — the key_down fallback's typing twin. This is
-                // the seam for apps that consume typing without a
-                // text-entry widget focused (a terminal grid): the
-                // ui-app layer maps it through `Options.on_text`, and
-                // the committed UTF-8 (IME results included) arrives
-                // verbatim — key names never reconstruct text.
-                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
-                        try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
-                            .window_id = input_event.window_id,
-                            .view_label = self.views[index].label,
-                            .keyboard = .{
-                                .phase = .text_input,
-                                .key = input_event.key,
-                                .text = input_event.text,
-                                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
-                            },
-                        } });
+            } else if (!widget_surface_dismissed) {
+                // No focused text widget consumed this text: committed
+                // text still reaches the app as a TARGET-LESS text event
+                // — the key_down fallback's typing twin, for apps that
+                // consume typing with no text-entry widget focused (a
+                // terminal grid). IME is handled here too, since no
+                // focused editor tracks the composition: a preedit
+                // (`ime_set_composition`) is buffered but NOT delivered
+                // (provisional), and the commit delivers the composed
+                // text — the host emits an EMPTY commit when the marked
+                // text is committed unchanged, so the bytes come from
+                // the buffered preedit. Only committed UTF-8 ever
+                // reaches `on_text`; key names never reconstruct text.
+                const committed: ?[]const u8 = switch (input_event.kind) {
+                    .text_input => blk: {
+                        self.targetless_ime_preedit_len = 0;
+                        break :blk if (input_event.text.len > 0) input_event.text else null;
+                    },
+                    .ime_set_composition => blk: {
+                        const len = @min(input_event.text.len, self.targetless_ime_preedit.len);
+                        @memcpy(self.targetless_ime_preedit[0..len], input_event.text[0..len]);
+                        self.targetless_ime_preedit_len = len;
+                        break :blk null; // preedit is provisional
+                    },
+                    .ime_commit_composition => blk: {
+                        const text = if (input_event.text.len > 0)
+                            input_event.text
+                        else
+                            self.targetless_ime_preedit[0..self.targetless_ime_preedit_len];
+                        self.targetless_ime_preedit_len = 0;
+                        break :blk if (text.len > 0) text else null;
+                    },
+                    .ime_cancel_composition => blk: {
+                        self.targetless_ime_preedit_len = 0;
+                        break :blk null;
+                    },
+                    else => null,
+                };
+                if (committed) |text| {
+                    if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                        if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
+                            try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
+                                .window_id = input_event.window_id,
+                                .view_label = self.views[index].label,
+                                .keyboard = .{
+                                    .phase = .text_input,
+                                    .key = input_event.key,
+                                    .text = text,
+                                    // Mark it committed so the ui-app
+                                    // `on_text` gate (insert_text only)
+                                    // delivers it.
+                                    .edit = .{ .insert_text = text },
+                                    .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                                },
+                            } });
+                        }
                     }
                 }
             }
