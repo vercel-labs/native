@@ -117,12 +117,18 @@ pub const Pty = struct {
 
     /// Reap the child if it has exited. Returns null while it is still
     /// running, or the decoded exit on reap. Non-blocking (WNOHANG).
+    /// `ECHILD` — the child was already reaped elsewhere (an embedder
+    /// with `SA_NOCLDWAIT`, `SIG_IGN` on SIGCHLD, or its own reaper) —
+    /// is reported as a gone child (sentinel exit), NEVER as "still
+    /// running": a reaped pid may be reused, so treating it as alive
+    /// would let `reapEnding` signal an unrelated process.
     pub fn reap(self: Pty) ?Exit {
         if (!supported) return null;
         var status: c_int = 0;
         const r = c.waitpid(self.pid, &status, wnohang);
-        if (r != self.pid) return null;
-        return decodeStatus(status);
+        if (r == self.pid) return decodeStatus(status);
+        if (r < 0 and errnoValue() == echild) return .{ .code = -1, .signal = 0 };
+        return null;
     }
 
     /// Reap the child, blocking until it exits. Used at teardown after a
@@ -263,10 +269,27 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         _ = c.close(master);
         return error.PtyOpenFailed;
     };
-    const slave = c.open(slave_name, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
+    var slave = c.open(slave_name, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
     if (slave < 0) {
         _ = c.close(master);
         return error.PtyOpenFailed;
+    }
+    // Keep the slave off the standard descriptors: `login_tty` dup2's it
+    // onto 0/1/2, and dup2 CLEARS close-on-exec on its copies — but a
+    // SAME-fd dup2 (slave already IS fd 0/1/2, which happens when the
+    // host started with standard descriptors closed) is a no-op that
+    // leaves the CLOEXEC flag set, so the child's stdio would vanish at
+    // execve. Relocating to a high fd (F_DUPFD_CLOEXEC) guarantees the
+    // dup2 targets are distinct and their CLOEXEC gets cleared.
+    if (slave < 3) {
+        const high = c.fcntl(slave, f_dupfd_cloexec, @as(c_int, 3));
+        if (high < 0) {
+            _ = c.close(slave);
+            _ = c.close(master);
+            return error.PtyOpenFailed;
+        }
+        _ = c.close(slave);
+        slave = high;
     }
     // Push the initial window size onto the slave (the child's terminal)
     // before the fork so the child's very first TIOCGWINSZ sees the
@@ -510,6 +533,13 @@ const sigkill: c_int = 9;
 const sighup: c_int = 1;
 const eintr: c_int = 4;
 const eio: c_int = 5;
+const echild: c_int = 10;
+// F_DUPFD_CLOEXEC differs by platform.
+const f_dupfd_cloexec: c_int = switch (builtin.os.tag) {
+    .linux => 1030,
+    .macos => 67,
+    else => 0,
+};
 
 fn errnoValue() c_int {
     return switch (builtin.os.tag) {

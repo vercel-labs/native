@@ -318,6 +318,50 @@ fn recordTerminalSession(
     return result;
 }
 
+test "typing reaches the pty before the first output batch (empty-prompt shell)" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+
+    const session = try createSession(80, 24);
+    defer session.destroy();
+    const app_state = try gpa.create(TerminalApp);
+    defer gpa.destroy(app_state);
+    app_state.* = TerminalApp.init(std.heap.page_allocator, .{ .session = session }, app.appOptions());
+    defer app_state.deinit();
+    app_state.effects.executor = .fake;
+    const app_iface = app_state.app();
+
+    try harness.start(app_iface);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_frame = .{
+        .label = "terminal-canvas",
+        .size = geometry.SizeF.init(980, 640),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .frame_requested);
+
+    // The shell spawned (init_fx) but produced NO output — phase is
+    // still .starting, never .live. Typing must still reach the pty.
+    try testing.expectEqual(app.Phase.starting, app_state.model.phase);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .pointer_down,
+        .x = 200,
+        .y = 200,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "whoami",
+    } });
+    try testing.expectEqualStrings("whoami", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "a recorded terminal session replays byte-identical offline - no shell present" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

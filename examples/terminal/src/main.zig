@@ -94,6 +94,16 @@ pub const Model = struct {
     dropped_writes: u32 = 0,
     /// The window's traffic-light inset so the header clears it.
     chrome_leading: f32 = 0,
+
+    /// Input flows to the pty from the moment it is spawned — not only
+    /// after the first output batch flips the phase to `.live`. A shell
+    /// with an empty prompt and no startup banner never produces that
+    /// first batch, and gating input on `.live` would strand it waiting
+    /// for keystrokes it discards. Only an ended or failed session
+    /// refuses input.
+    pub fn acceptsInput(model: *const Model) bool {
+        return model.phase == .starting or model.phase == .live;
+    }
 };
 
 pub const Msg = union(enum) {
@@ -144,7 +154,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
         },
         .key => |event| handleKey(model, fx, event),
         .text => |event| {
-            if (model.selecting or model.phase != .live) return;
+            if (model.selecting or !model.acceptsInput()) return;
             if (event.text.len == 0) return;
             model.session.scrollToBottom();
             fx.ptyWrite(shell_key, event.text);
@@ -268,7 +278,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
         return;
     }
 
-    if (model.phase != .live) return;
+    if (!model.acceptsInput()) return;
 
     // Everything else is terminal input: specials and chords encode
     // through the emulator (application cursor-key mode, kitty

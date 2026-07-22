@@ -6360,6 +6360,13 @@ pub fn Effects(comptime Msg: type) type {
             shared.mutex.lock();
             const accepted = accepted: {
                 if (!shared.open or shared.generation != slot.generation) break :accepted false;
+                // The reaper has finished (exit staged): there is no io
+                // thread left to send bytes, and the exit's accounting
+                // is already finalized — a late write must NOT queue
+                // bytes nobody will flush, nor mutate the staged exit's
+                // dropped_writes. Silently drop it (a write after the
+                // child is gone could never have landed anyway).
+                if (shared.exit_staged or shared.io_done) break :accepted false;
                 if (bytes.len > max_effect_pty_write_bytes or
                     shared.out_len + bytes.len > max_effect_pty_outbound_bytes or
                     shared.out_write_count == max_effect_pty_write_records)
