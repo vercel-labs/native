@@ -249,6 +249,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .video and videoScalarsDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} carries a millisecond or dimension value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -403,6 +410,21 @@ fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
 fn channelRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
     if (record.exit_reason == .rejected) return record.channel_kind != .rejected;
     return record.exit_reason != .exited;
+}
+
+/// A structurally valid u64 in a video record is not automatically an
+/// HONEST one: no recorder ever writes a position, duration, or
+/// dimension at or past 2^53 (285,000 years of milliseconds; dimensions
+/// orders of magnitude past every texture budget), and the TS delivery
+/// tier carries these scalars through the subset's exact-integer number
+/// window — feeding a larger value would trap in the bridge's numeric
+/// widening instead of refusing the hostile file at the gate.
+fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
+    const max_exact: u64 = 1 << 53;
+    return record.video_position_ms >= max_exact or
+        record.video_duration_ms >= max_exact or
+        record.video_width >= max_exact or
+        record.video_height >= max_exact;
 }
 
 fn imageDimsDamaged(record: journal.EffectResultRecord) bool {

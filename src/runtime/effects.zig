@@ -6503,21 +6503,46 @@ pub fn Effects(comptime Msg: type) type {
                             if (entry.resolve) {
                                 // Fed events move the live channel's
                                 // mirrors at delivery exactly like a
-                                // platform event — when the channel
-                                // still answers. Under replay the
-                                // journaled platform `.video` event may
-                                // ALREADY have applied this terminal
-                                // (a `.failed` resets the channel), so
-                                // an unresolvable fed event delivers
-                                // its journaled values verbatim: they
-                                // ARE the record-time resolved event,
-                                // and the handler was captured at feed
-                                // time (`PendingVideo`), so the Msg the
-                                // recording delivered is never dropped.
-                                if (self.applyVideoEvent(event)) |resolved| event = resolved;
+                                // platform event — but only while the
+                                // live channel is still THE playback
+                                // the feed captured. A stale fed event
+                                // (its playback was replaced before
+                                // the drain, or a replayed platform
+                                // `.failed` already applied this
+                                // terminal and reset the channel)
+                                // delivers its staged values verbatim
+                                // — they ARE the resolved event from
+                                // stage time — through the handler
+                                // captured at feed time
+                                // (`PendingVideo`), and leaves the
+                                // live channel alone: applying a
+                                // replaced stream's terminal would
+                                // reset the replacement.
+                                if (self.video.active and self.video.key == entry.event.key) {
+                                    if (self.applyVideoEvent(event)) |resolved| event = resolved;
+                                }
+                            } else {
+                                // Loop-side terminals journal BEFORE
+                                // the handler gate — the image arm's
+                                // rule: a handler-less declarative
+                                // playback's synchronous `.failed` is
+                                // executor truth, and its record is
+                                // what replays the channel reset. Only
+                                // the Msg depends on the handler.
+                                self.journalNote(.{
+                                    .kind = .video,
+                                    .key = event.key,
+                                    .video_kind = event.kind,
+                                    .video_position_ms = event.position_ms,
+                                    .video_duration_ms = event.duration_ms,
+                                    .video_playing = event.playing,
+                                    .video_buffering = event.buffering,
+                                    .video_width = event.width,
+                                    .video_height = event.height,
+                                });
                             }
                             const event_fn = video_fn orelse continue;
-                            self.journalNote(.{
+                            if (entry.resolve) self.journalNote(.{
                                 .kind = .video,
                                 .key = event.key,
                                 .video_kind = event.kind,
@@ -8211,9 +8236,13 @@ pub fn Effects(comptime Msg: type) type {
         /// Stage a video event Msg produced on the loop thread
         /// (rejections and synchronous failures) for the next drain —
         /// through the non-lossy video stage, never the ring: each is
-        /// its load call's only terminal (`PendingVideo`).
+        /// its load call's only terminal (`PendingVideo`). Handler-less
+        /// terminals stage too (the image arm's rule): a declarative
+        /// playback binds no Msg, but its synchronous `.failed` must
+        /// still journal — the record is what replays the channel
+        /// reset — and the staged delivery's wake is what re-renders
+        /// the house chrome from the reset mirrors.
         fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn) void {
-            if (video_fn == null) return;
             self.stagePendingVideo(.{
                 .seq = self.nextPendingSeq(),
                 .event = event,

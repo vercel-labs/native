@@ -18,6 +18,7 @@ const effects_mod = @import("effects.zig");
 const platform = @import("../platform/root.zig");
 const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
+const journal = @import("session_journal.zig");
 
 const canvas_label = "video-canvas";
 
@@ -1216,4 +1217,100 @@ test "a recorded mid-playback failure replays its Msg and fingerprints identical
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
+}
+
+/// Overwrite the `video_position_ms` field of the first journaled
+/// video effect record, in place. Per `journal.encodeEffect` the video
+/// fields are the LAST 35 bytes of the effect payload — video_kind
+/// (1), position (8), duration (8), playing (1), buffering (1), width
+/// (8), height (8) — so the position lives 34 bytes from the end.
+/// Framing and every other field stay valid: only replay's damage gate
+/// can catch the value. Returns whether a record was damaged.
+fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .video) continue;
+        std.mem.writeInt(u64, payload[payload.len - 34 ..][0..8], position, .little);
+        return true;
+    }
+    return false;
+}
+
+test "a video record claiming a past-2^53 scalar refuses replay as damage" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record a real playback session (the byte-identical test's shape,
+    // shortened), then hand-damage the first video record's position
+    // to a value no recorder ever writes.
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(500).?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+    }
+
+    try std.testing.expect(patchFirstVideoPosition(buffer.bytes[0..buffer.len], @as(u64, 1) << 53));
+
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.video_playback = false;
+    harness.runtime.options.platform = harness.null_platform.platform();
+    const app_state = try gpa.create(VideoApp);
+    defer gpa.destroy(app_state);
+    app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-video",
+        .scene = video_scene,
+        .canvas_label = canvas_label,
+        .update_fx = videoUpdate,
+        .view = videoView,
+        .on_command = videoCommand,
+    });
+    defer app_state.deinit();
+
+    const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = false,
+        .require_same_platform = false,
+    });
+    try std.testing.expectError(error.ReplayDamagedRecord, result);
 }
