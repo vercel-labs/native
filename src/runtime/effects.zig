@@ -2198,9 +2198,21 @@ pub fn Effects(comptime Msg: type) type {
             /// Stamped at the parked open's dispatch; no feed has
             /// resolved it yet.
             reserved,
-            /// Resolved: the refusal reclaimed the stamp, or the first
-            /// fed event proved the open was accepted live.
+            /// Resolved as ACCEPTED LIVE: the first fed event was a
+            /// `.data`, so the stamp went unused and the recorded
+            /// stream is still flowing — more `.data` and the one
+            /// `.closed` terminal may follow.
             vacated,
+            /// The open's TERMINAL fed (the refusal reclaimed the
+            /// stamp, or a `.closed` rode the queue): nothing may
+            /// target this occupancy again. The slot itself retires
+            /// when the terminal DELIVERS; until then this state is
+            /// what refuses a damaged journal's post-terminal records
+            /// (`feedChannelEvent` -> `error.ReplayDamagedRecord`)
+            /// instead of letting them enqueue and be silently
+            /// discarded by the delivery generation gate after the
+            /// retire.
+            terminated,
         };
 
         const ChannelSlot = struct {
@@ -4680,12 +4692,15 @@ pub fn Effects(comptime Msg: type) type {
         /// stranded — a permanent busy signal. Live occupancies end
         /// through `closeChannel`, never through the feed seam.
         ///
-        /// One terminal per open: a replay-parked occupancy's
-        /// pending-order reservation (`ParkOrderState`) resolves at
-        /// the FIRST fed terminal and never again — a `.rejected`
-        /// record targeting a park already vacated is journal damage
-        /// (`error.ReplayDamagedRecord`), refused before it could
-        /// append a duplicate terminal to the pending ring.
+        /// One terminal per open, nothing past it: a replay-parked
+        /// occupancy's pending-order reservation (`ParkOrderState`)
+        /// resolves at the FIRST fed terminal and never again — a
+        /// `.rejected` record targeting a park already resolved, or
+        /// ANY record targeting an open whose terminal already fed, is
+        /// journal damage (`error.ReplayDamagedRecord`), refused
+        /// before it could append a duplicate terminal to the pending
+        /// ring or enqueue an event the terminal's retire would
+        /// silently discard.
         pub fn feedChannelEvent(self: *Self, key: u64, kind: EffectChannelEventKind, bytes: []const u8, dropped_pending: u32, dropped_total: u32) error{ EffectNotFound, EffectQueueFull, ChannelLiveFeed, ReplayDamagedRecord }!void {
             const slot_index = blk: {
                 for (&self.channel_slots, 0..) |*slot, index| {
@@ -4705,20 +4720,35 @@ pub fn Effects(comptime Msg: type) type {
             // staged nothing at dispatch), so the reservation vacates
             // and the event rides the queue like every fed result.
             if (slot.park_state != .none) {
+                // Nothing feeds after the open's terminal: between a
+                // terminal's feed and its delivery the slot is still
+                // occupied, so a damaged journal's extra records would
+                // otherwise enqueue here and then be silently discarded
+                // by the delivery generation gate once the terminal
+                // retires the slot — an invalid stream that unverified
+                // replay would pass. One terminal per open, nothing
+                // past it.
+                if (slot.park_state == .terminated) {
+                    if (comptime builtin.os.tag != .freestanding) {
+                        std.debug.print(
+                            "replay refused: channel record for key {d} feeds a .{s} event after the open's terminal already fed - a channel delivers nothing past its terminal (one terminal per open), so the journal is damaged or hand-edited; re-record the session\n",
+                            .{ key, @tagName(kind) },
+                        );
+                    }
+                    return error.ReplayDamagedRecord;
+                }
                 if (kind == .rejected) {
                     // Resolve ONLY while `.reserved`: one open reserves
                     // exactly one pending-order stamp, and the first
                     // fed terminal spends it. A `.rejected` record
-                    // targeting a park already vacated — whether the
-                    // first terminal was this refusal or a `.data`
-                    // that proved the open was accepted live — is a
-                    // SECOND terminal for the same open, which no
-                    // recorder can write (one terminal per open, the
-                    // families' shared discipline). Reusing the stamp
-                    // here would append duplicate entries to the
-                    // one-entry-per-open pending ring until its
-                    // capacity panic; refuse the record as journal
-                    // damage instead.
+                    // targeting a park the stream already proved
+                    // ACCEPTED live (`.vacated` — a `.data` fed first)
+                    // is a terminal the recorded open can never have
+                    // produced (a refused open delivers nothing before
+                    // its refusal); reusing the stamp would append
+                    // duplicate entries to the one-entry-per-open
+                    // pending ring until its capacity panic. Refuse the
+                    // record as journal damage instead.
                     if (slot.park_state != .reserved) {
                         if (comptime builtin.os.tag != .freestanding) {
                             std.debug.print(
@@ -4729,7 +4759,7 @@ pub fn Effects(comptime Msg: type) type {
                         return error.ReplayDamagedRecord;
                     }
                     const park_seq = slot.park_seq;
-                    slot.park_state = .vacated;
+                    slot.park_state = .terminated;
                     self.stagePendingChannel(.{
                         .seq = park_seq,
                         .event = .{
@@ -4745,7 +4775,10 @@ pub fn Effects(comptime Msg: type) type {
                     });
                     return;
                 }
-                slot.park_state = .vacated;
+                // `.data` proves the open was accepted live and keeps
+                // the recorded stream flowing; `.closed` is that
+                // stream's one terminal.
+                slot.park_state = if (kind == .closed) .terminated else .vacated;
             }
             const staged_len = @min(bytes.len, max_effect_channel_bytes);
             var entry: Entry = .{

@@ -385,6 +385,77 @@ test "a second rejection record against one park is journal damage, not a second
     try testing.expect(fx.channelHandle(29) == null);
 }
 
+test "a data record after the open's rejection terminal is journal damage" {
+    // The silent-discard shape: the fed rejection will retire the slot
+    // at DELIVERY, so a `.data` fed before that delivery would enqueue,
+    // outlive the retire, and then be dropped by the delivery
+    // generation gate — an invalid stream that unverified replay would
+    // pass. Refused at the feed instead: nothing feeds past a terminal.
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 31, .on_event = DirectFx.channelMsg(.event) });
+    try fx.feedChannelEvent(31, .rejected, "", 0, 0);
+    try testing.expectError(
+        error.ReplayDamagedRecord,
+        fx.feedChannelEvent(31, .data, "ghost", 0, 0),
+    );
+    // Exactly the one terminal delivers, and it retires the key.
+    const rejected = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.rejected, rejected.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(31) == null);
+}
+
+test "a data record after the fed closed terminal is journal damage" {
+    // The accepted-live stream's twin of the rejection case above: the
+    // `.closed` terminal fed, so nothing may target the open again.
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 32, .on_event = DirectFx.channelMsg(.event) });
+    try fx.feedChannelEvent(32, .data, "recorded", 0, 0);
+    try fx.feedChannelEvent(32, .closed, "", 0, 0);
+    try testing.expectError(
+        error.ReplayDamagedRecord,
+        fx.feedChannelEvent(32, .data, "ghost", 0, 0),
+    );
+    // The recorded stream still delivers verbatim and retires the key.
+    _ = try expectData(&fx, 32, "recorded");
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(32) == null);
+}
+
+test "a rejection record after the stream proved the open accepted is journal damage" {
+    // A refused open delivers nothing before its refusal, so a
+    // `.rejected` fed after a `.data` vacated the park is a terminal
+    // the recorded open can never have produced — and the refusal must
+    // not corrupt the park: the stream's real terminal still lands.
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 33, .on_event = DirectFx.channelMsg(.event) });
+    try fx.feedChannelEvent(33, .data, "recorded", 0, 0);
+    try testing.expectError(
+        error.ReplayDamagedRecord,
+        fx.feedChannelEvent(33, .rejected, "", 0, 0),
+    );
+    try fx.feedChannelEvent(33, .closed, "", 0, 0);
+    _ = try expectData(&fx, 33, "recorded");
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(33) == null);
+}
+
 test "under replay a duplicate open still rejects symmetrically against the parked occupancy" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
