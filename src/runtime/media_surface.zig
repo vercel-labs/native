@@ -291,17 +291,24 @@ pub const MediaSurfaceProducer = struct {
             defer slot.mutex.unlock();
             if (!slot.active or slot.generation != self.generation) return error.MediaSurfaceReleased;
             // Push-boundary damage short-circuit: same bytes as the last
-            // push (adopted or still staged) change nothing downstream —
-            // including the wake below: unchanged pixels never stir an
-            // idle compositor.
-            if (slot.last_push_fingerprint == fingerprint) return;
-            @memcpy(slot.staging[0..byte_len], rgba8);
-            slot.staged = true;
-            slot.staged_width = width;
-            slot.staged_height = height;
-            slot.staged_byte_len = byte_len;
-            slot.staged_fingerprint = fingerprint;
-            slot.last_push_fingerprint = fingerprint;
+            // push change nothing downstream — an ADOPTED frame's repeat
+            // never stirs an idle compositor. But bytes still STAGED are
+            // owed a frame, and the wake that promised one may have been
+            // refused (`requestWake` leaves `pending` clear on refusal
+            // precisely so a retry can land): an identical push then
+            // falls through to the wake below instead of stranding a
+            // static frame unadopted forever.
+            if (slot.last_push_fingerprint == fingerprint) {
+                if (!slot.staged) return;
+            } else {
+                @memcpy(slot.staging[0..byte_len], rgba8);
+                slot.staged = true;
+                slot.staged_width = width;
+                slot.staged_height = height;
+                slot.staged_byte_len = byte_len;
+                slot.staged_fingerprint = fingerprint;
+                slot.last_push_fingerprint = fingerprint;
+            }
         }
         // NEW bytes are staged: make sure a frame is coming to adopt
         // them, even in an idle app whose demand-driven scheduler is
