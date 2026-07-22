@@ -52,6 +52,23 @@ pub const PendingCanvasWidgetContextMenu = struct {
     /// against it; the token above no longer doubles as its id).
     target_id: canvas.ObjectId = 0,
     kind: Kind = .app,
+    /// The presented view's label, copied into the request so a
+    /// superseded menu's dismissal notice can still name its canvas —
+    /// the view may be gone (window closed) by the time the request
+    /// resolves, and per-canvas menu state in a raw app needs the
+    /// correlation.
+    view_label_storage: [platform.max_view_label_bytes]u8 = undefined,
+    view_label_len: usize = 0,
+
+    pub fn viewLabel(self: *const PendingCanvasWidgetContextMenu) []const u8 {
+        return self.view_label_storage[0..self.view_label_len];
+    }
+
+    pub fn setViewLabel(self: *PendingCanvasWidgetContextMenu, label: []const u8) void {
+        const len = @min(label.len, self.view_label_storage.len);
+        @memcpy(self.view_label_storage[0..len], label[0..len]);
+        self.view_label_len = len;
+    }
 
     pub const Kind = enum {
         app,
@@ -195,22 +212,24 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
-        /// A NEW presentation or dispatch is replacing the pending
-        /// request. An app menu's pending has state beyond the runtime's
-        /// gate — UiApp holds a token-keyed snapshot and a pinned build
-        /// generation for it — and the superseded token can never arrive
-        /// (the gate would swallow it), so tell the app the old menu is
-        /// gone. This runs for EVERY superseding kind: app over app,
-        /// a default edit/copy menu over an app menu, and the automation
-        /// verb's direct dispatch.
-        pub fn releaseSupersededPending(self: *Runtime, app: runtime_api.App(Runtime)) anyerror!void {
-            const pending = self.canvas_widget_context_menu_pending orelse return;
+        /// A NEW presentation or dispatch replaced the pending request.
+        /// An app menu's pending has state beyond the runtime's gate —
+        /// UiApp holds a token-keyed snapshot and a pinned build
+        /// generation for it, and a raw app may track per-canvas menu
+        /// state — and the superseded token can never arrive (the gate
+        /// would swallow it), so tell the app the old menu is gone,
+        /// named by the view it was presented on. This runs for EVERY
+        /// superseding kind: app over app, a default edit/copy menu
+        /// over an app menu, and the automation verb's direct dispatch.
+        /// Call it AFTER committing the replacement pending: the notice
+        /// dispatch is fallible, and the runtime's bookkeeping must
+        /// already match the menu the platform accepted.
+        pub fn notifySupersededPending(self: *Runtime, app: runtime_api.App(Runtime), superseded: ?PendingCanvasWidgetContextMenu) anyerror!void {
+            const pending = superseded orelse return;
             if (pending.kind != .app) return;
             try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
                 .window_id = pending.window_id,
-                // The pending request stores no view label; the app's
-                // handler resolves by token alone.
-                .view_label = "",
+                .view_label = pending.viewLabel(),
                 .token = pending.token,
             } });
         }
@@ -222,6 +241,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
             var pending = request;
             pending.token = nextContextMenuToken(self);
+            pending.setViewLabel(self.views[view_index].label);
             self.options.platform.services.showContextMenu(.{
                 .window_id = pending.window_id,
                 .view_label = self.views[view_index].label,
@@ -236,8 +256,12 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 // pending (and its popover, if any) is still the truth.
                 return false;
             };
-            try releaseSupersededPending(self, app);
+            // The platform accepted: commit the replacement BEFORE the
+            // fallible superseded-notice dispatch, so the runtime's
+            // expected token always matches the menu on the glass.
+            const superseded = self.canvas_widget_context_menu_pending;
             self.canvas_widget_context_menu_pending = pending;
+            try notifySupersededPending(self, app, superseded);
             return true;
         }
 

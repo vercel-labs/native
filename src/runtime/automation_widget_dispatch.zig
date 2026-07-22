@@ -211,16 +211,21 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (!declared.enabled) return error.ContextMenuItemDisabled;
 
             // This direct dispatch supersedes any pending presentation:
-            // release the app-side snapshot/pin armed under its token
-            // before minting the replacement.
-            try runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).releaseSupersededPending(self, app);
+            // the replacement request commits first (bookkeeping must
+            // match the state the events describe), then the superseded
+            // app menu's snapshot/pin release through the fallible
+            // dismissed notice.
+            const superseded = self.canvas_widget_context_menu_pending;
             const token = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).nextContextMenuToken(self);
-            self.canvas_widget_context_menu_pending = .{
+            var pending: runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = .{
                 .window_id = self.views[view_index].window_id,
                 .token = token,
                 .target_id = widget.id,
                 .kind = .app,
             };
+            pending.setViewLabel(self.views[view_index].label);
+            self.canvas_widget_context_menu_pending = pending;
+            try runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
             try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
                 .window_id = self.views[view_index].window_id,
                 .view_label = self.views[view_index].label,

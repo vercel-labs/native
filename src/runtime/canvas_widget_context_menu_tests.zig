@@ -29,6 +29,10 @@ const MenuTestApp = struct {
     last_edit_insert: [64]u8 = undefined,
     last_edit_insert_len: usize = 0,
     saw_truncated: bool = false,
+    dismissed_count: u32 = 0,
+    last_dismissed_token: u64 = 0,
+    last_dismissed_label: [32]u8 = undefined,
+    last_dismissed_label_len: usize = 0,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -49,6 +53,13 @@ const MenuTestApp = struct {
                 self.request_count += 1;
                 self.last_request_target = request_event.target_id;
                 self.last_request_point = request_event.point;
+            },
+            .canvas_widget_context_menu_dismissed => |dismissed_event| {
+                self.dismissed_count += 1;
+                self.last_dismissed_token = dismissed_event.token;
+                const len = @min(dismissed_event.view_label.len, self.last_dismissed_label.len);
+                @memcpy(self.last_dismissed_label[0..len], dismissed_event.view_label[0..len]);
+                self.last_dismissed_label_len = len;
             },
             .canvas_widget_keyboard => |keyboard_event| {
                 if (keyboard_event.keyboard.edit_truncated) self.saw_truncated = true;
@@ -155,6 +166,54 @@ test "right click over a widget with a declared menu presents it natively and di
     try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
     try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 0));
     try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+}
+
+test "a superseding presentation names the dismissed menu's view and keeps the successor selectable" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+    const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+    const first_row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "First",
+        .context_menu = &first_items,
+    };
+    const second_row = canvas.Widget{
+        .id = 3,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 60, 200, 40),
+        .text = "Second",
+        .context_menu = &second_items,
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // The second presentation supersedes the first: the app hears one
+    // dismissed notice carrying the OLD token and the VIEW the dismissed
+    // menu was presented on (a raw app tracking per-canvas menu state
+    // needs the correlation — the notice must never publish an empty
+    // label).
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+    const first_token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 70));
+    const second_token = harness.null_platform.context_menu_token;
+    try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+    try std.testing.expectEqual(first_token, app_state.last_dismissed_token);
+    try std.testing.expectEqualStrings("canvas", app_state.last_dismissed_label[0..app_state.last_dismissed_label_len]);
+
+    // The replacement pending was committed BEFORE the (fallible)
+    // dismissed notice dispatched, so the successor menu on the glass
+    // resolves normally.
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
 }
 
 test "a stale dismissal from a superseded menu never clears the successor's pending request" {
