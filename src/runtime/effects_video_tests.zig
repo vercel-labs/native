@@ -877,6 +877,14 @@ fn declUpdate(model: *DeclModel, msg: DeclMsg, fx: *DeclEffects) void {
     }
 }
 
+/// `declView` without the video element: the recording twin for the
+/// zero-record divergence pin below — a session recorded with this
+/// view journals NO effect records at all.
+fn declViewNone(ui: *DeclApp.Ui, model: *const DeclModel) DeclApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .padding = 8 }, .{ui.text(.{}, "no video")});
+}
+
 /// A view declaring the playback through `ui.video` (what `<video
 /// src=... controls/>` lowers to in both markup engines): presence IS
 /// playback, and the transport chrome is runtime-consumed.
@@ -2288,6 +2296,73 @@ test "a load burst past the resolution queue's inline capacity replays whole" {
         try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, app_state.effects.videoSnapshot().source);
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "a zero-record recording still fails replay when the timeline loads video" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record a session that journals NO effect records at all: no
+    // video element anywhere, just frames.
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video-decl", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+
+        const app_state = try gpa.create(DeclApp);
+        defer gpa.destroy(app_state);
+        app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video-decl",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = declUpdate,
+            .view = declViewNone,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+    }
+
+    // Replay into a build whose view DOES declare a video: the
+    // reconciler issues a load the recording never journaled. Zero
+    // records were fed, so only the unconditional end-of-journal
+    // consistency check can catch the divergence — and it must.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(DeclApp);
+        defer gpa.destroy(app_state);
+        app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video-decl",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = declUpdate,
+            .view = declView,
+        });
+        defer app_state.deinit();
+
+        const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = false,
+            .require_same_platform = false,
+        });
+        try std.testing.expectError(error.ReplayEffectDivergence, result);
     }
 }
 

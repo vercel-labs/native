@@ -350,22 +350,23 @@ pub fn replaySession(
         }
     }
     // End-of-journal consistency: every fed-but-queued record must have
-    // been consumed by the load it named (`Effects.finishReplay`). A
-    // structurally valid journal whose records the replayed timeline
-    // never claimed is divergence, not success. Apps without a replay
-    // hook fed nothing, so there is nothing to check.
-    if (report.effects_fed > 0) {
-        app.replayControl(.finish) catch |err| switch (err) {
-            error.ReplayUnsupported => {},
-            else => {
-                std.debug.print(
-                    "replay diverged at the journal's end: {s} - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
-                    .{@errorName(err)},
-                );
-                return error.ReplayEffectDivergence;
-            },
-        };
-    }
+    // been consumed by the load it named, and nothing the replayed
+    // timeline did may have latched a divergence
+    // (`Effects.finishReplay`). Unconditional — a recording with ZERO
+    // effect records still fails here when the replayed updates issued
+    // a load the recording never journaled. Apps without a replay hook
+    // have no armed channel to check and answer ReplayUnsupported,
+    // which is fine: nothing was fed and nothing could have latched.
+    app.replayControl(.finish) catch |err| switch (err) {
+        error.ReplayUnsupported => {},
+        else => {
+            std.debug.print(
+                "replay diverged at the journal's end: {s} - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
+                .{@errorName(err)},
+            );
+            return error.ReplayEffectDivergence;
+        },
+    };
     return report;
 }
 
