@@ -247,7 +247,10 @@ fn canvasDirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
     var edge = boundary / device;
     while (@as(f64, edge) * d >= b) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
     while (@as(f64, edge) * d < b) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
-    return edge;
+    // The walk can settle on negative zero (a boundary of zero steps
+    // below and back); canonicalize so serialized rects never carry a
+    // signed zero.
+    return if (edge == 0) 0 else edge;
 }
 
 /// Largest span whose RECONSTRUCTED max edge (`min_edge + span`, the
@@ -278,7 +281,7 @@ fn canvasDirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32
         if (next == span) return 0;
         span = next;
     }
-    return @max(0, span);
+    return if (span <= 0) 0 else span;
 }
 
 fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
