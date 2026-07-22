@@ -1028,20 +1028,13 @@ pub fn TsCoreHost(comptime core: type) type {
                         const video_path = takeLongBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         const flags = takeByte(cmd, &at);
-                        // One player is the whole surface: a new load
-                        // re-keys and re-routes the single entry in place,
-                        // exactly as the engine replaces its channel.
-                        video_entry.used = true;
-                        video_entry.key_len = key.len;
-                        @memcpy(video_entry.key[0..key.len], key);
-                        video_entry.event_tag = event_tag;
-                        fx.loadVideo(.{
+                        const options: Fx.LoadVideoOptions = .{
                             .key = video_key_base,
                             // The wire carries the app's number; a surface
                             // that is not an exactly-carried positive
                             // integer (0, negatives, fractions, 2^53 and
                             // past — the image id bound) reaches the engine
-                            // as 0, which loadVideo refuses with one
+                            // as 0, which the validation refuses with one
                             // `.rejected` event — never silent.
                             .surface = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface)
                                 @intFromFloat(surface)
@@ -1053,7 +1046,32 @@ pub fn TsCoreHost(comptime core: type) type {
                             .loop = (flags & 0x02) != 0,
                             .muted = (flags & 0x04) != 0,
                             .on_event = videoEventMsg,
-                        });
+                        };
+                        // A load the engine's own deterministic gates
+                        // would refuse must not commit the routing
+                        // entry: the engine keeps the CURRENT playback
+                        // on a rejected load, so re-keying first would
+                        // route the surviving stream's events and verbs
+                        // through the refused load's key and arm. Stage
+                        // the rejection to the refused arm directly
+                        // (the channel-admission precedent) and leave
+                        // the entry — and the engine — untouched.
+                        if (Fx.videoLoadRejected(options)) {
+                            fx.stageLoopMsg(msgFromTagVideo(event_tag, .{
+                                .key = video_key_base,
+                                .kind = .rejected,
+                            }));
+                        } else {
+                            // One player is the whole surface: an
+                            // accepted load re-keys and re-routes the
+                            // single entry in place, exactly as the
+                            // engine replaces its channel.
+                            video_entry.used = true;
+                            video_entry.key_len = key.len;
+                            @memcpy(video_entry.key[0..key.len], key);
+                            video_entry.event_tag = event_tag;
+                            fx.loadVideo(options);
+                        }
                     },
                     // video_ctl [op][key_len][key][verb u8][value f64 LE]
                     0x18 => {

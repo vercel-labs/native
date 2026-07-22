@@ -233,6 +233,7 @@ const mini_core = struct {
         vmute_it, // 64: video_ctl muted "clip" 1
         vloop_it, // 65: video_ctl loop "clip" 1
         vctl_stray, // 66: video_ctl pause "other" (key gate no-op)
+        vload_bad, // 67: video_load "bad" with surface 0 (bridge-refused)
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -522,6 +523,9 @@ const mini_core = struct {
             .vmute_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 5, 1) },
             .vloop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 6, 1) },
             .vctl_stray => return .{ .model = model, .cmd = cmdVideoCtl("other", 1, 0) },
+            // Surface 0 is the engine's own refusal class: the bridge
+            // must reject WITHOUT re-routing the single entry.
+            .vload_bad => return .{ .model = model, .cmd = cmdVideoLoad("bad", 58, 0, "media/x.mp4", "", 0b001) },
         }
     }
 
@@ -1697,6 +1701,35 @@ test "video_load decodes whole and events route the seven-field arm by name" {
     try std.testing.expect(!replaced.playing);
     try std.testing.expect(replaced.looping);
     try std.testing.expect(replaced.muted);
+}
+
+test "a rejected video_load keeps the live stream's routing and key gate" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);
+
+    // An invalid replacement is refused before it can re-route the
+    // single entry: the rejection reaches the app through the refused
+    // record's own event arm...
+    Host.dispatch(fx, .vload_bad);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.rejected, Host.model().video_state);
+    // ...while the surviving playback keeps its stream, its routing,
+    // and its wire-key gate: events still deliver, and the ORIGINAL
+    // key still drives the transport (a re-keyed entry would answer
+    // to the refused key instead).
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.position, 1_000, 12_000, true, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.position, Host.model().video_state);
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(!fx.videoSnapshot().playing);
 }
 
 test "video_ctl verbs drive the engine channel, gated by the wire key" {
