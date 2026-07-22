@@ -225,13 +225,26 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             };
             pending.setViewLabel(self.views[view_index].label);
             self.canvas_widget_context_menu_pending = pending;
-            try runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
+            // The notice keeps its place in the event order (the old
+            // menu's dismissal before the successor's outcome, like
+            // every superseding path), but its error must not skip the
+            // synthetic selection below: unlike a presented menu, whose
+            // outcome the platform delivers later regardless, this
+            // dispatch is the armed request's ONLY outcome. No error
+            // path may leave a pending token with no presented menu and
+            // no delivered outcome — so capture the notice's error,
+            // dispatch the selection, and re-raise after (the dispatch
+            // ring already recorded it, matching `.propagate` semantics
+            // elsewhere: bookkeeping settles first, the error still
+            // surfaces).
+            const notice = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
             try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
                 .window_id = self.views[view_index].window_id,
                 .view_label = self.views[view_index].label,
                 .token = token,
                 .item_id = @intCast(item.item_index + 1),
             } });
+            try notice;
         }
 
         /// Where a pointer verb lands on a widget: the control's aim

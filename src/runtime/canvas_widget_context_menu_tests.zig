@@ -33,6 +33,9 @@ const MenuTestApp = struct {
     last_dismissed_token: u64 = 0,
     last_dismissed_label: [32]u8 = undefined,
     last_dismissed_label_len: usize = 0,
+    /// When set, the dismissed-notice handler errors AFTER recording
+    /// the notice — the app heard it, then blew up.
+    dismissal_error: ?anyerror = null,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -60,6 +63,7 @@ const MenuTestApp = struct {
                 const len = @min(dismissed_event.view_label.len, self.last_dismissed_label.len);
                 @memcpy(self.last_dismissed_label[0..len], dismissed_event.view_label[0..len]);
                 self.last_dismissed_label_len = len;
+                if (self.dismissal_error) |err| return err;
             },
             .canvas_widget_keyboard => |keyboard_event| {
                 if (keyboard_event.keyboard.edit_truncated) self.saw_truncated = true;
@@ -580,6 +584,53 @@ test "the widget-context-menu verb dispatches selections through context_menu_ac
     try std.testing.expectError(error.ContextMenuItemSeparator, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1"));
     try std.testing.expectError(error.ContextMenuItemDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 3"));
     try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+}
+
+test "the widget-context-menu verb's synthetic selection survives an erroring dismissal handler" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+    const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+    const first_row = canvas.Widget{
+        .id = 2,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 10, 200, 40),
+        .text = "First",
+        .context_menu = &first_items,
+    };
+    const second_row = canvas.Widget{
+        .id = 3,
+        .kind = .list_item,
+        .frame = geometry.RectF.init(10, 60, 200, 40),
+        .text = "Second",
+        .context_menu = &second_items,
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // A real menu is on the glass for the first row when the verb
+    // supersedes it — and the app's dismissed handler errors under the
+    // harness's `.propagate` policy.
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+    const first_token = harness.null_platform.context_menu_token;
+    app_state.dismissal_error = error.DismissalHandlerBlewUp;
+
+    // The verb's synthetic selection is its request's ONLY outcome (no
+    // native menu presents), so the erroring notice must not skip it:
+    // the selection dispatches, the notice error still propagates, and
+    // no error path leaves a pending token with no presented menu and
+    // no delivered outcome.
+    try std.testing.expectError(error.DismissalHandlerBlewUp, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 3 0"));
+    try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+    try std.testing.expectEqual(first_token, app_state.last_dismissed_token);
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
+    try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
 }
 
 test "automation snapshots list each widget's declared context-menu items in invocable order" {
