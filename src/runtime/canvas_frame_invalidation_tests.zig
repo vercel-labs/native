@@ -739,6 +739,96 @@ test "a finer presentation scale re-aligns damage to its own pixel grid" {
     try std.testing.expectEqualSlices(u8, full, incremental);
 }
 
+test "device-grid re-alignment survives the float round-trip" {
+    // Snapped edges live in f32 logical points: `ceil(v*s)/s` can land
+    // on an f32 whose product with the scale rounds back UP past the
+    // device boundary (an edge at 65 points re-snapped at 1.75x becomes
+    // 65.14286, whose product is 114.00001 — ceiling to 115), so the
+    // consumer would clear one pixel more than culling against the rect
+    // admits — erasing an unchanged neighbor's coverage in that extra
+    // pixel. The snap must pick edges whose round trip lands on the
+    // intended boundary.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-grid-roundtrip", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const surface = geometry.SizeF.init(80, 16);
+    const presentation_scale: f32 = 1.75;
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, surface.width, surface.height),
+    });
+
+    // Changing rect ends at x=63.9: bleed plus the plan-grid snap land
+    // the dirty edge exactly on 65 points — the coordinate whose 1.75x
+    // re-snap rounds badly. The unchanged rounded neighbor at x=65.3
+    // paints device pixel 114, the pixel the bad round trip clears.
+    const neighbor = canvas.CanvasCommand{ .fill_rounded_rect = .{
+        .id = 2,
+        .rect = geometry.RectF.init(65.3, 2, 8, 8),
+        .radius = canvas.Radius.all(3),
+        .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
+    } };
+    const changing = struct {
+        fn command(color: canvas.Color) canvas.CanvasCommand {
+            return .{ .fill_rect = .{
+                .id = 1,
+                .rect = geometry.RectF.init(2, 2, 61.9, 8),
+                .fill = .{ .color = color },
+            } };
+        }
+    }.command;
+
+    const pixel_size = try canvas_frame_helpers.canvasSurfacePixelSize(surface, presentation_scale);
+    const incremental = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(incremental);
+    const full = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(full);
+    const scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+    const clear_color = canvas.Color.rgb8(15, 23, 42);
+    var no_gpu_commands: [0]canvas.CanvasGpuCommand = .{};
+    var no_packet_bytes: [0]u8 = .{};
+
+    const presentScaled = struct {
+        fn present(h: anytype, frame_index: u64, full_repaint: bool, pixels: []u8, sc: []u8, clear: canvas.Color, gpu: []canvas.CanvasGpuCommand, packet: []u8) !canvas.CanvasFrame {
+            const result = try h.runtime.presentNextCanvasFrame(1, "canvas", .{
+                .frame_index = frame_index,
+                .timestamp_ns = frame_index * 16_000_000,
+                .surface_size = geometry.SizeF.init(80, 16),
+                .full_repaint = full_repaint,
+            }, canvasFrameScratchStorage(&h.runtime), gpu, packet, pixels, sc, clear, 1.75);
+            return result.frame;
+        }
+    }.present;
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ changing(canvas.Color.rgb8(255, 0, 0)), neighbor } });
+    _ = try presentScaled(harness, 1, false, incremental, scratch, clear_color, &no_gpu_commands, &no_packet_bytes);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ changing(canvas.Color.rgb8(37, 99, 235)), neighbor } });
+    const swapped = try presentScaled(harness, 2, false, incremental, scratch, clear_color, &no_gpu_commands, &no_packet_bytes);
+    try std.testing.expect(!swapped.full_repaint);
+    try std.testing.expect(swapped.dirty_bounds != null);
+    // The dirty edge's round trip must land on its device boundary —
+    // never past it.
+    const dirty = swapped.dirty_bounds.?;
+    try std.testing.expect(@ceil(dirty.maxX() * presentation_scale) <= 114);
+
+    _ = try presentScaled(harness, 3, true, full, scratch, clear_color, &no_gpu_commands, &no_packet_bytes);
+    try std.testing.expectEqualSlices(u8, full, incremental);
+}
+
 test "keyed subtree swap leaves no stale pixels on the summary-dirty pixel path" {
     try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary", false, 1);
     try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary-2x", false, 2);

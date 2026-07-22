@@ -673,11 +673,28 @@ fn deviceAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32) ?geometry.RectF
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = @floor(normalized.minX() * device) / device;
-    const min_y = @floor(normalized.minY() * device) / device;
-    const max_x = @ceil(normalized.maxX() * device) / device;
-    const max_y = @ceil(normalized.maxY() * device) / device;
-    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
+    const min_x = alignedDirtyFloorEdge(normalized.minX(), device);
+    const min_y = alignedDirtyFloorEdge(normalized.minY(), device);
+    const max_x = alignedDirtyCeilEdge(normalized.maxX(), device);
+    const max_y = alignedDirtyCeilEdge(normalized.maxY(), device);
+    return geometry.RectF.init(min_x, min_y, @max(0, max_x - min_x), @max(0, max_y - min_y));
+}
+
+/// The snapped max edge, chosen so its f32 product with `device` never
+/// exceeds the ceil boundary (see the runtime helper twin): a rounded-up
+/// edge would clear one pixel more than culling against the rect admits.
+fn alignedDirtyCeilEdge(value: f32, device: f32) f32 {
+    const boundary = @ceil(value * device);
+    var edge = boundary / device;
+    while (edge * device > boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
+    return @max(edge, value);
+}
+
+fn alignedDirtyFloorEdge(value: f32, device: f32) f32 {
+    const boundary = @floor(value * device);
+    var edge = boundary / device;
+    while (edge * device < boundary) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
+    return @min(edge, value);
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {
