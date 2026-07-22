@@ -392,10 +392,16 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
 }
 
 /// CHILD-side exec-failure report: write the errno byte into the self-
-/// pipe and exit. Async-signal-safe — a single `write` and `_exit`.
+/// pipe and exit. Async-signal-safe (`write`/`_exit`). EINTR retries —
+/// a signal interrupting the one-byte report must not drop it, or the
+/// parent reads a clean EOF and mistakes the failed exec for success.
 fn reportExecFailure(write_fd: c_int) noreturn {
     const byte = [_]u8{1};
-    _ = c.write(write_fd, &byte, 1);
+    while (true) {
+        if (c.write(write_fd, &byte, 1) >= 0) break;
+        if (errnoValue() == eintr) continue;
+        break;
+    }
     c._exit(127);
 }
 

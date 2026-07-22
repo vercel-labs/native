@@ -335,10 +335,14 @@ pub const Runtime = struct {
     /// text on `ime_commit_composition` (the host emits an EMPTY commit
     /// when the marked text is committed unchanged, so the composed
     /// bytes live only here), cleared on cancel or a direct text_input.
-    /// Bounded; an over-long preedit truncates rather than growing.
+    /// Sized to one pty write's worth of composition (4 KiB): a single
+    /// IME composition before commit is a phrase, not a document, and
+    /// this matches the per-write bound the committed text flows through
+    /// anyway. An extreme composition past it truncates on a UTF-8
+    /// boundary (never mid-code-point), the loud-bounded house style.
     /// Focused text widgets never use this — their editor applies the
     /// composition directly.
-    targetless_ime_preedit: [256]u8 = undefined,
+    targetless_ime_preedit: [4096]u8 = undefined,
     targetless_ime_preedit_len: usize = 0,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching

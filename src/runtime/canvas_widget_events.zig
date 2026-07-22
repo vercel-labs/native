@@ -188,9 +188,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (!self.views[index].focused) return null;
             const focused_id = self.views[index].canvas_widget_focused_id;
             if (focused_id == 0) return null;
+            // Text and IME only belong to an EDITABLE focused widget. A
+            // focused non-text widget (a button, a list row) cannot
+            // consume a composition, so returning null here lets the
+            // committed text fall through to the app's target-less
+            // `on_text` seam instead of being routed to a widget that
+            // drops it — the terminal-with-a-focused-button case.
+            const tree = self.views[index].widgetLayoutTree();
+            if (tree.findById(focused_id)) |node| {
+                if (!canvas.isWidgetTextEntry(node.widget)) return null;
+            }
             const keyboard = canvasWidgetTextInputEventFromGpuInput(input_event, focused_id) orelse return null;
 
-            const route = try self.views[index].widgetLayoutTree().routeKeyboardEvent(keyboard, output);
+            const route = try tree.routeKeyboardEvent(keyboard, output);
             if (route.target == null) return null;
             return .{
                 .window_id = input_event.window_id,

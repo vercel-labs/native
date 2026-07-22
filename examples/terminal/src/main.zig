@@ -157,7 +157,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (model.selecting or !model.acceptsInput()) return;
             if (event.text.len == 0) return;
             model.session.scrollToBottom();
-            fx.ptyWrite(shell_key, event.text);
+            writeInput(fx, event.text);
         },
         .viewport => |size| {
             // Commit the new size only once the emulator actually took
@@ -185,6 +185,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (model.phase != .ended and model.phase != .failed) return;
             spawnShell(model, fx);
         },
+    }
+}
+
+/// Write input to the pty in chunks no larger than the per-write bound:
+/// a single committed-text event (a paste, or a long IME commit) can
+/// exceed `max_effect_pty_write_bytes`, which `ptyWrite` refuses whole,
+/// so splitting keeps every byte flowing. The pty is a byte stream, so
+/// a split between two writes is invisible to the child.
+fn writeInput(fx: *Fx, bytes: []const u8) void {
+    const chunk = native_sdk.max_effect_pty_write_bytes;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + chunk, bytes.len);
+        fx.ptyWrite(shell_key, bytes[offset..end]);
+        offset = end;
     }
 }
 

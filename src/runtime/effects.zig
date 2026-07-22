@@ -4310,77 +4310,88 @@ pub fn Effects(comptime Msg: type) type {
             // shared header, its staging ring, the transport fds) is
             // process-lived or deliberately leaked with it.
             for (&self.pty_slots) |*pty_slot| {
-                if (pty_slot.state == .idle) {
-                    continue;
-                }
-                if (pty_slot.fake) {
-                    pty_slot.state = .idle;
-                    pty_slot.on_event = null;
-                    continue;
-                }
+                // Wind down a running REAL pty: kill and wait (bounded)
+                // for the io thread to stage its exit, then retire or
+                // abandon it. A fake or unsupported occupancy just
+                // clears. Idle slots fall straight to the wake quiesce
+                // below — their retained header may still carry an
+                // in-flight wake from a session that retired earlier
+                // this teardown (retirement only REVOKES, never waits).
                 if (comptime pty_transport.supported) {
-                    if (pty_slot.shared) |shared| {
-                        // Signal under the mutex, the ptyKill discipline:
-                        // the check and the kill are atomic against the
-                        // io thread's `reaping` publish, so a reaped
-                        // pid's reuse is never signalled.
-                        shared.mutex.lock();
-                        shared.shutdown = true;
-                        shared.kill_requested = true;
-                        if (!(shared.reaping or shared.exit_staged or shared.io_done)) {
-                            if (pty_slot.transport) |transport| transport.kill(false);
-                        }
-                        shared.mutex.unlock();
-                    } else {
-                        if (pty_slot.transport) |transport| transport.kill(false);
-                    }
-                    pty_transport.nudge(pty_slot.wake_pipe[1]);
-                    var io_done = pty_slot.shared == null;
-                    if (pty_slot.shared) |shared| {
-                        const start_ns = runtime_clock.monotonicNanoseconds();
-                        while (true) {
-                            shared.mutex.lock();
-                            io_done = shared.io_done;
-                            shared.mutex.unlock();
-                            if (io_done) break;
-                            const elapsed_ms = (runtime_clock.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
-                            if (elapsed_ms >= self.spawn_join_deadline_ms) break;
-                            std.atomic.spinLoopHint();
-                        }
-                    }
-                    if (io_done) {
-                        self.retirePtySlot(pty_slot);
+                    if (pty_slot.state == .running and !pty_slot.fake) {
                         if (pty_slot.shared) |shared| {
-                            if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
-                                self.abandoned_channel_wakes += 1;
-                                if (self.services) |services| services.noteChannelWakeAbandoned();
+                            // Signal under the mutex, the ptyKill
+                            // discipline: check and kill are atomic
+                            // against the io thread's `reaping` publish,
+                            // so a reaped pid's reuse is never signalled.
+                            shared.mutex.lock();
+                            shared.shutdown = true;
+                            shared.kill_requested = true;
+                            if (!(shared.reaping or shared.exit_staged or shared.io_done)) {
+                                if (pty_slot.transport) |transport| transport.kill(false);
+                            }
+                            shared.mutex.unlock();
+                        } else if (pty_slot.transport) |transport| {
+                            transport.kill(false);
+                        }
+                        pty_transport.nudge(pty_slot.wake_pipe[1]);
+                        var io_done = pty_slot.shared == null;
+                        if (pty_slot.shared) |shared| {
+                            const start_ns = runtime_clock.monotonicNanoseconds();
+                            while (true) {
+                                shared.mutex.lock();
+                                io_done = shared.io_done;
+                                shared.mutex.unlock();
+                                if (io_done) break;
+                                const elapsed_ms = (runtime_clock.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
+                                if (elapsed_ms >= self.spawn_join_deadline_ms) break;
+                                std.atomic.spinLoopHint();
                             }
                         }
-                    } else {
-                        // Abandon: detach the io thread and leak what it
-                        // can still touch (its staging ring stays
-                        // installed, the master fd stays open).
-                        if (comptime builtin.os.tag != .freestanding) {
-                            std.debug.print(
-                                "effects teardown: a pty io thread is still running after {d}ms (a descendant may be holding the terminal open past the group kill); abandoning the thread and leaking its fds and staging so teardown can return safely\n",
-                                .{self.spawn_join_deadline_ms},
-                            );
+                        if (io_done) {
+                            self.retirePtySlot(pty_slot);
+                        } else {
+                            // Abandon: detach the io thread and leak what
+                            // it can still touch (its staging ring stays
+                            // installed, the master fd stays open).
+                            if (comptime builtin.os.tag != .freestanding) {
+                                std.debug.print(
+                                    "effects teardown: a pty io thread is still running after {d}ms (a descendant may be holding the terminal open past the group kill); abandoning the thread and leaking its fds and staging so teardown can return safely\n",
+                                    .{self.spawn_join_deadline_ms},
+                                );
+                            }
+                            if (pty_slot.io_thread) |thread| {
+                                thread.detach();
+                                pty_slot.io_thread = null;
+                            }
+                            if (pty_slot.shared) |shared| {
+                                shared.mutex.lock();
+                                shared.open = false;
+                                shared.owner = null;
+                                shared.mutex.unlock();
+                            }
+                            pty_slot.state = .idle;
+                            pty_slot.on_event = null;
                         }
-                        if (pty_slot.io_thread) |thread| {
-                            thread.detach();
-                            pty_slot.io_thread = null;
-                        }
-                        if (pty_slot.shared) |shared| {
-                            shared.mutex.lock();
-                            shared.open = false;
-                            shared.owner = null;
-                            shared.mutex.unlock();
-                            _ = quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms);
-                        }
+                    } else if (pty_slot.state != .idle) {
                         pty_slot.state = .idle;
                         pty_slot.on_event = null;
                     }
-                } else {
+                    // Quiesce the wake header — for EVERY slot with one,
+                    // idle included: the header is process-lifetime and
+                    // reused, so a retired session's slow `wake_fn` may
+                    // still be in flight, and the services snapshot and
+                    // platform it dereferences are about to be freed. A
+                    // still-executing call at the deadline is abandoned,
+                    // counted, and the platform is signalled to outlive
+                    // it (the channel teardown's containment, verbatim).
+                    if (pty_slot.shared) |shared| {
+                        if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
+                            self.abandoned_channel_wakes += 1;
+                            if (self.services) |services| services.noteChannelWakeAbandoned();
+                        }
+                    }
+                } else if (pty_slot.state != .idle) {
                     pty_slot.state = .idle;
                     pty_slot.on_event = null;
                 }
