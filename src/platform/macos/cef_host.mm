@@ -2552,19 +2552,21 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
  * The Chromium host reports the feature unsupported and the Zig side
  * refuses before calling, so these exist only to satisfy the shared C
  * ABI — each answers with its honest failure code. */
-int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
     (void)host;
     (void)path;
     (void)path_len;
+    (void)token;
     (void)push_fn;
     (void)push_context;
     return 2;
 }
 
-int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
     (void)host;
     (void)url;
     (void)url_len;
+    (void)token;
     (void)push_fn;
     (void)push_context;
     return 2;

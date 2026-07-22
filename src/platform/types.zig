@@ -1440,6 +1440,14 @@ pub const VideoEventKind = enum(u8) {
 /// host downscales frames to fit the texture channel's pixel budget.
 pub const VideoEvent = struct {
     kind: VideoEventKind,
+    /// Which LOAD this event reports on: the engine mints a fresh
+    /// token per `videoLoad`/`videoLoadUrl` and the host echoes it in
+    /// every event that playback produces. The single player replaces
+    /// in place, and an event emitted by the replaced playback can
+    /// still be queued when the replacement lands — the token is how
+    /// the engine swallows it instead of resetting (or misattributing
+    /// events to) the playback that replaced it.
+    token: u64 = 0,
     position_ms: u64 = 0,
     duration_ms: u64 = 0,
     playing: bool = false,
@@ -2328,13 +2336,13 @@ pub const PlatformServices = struct {
     /// Decoded frames flow through `sink` from whatever thread the
     /// host's decode path runs on — the core never sees pixels. One
     /// player is the whole surface, like the audio channel it mirrors.
-    video_load_fn: ?*const fn (context: ?*anyopaque, path: []const u8, sink: VideoFrameSink) anyerror!void = null,
+    video_load_fn: ?*const fn (context: ?*anyopaque, path: []const u8, token: u64, sink: VideoFrameSink) anyerror!void = null,
     /// Load an http(s) video source into the same single player,
     /// streaming progressively (playable before the download finishes;
     /// `buffering` flags on position ticks report stalls honestly).
     /// Same acknowledgment, sink, and replace semantics as
     /// `video_load_fn`.
-    video_load_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8, sink: VideoFrameSink) anyerror!void = null,
+    video_load_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8, token: u64, sink: VideoFrameSink) anyerror!void = null,
     /// Start or resume the loaded player. While playing the platform
     /// emits `.video`/`.position` events at the audio tier's coarse
     /// honest cadence (about every 500ms — a readout, never the frame
@@ -2925,22 +2933,22 @@ pub const PlatformServices = struct {
     /// `video_load_fn`). Platforms without video playback answer
     /// `error.UnsupportedService`; bad arguments are rejected here
     /// before the platform is asked.
-    pub fn videoLoad(self: PlatformServices, path: []const u8, sink: VideoFrameSink) anyerror!void {
+    pub fn videoLoad(self: PlatformServices, path: []const u8, token: u64, sink: VideoFrameSink) anyerror!void {
         if (path.len == 0) return error.InvalidVideoOptions;
         if (path.len > max_video_path_bytes) return error.VideoPathTooLarge;
         const load_fn = self.video_load_fn orelse return error.UnsupportedService;
-        return load_fn(self.context, path, sink);
+        return load_fn(self.context, path, token, sink);
     }
 
     /// Load an http(s) video source into the app's single video player,
     /// streaming progressively (see `video_load_url_fn`). Platforms
     /// without video playback answer `error.UnsupportedService`; bad
     /// arguments are rejected here before the platform is asked.
-    pub fn videoLoadUrl(self: PlatformServices, url: []const u8, sink: VideoFrameSink) anyerror!void {
+    pub fn videoLoadUrl(self: PlatformServices, url: []const u8, token: u64, sink: VideoFrameSink) anyerror!void {
         if (url.len == 0) return error.InvalidVideoOptions;
         if (url.len > max_video_path_bytes) return error.VideoPathTooLarge;
         const load_fn = self.video_load_url_fn orelse return error.UnsupportedService;
-        return load_fn(self.context, url, sink);
+        return load_fn(self.context, url, token, sink);
     }
 
     pub fn videoPlay(self: PlatformServices) anyerror!void {

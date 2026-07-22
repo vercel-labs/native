@@ -2485,6 +2485,14 @@ pub fn Effects(comptime Msg: type) type {
             active: bool = false,
             fake: bool = false,
             key: u64 = 0,
+            /// This load's identity on the platform seam: minted from
+            /// `video_token_seq` at load, passed to the platform, and
+            /// echoed in every `.video` event it emits — how
+            /// `takeVideoMsg` swallows a replaced playback's queued
+            /// stragglers instead of applying them to the replacement.
+            /// Deterministic under replay (one increment per replayed
+            /// load dispatch).
+            token: u64 = 0,
             surface_id: u64 = 0,
             on_event: ?VideoMsgFn = null,
             playing: bool = false,
@@ -3386,6 +3394,9 @@ pub fn Effects(comptime Msg: type) type {
         audio: AudioChannel = .{},
         /// The single video playback channel (see `VideoChannel`).
         video: VideoChannel = .{},
+        /// Monotonic per-load video token mint (see
+        /// `VideoChannel.token`). Loop-thread only.
+        video_token_seq: u64 = 0,
         /// Fixed external-source channel table (see
         /// `max_effect_channels`): long-lived keyed occupancies beside
         /// the effect slots. Loop-thread only — the thread-shared half
@@ -6003,10 +6014,12 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.releaseVideoSink();
             const volume = self.video.volume;
+            self.video_token_seq += 1;
             self.video = .{
                 .active = true,
                 .fake = self.executor == .fake,
                 .key = options.key,
+                .token = self.video_token_seq,
                 .surface_id = options.surface,
                 .on_event = options.on_event,
                 // Optimistic command mirror; the platform's events are
@@ -6039,7 +6052,7 @@ pub fn Effects(comptime Msg: type) type {
             // different source would mask the real problem.
             resolve: {
                 if (options.path.len > 0) {
-                    if (services.videoLoad(options.path, sink)) |_| {
+                    if (services.videoLoad(options.path, self.video.token, sink)) |_| {
                         self.video.source = .local;
                         break :resolve;
                     } else |err| {
@@ -6048,7 +6061,7 @@ pub fn Effects(comptime Msg: type) type {
                         }
                     }
                 }
-                services.videoLoadUrl(options.url, sink) catch return self.failVideoChannel();
+                services.videoLoadUrl(options.url, self.video.token, sink) catch return self.failVideoChannel();
                 self.video.source = .stream;
                 // A fresh stream has no bytes yet: buffering starts
                 // true optimistically and the platform's `.loaded`
@@ -6158,6 +6171,16 @@ pub fn Effects(comptime Msg: type) type {
         /// `stopVideo`) or has no handler. Loop-thread only; called by
         /// `UiApp.handleEvent` for `.video` platform events.
         pub fn takeVideoMsg(self: *Self, platform_event: platform.VideoEvent) ?Msg {
+            // Identity gate, before anything else: an event whose token
+            // is not the CURRENT load's belongs to a playback this
+            // channel already replaced or stopped — a terminal queued
+            // by the old player must neither reset the replacement nor
+            // route through its handler (`VideoChannel.token`). Under
+            // replay the same gate keeps the mirrors honest: the re-run
+            // loads mint the same deterministic token sequence, so
+            // stale recorded events are swallowed exactly as they were
+            // live.
+            if (!self.video.active or platform_event.token != self.video.token) return null;
             const kind: EffectVideoEventKind = switch (platform_event.kind) {
                 .loaded => .loaded,
                 .position => .position,

@@ -237,6 +237,10 @@ pub const default_null_video_height: u64 = 360;
 /// A looping player wraps at the end instead of completing.
 pub const NullVideo = struct {
     loaded: bool = false,
+    /// The engine-minted load token this playback echoes in every
+    /// event it emits (the real hosts' contract — see
+    /// `platform.VideoEvent.token`).
+    token: u64 = 0,
     playing: bool = false,
     streaming: bool = false,
     looping: bool = false,
@@ -1801,7 +1805,7 @@ pub const NullPlatform = struct {
         return .{ .audio = .{ .kind = .failed } };
     }
 
-    fn videoLoad(context: ?*anyopaque, path: []const u8, sink: types.VideoFrameSink) anyerror!void {
+    fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.video_load_count += 1;
         if (path.len > self.video.path_storage.len) return error.VideoPathTooLarge;
@@ -1809,7 +1813,7 @@ pub const NullPlatform = struct {
         // exactly the synchronous refusal a real host's open gives.
         if (!self.video_local_files) return error.VideoSourceNotFound;
         const volume = self.video.volume;
-        self.video = .{ .volume = volume, .sink = sink };
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
         @memcpy(self.video.path_storage[0..path.len], path);
         self.video.path_len = path.len;
         self.video.loaded = true;
@@ -1817,12 +1821,12 @@ pub const NullPlatform = struct {
         self.video_loaded_pending = true;
     }
 
-    fn videoLoadUrl(context: ?*anyopaque, url: []const u8, sink: types.VideoFrameSink) anyerror!void {
+    fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.video_load_url_count += 1;
         if (url.len > self.video.path_storage.len) return error.VideoPathTooLarge;
         const volume = self.video.volume;
-        self.video = .{ .volume = volume, .sink = sink };
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
         @memcpy(self.video.path_storage[0..url.len], url);
         self.video.path_len = url.len;
         self.video.loaded = true;
@@ -1915,6 +1919,7 @@ pub const NullPlatform = struct {
         self.video_loaded_pending = false;
         return .{ .video = .{
             .kind = .loaded,
+            .token = self.video.token,
             .position_ms = self.video.position_ms,
             .duration_ms = self.video.duration_ms,
             .playing = self.video.playing,
@@ -1932,12 +1937,15 @@ pub const NullPlatform = struct {
     /// nothing is loaded or playing; position never advances on its own.
     pub fn advanceVideo(self: *NullPlatform, delta_ms: u64) ?Event {
         if (!self.video.loaded or !self.video.playing) return null;
-        const advanced = self.video.position_ms + delta_ms;
+        // Saturating: a hostile or fuzzing advance past u64 completes
+        // (or wraps, for a looping player) instead of trapping.
+        const advanced = self.video.position_ms +| delta_ms;
         if (advanced >= self.video.duration_ms and self.video.duration_ms > 0) {
             if (self.video.looping) {
                 self.video.position_ms = advanced % self.video.duration_ms;
                 return .{ .video = .{
                     .kind = .position,
+                    .token = self.video.token,
                     .position_ms = self.video.position_ms,
                     .duration_ms = self.video.duration_ms,
                     .playing = true,
@@ -1947,6 +1955,7 @@ pub const NullPlatform = struct {
             self.video.position_ms = self.video.duration_ms;
             return .{ .video = .{
                 .kind = .completed,
+                .token = self.video.token,
                 .position_ms = self.video.position_ms,
                 .duration_ms = self.video.duration_ms,
                 .playing = false,
@@ -1955,6 +1964,7 @@ pub const NullPlatform = struct {
         self.video.position_ms = advanced;
         return .{ .video = .{
             .kind = .position,
+            .token = self.video.token,
             .position_ms = self.video.position_ms,
             .duration_ms = self.video.duration_ms,
             .playing = true,
@@ -1969,6 +1979,7 @@ pub const NullPlatform = struct {
         if (!self.video.loaded or !self.video.playing or !self.video.streaming) return null;
         return .{ .video = .{
             .kind = .position,
+            .token = self.video.token,
             .position_ms = self.video.position_ms,
             .duration_ms = self.video.duration_ms,
             .playing = true,
@@ -1981,9 +1992,10 @@ pub const NullPlatform = struct {
     /// player like a real failure would.
     pub fn failVideo(self: *NullPlatform) ?Event {
         if (!self.video.loaded) return null;
+        const token = self.video.token;
         self.video = .{ .volume = self.video.volume };
         self.video_loaded_pending = false;
-        return .{ .video = .{ .kind = .failed } };
+        return .{ .video = .{ .kind = .failed, .token = token } };
     }
 
     /// Test helper: push one synthetic RGBA8 frame through the sink the

@@ -599,12 +599,15 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
         },
-        // Recorded for stream fidelity like `.audio`; inert on replay
-        // (the journaled video EFFECT records are the Msg source —
-        // `takeVideoMsg` ignores platform video events under replay).
+        // Recorded for stream fidelity like `.audio`. On replay the
+        // journaled video EFFECT records are the Msg source; the
+        // platform events steer only the channel MIRRORS (the house
+        // chrome's render state for handler-less playbacks), gated by
+        // the load token exactly as live (`Effects.takeVideoMsg`).
         .video => |video| {
             try cursor.writeEnum(EventTag.video);
             try cursor.writeEnum(video.kind);
+            try cursor.writeInt(u64, video.token);
             try cursor.writeInt(u64, video.position_ms);
             try cursor.writeInt(u64, video.duration_ms);
             try cursor.writeBool(video.playing);
@@ -822,6 +825,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             const kind = try cursor.readEnum(platform.VideoEventKind);
             break :blk .{ .video = .{
                 .kind = kind,
+                .token = try cursor.readInt(u64),
                 .position_ms = try cursor.readInt(u64),
                 .duration_ms = try cursor.readInt(u64),
                 .playing = try cursor.readBool(),

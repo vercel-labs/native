@@ -337,6 +337,10 @@ typedef struct {
      * video_playing/video_buffering carry the audio event's exact
      * semantics (transport intent vs a stalled stream). */
     int video_kind;
+    /* The engine-minted load token this playback echoes in every event
+     * (see the Zig seam's VideoEvent.token): how a replaced playback's
+     * queued straggler is told apart from the replacement's stream. */
+    uint64_t video_token;
     uint64_t video_position_ms;
     uint64_t video_duration_ms;
     int video_playing;
@@ -541,14 +545,14 @@ typedef int (*native_sdk_appkit_video_sink_push_t)(void *context, size_t width, 
  * applied, 0 when there is no loaded player to apply to (stop, pause,
  * and the setters treat that as a harmless no-op on the Zig side).
  * All entries are loop-thread only. */
-int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
 /* URL sources on the same single player: progressive AVPlayer streaming
  * (playable as soon as enough bytes arrive, never download-then-play;
  * no cache layer). Returns 2 when the URL cannot even be parsed, 0 for
  * a started stream. Async failures (unreachable host, mid-stream
  * network loss, undecodable payload) arrive as one EVENT_VIDEO/FAILED
  * on the run loop. Loop-thread only. */
-int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
 int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host);

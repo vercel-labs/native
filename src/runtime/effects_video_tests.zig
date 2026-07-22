@@ -617,6 +617,33 @@ test "a platform straggler after stop is swallowed, never misattributed" {
     try std.testing.expectEqual(before, h.app_state.model.event_count);
 }
 
+test "a replaced playback's queued terminal never resets the replacement" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try np.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+    // Playback A dies — but its `.failed` event is still queued when
+    // the update replaces it with playback B (same source, fresh
+    // load): the single player's classic straggler race.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    const stale_failed = np.failVideo().?;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    const events_before = h.app_state.model.event_count;
+
+    // A's stale terminal arrives: the load token names A, so the
+    // channel swallows it — no Msg, no reset, B keeps its claim and
+    // its mirrors.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, stale_failed);
+    try std.testing.expectEqual(events_before, h.app_state.model.event_count);
+    const fx = &h.app_state.effects;
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try std.testing.expectEqual(@as(u64, 92_500), fx.videoSnapshot().duration_ms);
+}
+
 test "quit while playing: the stop hook silences video and releases the claim through the live platform" {
     // The desktop runner's exit ordering, the audio quit test's twin:
     // the platform dies BEFORE the app's deferred deinit runs, so the

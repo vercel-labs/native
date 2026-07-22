@@ -1460,9 +1460,10 @@ fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
 /// unsupported-service, while the transport verbs stay null — the
 /// channel never activates without a successful load. Pure (no Win32
 /// externs), so the teaching is unit-testable on every host.
-fn videoLoad(context: ?*anyopaque, path: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
+fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
     _ = context;
     _ = path;
+    _ = token;
     _ = sink;
     std.debug.print("video playback is not implemented on windows yet: the Win32 host has no Media Foundation decode path into the media-surface texture channel - the app receives one failed video event (scope video sources to macos builds, or compose a media-surface with your own producer)\n", .{});
     return error.UnsupportedService;
@@ -1470,8 +1471,8 @@ fn videoLoad(context: ?*anyopaque, path: []const u8, sink: platform_mod.VideoFra
 
 /// The URL twin rides the same teaching — a stream would need the same
 /// missing decode path a file does.
-fn videoLoadUrl(context: ?*anyopaque, url: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
-    return videoLoad(context, url, sink);
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    return videoLoad(context, url, token, sink);
 }
 
 fn configureSecurityPolicy(context: ?*anyopaque, policy: security.Policy) anyerror!void {

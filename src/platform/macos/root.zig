@@ -124,6 +124,9 @@ const AppKitEvent = extern struct {
     /// from `video_playing` (the transport intent) — the audio pair's
     /// exact semantics.
     video_kind: c_int,
+    /// The engine-minted load token this event's playback echoes (see
+    /// `platform.VideoEvent.token`).
+    video_token: u64,
     video_position_ms: u64,
     video_duration_ms: u64,
     video_playing: c_int,
@@ -199,8 +202,8 @@ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
 extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
-extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
-extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_video_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_video_stop(host: *AppKitHost) c_int;
@@ -972,6 +975,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
         } }),
         .video => state.emit(.{ .video = .{
             .kind = videoEventKindFromInt(event.video_kind),
+            .token = event.video_token,
             .position_ms = event.video_position_ms,
             .duration_ms = event.video_duration_ms,
             .playing = event.video_playing != 0,
@@ -1509,11 +1513,11 @@ fn nativeSdkVideoSinkPush(context: ?*anyopaque, width: usize, height: usize, pix
 /// `.loaded` acknowledgment (with the stream's dimensions and duration)
 /// follows as a `.video` event on the run loop; decoded frames flow
 /// through the sink stored on the platform (see `nativeSdkVideoSinkPush`).
-fn videoLoad(context: ?*anyopaque, path: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
+fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     self.video_sink = sink;
-    return switch (native_sdk_appkit_video_load(self.host, path.ptr, path.len, nativeSdkVideoSinkPush, self)) {
+    return switch (native_sdk_appkit_video_load(self.host, path.ptr, path.len, token, nativeSdkVideoSinkPush, self)) {
         0 => {},
         1 => error.VideoSourceNotFound,
         else => error.VideoDecodeFailed,
@@ -1525,11 +1529,11 @@ fn videoLoad(context: ?*anyopaque, path: []const u8, sink: platform_mod.VideoFra
 /// ready), anything else the URL itself was unusable. Network failures
 /// after this point are asynchronous and arrive as `.video`/`.failed`
 /// events.
-fn videoLoadUrl(context: ?*anyopaque, url: []const u8, sink: platform_mod.VideoFrameSink) anyerror!void {
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     self.video_sink = sink;
-    return switch (native_sdk_appkit_video_load_url(self.host, url.ptr, url.len, nativeSdkVideoSinkPush, self)) {
+    return switch (native_sdk_appkit_video_load_url(self.host, url.ptr, url.len, token, nativeSdkVideoSinkPush, self)) {
         0 => {},
         else => error.InvalidVideoOptions,
     };

@@ -802,6 +802,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * at 60 Hz forever. */
 @property(nonatomic, assign) BOOL videoPosterPending;
 @property(nonatomic, assign) int videoPosterTicks;
+/* The engine-minted token of the CURRENT load, echoed in every video
+ * event (see the header's video_token) so a replaced playback's queued
+ * straggler can never be attributed to the replacement. */
+@property(nonatomic, assign) uint64_t videoToken;
 /* Whether the loaded source is a local file: local sources never
  * report buffering. */
 @property(nonatomic, assign) BOOL videoSourceIsLocal;
@@ -979,8 +983,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)stopAudioSpectrumTimer;
 - (BOOL)anyHostWindowVisibleOnGlass;
 - (void)audioSpectrumTimerFired:(NSTimer *)timer;
-- (int)videoLoadPath:(NSString *)path pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
-- (int)videoLoadURL:(NSString *)urlString pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (int)videoLoadPath:(NSString *)path token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
+- (int)videoLoadURL:(NSString *)urlString token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
 - (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
 - (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item;
 - (void)videoTearDownPlayer;
@@ -9892,6 +9896,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     native_sdk_appkit_event_t event = {
         .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
         .video_kind = kind,
+        .video_token = self.videoToken,
         .video_position_ms = position_ms,
         .video_duration_ms = duration_ms,
         .video_playing = playing,
@@ -10033,8 +10038,9 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
  * decode has no video twin), so the existence check is the only
  * synchronous refusal — an undecodable file reports asynchronously as
  * one FAILED event. */
-- (int)videoLoadPath:(NSString *)path pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+- (int)videoLoadPath:(NSString *)path token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
     [self videoStop];
+    self.videoToken = token;
     /* Relative paths resolve against the bundle's Resources inside a
      * packaged .app (where the process cwd is meaningless — `open`
      * launches at /), and keep their cwd meaning everywhere else. */
@@ -10053,8 +10059,9 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
  * started stream, 2 when the URL cannot be parsed; everything
  * asynchronous — readiness, stalls, natural end, network death —
  * arrives as EVENT_VIDEO reports. */
-- (int)videoLoadURL:(NSString *)urlString pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
+- (int)videoLoadURL:(NSString *)urlString token:(uint64_t)token pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext {
     [self videoStop];
+    self.videoToken = token;
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url || !url.scheme) return 2;
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
@@ -10096,21 +10103,29 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
                 context:NativeSdkAppKitVideoTimeControlContext];
     self.videoObservingStatus = YES;
     __weak NativeSdkAppKitHost *weakSelf = self;
+    /* Both blocks re-check the notification's item against the CURRENT
+     * one: removeObserver (the teardown a replacing load runs) stops
+     * future deliveries, but a notification already enqueued on the
+     * main queue still executes its block — ungated, a replaced item's
+     * terminal would tear down the replacement's player and emit a
+     * false terminal event for the playback that replaced it. */
     self.videoEndObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
                     object:item
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
-                    (void)note;
-                    [weakSelf videoDidPlayToEnd];
+                    NativeSdkAppKitHost *host = weakSelf;
+                    if (!host || note.object != host.videoItem) return;
+                    [host videoDidPlayToEnd];
                 }];
     self.videoFailObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
                     object:item
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
-                    (void)note;
-                    [weakSelf videoDidFail];
+                    NativeSdkAppKitHost *host = weakSelf;
+                    if (!host || note.object != host.videoItem) return;
+                    [host videoDidFail];
                 }];
 }
 
@@ -10198,6 +10213,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     self.videoStreamHeight = 0;
     self.videoPosterPending = NO;
     self.videoPosterTicks = 0;
+    self.videoToken = 0;
     if (self.videoFrameBuffer) {
         free(self.videoFrameBuffer);
         self.videoFrameBuffer = NULL;
@@ -10288,10 +10304,12 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         double duration = NativeSdkSecondsFromCMTime(self.videoItem.duration);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
     }
+    const uint64_t token = self.videoToken;
     [self videoTearDownPlayer];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
         .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_COMPLETED,
+        .video_token = token,
         .video_position_ms = duration_ms,
         .video_duration_ms = duration_ms,
         .video_playing = 0,
@@ -10308,10 +10326,12 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (!self.videoPlayer) return;
     [self stopVideoPositionTimer];
     [self stopVideoFrameTimer];
+    const uint64_t token = self.videoToken;
     [self videoTearDownPlayer];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_VIDEO,
         .video_kind = NATIVE_SDK_APPKIT_VIDEO_EVENT_FAILED,
+        .video_token = token,
         .video_position_ms = 0,
         .video_duration_ms = 0,
         .video_playing = 0,
@@ -11000,18 +11020,18 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
     return [object audioSetVolume:volume];
 }
 
-int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *path_string = [[NSString alloc] initWithBytes:path length:path_len encoding:NSUTF8StringEncoding];
     if (!path_string) return 1;
-    return [object videoLoadPath:path_string pushFn:push_fn pushContext:push_context];
+    return [object videoLoadPath:path_string token:token pushFn:push_fn pushContext:push_context];
 }
 
-int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *url_string = [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding];
     if (!url_string) return 2;
-    return [object videoLoadURL:url_string pushFn:push_fn pushContext:push_context];
+    return [object videoLoadURL:url_string token:token pushFn:push_fn pushContext:push_context];
 }
 
 int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host) {
