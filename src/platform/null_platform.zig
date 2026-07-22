@@ -1808,11 +1808,17 @@ pub const NullPlatform = struct {
     fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.video_load_count += 1;
+        // Retire the previous player FIRST — the macOS host's ordering
+        // (videoStop before the file probe): a load that then refuses
+        // must not leave the replaced playback emitting frames and
+        // events under its old token.
+        const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
         if (path.len > self.video.path_storage.len) return error.VideoPathTooLarge;
         // Model the assets-absent machine: the local file is not there,
         // exactly the synchronous refusal a real host's open gives.
         if (!self.video_local_files) return error.VideoSourceNotFound;
-        const volume = self.video.volume;
         self.video = .{ .volume = volume, .sink = sink, .token = token };
         @memcpy(self.video.path_storage[0..path.len], path);
         self.video.path_len = path.len;
@@ -1824,8 +1830,11 @@ pub const NullPlatform = struct {
     fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.video_load_url_count += 1;
-        if (url.len > self.video.path_storage.len) return error.VideoPathTooLarge;
+        // Retire-first, `videoLoad`'s ordering.
         const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
+        if (url.len > self.video.path_storage.len) return error.VideoPathTooLarge;
         self.video = .{ .volume = volume, .sink = sink, .token = token };
         @memcpy(self.video.path_storage[0..url.len], url);
         self.video.path_len = url.len;
