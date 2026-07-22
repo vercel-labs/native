@@ -140,11 +140,23 @@ pub fn bleedAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = canvasDirtyEdgeForFloorBoundary(@floor(normalized.minX() * device) - bleed_pixels, device);
-    const min_y = canvasDirtyEdgeForFloorBoundary(@floor(normalized.minY() * device) - bleed_pixels, device);
-    const width = canvasDirtySpanForCeilBoundary(min_x, @ceil(normalized.maxX() * device) + bleed_pixels, device);
-    const height = canvasDirtySpanForCeilBoundary(min_y, @ceil(normalized.maxY() * device) + bleed_pixels, device);
-    return geometry.RectF.init(min_x, min_y, width, height);
+    const min_x = canvasDirtyEdgeForFloorBoundary(clampedCanvasDirtyBoundary(@floor(normalized.minX() * device) - bleed_pixels), device);
+    const min_y = canvasDirtyEdgeForFloorBoundary(clampedCanvasDirtyBoundary(@floor(normalized.minY() * device) - bleed_pixels), device);
+    const width = canvasDirtySpanForCeilBoundary(min_x, clampedCanvasDirtyBoundary(@ceil(normalized.maxX() * device) + bleed_pixels), device);
+    const height = canvasDirtySpanForCeilBoundary(min_y, clampedCanvasDirtyBoundary(@ceil(normalized.maxY() * device) + bleed_pixels), device);
+    return geometry.RectF.init(min_x, min_y, @max(0, width), @max(0, height));
+}
+
+/// Device boundaries beyond any presentable surface behave identically
+/// after surface clipping, so they clamp into f32's exact-integer range
+/// (2^24): a far off-screen coordinate can floor/ceil to infinity, and
+/// the ulp walks below would never terminate from there. NaN (a
+/// degenerate input rect) clamps to zero — surface clipping discards
+/// the empty result.
+fn clampedCanvasDirtyBoundary(boundary: f32) f32 {
+    const limit: f32 = 16_777_216;
+    if (std.math.isNan(boundary)) return 0;
+    return std.math.clamp(boundary, -limit, limit);
 }
 
 /// Smallest representable logical coordinate whose f32 product with

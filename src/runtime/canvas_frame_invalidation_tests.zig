@@ -859,6 +859,23 @@ test "bleed-aligned dirty edges round-trip onto their device boundaries" {
     }
 }
 
+test "bleed alignment stays finite for far off-screen damage" {
+    // Scaling a far off-screen coordinate can floor/ceil to infinity;
+    // the boundary must clamp instead of the edge search walking
+    // nextAfter from infinity forever. The clamped result only needs
+    // to stay finite and OUTSIDE any presentable surface — surface
+    // clipping owns the rest.
+    const negative = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1.0e38, 1.0e38), 2, 1).?;
+    try std.testing.expect(std.math.isFinite(negative.minX()));
+    try std.testing.expect(std.math.isFinite(negative.maxX()));
+    try std.testing.expect(negative.maxX() <= 0);
+
+    const positive = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1.0e38, 1.0e38, 2.0e38, 2.0e38), 2, 1).?;
+    try std.testing.expect(std.math.isFinite(positive.minX()));
+    try std.testing.expect(std.math.isFinite(positive.maxX()));
+    try std.testing.expect(positive.minX() >= 16_384);
+}
+
 test "reflow damage reaches a whole device pixel past changed bounds at fractional scales" {
     // The AA bleed allowance is one DEVICE pixel: at scale 1.3 a pill
     // starting at x=170 occupies device column 220, so removing it must

@@ -665,11 +665,21 @@ fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f3
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = dirtyEdgeForFloorBoundary(@floor(normalized.minX() * device) - bleed_pixels, device);
-    const min_y = dirtyEdgeForFloorBoundary(@floor(normalized.minY() * device) - bleed_pixels, device);
-    const width = dirtySpanForCeilBoundary(min_x, @ceil(normalized.maxX() * device) + bleed_pixels, device);
-    const height = dirtySpanForCeilBoundary(min_y, @ceil(normalized.maxY() * device) + bleed_pixels, device);
-    return geometry.RectF.init(min_x, min_y, width, height);
+    const min_x = dirtyEdgeForFloorBoundary(clampedDirtyBoundary(@floor(normalized.minX() * device) - bleed_pixels), device);
+    const min_y = dirtyEdgeForFloorBoundary(clampedDirtyBoundary(@floor(normalized.minY() * device) - bleed_pixels), device);
+    const width = dirtySpanForCeilBoundary(min_x, clampedDirtyBoundary(@ceil(normalized.maxX() * device) + bleed_pixels), device);
+    const height = dirtySpanForCeilBoundary(min_y, clampedDirtyBoundary(@ceil(normalized.maxY() * device) + bleed_pixels), device);
+    return geometry.RectF.init(min_x, min_y, @max(0, width), @max(0, height));
+}
+
+/// Boundaries clamp into f32's exact-integer range (see the runtime
+/// twin): a far off-screen coordinate can floor/ceil to infinity, and
+/// the ulp walks below never terminate from there; surface clipping
+/// owns everything past the clamp.
+fn clampedDirtyBoundary(boundary: f32) f32 {
+    const limit: f32 = 16_777_216;
+    if (std.math.isNan(boundary)) return 0;
+    return std.math.clamp(boundary, -limit, limit);
 }
 
 /// Smallest representable coordinate whose product with `device`
