@@ -6183,13 +6183,13 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.replay) self.takeReplayVideoSource();
                 return;
             }
-            const services = self.services orelse return self.failVideoChannel();
+            const services = self.services orelse return self.failVideoLoad();
             // Claim the texture channel first: a surface another
             // producer holds (or a host with no channels left) fails
             // loudly before the platform decodes anything toward it.
-            const binding = self.media_surfaces orelse return self.failVideoChannel();
+            const binding = self.media_surfaces orelse return self.failVideoLoad();
             const sink = binding.acquire_fn(binding.context, options.surface) catch
-                return self.failVideoChannel();
+                return self.failVideoLoad();
             self.video.sink = sink;
             // The source cascade, the audio rule verbatim: a missing
             // local file is the ONE local failure that falls through to
@@ -6202,11 +6202,11 @@ pub fn Effects(comptime Msg: type) type {
                         break :resolve;
                     } else |err| {
                         if (err != error.VideoSourceNotFound or options.url.len == 0) {
-                            return self.failVideoChannel();
+                            return self.failVideoLoad();
                         }
                     }
                 }
-                services.videoLoadUrl(options.url, self.video.token, sink) catch return self.failVideoChannel();
+                services.videoLoadUrl(options.url, self.video.token, sink) catch return self.failVideoLoad();
                 self.video.source = .stream;
                 // A fresh stream has no bytes yet: when the load will
                 // PLAY, buffering starts true optimistically and the
@@ -6217,25 +6217,26 @@ pub fn Effects(comptime Msg: type) type {
                 // play. `playing` holds the autoplay intent here.
                 self.video.buffering = self.video.playing;
             }
-            // Journal the cascade's resolution for replay — Msg-less
-            // engine truth, journaled handler or no handler (the
-            // `.video_load` kind's doc has the full story). A later
-            // start failure journals its own `.failed` terminal after
-            // this record, so replay resets the channel in the same
-            // order the recording did.
-            self.journalNote(.{
-                .kind = .video_load,
-                .key = options.key,
-                .video_token = self.video.token,
-                .video_source = self.video.source,
-            });
             // Options that shape the fresh player (a load resets the
             // platform side, so defaults need no call). Best effort,
             // like the remembered audio volume.
             if (options.loop) services.videoSetLoop(true) catch {};
             if (options.muted) services.videoSetMuted(true) catch {};
             if (volume != 1.0) services.videoSetVolume(volume) catch {};
-            if (options.autoplay) services.videoPlay() catch return self.failVideoChannel();
+            if (options.autoplay) services.videoPlay() catch return self.failVideoLoad();
+            // Journal the cascade's resolution for replay — Msg-less
+            // engine truth, journaled handler or no handler (the
+            // `.video_load` kind's doc has the full story). EVERY exit
+            // of the real path journals exactly one such record
+            // (`failVideoLoad` covers the refusals), so the replayed
+            // loads and the journaled records form a bijection replay
+            // can verify: extras and absences are both divergence.
+            self.journalNote(.{
+                .kind = .video_load,
+                .key = options.key,
+                .video_token = self.video.token,
+                .video_source = self.video.source,
+            });
         }
 
         /// Start or resume the loaded playback (the poster-frame
@@ -6593,9 +6594,19 @@ pub fn Effects(comptime Msg: type) type {
         fn takeReplayVideoSource(self: *Self) void {
             const storage = self.replayVideoSourceStorage();
             var index: usize = 0;
+            var matched = false;
             while (index < self.replay_video_source_len) {
                 const entry = storage[index];
                 if (entry.token < self.video.token) {
+                    // A record whose load position has already passed:
+                    // the replayed timeline never issued the load that
+                    // journaled it. Divergence, consumed (it can never
+                    // pair) and latched for `finishReplay`.
+                    std.debug.print(
+                        "session replay: the journaled video load for key {d} (position {d}) was never issued by the replayed updates - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                        .{ entry.key, entry.token },
+                    );
+                    self.replay_video_diverged = true;
                     self.replay_video_source_len -= 1;
                     storage[index] = storage[self.replay_video_source_len];
                     continue;
@@ -6614,6 +6625,7 @@ pub fn Effects(comptime Msg: type) type {
                         self.replay_video_diverged = true;
                         self.replay_video_source_len -= 1;
                         storage[index] = storage[self.replay_video_source_len];
+                        matched = true;
                         break;
                     }
                     self.video.source = entry.source;
@@ -6625,9 +6637,23 @@ pub fn Effects(comptime Msg: type) type {
                     if (entry.source == .stream and self.video.playing) self.video.buffering = true;
                     self.replay_video_source_len -= 1;
                     storage[index] = storage[self.replay_video_source_len];
+                    matched = true;
                     break;
                 }
                 index += 1;
+            }
+            if (!matched and !self.replay_video_diverged) {
+                // Every non-rejected recorded load journaled a record
+                // that feeds before its dispatch, so a replayed load
+                // with no record at its position is a load the
+                // recording never issued. Divergence, latched for
+                // `finishReplay` (this is the live `loadVideo` API —
+                // no error channel).
+                std.debug.print(
+                    "session replay: the replayed dispatch loaded video key {d} (position {d}) but the recording journaled no load there - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                    .{ self.video.key, self.video.token },
+                );
+                self.replay_video_diverged = true;
             }
             if (self.replay_video_source_len == 0 and self.replay_video_source_spill.len > 0) {
                 self.allocator.free(self.replay_video_source_spill);
@@ -8596,6 +8622,23 @@ pub fn Effects(comptime Msg: type) type {
         /// whatever was claimed, reset the channel, and deliver one
         /// `.failed` event on the next drain — the honest degrade for
         /// hosts without video playback.
+        /// A synchronous `loadVideo` refusal: journal this load's
+        /// `.video_load` record FIRST — every non-rejected load
+        /// journals exactly one, resolved or refused, which is what
+        /// lets replay pair every replayed load with a record and
+        /// refuse extras — then degrade through `failVideoChannel`
+        /// (whose `.failed` terminal journals later, at its drain, so
+        /// replay resets the channel in the recording's order).
+        fn failVideoLoad(self: *Self) void {
+            self.journalNote(.{
+                .kind = .video_load,
+                .key = self.video.key,
+                .video_token = self.video.token,
+                .video_source = self.video.source,
+            });
+            self.failVideoChannel();
+        }
+
         fn failVideoChannel(self: *Self) void {
             const key = self.video.key;
             const token = self.video.token;

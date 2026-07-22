@@ -968,7 +968,14 @@ test "a declared <video src> loads on first rebuild, reloads on src change, and 
 
     // The installing rebuild reconciled the declaration into the
     // channel: one load of the declared path onto the framework-owned
-    // playback surface, autoplay honored.
+    // playback surface, autoplay honored. The captured declaration is
+    // COPIED out of the build arena (a later failed rebuild resets the
+    // arena; the reconcile can run from a window close before the next
+    // success), so its src must alias the app-owned buffer.
+    try std.testing.expectEqual(
+        @intFromPtr(&h.app_state.video_build_src_buffer),
+        @intFromPtr(h.app_state.video_build_declaration.?.src.ptr),
+    );
     try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
     try std.testing.expectEqualStrings("assets/clips/one.mp4", np.video.path());
     try std.testing.expect(np.video.playing);
@@ -1987,12 +1994,14 @@ test "retired video identities release at the next drain-pass boundary" {
     defer fx.deinit();
     fx.armReplay();
 
+    fx.pushReplayVideoSource(clip_key, 1, .local);
     fx.loadVideo(.{
         .key = clip_key,
         .surface = clip_surface,
         .path = clip_path,
         .on_event = VideoEffects.videoMsg(.video_event),
     });
+    fx.pushReplayVideoSource(clip_key + 1, 2, .local);
     fx.loadVideo(.{
         .key = clip_key + 1,
         .surface = clip_surface,
@@ -2116,12 +2125,14 @@ test "replayed video records must name the load at their position" {
     defer fx.deinit();
     fx.armReplay();
 
+    fx.pushReplayVideoSource(clip_key, 1, .local);
     fx.loadVideo(.{
         .key = clip_key,
         .surface = clip_surface,
         .path = clip_path,
         .on_event = VideoEffects.videoMsg(.video_event),
     });
+    fx.pushReplayVideoSource(clip_key + 1, 2, .local);
     fx.loadVideo(.{
         .key = clip_key + 1,
         .surface = clip_surface,
@@ -2181,6 +2192,17 @@ test "unclaimed or misclaimed cascade resolutions fail the finish check" {
         });
         try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, fx.videoSnapshot().source);
         try fx.finishReplay();
+
+        // An EXTRA load the recording never issued — no record at its
+        // position — is divergence too: every non-rejected recorded
+        // load journals one, so absence proves the timelines differ.
+        fx.loadVideo(.{
+            .key = clip_key + 1,
+            .surface = clip_surface,
+            .url = clip_url,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        });
+        try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
     }
 }
 

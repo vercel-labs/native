@@ -117,8 +117,11 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// becoming per-request generations — same bytes, values a stale build
 /// could never match). Bump this ONLY for such semantics-only changes;
 /// layout changes need NO action here — the fingerprint moves on its
-/// own.
-pub const format_semantic_epoch: u32 = 1;
+/// own. Epoch 2: `.video_load` records became one-per-load (refused
+/// cascades journal one too) and replay verifies the bijection — an
+/// earlier journal's failed loads would replay as false divergence, so
+/// the identical bytes must refuse.
+pub const format_semantic_epoch: u32 = 2;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record

@@ -941,6 +941,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the post-rebuild reconcile; the src slice lives in that
         /// build's arena, valid until the next rebuild.
         video_build_declaration: ?VideoBuildDeclaration = null,
+        /// Backing bytes for `video_build_declaration.src`, copied out
+        /// of the build arena at capture (the slot captures' rule): the
+        /// declaration outlives the pass that recorded it — a later
+        /// FAILED rebuild resets the arena it would otherwise borrow
+        /// from, and the reconcile can run from a window close before
+        /// the next successful build.
+        video_build_src_buffer: [1024]u8 = undefined,
         /// The video mirrors as the LAST main-canvas build rendered
         /// them (stamped at build time, before the post-build reconcile
         /// can move them): `drainEffects` compares against the live
@@ -1663,13 +1670,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
                 // Capture the build's `<video src>` declaration for the
                 // post-rebuild reconcile (last pass wins — each pass
-                // resets the arena and re-records).
-                self.video_build_declaration = if (ui.video_declaration) |declaration| .{
-                    .src = declaration.src,
-                    .autoplay = declaration.autoplay,
-                    .loop = declaration.loop,
-                    .muted = declaration.muted,
-                } else null;
+                // resets the arena and re-records), COPIED out of the
+                // build arena (`video_build_src_buffer`): borrowing the
+                // arena would dangle after a later failed rebuild reset
+                // it. Over-long sources are not tracked and keep the
+                // previous capture — the slot captures' rule
+                // (`captureSlotVideoDeclaration`).
+                if (ui.video_declaration) |declaration| {
+                    if (declaration.src.len > 0 and declaration.src.len <= self.video_build_src_buffer.len) {
+                        @memcpy(self.video_build_src_buffer[0..declaration.src.len], declaration.src);
+                        self.video_build_declaration = .{
+                            .src = self.video_build_src_buffer[0..declaration.src.len],
+                            .autoplay = declaration.autoplay,
+                            .loop = declaration.loop,
+                            .muted = declaration.muted,
+                        };
+                    }
+                } else {
+                    self.video_build_declaration = null;
+                }
                 self.rememberVirtualWindows(&ui);
                 // Measure the mounted rows of every variable-extent
                 // list against the fresh layout and patch the retained
