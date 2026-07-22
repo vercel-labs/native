@@ -8,6 +8,7 @@ const effects_mod = @import("effects.zig");
 const automation = @import("../automation/root.zig");
 const zero_platform = @import("../platform/root.zig");
 const null_platform_mod = @import("../platform/null_platform.zig");
+const canvas_frame_helpers = @import("canvas_frame_helpers.zig");
 
 const canvas_label = "counter-canvas";
 
@@ -580,7 +581,7 @@ test "selection-change reflow leaves no stale pixels on the ui app pixel path" {
     try std.testing.expect(app_state.installed);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
 
-    const byte_len = (try @import("canvas_frame_helpers.zig").canvasSurfacePixelSize(surface, scale)).byte_len;
+    const byte_len = (try canvas_frame_helpers.canvasSurfacePixelSize(surface, scale)).byte_len;
     const after_swap = try std.testing.allocator.alloc(u8, byte_len);
     defer std.testing.allocator.free(after_swap);
     const full = try std.testing.allocator.alloc(u8, byte_len);
