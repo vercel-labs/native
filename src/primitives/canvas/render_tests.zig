@@ -2847,14 +2847,16 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(@as(usize, 1), frame.changes.len);
     try std.testing.expectEqual(DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?ObjectId, 1), frame.changes[0].id);
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), frame.dirty_bounds);
+    // Changed extents' union, inflated by the one-device-pixel AA
+    // bleed and clipped to the 50x50 surface.
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), frame.dirty_bounds);
 
     const render_pass = frame.renderPass();
     try std.testing.expect(render_pass.requiresRender());
     try std.testing.expectEqual(CanvasRenderPassLoadAction.load, render_pass.loadAction());
     try std.testing.expectEqual(@as(usize, 2), render_pass.commandCount());
     try std.testing.expectEqual(@as(usize, 1), render_pass.batchCount());
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), render_pass.scissorBounds());
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), render_pass.scissorBounds());
 
     var gpu_commands: [2]CanvasGpuCommand = undefined;
     const packet = try frame.gpuPacket(&gpu_commands);
@@ -2867,27 +2869,27 @@ test "canvas frame plan clips incremental dirty bounds to surface" {
     try std.testing.expectEqual(packet.commandCount(), packet_summary.command_count);
     try std.testing.expectEqual(packet.cachedResourceCommandCount(), packet_summary.cached_resource_command_count);
     try std.testing.expectEqual(packet.unsupported_command_count, packet_summary.unsupported_command_count);
-    try expectRect(geometry.RectF.init(0, 0, 50, 40), packet.scissor.?);
+    try expectRect(geometry.RectF.init(0, 0, 50, 41), packet.scissor.?);
     var packet_json_buffer: [2048]u8 = undefined;
     var packet_json_writer = std.Io.Writer.fixed(&packet_json_buffer);
     try packet.writeJson(&packet_json_writer);
     const packet_json = packet_json_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"loadAction\":\"load\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"scissorBounds\":[0,0,50,40]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"scissorBounds\":[0,0,50,41]") != null);
 
     const profile = frame.profile();
     try std.testing.expect(profile.requires_render);
     try std.testing.expect(!profile.full_repaint);
     try std.testing.expectEqual(@as(f32, 2500), profile.surface_area);
-    try std.testing.expectEqual(@as(f32, 2000), profile.dirty_area);
-    try std.testing.expectEqual(@as(f32, 0.8), profile.dirty_ratio);
+    try std.testing.expectEqual(@as(f32, 2050), profile.dirty_area);
+    try std.testing.expectEqual(@as(f32, 2050.0 / 2500.0), profile.dirty_ratio);
     try std.testing.expectEqual(CanvasFrameProfileRisk.high, profile.risk);
 
     var profile_json_buffer: [1024]u8 = undefined;
     var profile_json_writer = std.Io.Writer.fixed(&profile_json_buffer);
     try frame.writeProfileJson(&profile_json_writer);
     const profile_json = profile_json_writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"dirtyArea\":2000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"dirtyArea\":2050") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile_json, "\"risk\":\"high\"") != null);
 }
 
@@ -2969,7 +2971,8 @@ test "canvas frame plan applies render overrides without display list changes" {
     try std.testing.expect(!frame.full_repaint);
     try std.testing.expect(frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), frame.dirty_bounds);
+    // Override extents' union, inflated by the AA bleed and clipped.
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), frame.dirty_bounds);
     try std.testing.expectEqual(@as(usize, 1), frame.render_plan.commandCount());
     try std.testing.expectEqual(@as(f32, 0.5), frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(Affine.translate(10, 0), frame.render_plan.commands[0].transform);
@@ -2977,7 +2980,7 @@ test "canvas frame plan applies render overrides without display list changes" {
 
     const render_pass = frame.renderPass();
     try std.testing.expectEqual(CanvasRenderPassLoadAction.load, render_pass.loadAction());
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), render_pass.scissorBounds());
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), render_pass.scissorBounds());
 
     var pixels: [40 * 20 * 4]u8 = undefined;
     const surface = try ReferenceRenderSurface.init(40, 20, &pixels);
@@ -3053,7 +3056,7 @@ test "canvas render animations sample overrides for frame planning" {
     });
 
     try std.testing.expectEqual(@as(usize, 0), frame.changes.len);
-    try expectRect(geometry.RectF.init(0, 0, 20, 10), frame.dirty_bounds);
+    try expectRect(geometry.RectF.init(0, 0, 21, 11), frame.dirty_bounds);
     try std.testing.expectEqual(@as(f32, 0.5), frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(Affine.translate(10, 0), frame.render_plan.commands[0].transform);
 
