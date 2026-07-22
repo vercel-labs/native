@@ -139,6 +139,35 @@ pub const Pty = struct {
         }
     }
 
+    /// Reap after the output stream ended, NEVER blocking indefinitely.
+    /// The fast path is the normal case: the child already exited, so a
+    /// non-blocking reap returns at once and no signal is sent. If the
+    /// child is still alive (it closed its terminal descriptors but kept
+    /// running), it is hung up like a real terminal (SIGHUP to the job),
+    /// then escalated to SIGKILL within a bounded window, so the exit
+    /// always arrives and no zombie is left — the fix for a `reapBlocking`
+    /// that would otherwise wait forever on such a child while a kill is
+    /// skipped. The caller publishes `reaping` before this so no
+    /// concurrent kill signals the (soon-freed) pid.
+    pub fn reapEnding(self: Pty) Exit {
+        if (!supported) return .{ .code = -1, .signal = 0 };
+        if (self.reap()) |exit| return exit;
+        // Still running: hang it up, then escalate.
+        _ = c.kill(-self.pid, sighup);
+        _ = c.kill(self.pid, sighup);
+        var waited_us: usize = 0;
+        while (waited_us < 500_000) : (waited_us += 10_000) {
+            _ = c.usleep(10_000);
+            if (self.reap()) |exit| return exit;
+            if (waited_us == 200_000) {
+                _ = c.kill(-self.pid, sigkill);
+                _ = c.kill(self.pid, sigkill);
+            }
+        }
+        // SIGKILL cannot be caught; this wait is bounded.
+        return self.reapBlocking();
+    }
+
     /// Close the master fd. The child is expected to be reaped separately.
     pub fn close(self: Pty) void {
         if (!supported) return;
@@ -233,25 +262,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // 127 on its own — a shebang naming a missing interpreter passes
     // the X_OK check yet fails at exec, and must not masquerade as a
     // normal exit.
-    var exec_pipe: [2]c_int = undefined;
-    if (c.pipe(&exec_pipe) != 0) {
+    // Both ends close-on-exec (atomically on Linux via pipe2): the
+    // write end must close on the child's successful exec to signal EOF
+    // (and must not leak to a concurrent fork's child, which would
+    // delay that EOF), and the read end must not leak either. The
+    // exec-status poll's timeout is the net for Darwin's residual
+    // sub-syscall window.
+    const exec_pipe = makePipe(false) catch {
         _ = c.close(master);
         _ = c.close(slave);
         return error.PtyOpenFailed;
-    }
-    // CLOEXEC on the write end is load-bearing, not best-effort: if it
-    // does not take, a successful exec leaves the child holding a copy
-    // of the write end and the parent's `readAll` below blocks until
-    // the child exits. The read end is CLOEXEC too so a concurrent
-    // spawn on another thread cannot inherit it between fork and the
-    // parent's read. A failed fcntl aborts the spawn instead.
-    if (!setCloexec(exec_pipe[1]) or !setCloexec(exec_pipe[0])) {
-        _ = c.close(master);
-        _ = c.close(slave);
-        _ = c.close(exec_pipe[0]);
-        _ = c.close(exec_pipe[1]);
-        return error.PtyOpenFailed;
-    }
+    };
 
     const pid = c.fork();
     if (pid < 0) {
@@ -272,10 +293,18 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // PARENT.
     _ = c.close(slave);
     _ = c.close(exec_pipe[1]);
-    // Block until the write end closes: EOF means exec succeeded, any
-    // byte means it failed (the child wrote its errno then _exit'd).
-    var probe: [1]u8 = undefined;
-    const failed = readAll(exec_pipe[0], &probe) > 0;
+    // A failure byte, EOF, or the timeout resolves exec status. A real
+    // exec failure writes its byte into the pipe buffer INSTANTLY (the
+    // child's write lands before its _exit), so a byte always means
+    // failure regardless of who else holds a writer. EOF (every writer
+    // closed) is the fast success signal. The timeout is the safety net
+    // for the residual CLOEXEC window: if a process spawn on another
+    // thread forked in the instant between this pipe's creation and its
+    // fcntl and its exec'd child inherited a copy of the write end, EOF
+    // is delayed until THAT process exits — but no failure byte arrived,
+    // so exec succeeded, and we proceed rather than hang. Bounded at a
+    // few seconds, orders of magnitude past a real exec.
+    const failed = execFailed(exec_pipe[0]);
     _ = c.close(exec_pipe[0]);
     if (failed) {
         var status: c_int = 0;
@@ -300,21 +329,37 @@ fn setCloexec(fd: c_int) bool {
     return c.fcntl(fd, f_setfd, flags | fd_cloexec) >= 0;
 }
 
-/// Read into `buf` until EOF or full, retrying EINTR. Returns the byte
-/// count (0 = clean EOF).
-fn readAll(fd: c_int, buf: []u8) usize {
-    var total: usize = 0;
-    while (total < buf.len) {
-        const r = c.read(fd, buf[total..].ptr, buf.len - total);
-        if (r > 0) {
-            total += @intCast(r);
-            continue;
+/// Resolve exec status from the self-pipe read end without ever
+/// blocking indefinitely: poll for a failure byte, EOF, or a timeout.
+/// A byte (the child's errno report) means exec FAILED. EOF (every
+/// writer closed via CLOEXEC on a successful exec) means it SUCCEEDED.
+/// The timeout also means success — it can only be reached when a
+/// concurrent fork's child inherited a copy of the write end in the
+/// CLOEXEC-setup window (delaying EOF), and no failure byte arrived, so
+/// our own exec succeeded. Bounded so that residual race can never hang
+/// the spawning thread.
+fn execFailed(fd: c_int) bool {
+    const timeout_ms: c_int = 5000;
+    var fds = [1]Pollfd{.{ .fd = fd, .events = pollin, .revents = 0 }};
+    while (true) {
+        const r = c.poll(&fds, 1, timeout_ms);
+        if (r < 0) {
+            if (errnoValue() == eintr) continue;
+            return false;
         }
-        if (r == 0) break;
-        if (errnoValue() == eintr) continue;
-        break;
+        if (r == 0) return false; // timeout: exec succeeded (see above)
+        // Readable or hung up: a byte present is failure; a clean EOF
+        // (readable, zero bytes) is success.
+        if (fds[0].revents & pollin != 0) {
+            var probe: [1]u8 = undefined;
+            const n = c.read(fd, &probe, 1);
+            if (n > 0) return true;
+            if (n < 0 and errnoValue() == eintr) continue;
+            return false;
+        }
+        // POLLHUP/POLLERR with no data: the writer closed on exec.
+        return false;
     }
-    return total;
 }
 
 fn decodeStatus(status: c_int) Exit {
@@ -420,8 +465,12 @@ const o_nonblock: c_int = switch (builtin.os.tag) {
     .macos => 0x4,
     else => 0,
 };
+// pipe2 flag values (Linux): O_CLOEXEC and O_NONBLOCK as c_uint.
+const o_cloexec: c_uint = 0x80000;
+const o_nonblock_flag: c_uint = 0x800;
 const sigterm: c_int = 15;
 const sigkill: c_int = 9;
+const sighup: c_int = 1;
 const eintr: c_int = 4;
 const eio: c_int = 5;
 
@@ -458,8 +507,10 @@ const c = struct {
     extern "c" fn _exit(code: c_int) noreturn;
     extern "c" fn kill(pid: c_int, sig: c_int) c_int;
     extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
+    extern "c" fn usleep(usec: c_uint) c_int;
     extern "c" fn ioctl(fd: c_int, request: c_ulong, arg: *const Winsize) c_int;
     extern "c" fn pipe(fds: *[2]c_int) c_int;
+    extern "c" fn pipe2(fds: *[2]c_int, flags: c_uint) c_int;
     extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
     extern "c" fn poll(fds: [*]Pollfd, nfds: c_uint, timeout: c_int) c_int;
     extern "c" fn __error() *c_int; // Darwin errno
@@ -476,14 +527,38 @@ const c = struct {
 /// runtime closing its copies. The child needs neither end.
 pub fn pipePair() Error![2]c_int {
     if (comptime !supported) return error.PtyUnsupported;
+    return makePipe(true);
+}
+
+/// Create a pipe with both ends close-on-exec (and, when `nonblock`,
+/// non-blocking). On Linux the flags are set ATOMICALLY at creation via
+/// `pipe2`, closing the concurrent-fork inheritance window entirely; on
+/// Darwin (no `pipe2`) the flags are applied with `fcntl` immediately
+/// after, and the exec self-pipe's poll timeout is the net for the
+/// residual sub-syscall window. A failed setup closes both ends and
+/// aborts. CLOEXEC is load-bearing (an inherited exec-pipe writer would
+/// delay EOF; an inherited wake pipe would leak); non-blocking is
+/// load-bearing on the wake pipe (a full pipe must never block the UI
+/// thread inside `nudge`).
+fn makePipe(nonblock: bool) Error![2]c_int {
     var fds: [2]c_int = undefined;
+    if (comptime builtin.os.tag == .linux) {
+        var flags: c_uint = o_cloexec;
+        if (nonblock) flags |= o_nonblock_flag;
+        if (c.pipe2(&fds, flags) != 0) return error.PtyOpenFailed;
+        return fds;
+    }
     if (c.pipe(&fds) != 0) return error.PtyOpenFailed;
     for (fds) |fd| {
-        // Non-blocking is load-bearing, not best-effort: without it a
-        // burst of `ptyWrite` nudges against a full pipe would block
-        // the UI thread inside `nudge`. A failed fcntl aborts the pair.
-        const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
-        if (flags < 0 or c.fcntl(fd, f_setfl, flags | o_nonblock) < 0 or !setCloexec(fd)) {
+        if (nonblock) {
+            const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
+            if (flags < 0 or c.fcntl(fd, f_setfl, flags | o_nonblock) < 0) {
+                _ = c.close(fds[0]);
+                _ = c.close(fds[1]);
+                return error.PtyOpenFailed;
+            }
+        }
+        if (!setCloexec(fd)) {
             _ = c.close(fds[0]);
             _ = c.close(fds[1]);
             return error.PtyOpenFailed;

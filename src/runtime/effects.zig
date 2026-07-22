@@ -939,11 +939,14 @@ pub const max_effect_pty_write_bytes: usize = 4096;
 /// refused and counted into `EffectPtyEvent.dropped_writes` on the
 /// exit event — never silence.
 pub const max_effect_pty_outbound_bytes: usize = 64 * 1024;
-/// Distinct un-fully-sent `ptyWrite` payloads tracked for the
-/// `dropped_writes` count (see `PtyShared.out_write_lens`). Realistic
-/// input is a handful of small writes in flight; a backlog past this
-/// merges into the last record (bounded undercount), never overflows.
-pub const max_effect_pty_write_records: usize = 128;
+/// Distinct un-fully-sent `ptyWrite` payloads the outbound FIFO holds
+/// (see `PtyShared.out_write_lens`) — an admission bound alongside the
+/// byte budget, so every accepted write owns an exact length record and
+/// `dropped_writes` counts payloads precisely. A write past it is
+/// refused and counted, exactly like a full byte buffer; realistic
+/// input is a handful of small writes in flight, so only a child that
+/// stopped reading entirely reaches it.
+pub const max_effect_pty_write_records: usize = 256;
 /// Longest TERM value `ptySpawn` accepts.
 pub const max_effect_pty_term_bytes: usize = 32;
 /// Bytes of `ptyWrite` input a FAKE pty retains for test assertions
@@ -1930,18 +1933,19 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         // buffer and readable.)
         if (ready.hangup and want_read) break :read_loop;
     }
-    // The stream is over: reap the child (EOF follows the last slave
-    // close, so this wait is a formality after a normal exit and
-    // bounded after a kill) and stage the exit. Deliberately the
-    // thread's LAST shared touch before the wake. Publish `reaping`
-    // BEFORE `waitpid` so a racing ptyKill/teardown never signals a
-    // pid that reapBlocking is about to free for reuse — until the
-    // wait returns the child is still alive, so declining to signal
-    // loses nothing.
+    // The stream is over: reap the child and stage the exit. Publish
+    // `reaping` BEFORE any waitpid so a racing ptyKill/teardown never
+    // signals a pid that reaping is about to free for reuse — until the
+    // reap returns the child is still alive, so declining to signal
+    // loses nothing. `reapEnding` never blocks forever: the normal case
+    // (child already exited) returns at once with no signal, and a child
+    // that closed its terminal but kept running is hung up and escalated
+    // to SIGKILL within a bounded window, so the exit always arrives.
+    // This is the thread's LAST shared touch before the wake.
     shared.mutex.lock();
     shared.reaping = true;
     shared.mutex.unlock();
-    const exit = transport.reapBlocking();
+    const exit = transport.reapEnding();
     shared.mutex.lock();
     if (shared.open and shared.generation == generation) {
         // Outbound bytes still staged at exit never reached the child:
@@ -4302,17 +4306,19 @@ pub fn Effects(comptime Msg: type) type {
                     continue;
                 }
                 if (comptime pty_transport.supported) {
-                    var skip_signal = false;
                     if (pty_slot.shared) |shared| {
+                        // Signal under the mutex, the ptyKill discipline:
+                        // the check and the kill are atomic against the
+                        // io thread's `reaping` publish, so a reaped
+                        // pid's reuse is never signalled.
                         shared.mutex.lock();
                         shared.shutdown = true;
                         shared.kill_requested = true;
-                        // Same pid-reuse guard as ptyKill: never signal
-                        // once the io thread has begun reaping.
-                        skip_signal = shared.reaping or shared.exit_staged or shared.io_done;
+                        if (!(shared.reaping or shared.exit_staged or shared.io_done)) {
+                            if (pty_slot.transport) |transport| transport.kill(false);
+                        }
                         shared.mutex.unlock();
-                    }
-                    if (!skip_signal) {
+                    } else {
                         if (pty_slot.transport) |transport| transport.kill(false);
                     }
                     pty_transport.nudge(pty_slot.wake_pipe[1]);
@@ -6355,8 +6361,16 @@ pub fn Effects(comptime Msg: type) type {
             const accepted = accepted: {
                 if (!shared.open or shared.generation != slot.generation) break :accepted false;
                 if (bytes.len > max_effect_pty_write_bytes or
-                    shared.out_len + bytes.len > max_effect_pty_outbound_bytes)
+                    shared.out_len + bytes.len > max_effect_pty_outbound_bytes or
+                    shared.out_write_count == max_effect_pty_write_records)
                 {
+                    // Refused: over-bound, the byte FIFO is full, or the
+                    // per-payload record ring is full (a child that
+                    // stopped reading). Counted as one dropped write, so
+                    // the count stays EXACT — admission is bounded by
+                    // both the byte buffer and the record ring, so an
+                    // accepted write always has an exact record and the
+                    // fold that would undercount never happens.
                     shared.dropped_writes +|= 1;
                     break :accepted false;
                 }
@@ -6365,17 +6379,8 @@ pub fn Effects(comptime Msg: type) type {
                     shared.out_data[(shared.out_head + shared.out_len + index) % max_effect_pty_outbound_bytes] = bytes[index];
                 }
                 shared.out_len += bytes.len;
-                if (shared.out_write_count == max_effect_pty_write_records) {
-                    // Backlog past the record cap: fold into the tail so
-                    // the count never overflows (a bounded undercount of
-                    // an absurd keystroke backlog, never a miscount of
-                    // delivered writes).
-                    const tail = (shared.out_write_head + shared.out_write_count - 1) % max_effect_pty_write_records;
-                    shared.out_write_lens[tail] +|= @intCast(bytes.len);
-                } else {
-                    shared.out_write_lens[(shared.out_write_head + shared.out_write_count) % max_effect_pty_write_records] = @intCast(bytes.len);
-                    shared.out_write_count += 1;
-                }
+                shared.out_write_lens[(shared.out_write_head + shared.out_write_count) % max_effect_pty_write_records] = @intCast(bytes.len);
+                shared.out_write_count += 1;
                 break :accepted true;
             };
             shared.mutex.unlock();
@@ -6414,23 +6419,28 @@ pub fn Effects(comptime Msg: type) type {
             // already staged but not yet delivered rewrites to
             // `.cancelled` with the -1 sentinel code — after this verb
             // the exit always says cancelled, never a stale child code.
-            // Signal ONLY while the io thread has not begun reaping:
-            // once `reaping` is set (before its `waitpid`) the pid may
-            // be freed for OS reuse the instant the wait returns, so
-            // signalling could hit an unrelated process. Before that
-            // point the child is alive and the signal is safe. The
-            // nudge still wakes the io thread so a read parked short of
-            // EOF winds down through the kill_requested break.
-            const skip_signal = shared.reaping or shared.exit_staged or shared.io_done;
+            // Signal ONLY while the io thread has not begun reaping,
+            // and do it UNDER THE MUTEX so the check and the signal are
+            // atomic against the io thread: the io thread sets `reaping`
+            // under this same mutex before its first waitpid, so either
+            // we acquire first (reaping false → the child is unwaited
+            // and alive → the signal is safe) or it acquires first
+            // (reaping true → we skip). Once `reaping` is set the pid
+            // may be freed for reuse the instant a reap returns, so
+            // signalling then could hit an unrelated process. kill() is
+            // a bounded, non-blocking syscall, so holding the spin mutex
+            // across it is fine. The nudge (outside the lock) still
+            // wakes a read parked short of EOF through the
+            // kill_requested break.
             if (shared.exit_staged) {
                 shared.exit_reason = .cancelled;
                 shared.exit_code = effect_error_exit_code;
                 shared.exit_signal = 0;
             }
-            shared.mutex.unlock();
-            if (!skip_signal) {
+            if (!(shared.reaping or shared.exit_staged or shared.io_done)) {
                 if (slot.transport) |transport| transport.kill(false);
             }
+            shared.mutex.unlock();
             pty_transport.nudge(slot.wake_pipe[1]);
         }
 

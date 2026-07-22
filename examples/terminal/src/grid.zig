@@ -126,13 +126,18 @@ pub const Session = struct {
         return @intCast(session.term.rows);
     }
 
-    /// Resize the emulator grid (reflow included). The caller mirrors
-    /// the same size to the pty so the child hears SIGWINCH.
-    pub fn resize(session: *Session, new_cols: u16, new_rows: u16) void {
+    /// Resize the emulator grid (reflow included). Returns whether the
+    /// grid now matches the request: a no-op (already that size) and a
+    /// successful reflow both return true; an allocation failure returns
+    /// false so the caller leaves its model dimensions unchanged and
+    /// retries on the next frame, keeping the emulator and the pty from
+    /// disagreeing about the size under memory pressure.
+    pub fn resize(session: *Session, new_cols: u16, new_rows: u16) bool {
         const c: vt.size.CellCountInt = @intCast(std.math.clamp(@as(usize, new_cols), 2, max_cols));
         const r: vt.size.CellCountInt = @intCast(std.math.clamp(@as(usize, new_rows), 2, max_rows));
-        if (c == session.term.cols and r == session.term.rows) return;
-        session.term.resize(session.gpa, .{ .cols = c, .rows = r }) catch return;
+        if (c == session.term.cols and r == session.term.rows) return true;
+        session.term.resize(session.gpa, .{ .cols = c, .rows = r }) catch return false;
+        return true;
     }
 
     /// Clamp a proposed grid to the canvas budgets: the glyph budget
@@ -287,12 +292,12 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     const cell_w = session.cell_width;
     const cell_h = session.cell_height;
 
-    // One row emits at most ~2 commands per column (a background run
-    // plus a text run) plus a selection wash and an underline: reserve
-    // that worst case so the LAST painted row can never push the list
-    // past the budget. The cursor and scrollbar (+2) fit under the same
-    // reserve.
-    const row_reserve: usize = max_cols * 2 + 4;
+    // Worst case for one row, when no runs merge (every cell a distinct
+    // style): a background run, a text run, AND an underline run per
+    // column — three commands each — plus one selection wash. Reserve
+    // that so the LAST painted row can never push the list past the
+    // budget; the cursor and scrollbar (+2) fit under the same reserve.
+    const row_reserve: usize = max_cols * 3 + 4;
     const row_ceiling: usize = if (options.command_budget > row_reserve)
         options.command_budget - row_reserve
     else

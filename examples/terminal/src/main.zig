@@ -150,9 +150,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             fx.ptyWrite(shell_key, event.text);
         },
         .viewport => |size| {
+            // Commit the new size only once the emulator actually took
+            // it: on an allocation failure the model keeps its old
+            // dimensions and the frame pump retries next frame, so the
+            // emulator and the pty never disagree about the grid.
+            if (!model.session.resize(size.cols, size.rows)) return;
             model.cols = size.cols;
             model.rows = size.rows;
-            model.session.resize(size.cols, size.rows);
             fx.ptyResize(shell_key, size.cols, size.rows);
         },
         .copy_selection => copySelection(model, fx),
