@@ -2803,7 +2803,16 @@ test "an open that cannot allocate the services snapshot refuses as executor tru
     while (fx.takeMsg()) |_| {}
 }
 
-test "a failed bind-site snapshot publication heals at the next pass boundary" {
+test "a failed bind-site snapshot publication closes open channels instead of stranding posts" {
+    // Open-before-bind is the one shape where a live channel can meet
+    // a failed publication (the open-site pre-flight is a no-op while
+    // no services are bound, and `openChannel` cannot refuse what was
+    // committed before the bind existed). A channel left OPEN there
+    // would accept posts that never wake the host — and with no
+    // unrelated loop event, never deliver — so the failed bind closes
+    // it: the accepted backlog flushes, the `.closed` terminal
+    // delivers through the bind's own loop-side wake, and the
+    // producer's next post answers `.closed` (its exit signal).
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -2814,28 +2823,35 @@ test "a failed bind-site snapshot publication heals at the next pass boundary" {
     null_platform.* = platform_mod.NullPlatform.init(.{});
     const host_platform = null_platform.platform();
 
-    // Open BEFORE bind: the one shape that can be live through a
-    // failed publication (the open-site pre-flight is a no-op while no
-    // services are bound, and `openChannel` cannot refuse what was
-    // committed before the bind existed).
     const handle = fx.openChannel(.{ .key = 91, .on_event = DirectFx.channelMsg(.event) });
     try testing.expect(handle.shared != null);
+    // Accepted before the bind: no services exist to wake, the bind
+    // sweep is what un-strands it.
+    try testing.expectEqual(PostResult.accepted, handle.post("early"));
 
-    // The bind-time publication fails: producer wakes stay disarmed...
+    // The bind-time publication fails: no snapshot...
     failing.armed = true;
     fx.bindServices(&host_platform.services);
     try testing.expect(fx.wake_services.load(.seq_cst) == null);
-    // ...so a post in that window is accepted but latches no host wake.
-    try testing.expectEqual(PostResult.accepted, handle.post("stranded?"));
-    try testing.expectEqual(@as(usize, 0), null_platform.wake_count.load(.acquire));
-
-    // The next pass boundary heals: the retried publication lands and
-    // its Dekker sweep un-strands the accepted post with a host wake.
-    var boundary = fx.drainBoundary();
-    try testing.expect(fx.wake_services.load(.seq_cst) != null);
+    // ...and the channel is CLOSED, never left accepting posts it
+    // cannot deliver: the producer learns immediately...
+    try testing.expectEqual(PostResult.closed, handle.post("stranded?"));
+    // ...the loop was nudged (the close and the bind sweep)...
     try testing.expect(null_platform.wake_count.load(.acquire) >= 1);
-    const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
-    try testing.expectEqualStrings("stranded?", msg.event.bytes);
+    // ...and the pre-bind backlog flushes ahead of the terminal.
+    _ = try expectData(&fx, 91, "early");
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(91) == null);
+
+    // Storage recovered: a later open retries the publication through
+    // its own pre-flight and posts wake normally.
+    const again = fx.openChannel(.{ .key = 91, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(again.shared != null);
+    try testing.expect(fx.wake_services.load(.seq_cst) != null);
+    try testing.expectEqual(PostResult.accepted, again.post("healed"));
+    _ = try expectData(&fx, 91, "healed");
     fx.closeChannel(91);
     while (fx.takeMsg()) |_| {}
 }

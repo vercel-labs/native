@@ -3704,7 +3704,29 @@ pub fn Effects(comptime Msg: type) type {
             // the publication site. Bind-before-open publishes at the
             // first live `openChannel` instead (the lazy rule), and
             // replay never publishes at all — parked handles are inert.
-            if (self.liveChannelWakeArmed()) _ = self.materializeWakeSnapshot();
+            if (self.liveChannelWakeArmed() and !self.materializeWakeSnapshot()) {
+                // The publication failed with channels LIVE — the one
+                // shape `openChannel`'s refusing pre-flight cannot
+                // reach (these opens were committed before any
+                // services existed). Left open, they would keep
+                // accepting posts that can never wake the host — and
+                // with no unrelated loop event, never deliver — so
+                // CLOSE them instead: the accepted backlog flushes,
+                // each `.closed` terminal (drop totals aboard)
+                // delivers through the loop-side wake the close and
+                // the sweep below nudge, and the producer's next post
+                // answers `.closed`, its exit signal. Loud, like every
+                // containment on this seam.
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "effects bindServices: closing the open channels - without the snapshot their accepted posts could never wake the host; each flushes its backlog and delivers its .closed terminal\n",
+                        .{},
+                    );
+                }
+                for (&self.channel_slots) |*slot| {
+                    if (slot.state == .open and slot.shared != null) self.closeChannel(slot.key);
+                }
+            }
             // Sweep unconditionally, snapshot or no snapshot: work
             // staged BEFORE this bind could never reach the host
             // (`wakeHost` was a no-op with `services` null), so exactly
@@ -3757,22 +3779,25 @@ pub fn Effects(comptime Msg: type) type {
         /// posts accepted in that window latch nothing, and the next
         /// successful publication's sweep is what un-strands them.
         ///
-        /// FAILURE CONTAINMENT differs by site: `openChannel` REFUSES
-        /// the open outright (no channel exists whose accepted posts
-        /// could strand wakeless), so only a channel opened BEFORE
-        /// `bindServices` can be live through a failed publication —
-        /// and `drainBoundary` retries at every pass boundary until it
-        /// heals. Returns whether THIS call published.
+        /// FAILURE CONTAINMENT differs by site, and together the two
+        /// sites keep one invariant: NO live channel ever runs with
+        /// producer wakes disarmed while services are bound.
+        /// `openChannel` REFUSES the open outright (no channel exists
+        /// whose accepted posts could strand wakeless); `bindServices`
+        /// CLOSES the channels that were already open (committed
+        /// before any services existed — the one shape the refusing
+        /// pre-flight cannot reach), flushing their backlogs and
+        /// delivering their terminals through the bind's own loop-side
+        /// wake. Returns whether THIS call published.
         fn materializeWakeSnapshot(self: *Self) bool {
             if (self.wake_services.load(.seq_cst) != null) return false;
             const services = self.services orelse return false;
             const snapshot = self.channel_storage_allocator.create(platform.PlatformServices) catch {
                 // No storage for the snapshot: leave the producer-side
-                // mirror disarmed (loop-side stages still wake through
-                // the plain `services` field, and the boundary retry
-                // above heals any live open-before-bind channel) rather
-                // than publish a pointer whose owner can die before an
-                // abandoned call dereferences it.
+                // mirror disarmed rather than publish a pointer whose
+                // owner can die before an abandoned call dereferences
+                // it; each call site contains the consequence (see the
+                // doc above).
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print("effects: cannot allocate the process-lived services snapshot; producer-thread host wakes stay disarmed until a later open retries\n", .{});
                 }
@@ -4563,8 +4588,10 @@ pub fn Effects(comptime Msg: type) type {
             // posting contract: the same executor-truth rejection class
             // as the header/staging allocation failures below. A
             // publication is followed by its Dekker sweep (see
-            // `materializeWakeSnapshot` — load-bearing only for posts
-            // stranded by an earlier failed bind-site publication).
+            // `materializeWakeSnapshot`) — publish-then-sweep is the
+            // invariant every publication site keeps, cheap insurance
+            // here where the failure containments leave no post to
+            // strand.
             if (self.services != null and self.wake_services.load(.seq_cst) == null) {
                 if (!self.materializeWakeSnapshot()) {
                     self.rejectChannel(options.key, options.on_event, false);
@@ -5670,23 +5697,6 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
-            // Heal a failed bind-site snapshot publication: an
-            // open-before-bind channel is the one shape that can be
-            // LIVE with producer wakes disarmed (`openChannel` refuses
-            // opens that cannot publish, but a channel opened before
-            // `bindServices` was already committed when the bind-time
-            // attempt failed). Retrying at every pass boundary bounds
-            // the stranding to one loop wake of any origin — the bind's
-            // own catch-up sweep, a timer, a frame — and the
-            // publication's Dekker sweep then un-strands any posts
-            // accepted during the disarmed window. One atomic load on
-            // the common path; the allocation retries only while a
-            // live wake header actually needs it.
-            if (self.wake_services.load(.seq_cst) == null and self.services != null and self.liveChannelWakeArmed()) {
-                if (self.materializeWakeSnapshot()) {
-                    if (self.hasPending()) self.wakeHost();
-                }
-            }
             // Drain the channel wake coalescers BEFORE snapshotting the
             // post order — `adoptMediaSurfaceFrames`' clear-before-
             // sample placement, matched exactly (it clears each slot's
