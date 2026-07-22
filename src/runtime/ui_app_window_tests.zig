@@ -1183,3 +1183,271 @@ test "close_policy .hide on a secondary startup window is refused loudly at star
         try std.testing.expectEqual(@as(usize, 2), harness.runtime.listWindows(&buffer).len);
     }
 }
+
+// --------------------- context-menu pin across the window lifecycle
+
+const MenuWinModel = struct {
+    a_open: bool = true,
+    b_open: bool = true,
+    generation: u32 = 0,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+    received_ptr: usize = 0,
+};
+
+const MenuWinMsg = union(enum) {
+    bump,
+    close_a,
+    a_closed,
+    b_closed,
+    send: []const u8,
+};
+
+const MenuWinApp = ui_app_model.UiApp(MenuWinModel, MenuWinMsg);
+
+fn menuWinUpdate(model: *MenuWinModel, msg: MenuWinMsg) void {
+    switch (msg) {
+        .bump => model.generation += 1,
+        .close_a, .a_closed => model.a_open = false,
+        .b_closed => model.b_open = false,
+        .send => |bytes| {
+            const len = @min(bytes.len, model.received_storage.len);
+            @memcpy(model.received_storage[0..len], bytes[0..len]);
+            model.received_len = len;
+            model.received_ptr = @intFromPtr(bytes.ptr);
+            model.sends += 1;
+        },
+    }
+}
+
+fn menuWinView(ui: *MenuWinApp.Ui, model: *const MenuWinModel) MenuWinApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = .bump }, "Rebuild"),
+        ui.button(.{ .on_press = .close_a }, "Close A"),
+    });
+}
+
+fn menuWinWindows(model: *const MenuWinModel, scratch: *MenuWinApp.WindowsScratch) []const MenuWinApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.a_open) {
+        scratch.windows[count] = .{
+            .label = "win-a",
+            .canvas_label = "canvas-a",
+            .title = "A",
+            .width = 320,
+            .height = 240,
+            .on_close = .a_closed,
+        };
+        count += 1;
+    }
+    if (model.b_open) {
+        scratch.windows[count] = .{
+            .label = "win-b",
+            .canvas_label = "canvas-b",
+            .title = "B",
+            .width = 320,
+            .height = 240,
+            .on_close = .b_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn menuWinWindowView(ui: *MenuWinApp.Ui, model: *const MenuWinModel, window_label: []const u8) MenuWinApp.Ui.Node {
+    // The same address-stability slab as the main-canvas arena fixture:
+    // if the pin regresses, the byte assertion fails deterministically
+    // instead of reading whatever the reused chunk happens to hold.
+    const slab = ui.arena.alloc(u8, 64 * 1024) catch @panic("arena slab");
+    @memset(slab, '!');
+    // Window labels share a length, so every window's payload is
+    // same-sized and generation-stamped.
+    const payload = ui.fmt("payload-{s}-{d:0>4}", .{ window_label, model.generation });
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Row",
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+            },
+        }, .{}),
+    });
+}
+
+const MenuWinFixture = struct {
+    harness: *core.TestHarness(),
+    app_state: *MenuWinApp,
+    app: core.App,
+
+    fn create() !MenuWinFixture {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const app_state = try MenuWinApp.create(std.testing.allocator, .{
+            .name = "ui-app-menu-windows",
+            .scene = panel_scene,
+            .canvas_label = canvas_label,
+            .update = menuWinUpdate,
+            .view = menuWinView,
+            .windows_fn = menuWinWindows,
+            .window_view = menuWinWindowView,
+        });
+        errdefer app_state.destroy();
+        const app = app_state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app };
+    }
+
+    fn destroy(self: MenuWinFixture) void {
+        self.app_state.destroy();
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    fn windowInfo(self: MenuWinFixture, label: []const u8) ?support.platform.WindowInfo {
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        for (self.harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, label)) return info;
+        }
+        return null;
+    }
+
+    fn installCanvas(self: MenuWinFixture, window_id: support.platform.WindowId, label: []const u8, timestamp_ns: u64) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
+            .window_id = window_id,
+            .label = label,
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = timestamp_ns,
+            .nonblank = true,
+        } });
+    }
+
+    /// A real secondary-button press on the window's "Row" item — the
+    /// path that presents the row's native menu.
+    fn rightClickRow(self: MenuWinFixture, window_id: support.platform.WindowId, label: []const u8, timestamp_ns: u64) !void {
+        const layout = try self.harness.runtime.canvasWidgetLayout(window_id, label);
+        const id = widgetIdByText(layout, .list_item, "Row") orelse return error.TestUnexpectedResult;
+        var frame: geometry.RectF = .{};
+        for (layout.nodes) |node| {
+            if (node.widget.id == id) frame = node.frame;
+        }
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = window_id,
+            .label = label,
+            .kind = .pointer_down,
+            .button = 1,
+            .x = frame.x + 4,
+            .y = frame.y + 4,
+            .timestamp_ns = timestamp_ns,
+        } });
+    }
+
+    /// Drive a main-canvas button through the real automation click.
+    fn clickMainButton(self: MenuWinFixture, text: []const u8) !void {
+        const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        const id = widgetIdByText(layout, .button, text) orelse return error.TestUnexpectedResult;
+        var buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&buffer, "widget-click {s} {d}", .{ canvas_label, id });
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    fn slotCanvasLabel(self: MenuWinFixture, index: usize) []const u8 {
+        const slot = &self.app_state.window_slots[index];
+        return slot.canvas_label_storage[0..slot.canvas_label_len];
+    }
+};
+
+test "the menu pin follows its window across slot compaction" {
+    const fixture = try MenuWinFixture.create();
+    defer fixture.destroy();
+    try std.testing.expect(fixture.windowInfo("win-a") != null);
+    const b_info = fixture.windowInfo("win-b") orelse return error.TestUnexpectedResult;
+    try fixture.installCanvas(b_info.id, "canvas-b", 2_000_000);
+
+    // Present the menu from window B (slot index 1) and capture the
+    // presented payload's address.
+    try fixture.rightClickRow(b_info.id, "canvas-b", 3_000_000);
+    try std.testing.expectEqual(@as(usize, 1), fixture.harness.null_platform.context_menu_request_count);
+    const token = fixture.harness.null_platform.context_menu_token;
+    const pin = fixture.app_state.context_menu_pin orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(b_info.id, pin.window_id.?);
+    var presented_ptr: usize = 0;
+    for (fixture.app_state.window_slots[0..fixture.app_state.window_slot_count]) |*slot| {
+        if (!std.mem.eql(u8, slot.canvas_label_storage[0..slot.canvas_label_len], "canvas-b")) continue;
+        const layout = try fixture.harness.runtime.canvasWidgetLayout(b_info.id, "canvas-b");
+        const row_id = widgetIdByText(layout, .list_item, "Row") orelse return error.TestUnexpectedResult;
+        const msg = slot.tree.?.msgForContextMenu(row_id, 0) orelse return error.TestUnexpectedResult;
+        presented_ptr = @intFromPtr(msg.send.ptr);
+    }
+    try std.testing.expect(presented_ptr != 0);
+
+    // Close window A: the slot bookkeeping swap-moves B's slot into
+    // A's index while B's menu is still on the glass. The pin is keyed
+    // by window identity, so it moves with the slot.
+    try fixture.clickMainButton("Close A");
+    try std.testing.expect(!fixture.app_state.model.a_open);
+    const closed = fixture.windowInfo("win-a");
+    try std.testing.expect(closed == null or !closed.?.open);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqualStrings("canvas-b", fixture.slotCanvasLabel(0));
+    try std.testing.expect(fixture.app_state.context_menu_pin != null);
+
+    // Rebuild twice under the open menu (the arena-pair race), then
+    // select: the dispatched Msg is the ORIGINAL presented value.
+    try fixture.clickMainButton("Rebuild");
+    try fixture.clickMainButton("Rebuild");
+    try std.testing.expectEqual(@as(u32, 2), fixture.app_state.model.generation);
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .context_menu_action = .{
+        .window_id = b_info.id,
+        .view_label = "canvas-b",
+        .token = token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-win-b-0000", fixture.app_state.model.received_storage[0..fixture.app_state.model.received_len]);
+    try std.testing.expectEqual(presented_ptr, fixture.app_state.model.received_ptr);
+    try std.testing.expect(fixture.app_state.context_menu_pin == null);
+}
+
+test "closing the pin-owning window releases its snapshot and pin" {
+    const fixture = try MenuWinFixture.create();
+    defer fixture.destroy();
+    const a_info = fixture.windowInfo("win-a") orelse return error.TestUnexpectedResult;
+    try fixture.installCanvas(a_info.id, "canvas-a", 2_000_000);
+
+    try fixture.rightClickRow(a_info.id, "canvas-a", 3_000_000);
+    const token = fixture.harness.null_platform.context_menu_token;
+    try std.testing.expect(fixture.app_state.context_menu_pin != null);
+    try std.testing.expect(fixture.app_state.context_menu_shown_token != 0);
+
+    // The model stops declaring window A while its menu is open: the
+    // reconcile close deinits the slot's arenas, so the snapshot and
+    // pin presented from it must release NOW — a stale pin would keep
+    // steering the reused slot's rebuild cadence around a generation
+    // that no longer exists.
+    try fixture.clickMainButton("Close A");
+    try std.testing.expect(!fixture.app_state.model.a_open);
+    const closed = fixture.windowInfo("win-a");
+    try std.testing.expect(closed == null or !closed.?.open);
+    try std.testing.expect(fixture.app_state.context_menu_pin == null);
+    try std.testing.expectEqual(@as(u64, 0), fixture.app_state.context_menu_shown_token);
+
+    // The dead window's selection dispatches nothing.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .context_menu_action = .{
+        .window_id = a_info.id,
+        .view_label = "canvas-a",
+        .token = token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.sends);
+}

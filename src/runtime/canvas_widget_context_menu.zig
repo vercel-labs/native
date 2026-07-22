@@ -116,7 +116,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                             .separator = item.separator,
                         };
                     }
-                    if (try showMenu(self, index, .{
+                    if (try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
                         .target_id = widget.id,
                         .kind = .app,
@@ -163,7 +163,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     items[2] = .{ .id = default_item_paste, .label = "Paste" };
                     items[3] = .{ .separator = true };
                     items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = widget.text.len > 0 };
-                    _ = try showMenu(self, index, .{
+                    _ = try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
                         .target_id = target.id,
                         .kind = .edit_text,
@@ -176,7 +176,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (selected_id != 0 and selected_id == target.id) {
                     if (!has_presenter) return;
                     items[0] = .{ .id = default_item_copy, .label = "Copy" };
-                    _ = try showMenu(self, index, .{
+                    _ = try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
                         .target_id = target.id,
                         .kind = .static_copy,
@@ -195,11 +195,31 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
+        /// A NEW presentation or dispatch is replacing the pending
+        /// request. An app menu's pending has state beyond the runtime's
+        /// gate — UiApp holds a token-keyed snapshot and a pinned build
+        /// generation for it — and the superseded token can never arrive
+        /// (the gate would swallow it), so tell the app the old menu is
+        /// gone. This runs for EVERY superseding kind: app over app,
+        /// a default edit/copy menu over an app menu, and the automation
+        /// verb's direct dispatch.
+        pub fn releaseSupersededPending(self: *Runtime, app: runtime_api.App(Runtime)) anyerror!void {
+            const pending = self.canvas_widget_context_menu_pending orelse return;
+            if (pending.kind != .app) return;
+            try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                .window_id = pending.window_id,
+                // The pending request stores no view label; the app's
+                // handler resolves by token alone.
+                .view_label = "",
+                .token = pending.token,
+            } });
+        }
+
         /// Returns whether the platform accepted the presentation; a
         /// refusal is not fatal (app-declared menus fall back to the
         /// anchored canvas surface, the zero-code defaults degrade to
         /// their keyboard paths).
-        fn showMenu(self: *Runtime, view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
+        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
             var pending = request;
             pending.token = nextContextMenuToken(self);
             self.options.platform.services.showContextMenu(.{
@@ -212,8 +232,11 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (err != error.UnsupportedService) {
                     context_menu_log.warn("context menu presentation failed: {s}", .{@errorName(err)});
                 }
+                // Presentation refused: nothing superseded — the old
+                // pending (and its popover, if any) is still the truth.
                 return false;
             };
+            try releaseSupersededPending(self, app);
             self.canvas_widget_context_menu_pending = pending;
             return true;
         }

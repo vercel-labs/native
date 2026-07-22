@@ -210,6 +210,10 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (declared.separator) return error.ContextMenuItemSeparator;
             if (!declared.enabled) return error.ContextMenuItemDisabled;
 
+            // This direct dispatch supersedes any pending presentation:
+            // release the app-side snapshot/pin armed under its token
+            // before minting the replacement.
+            try runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).releaseSupersededPending(self, app);
             const token = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).nextContextMenuToken(self);
             self.canvas_widget_context_menu_pending = .{
                 .window_id = self.views[view_index].window_id,

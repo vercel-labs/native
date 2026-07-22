@@ -1379,7 +1379,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             var tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
-            const next_index = self.arena_index ^ 1;
+            const next_index = self.contextMenuRebuildIndex(null, self.arena_index);
             // Widget layout is inset by the runtime's viewport chrome
             // (safe areas + keyboard on mobile, zero on desktop); the
             // canvas itself stays surface-sized so chrome and the clear
@@ -1459,11 +1459,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var layout: canvas.WidgetLayoutTree = undefined;
             var pass: usize = 0;
             while (true) {
-                // The pinned generation is exempt: a presented menu's
-                // payloads live there until the request resolves.
-                if (!self.contextMenuPinBlocksArena(null, next_index)) {
-                    _ = self.arenas[next_index].reset(.retain_capacity);
-                }
+                // `contextMenuRebuildIndex` never routes a rebuild into
+                // the pinned generation, so the reset is unconditional.
+                std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != null or pin.arena_index != next_index else true);
+                _ = self.arenas[next_index].reset(.retain_capacity);
                 var ui = Ui.init(self.arenas[next_index].allocator());
                 ui.virtual_window_context = @ptrCast(&window_source);
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
@@ -2015,6 +2014,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the model already knows).
         fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) void {
             const window_id = self.window_slots[index].window_id;
+            self.releaseContextMenuSnapshotForWindow(window_id);
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
@@ -2030,6 +2030,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Drop a slot whose runtime window is ALREADY gone (the user
         /// closed it): bookkeeping only, no platform call.
         fn forgetWindowSlot(self: *Self, index: usize) ?MsgT {
+            self.releaseContextMenuSnapshotForWindow(self.window_slots[index].window_id);
             const on_close = self.window_slots[index].on_close;
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
@@ -2055,7 +2056,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
-            const next_index = slot.arena_index ^ 1;
+            const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
             var built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
             // The same one-retry window-control clearance the main
@@ -2095,11 +2096,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             next_index: usize,
         ) anyerror!BuiltLayout {
             const window_view = self.options.window_view.?;
-            // Same pin exemption as `buildLayoutPass`: a menu presented
-            // from this window's tree holds its build generation.
-            if (!self.contextMenuPinBlocksArena(self.windowSlotIndex(slot), next_index)) {
-                _ = slot.arenas[next_index].reset(.retain_capacity);
-            }
+            // `contextMenuRebuildIndex` never routes a rebuild into the
+            // pinned generation, so the reset is unconditional.
+            std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != slot.window_id or pin.arena_index != next_index else true);
+            _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
             if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
@@ -3620,32 +3620,49 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.context_menu_shown_token = shown_event.token;
             self.context_menu_shown_count = count;
             self.context_menu_pin = if (std.mem.eql(u8, shown_event.view_label, self.options.canvas_label))
-                .{ .slot = null, .arena_index = self.arena_index }
+                .{ .window_id = null, .arena_index = self.arena_index }
             else if (self.windowSlotByCanvasLabel(shown_event.view_label)) |slot|
-                .{ .slot = self.windowSlotIndex(slot), .arena_index = slot.arena_index }
+                .{ .window_id = slot.window_id, .arena_index = slot.arena_index }
             else
                 null;
         }
 
-        /// Whether the presented menu's pin exempts this arena
-        /// generation from the rebuild reset. `slot` null names the
-        /// main canvas's pair, else the window slot's.
-        fn contextMenuPinBlocksArena(self: *const Self, slot: ?usize, arena_index: usize) bool {
-            const pin = self.context_menu_pin orelse return false;
-            if (pin.arena_index != arena_index) return false;
-            const pin_slot = pin.slot orelse return slot == null;
-            const candidate = slot orelse return false;
-            return pin_slot == candidate;
+        /// The arena index this canvas's next rebuild must use:
+        /// normally the pair alternates, but while the presented menu's
+        /// pin holds one generation of THIS canvas (matched by stable
+        /// window identity, null = the main canvas), every rebuild
+        /// routes through the partner arena instead — consecutive
+        /// builds reset and reuse one side while the pinned side stays
+        /// frozen, exactly the cadence the clearance-retry pass already
+        /// runs within a single rebuild. Memory under an open menu is
+        /// therefore bounded at two trees, however many rebuilds occur.
+        fn contextMenuRebuildIndex(self: *const Self, window_id: ?platform.WindowId, current_index: usize) usize {
+            const natural = current_index ^ 1;
+            const pin = self.context_menu_pin orelse return natural;
+            if (pin.arena_index != natural) return natural;
+            const matches = if (pin.window_id) |pin_window|
+                (window_id orelse return natural) == pin_window
+            else
+                window_id == null;
+            return if (matches) natural ^ 1 else natural;
         }
 
-        fn windowSlotIndex(self: *const Self, slot: *const WindowSlot) usize {
-            return (@intFromPtr(slot) - @intFromPtr(&self.window_slots[0])) / @sizeOf(WindowSlot);
+        /// Window teardown for the pin's owner: the slot's arenas are
+        /// about to deinit (and another slot swap-moves into its index),
+        /// so a snapshot presented from this window must disarm NOW —
+        /// a stale pin would otherwise keep steering the reused slot's
+        /// rebuild cadence around a generation that no longer exists.
+        fn releaseContextMenuSnapshotForWindow(self: *Self, window_id: platform.WindowId) void {
+            const pin = self.context_menu_pin orelse return;
+            const pin_window = pin.window_id orelse return;
+            if (pin_window == window_id) self.releaseContextMenuSnapshot();
         }
 
         /// Disarm the presented-menu snapshot and release the pinned
         /// build generation. Every way a request ends comes through
         /// here: selection (after its dispatch), the runtime's
-        /// dismissed notice, and an out-of-range selection swallow.
+        /// dismissed notice, an out-of-range selection swallow, and the
+        /// pin-owning window's teardown.
         fn releaseContextMenuSnapshot(self: *Self) void {
             self.context_menu_shown_token = 0;
             self.context_menu_shown_count = 0;
@@ -3801,13 +3818,19 @@ fn effectsQuitApp(context: *anyopaque) bool {
 }
 
 /// The build storage pinned under a presented native context menu:
-/// which canvas's arena pair (`slot` null = the main canvas) and which
-/// generation (index) of that pair built the presented tree. While set,
-/// that generation's reset is skipped (`contextMenuPinBlocksArena`), so
-/// the snapshot's Msg payloads keep their original storage — and their
-/// original pointer identity — however many rebuilds the menu outlives.
+/// which canvas's arena pair and which generation (index) of that pair
+/// built the presented tree. The canvas is named by STABLE window
+/// identity (`window_id` null = the main canvas), never by slot index —
+/// removing a window swap-moves another slot into its place, and an
+/// index-keyed pin would start protecting the wrong arena. While set,
+/// rebuilds of that canvas route through the PARTNER arena
+/// (`contextMenuRebuildIndex`), so the pinned generation stays
+/// untouched — the snapshot's Msg payloads keep their original storage
+/// and pointer identity — and memory holds at two trees (the pinned
+/// one plus the partner, reset on its normal cadence) however long the
+/// menu stays open.
 const ContextMenuPin = struct {
-    slot: ?usize,
+    window_id: ?platform.WindowId,
     arena_index: usize,
 };
 
