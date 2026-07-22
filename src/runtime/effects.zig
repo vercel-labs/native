@@ -10246,8 +10246,17 @@ pub fn Effects(comptime Msg: type) type {
             shared.reader_parked = false;
             shared.out_head = 0;
             shared.out_len = 0;
+            shared.out_write_head = 0;
+            shared.out_write_count = 0;
+            shared.out_front_sent = 0;
             shared.dropped_writes = 0;
             shared.kill_requested = false;
+            // Every prior-session flag on the reused header must reset,
+            // or a stale value steers the new session: a leftover
+            // `reaping` would make ptyKill skip its immediate SIGKILL
+            // and fall through to the reaper's slower SIGHUP-first
+            // escalation.
+            shared.reaping = false;
             shared.shutdown = false;
             shared.io_done = false;
             shared.owner = .{

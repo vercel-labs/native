@@ -233,26 +233,47 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     const argv_z = buildArgvZ(arena, options.argv) catch return error.PtyEnvironTooLarge;
     const envp_z = buildEnvpZ(arena, options.env, options.term) catch return error.PtyEnvironTooLarge;
 
-    var master: c_int = -1;
-    var slave: c_int = -1;
-    var ws: Winsize = .{
+    const ws: Winsize = .{
         .row = if (options.rows == 0) 24 else options.rows,
         .col = if (options.cols == 0) 80 else options.cols,
         .xpixel = 0,
         .ypixel = 0,
     };
-    if (c.openpty(&master, &slave, null, null, &ws) != 0) return error.PtyOpenFailed;
-    // CLOEXEC on both pty ends: a concurrent process spawn (or another
-    // pty spawn) forking on another thread would otherwise inherit
-    // these descriptors, keeping THIS pty open after its child exits
-    // (no EOF, no exit event) and leaking master fds into unrelated
-    // children. The child's own stdio survives because `login_tty`
-    // dup2's the slave onto 0/1/2 and dup2 clears CLOEXEC on the copies.
-    if (!setCloexec(master) or !setCloexec(slave)) {
+    // Open the pty pair by hand rather than `openpty`, so the SLAVE is
+    // opened close-on-exec ATOMICALLY (`open` with O_CLOEXEC). The slave
+    // is the descriptor that matters for the inheritance race the
+    // reviewer flagged: if a concurrent fork on another thread inherited
+    // a non-CLOEXEC slave across its exec, it would hold THIS pty open
+    // after our child exits, so no EOF and no `.exit` event ever
+    // arrives. `posix_openpt` + `grantpt` + `unlockpt` is the portable
+    // primitive underneath `openpty`; the master's CLOEXEC is applied
+    // immediately after (Linux honors O_CLOEXEC on `posix_openpt`
+    // directly; Darwin ignores it, leaving only the master a
+    // sub-syscall window — benign, since an inherited MASTER does not
+    // hold the pty open). pty spawns run on the loop thread, so
+    // `ptsname`'s static buffer is not raced.
+    const master = c.posix_openpt(o_rdwr | o_noctty | o_cloexec_open);
+    if (master < 0) return error.PtyOpenFailed;
+    _ = setCloexec(master);
+    if (c.grantpt(master) != 0 or c.unlockpt(master) != 0) {
         _ = c.close(master);
-        _ = c.close(slave);
         return error.PtyOpenFailed;
     }
+    const slave_name = c.ptsname(master) orelse {
+        _ = c.close(master);
+        return error.PtyOpenFailed;
+    };
+    const slave = c.open(slave_name, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
+    if (slave < 0) {
+        _ = c.close(master);
+        return error.PtyOpenFailed;
+    }
+    // Push the initial window size onto the slave (the child's terminal)
+    // before the fork so the child's very first TIOCGWINSZ sees the
+    // requested grid. `openpty` applied its `winp` to the slave; match
+    // that — setting it on the master does not reliably propagate before
+    // the slave becomes a controlling terminal.
+    _ = c.ioctl(slave, tiocswinsz, &ws);
 
     // The exec self-pipe: close-on-exec on the write end, so a
     // successful `execve` closes it and the parent reads EOF (exec
@@ -468,6 +489,22 @@ const o_nonblock: c_int = switch (builtin.os.tag) {
 // pipe2 flag values (Linux): O_CLOEXEC and O_NONBLOCK as c_uint.
 const o_cloexec: c_uint = 0x80000;
 const o_nonblock_flag: c_uint = 0x800;
+
+// open(2) flags for the pty pair, per platform.
+const o_rdwr: c_int = 0x2;
+const o_noctty: c_int = switch (builtin.os.tag) {
+    .linux => 0x100,
+    .macos => 0x20000,
+    else => 0,
+};
+// O_CLOEXEC on the master (posix_openpt, honored on Linux, ignored on
+// Darwin) and on the slave (open, honored on both — the atomic close of
+// the inheritance race).
+const o_cloexec_open: c_int = switch (builtin.os.tag) {
+    .linux => 0x80000,
+    .macos => 0x1000000,
+    else => 0,
+};
 const sigterm: c_int = 15;
 const sigkill: c_int = 9;
 const sighup: c_int = 1;
@@ -486,13 +523,11 @@ fn errnoValue() c_int {
 /// the platform layer already links; `openpty`/`login_tty` live in libutil
 /// on Linux (linked by the platform build) and in libSystem on macOS.
 const c = struct {
-    extern "c" fn openpty(
-        amaster: *c_int,
-        aslave: *c_int,
-        name: ?[*:0]u8,
-        termp: ?*const anyopaque,
-        winp: ?*const Winsize,
-    ) c_int;
+    extern "c" fn posix_openpt(flags: c_int) c_int;
+    extern "c" fn grantpt(fd: c_int) c_int;
+    extern "c" fn unlockpt(fd: c_int) c_int;
+    extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
+    extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
     extern "c" fn login_tty(fd: c_int) c_int;
     extern "c" fn fork() c_int;
     extern "c" fn execve(
@@ -508,7 +543,10 @@ const c = struct {
     extern "c" fn kill(pid: c_int, sig: c_int) c_int;
     extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
     extern "c" fn usleep(usec: c_uint) c_int;
-    extern "c" fn ioctl(fd: c_int, request: c_ulong, arg: *const Winsize) c_int;
+    // ioctl is variadic in C; declaring it variadic here matches the
+    // platform ABI for the winsize pointer argument (a fixed-arg
+    // declaration mis-passes it on arm64, silently dropping the size).
+    extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
     extern "c" fn pipe(fds: *[2]c_int) c_int;
     extern "c" fn pipe2(fds: *[2]c_int, flags: c_uint) c_int;
     extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
