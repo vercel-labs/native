@@ -793,6 +793,15 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * when the output texture is fitted smaller. */
 @property(nonatomic, assign) uint64_t videoStreamWidth;
 @property(nonatomic, assign) uint64_t videoStreamHeight;
+/* The poster-frame hunt: a load that acknowledges LOADED while paused
+ * (autoplay = false, "the poster-frame shape") still owes the surface
+ * its first decoded frame — the frame timer normally runs only while
+ * playing. Set on LOADED; the pump clears it at the first delivered
+ * frame (stopping the timer if still paused), and the tick counter
+ * bounds the hunt so an output that never yields a frame cannot poll
+ * at 60 Hz forever. */
+@property(nonatomic, assign) BOOL videoPosterPending;
+@property(nonatomic, assign) int videoPosterTicks;
 /* Whether the loaded source is a local file: local sources never
  * report buffering. */
 @property(nonatomic, assign) BOOL videoSourceIsLocal;
@@ -9940,6 +9949,18 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         return;
     }
     [self videoPumpFrame];
+    /* The poster hunt's bound: a paused hunt that has not yielded a
+     * frame within ~3s (180 ticks) stops polling — honest surrender,
+     * the placeholder stays. A PLAYING stream never surrenders here;
+     * its timer belongs to playback. */
+    if (self.videoPosterPending &&
+        self.videoPlayer.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+        self.videoPosterTicks += 1;
+        if (self.videoPosterTicks > 180) {
+            self.videoPosterPending = NO;
+            [self stopVideoFrameTimer];
+        }
+    }
 }
 
 /* One poll of the video output: if a new frame is due at the current
@@ -9987,11 +10008,24 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }
     CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
     CFRelease(pixels);
+    /* The first delivered frame ends the poster hunt: a paused load
+     * has painted its poster, so the timer stops until play; a playing
+     * load keeps its timer, the latch just clears. */
+    if (result == 0 && self.videoPosterPending) {
+        self.videoPosterPending = NO;
+        AVPlayer *player = self.videoPlayer;
+        if (player && player.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+            [self stopVideoFrameTimer];
+        }
+    }
     /* 1 says the receiving claim was released (the sink is
      * latest-wins; a released claim just means stop pushing) — the
      * frame timer has nothing left to feed. Any other nonzero result
      * is one dropped frame; the decode keeps rolling. */
-    if (result == 1) [self stopVideoFrameTimer];
+    if (result == 1) {
+        self.videoPosterPending = NO;
+        [self stopVideoFrameTimer];
+    }
 }
 
 /* Local files on the app's single video player. Unlike audio there is
@@ -10162,6 +10196,8 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     self.videoLooping = NO;
     self.videoStreamWidth = 0;
     self.videoStreamHeight = 0;
+    self.videoPosterPending = NO;
+    self.videoPosterTicks = 0;
     if (self.videoFrameBuffer) {
         free(self.videoFrameBuffer);
         self.videoFrameBuffer = NULL;
@@ -10188,6 +10224,14 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
             return;
         }
         [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED];
+        /* The poster frame: a paused load (autoplay = false) runs no
+         * frame timer, so start a bounded first-frame hunt — the
+         * output needs a beat past readyToPlay to yield the frame at
+         * position zero. A playing load clears the latch at its first
+         * pumped frame and the timer just keeps rolling. */
+        self.videoPosterPending = YES;
+        self.videoPosterTicks = 0;
+        [self startVideoFrameTimer];
         return;
     }
     if (item.status == AVPlayerItemStatusFailed) {
