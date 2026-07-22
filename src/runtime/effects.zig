@@ -974,7 +974,17 @@ pub const EffectPtyEvent = struct {
     key: u64,
     kind: EffectPtyEventKind = .output,
     bytes: []const u8 = "",
-    /// `.exit`: the child's exit code; -1 for every non-`.exited` reason.
+    /// `.exit`: the child's exit code for a normal `.exited` end; -1 for
+    /// every non-`.exited` reason. One documented exception carries -1
+    /// WITH `.exited`: the child exited on its own but was reaped OUTSIDE
+    /// the toolkit before `waitpid` could read its status — only
+    /// reachable when an embedder installs `SA_NOCLDWAIT`, ignores
+    /// `SIGCHLD`, or runs its own reaper for the toolkit's children (the
+    /// toolkit forks the pty child and is its sole reaper, and never
+    /// touches SIGCHLD disposition). In that already-broken case the
+    /// real code is genuinely unrecoverable, so -1 is the honest
+    /// "unknown"; a session the toolkit actually reaps always carries
+    /// the real code.
     code: i32 = effect_error_exit_code,
     /// `.exit`: how the pty ended.
     reason: EffectExitReason = .exited,
@@ -4381,12 +4391,27 @@ pub fn Effects(comptime Msg: type) type {
                     // idle included: the header is process-lifetime and
                     // reused, so a retired session's slow `wake_fn` may
                     // still be in flight, and the services snapshot and
-                    // platform it dereferences are about to be freed. A
-                    // still-executing call at the deadline is abandoned,
-                    // counted, and the platform is signalled to outlive
-                    // it (the channel teardown's containment, verbatim).
+                    // platform it dereferences are about to be freed.
                     if (pty_slot.shared) |shared| {
-                        if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
+                        if (quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
+                            // Clean: no producer is inside the host call
+                            // and the io thread has returned, so NOTHING
+                            // can touch this header again. Unlike a
+                            // channel header (which an app thread may
+                            // post to forever, hence its permanent
+                            // leak), the pty io thread is the sole
+                            // toucher and it is gone — free the header so
+                            // repeatedly creating and destroying runtimes
+                            // that used a pty does not leak ~64 KiB each.
+                            if (shared.staging) |st| process_allocator.destroy(st);
+                            self.channel_storage_allocator.destroy(shared);
+                            pty_slot.shared = null;
+                        } else {
+                            // A call still executing at the deadline is
+                            // abandoned, counted, and the platform
+                            // signalled to outlive it; its header LEAKS
+                            // (the stale call can still touch it) — the
+                            // channel teardown's containment, verbatim.
                             self.abandoned_channel_wakes += 1;
                             if (self.services) |services| services.noteChannelWakeAbandoned();
                         }

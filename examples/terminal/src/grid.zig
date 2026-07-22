@@ -276,6 +276,17 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     );
     if (measured > 0) session.cell_width = measured;
 
+    // Push the theme colors into the emulator's DEFAULTS (not the OSC
+    // overrides), so ghostty itself composes the final foreground,
+    // background, and cursor: an unstyled terminal resolves to the
+    // theme, an application's OSC 10/11/12 override wins, and DECSCNM
+    // reverse-video swaps whichever pair is in effect. The renderer then
+    // reads `rs.colors` verbatim — no second, divergent color policy
+    // here. Setting `.default` never clobbers a live `.override`.
+    session.term.colors.foreground.default = themeRgb(tokens.colors.text);
+    session.term.colors.background.default = themeRgb(tokens.colors.background);
+    session.term.colors.cursor.default = themeRgb(tokens.colors.accent);
+
     try session.render.update(session.gpa, &session.term);
     const rs = &session.render;
     const palette = Palette.init(tokens, &rs.colors);
@@ -302,13 +313,26 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         options.command_budget - row_reserve
     else
         0;
+    // The display-list TEXT store is a separate budget from the command
+    // count: a screen of multi-codepoint graphemes (emoji) can exhaust
+    // its bytes long before the command budget. Stop by ROW at a text
+    // reserve too, so the grid degrades to fewer painted rows instead of
+    // silently blanking cells mid-frame when the store fills. Worst case
+    // per row is one full grapheme cluster per column; the emulator caps
+    // a cluster's rendered bytes, but reserve generously.
+    const text_store: usize = canvas.max_display_list_text_bytes;
+    const row_text_reserve: usize = max_cols * 16;
+    const text_ceiling: usize = if (text_store > row_text_reserve) text_store - row_text_reserve else 0;
+    var text_bytes_emitted: usize = 0;
 
     var text_scratch: [max_cols * 4]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
         // Row-wise budget stop: once the list is within one row's worst
-        // case of the ceiling, stop painting further rows.
+        // case of either the command or the text-byte ceiling, stop
+        // painting further rows (honest degradation, never a torn row).
         if (options.command_budget > 0 and builder.displayList().commands.len >= row_ceiling) break;
+        if (text_bytes_emitted >= text_ceiling) break;
         const row = rs.row_data.get(row_index);
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         if (row_y + cell_h > options.frame.y + options.frame.height + cell_h) break;
@@ -394,6 +418,11 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
             const breaks = x == row.cells.len or skip or cp == 0 or
                 !colorEql(fg, run_fg) or underline != run_underline or text_len + 8 > text_scratch.len;
             if (breaks and run_len > 0 and text_len > 0) {
+                // The row-wise text ceiling reserves enough that this
+                // append fits; the catch is a defensive floor that stops
+                // the run cleanly if it ever did not (never a torn cell).
+                const run_text = builder.allocTextBytes(text_scratch[0..text_len]) catch break;
+                text_bytes_emitted += text_len;
                 try builder.drawText(.{
                     .id = row_id + 0x8000 + run_x,
                     .font_id = tokens.typography.mono_font_id,
@@ -403,7 +432,7 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                         row_y + (cell_h - session.font_size) * 0.5,
                     ),
                     .color = run_fg,
-                    .text = builder.allocTextBytes(text_scratch[0..text_len]) catch break,
+                    .text = run_text,
                 });
                 if (run_underline) {
                     try builder.fillRect(.{
@@ -539,6 +568,19 @@ fn colorEql(a: canvas.Color, b: canvas.Color) bool {
 /// as one surface. The moment a program restyles an entry (OSC 4), the
 /// programmed color wins verbatim — and the cube (16..231), the
 /// grayscale ramp (232..255), and truecolor always pass through exactly.
+/// A theme token color (f32 rgba 0..1) as the emulator's 8-bit RGB.
+fn themeRgb(color: canvas.Color) vt.color.RGB {
+    return .{
+        .r = @intFromFloat(std.math.clamp(color.r, 0, 1) * 255 + 0.5),
+        .g = @intFromFloat(std.math.clamp(color.g, 0, 1) * 255 + 0.5),
+        .b = @intFromFloat(std.math.clamp(color.b, 0, 1) * 255 + 0.5),
+    };
+}
+
+fn rgbToColor(rgb: vt.color.RGB) canvas.Color {
+    return canvas.Color.rgb8(rgb.r, rgb.g, rgb.b);
+}
+
 const Palette = struct {
     background: canvas.Color,
     foreground: canvas.Color,
@@ -552,10 +594,17 @@ const Palette = struct {
         const dark = colors.background.r + colors.background.g + colors.background.b < 1.5;
         const dim: f32 = if (dark) 0.85 else 1.0;
         const bright: f32 = if (dark) 1.0 else 0.8;
+        // Primary colors come from the emulator's resolved render state
+        // — which already folded in the theme defaults pushed above plus
+        // any OSC 10/11/12 override and DECSCNM reverse swap — so an
+        // application that recolors its terminal is honored exactly.
+        // (`background`/`foreground` are always populated once a default
+        // is set; `cursor` falls back to the accent if the emulator left
+        // it unset.)
         return .{
-            .background = colors.background,
-            .foreground = colors.text,
-            .cursor = colors.accent,
+            .background = rgbToColor(terminal_colors.background),
+            .foreground = rgbToColor(terminal_colors.foreground),
+            .cursor = if (terminal_colors.cursor) |cur| rgbToColor(cur) else colors.accent,
             .selection = colors.accent,
             .terminal = terminal_colors,
             .ansi = .{
