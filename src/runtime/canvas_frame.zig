@@ -1276,21 +1276,25 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
     };
 }
 
-/// Widen a planned frame's incremental damage when the present's
-/// EFFECTIVE scale carries a larger device pixel than the plan's: the
-/// AA bleed allowance was folded in at plan scale
-/// (`canvasDirtyBleedInset`), so a presentation-scale override below it
-/// must add the difference or the one-device-pixel fringe reopens
-/// (e.g. planned at scale 2, presented at scale 1: half a point of
-/// allowance where the host's raster apron spans a full point). No-op
-/// for full repaints, equal or finer presentation scales, and frames
-/// with nothing dirty.
+/// Rework a planned frame's incremental damage for the present's
+/// EFFECTIVE scale. Two obligations when the scales differ:
+/// - A COARSER presentation scale carries a larger device pixel than
+///   the plan's, so the AA bleed allowance folded in at plan scale
+///   (`canvasDirtyBleedInset`) must grow by the difference or the
+///   one-device-pixel fringe reopens (planned at scale 2, presented at
+///   scale 1: half a point of allowance where the host's raster apron
+///   spans a full point).
+/// - ANY differing scale changes the pixel grid — the grids need not
+///   nest (plan 1, present 1.5: a plan-aligned edge at 11 points sits
+///   mid-pixel at 1.5×) — so the damage re-snaps outward on the
+///   presentation grid, keeping the cull region identical to the
+///   pixels the present clears.
+/// No-op for full repaints, matching scales, and frames with nothing
+/// dirty.
 fn widenCanvasFrameDirtyForPresentationScale(canvas_frame: *canvas.CanvasFrame, presentation_scale: f32) void {
     if (canvas_frame.full_repaint) return;
-    const extra = canvasDirtyBleedInset(presentation_scale) - canvasDirtyBleedInset(canvas_frame.scale);
-    if (!(extra > 0)) return;
-    // Re-align on the COARSER presentation grid too: the plan's snap
-    // used its finer grid, whose edges can split a presented pixel.
+    if (presentation_scale == canvas_frame.scale) return;
+    const extra = @max(0, canvasDirtyBleedInset(presentation_scale) - canvasDirtyBleedInset(canvas_frame.scale));
     canvas_frame.dirty_bounds = clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(canvas_frame.dirty_bounds, extra), presentation_scale), canvas_frame.surface_size);
     var kept: usize = 0;
     for (canvas_frame.dirty_rects[0..canvas_frame.dirty_rect_count]) |rect| {
