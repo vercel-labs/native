@@ -778,6 +778,31 @@ test "the automation menu verb refuses by name when the dismissal handler presen
     try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
 }
 
+test "the automation menu verb refuses by name when the dismissal handler closes its target view" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createCompactionHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Alpha's menu is pending; the verb targets beta, but the dismissal
+    // notice for the superseded presentation closes BETA — the verb's
+    // own target view. Its armed request can never resolve, so the verb
+    // disarms it and refuses by name instead of reporting success while
+    // the action dispatch silently drops the selection.
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+    app_state.close_view_on_dismissal = "beta";
+    try std.testing.expectError(
+        error.ContextMenuViewClosed,
+        harness.runtime.dispatchAutomationCommand(app, "widget-context-menu beta 3 0"),
+    );
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+    try std.testing.expectEqual(@as(usize, 2), harness.runtime.view_count);
+    // No orphan: the unresolvable request is disarmed with the refusal.
+    try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+}
+
 test "a presentation superseded mid-notice by the dismissal handler's own menu announces nothing" {
     var app_state: MenuTestApp = .{};
     const app = app_state.app();

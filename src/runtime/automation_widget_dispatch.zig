@@ -200,7 +200,8 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// why an invocation cannot happen: no declared menu, an index
         /// past the declared items, a separator slot, a disabled item —
         /// the same items the snapshot lists per widget — or a dismissal
-        /// handler that presented a superseding menu mid-verb.
+        /// handler that presented a superseding menu, or closed the
+        /// target's view, mid-verb.
         pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, item.target);
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.target.id) orelse return error.InvalidCommand;
@@ -250,6 +251,22 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (!still_armed) {
                 try notice;
                 return error.ContextMenuSuperseded;
+            }
+            // The notice may instead have CLOSED the verb's target view:
+            // the armed request can never resolve (the action dispatch
+            // would clear the token, fail its view lookup, and silently
+            // drop the selection). Disarm it and refuse by name — never
+            // a silent success, never an orphaned token.
+            const view_open = view_check: {
+                for (self.views[0..self.view_count]) |*view| {
+                    if (view.open and view.window_id == pending.window_id and std.mem.eql(u8, view.label, pending.viewLabel())) break :view_check true;
+                }
+                break :view_check false;
+            };
+            if (!view_open) {
+                self.canvas_widget_context_menu_pending = null;
+                try notice;
+                return error.ContextMenuViewClosed;
             }
             // The synthetic event names its view from the request's own
             // bounded copy, never `self.views[view_index]` re-read here:

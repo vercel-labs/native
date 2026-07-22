@@ -3734,13 +3734,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (menu_event.token != 0 and menu_event.token == self.context_menu_shown_token) {
                 const count = self.context_menu_shown_count;
                 // The request is consumed on every path out of this
-                // block — resolved, out-of-range, or a failed dispatch —
-                // but the pin releases only AFTER the dispatch: the
-                // Msg's slice payloads live in the pinned build arena
-                // until `update` (and the rebuild it triggers) has run.
+                // block — resolved, out-of-range, or a failed dispatch.
                 defer self.releaseContextMenuSnapshot();
                 if (menu_event.item_index < count) {
                     if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
+                        // The Msg is stored by value and its pinned-arena
+                        // payload slices are consumed by `update` itself;
+                        // the rebuild that follows reads only the model.
+                        // Release the pin BEFORE the dispatch: nothing
+                        // resets the pinned arena until the rebuild, and
+                        // the rebuild then routes into the partner arena
+                        // naturally — so a Msg whose update pushes the
+                        // model past a build budget fails the rebuild
+                        // WITHOUT resetting the live arena underneath it.
+                        // Input keeps working on the previous tree, and
+                        // the app's controls can recover the model —
+                        // production's degraded-error contract.
+                        self.releaseContextMenuSnapshot();
                         try self.dispatch(runtime, menu_event.window_id, msg);
                         return;
                     }

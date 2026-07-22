@@ -4062,8 +4062,15 @@ fn pinFailureView(ui: *PinFailureApp.Ui, model: *const PinFailureModel) PinFailu
     return ui.column(.{ .gap = 2, .padding = 12 }, .{
         ui.el(.list_item, .{
             .text = "Ship the release",
-            .context_menu = &.{.{ .label = "Send", .msg = .{ .send = payload } }},
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+                // The poison item: its update pushes the roster far past
+                // the per-view widget budget, so the selection's rebuild
+                // fails.
+                .{ .label = "Grow", .msg = .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 } },
+            },
         }, .{}),
+        ui.button(.{ .on_press = PinFailureMsg{ .set_rows = 4 } }, "Shrink"),
         ui.column(.{ .gap = 2 }, ui.each(model.rows(ui.arena), pinFailureKey, pinFailureRow)),
     });
 }
@@ -4225,6 +4232,102 @@ test "dismissing the menu after a failed pinned rebuild restores the dropped tre
     } });
     try std.testing.expect(app_state.tree != null);
     try std.testing.expect(app_state.context_menu_pin == null);
+}
+
+test "a selection whose update breaks the build budget keeps the live tree and input alive" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-selection-failure",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the menu, then rebuild once under it: the live tree moves
+    // to the partner arena, adjacent to the pinned generation.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+
+    // Selecting "Grow" dispatches from the snapshot; its update pushes
+    // the model past the widget budget and the rebuild fails. The pin
+    // released before the dispatch, so the rebuild routed into the
+    // partner arena — the LIVE tree survives the failure and input
+    // keeps working (production's degraded contract; the harness's
+    // `.propagate` policy surfaces the recorded error here).
+    try std.testing.expectError(error.WidgetLayoutListFull, harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 2,
+    } }));
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(app_state.context_menu_pin == null);
+
+    // The app's own controls recover the model THROUGH the surviving
+    // handler table: a real pointer click on "Shrink" (still routed by
+    // the retained layout of the last successful build) dispatches its
+    // Msg and the next rebuild succeeds.
+    const retained = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var button_frame: geometry.RectF = .{};
+    for (retained.nodes) |node| {
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    try std.testing.expect(!button_frame.isEmpty());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 3_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .x = button_frame.x + 4,
+        .y = button_frame.y + 4,
+        .timestamp_ns = 4_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 4), app_state.model.row_count);
+    try std.testing.expect(app_state.tree != null);
 }
 
 // ------------------------------------------------- press fall-through fixture
