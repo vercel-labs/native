@@ -432,6 +432,48 @@ test "a data record after the fed closed terminal is journal damage" {
     try testing.expect(fx.channelHandle(32) == null);
 }
 
+test "a closed terminal refused by queue back-pressure stays retryable after a drain" {
+    // The replay pump's back-pressure contract: a feed that answers
+    // `EffectQueueFull` is drained around and fed AGAIN (see
+    // `replaySession`). The park's terminal transition must therefore
+    // apply only once the event actually enqueues — a `.closed` that
+    // marked the park terminated before a refused enqueue would turn
+    // the pump's legal retry into a ReplayDamagedRecord refusal of a
+    // valid journal.
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.armReplay();
+
+    _ = fx.openChannel(.{ .key = 34, .on_event = DirectFx.channelMsg(.event) });
+    // Fill the completion queue with recorded data events until it
+    // back-pressures.
+    var fed: usize = 0;
+    while (true) : (fed += 1) {
+        if (fed > 10_000) return error.TestExpectedBackPressure;
+        fx.feedChannelEvent(34, .data, "burst", 0, 0) catch |err| switch (err) {
+            error.EffectQueueFull => break,
+            else => return err,
+        };
+    }
+    // The terminal also answers back-pressure...
+    try testing.expectError(error.EffectQueueFull, fx.feedChannelEvent(34, .closed, "", 0, 0));
+    // ...the pump drains...
+    var delivered: usize = 0;
+    while (fx.takeMsg()) |msg| {
+        try testing.expectEqual(effects_mod.EffectChannelEventKind.data, msg.event.kind);
+        delivered += 1;
+    }
+    try testing.expectEqual(fed, delivered);
+    // ...and the retried terminal lands cleanly, delivering exactly
+    // once and retiring the key.
+    try fx.feedChannelEvent(34, .closed, "", 0, 0);
+    const closed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqual(effects_mod.EffectChannelEventKind.closed, closed.event.kind);
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    try testing.expect(fx.channelHandle(34) == null);
+}
+
 test "a rejection record after the stream proved the open accepted is journal damage" {
     // A refused open delivers nothing before its refusal, so a
     // `.rejected` fed after a `.data` vacated the park is a terminal

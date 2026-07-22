@@ -4788,10 +4788,13 @@ pub fn Effects(comptime Msg: type) type {
                     });
                     return;
                 }
-                // `.data` proves the open was accepted live and keeps
-                // the recorded stream flowing; `.closed` is that
-                // stream's one terminal.
-                slot.park_state = if (kind == .closed) .terminated else .vacated;
+                // `.data` and `.closed` resolve the park too — but the
+                // transition applies only AFTER the enqueue below
+                // succeeds: a full queue answers `EffectQueueFull` and
+                // the replay pump drains and feeds the SAME record
+                // again, so a state written before a refused enqueue
+                // would turn that legal retry into a damage refusal of
+                // a valid journal.
             }
             const staged_len = @min(bytes.len, max_effect_channel_bytes);
             var entry: Entry = .{
@@ -4811,6 +4814,12 @@ pub fn Effects(comptime Msg: type) type {
             // feeds again, so recorded delivery order survives drain
             // passes larger than the queue.
             if (!self.enqueue(&entry)) return error.EffectQueueFull;
+            // The event is committed: NOW resolve the park. `.data`
+            // proves the open was accepted live and keeps the recorded
+            // stream flowing; `.closed` is that stream's one terminal.
+            if (slot.park_state != .none) {
+                slot.park_state = if (kind == .closed) .terminated else .vacated;
+            }
             self.wakeHost();
         }
 
