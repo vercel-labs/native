@@ -169,10 +169,11 @@ pub const RecordKind = enum(u8) {
 
 /// Session identity, written once as the first record.
 pub const Header = struct {
-    /// The automation protocol version baked into the recording build —
-    /// the existing CLI/app handshake, reused so a journal from a stale
-    /// build is refused with the same teaching shape.
-    protocol_version: u32 = automation_protocol.version,
+    /// The automation protocol fingerprint baked into the recording
+    /// build — the existing CLI/app handshake identity, reused so a
+    /// journal from a stale build is refused with the same teaching
+    /// shape.
+    protocol_fingerprint: u64 = automation_protocol.fingerprint,
     /// Recording platform ("macos", "linux", ...). Replay is
     /// same-platform in v1; a cross-platform journal is refused loudly.
     platform_name: []const u8,
@@ -934,7 +935,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
 
 pub fn encodeHeader(header: Header, buffer: []u8) JournalError![]const u8 {
     var cursor = WriteCursor{ .buffer = buffer };
-    try cursor.writeInt(u32, header.protocol_version);
+    try cursor.writeInt(u64, header.protocol_fingerprint);
     try cursor.writeStr(header.platform_name);
     try cursor.writeStr(header.app_name);
     try cursor.writeInt(i64, header.recorded_at_wall_ms);
@@ -946,7 +947,7 @@ pub fn encodeHeader(header: Header, buffer: []u8) JournalError![]const u8 {
 pub fn decodeHeader(bytes: []const u8) JournalError!Header {
     var cursor = ReadCursor{ .bytes = bytes };
     const header: Header = .{
-        .protocol_version = try cursor.readInt(u32),
+        .protocol_fingerprint = try cursor.readInt(u64),
         .platform_name = try cursor.readStr(),
         .app_name = try cursor.readStr(),
         .recorded_at_wall_ms = try cursor.readInt(i64),
@@ -1483,7 +1484,7 @@ test "header, checkpoint, screenshot, and end codecs round-trip" {
     }, &buffer));
     try testing.expectEqualStrings("macos", header.platform_name);
     try testing.expectEqualStrings("calculator", header.app_name);
-    try testing.expectEqual(automation_protocol.version, header.protocol_version);
+    try testing.expectEqual(automation_protocol.fingerprint, header.protocol_fingerprint);
 
     const checkpoint = try decodeCheckpoint(try encodeCheckpoint(.{ .event_ordinal = 10, .frame_index = 4, .fingerprint = 0xdead }, &buffer));
     try testing.expectEqual(@as(u64, 0xdead), checkpoint.fingerprint);

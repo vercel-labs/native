@@ -39,7 +39,7 @@ pub const ReplayError = error{
     /// The journal was recorded on a different platform; v1 replay is
     /// same-platform only (font metrics and scale behavior differ).
     ReplayPlatformMismatch,
-    /// The journal's automation protocol version differs from this
+    /// The journal's automation protocol fingerprint differs from this
     /// build's — the recording binary and this one are skewed.
     ReplayProtocolMismatch,
     /// A journaled effect result found no parked request with its key:
@@ -95,7 +95,7 @@ pub const ReplayOptions = struct {
 };
 
 pub const ReplayReport = struct {
-    protocol_version: u32 = 0,
+    protocol_fingerprint: u64 = 0,
     events_replayed: u64 = 0,
     effects_fed: u64 = 0,
     effects_skipped: u64 = 0,
@@ -148,11 +148,11 @@ pub fn replaySession(
     while (try reader.next()) |record| {
         switch (record) {
             .header => |header| {
-                report.protocol_version = header.protocol_version;
-                if (header.protocol_version != automation_protocol.version) {
+                report.protocol_fingerprint = header.protocol_fingerprint;
+                if (header.protocol_fingerprint != automation_protocol.fingerprint) {
                     std.debug.print(
-                        "replay refused: the journal was recorded at automation protocol v{d} but this build speaks v{d} - re-record with this build\n",
-                        .{ header.protocol_version, automation_protocol.version },
+                        "replay refused: the journal was recorded by a build whose automation protocol differs from this build's (journal 0x{x:0>16}, this build 0x{x:0>16}) - re-record with this build\n",
+                        .{ header.protocol_fingerprint, automation_protocol.fingerprint },
                     );
                     return error.ReplayProtocolMismatch;
                 }

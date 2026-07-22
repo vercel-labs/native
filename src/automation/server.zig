@@ -448,7 +448,7 @@ test "server reports pending commands without consuming them" {
 
     // An empty dropbox is idle, and so is one holding only non-queue
     // files — response artifacts and, pointedly, a retired-v5 writer's
-    // `command.txt` slot, which this protocol version must never consume
+    // `command.txt` slot, which this protocol must never consume
     // (acking it would tell that stale CLI its command dispatched).
     try std.testing.expect(!server.hasPendingCommand());
     try writePath(std.testing.io, server.path("command.txt", &path_buffer), "widget-click canvas 7\n");

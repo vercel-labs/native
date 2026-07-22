@@ -271,11 +271,11 @@ pub const Input = struct {
 
 pub fn writeText(input: Input, writer: anytype) !void {
     // `protocol=` is the CLI/app handshake: the publishing app
-    // stamps ITS baked-in protocol version so a stale `native` binary
-    // (or a stale app) is refused loudly instead of silently driving
-    // yesterday's dropbox shape.
-    try writer.print("ready=true protocol={d} frame={d} commands={d} runtime_uptime_ns={d} dispatch_errors={d} dropped_trace_records={d} publisher_pid={d} markup_watch={s}\n", .{
-        protocol.version,
+    // stamps ITS baked-in protocol fingerprint so a stale `native`
+    // binary (or a stale app) is refused loudly instead of silently
+    // driving yesterday's dropbox shape.
+    try writer.print("ready=true protocol=0x{x:0>16} frame={d} commands={d} runtime_uptime_ns={d} dispatch_errors={d} dropped_trace_records={d} publisher_pid={d} markup_watch={s}\n", .{
+        protocol.fingerprint,
         input.diagnostics.frame_index,
         input.diagnostics.command_count,
         input.diagnostics.runtime_uptime_ns,
@@ -809,7 +809,7 @@ test "snapshot emits window and source" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "runtime_uptime_ns=42") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "publisher_pid=4242") != null);
     var protocol_field_buffer: [32]u8 = undefined;
-    const protocol_field = try std.fmt.bufPrint(&protocol_field_buffer, "protocol={d} ", .{protocol.version});
+    const protocol_field = try std.fmt.bufPrint(&protocol_field_buffer, "protocol=0x{x:0>16} ", .{protocol.fingerprint});
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), protocol_field) != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "@w1") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "view @w1/main kind=webview") != null);

@@ -1,48 +1,79 @@
 const std = @import("std");
+const layout_fingerprint = @import("layout_fingerprint.zig");
 
 pub const default_dir = ".zig-cache/native-sdk-automation";
 pub const max_command_bytes: usize = 16 * 1024 + 64;
 
-/// CLI <-> app dropbox protocol version. Both binaries bake this
-/// constant at THEIR build time: the app stamps it into every snapshot
-/// header (`protocol=N`), the CLI refuses a snapshot whose version is not
-/// its own — so a stale `native` binary driving a freshly built app (or
-/// the reverse) fails loudly, naming both versions, instead of silently
-/// reading yesterday's state. Bump on ANY shape change a stale binary
-/// would misread: the dropbox directory name, the snapshot header/format,
-/// or the command vocabulary.
+/// CLI <-> app dropbox protocol identity. Both binaries bake this
+/// fingerprint at THEIR build time: the app stamps it into every
+/// snapshot header (`protocol=0x...`), the CLI refuses a snapshot whose
+/// fingerprint is not its own — so a stale `native` binary driving a
+/// freshly built app (or the reverse) fails loudly, naming both
+/// fingerprints, instead of silently reading yesterday's state.
 ///
-/// History: 1 = the first stamped version (post-rename dropbox
-/// `.zig-cache/native-sdk-automation`, publisher_pid liveness, stdout
-/// payloads). 2 = the gesture verbs (`widget-hold`,
-/// `widget-context-press`) and per-window snapshot view/widget scoping.
-/// 3 = the `profile on|off` verb and the snapshot's `frame_profile`
-/// per-stage timing line.
-/// 4 = the `provenance` verb (widget id or point -> authored markup) and
-/// its `provenance.txt` response artifact, the write-back read half.
-/// 5 = the `widget-context-menu` verb (invoke a declared context-menu
-/// item by target widget + item index, through the same
-/// `context_menu_action` dispatch a native selection takes) and the
-/// snapshot's per-widget `context_menu=[...]` item listing.
-/// 6 = the queued command dropbox: numbered `command-<n>.txt` entries
-/// (claimed exclusively by writers, consumed lowest-number-first by the
-/// app, DELETED as the consumption ack) replace the single-entry
+/// This replaces the manually-bumped integer counter the handshake
+/// carried through v8. No skew is ever migrated — both sides always
+/// rebuild from one checkout — so an ORDERED version carried no
+/// information ("same or different" is the entire question) while
+/// costing two recurring failures: parallel branches contending for the
+/// next integer, and forgettable bumps. The fingerprint is a comptime
+/// Wyhash over a canonical description of the protocol surface this
+/// file declares (see `layoutDescription`), so any change to that
+/// surface moves the identity with no manual step.
+///
+/// History of the retired integer counter, kept because the refusal
+/// teachings it produced are still in the field: 1 = the first stamped
+/// version (post-rename dropbox `.zig-cache/native-sdk-automation`,
+/// publisher_pid liveness, stdout payloads). 2 = the gesture verbs
+/// (`widget-hold`, `widget-context-press`) and per-window snapshot
+/// view/widget scoping. 3 = the `profile on|off` verb and the
+/// snapshot's `frame_profile` per-stage timing line. 4 = the
+/// `provenance` verb (widget id or point -> authored markup) and its
+/// `provenance.txt` response artifact, the write-back read half. 5 =
+/// the `widget-context-menu` verb and the snapshot's per-widget
+/// `context_menu=[...]` item listing. 6 = the queued command dropbox:
+/// numbered `command-<n>.txt` entries replace the single-entry
 /// `command.txt` slot that rapid back-to-back writers could overwrite
-/// before the app drained it. A v5 CLI against a v6 app writes a
-/// `command.txt` the app never touches (and times out loudly on its own
-/// consumption wait); a v6 CLI against a v5 app queues files the app
-/// never touches (same loud timeout) — and both directions are refused
-/// up front by this handshake whenever a live snapshot exists.
-/// Snapshots without a `protocol=` field predate the handshake entirely.
-/// 7 = the `widget-pinch` verb (drive a trackpad pinch gesture as the
-/// real begin/change/end platform input events, journaled like every
-/// synthesized input).
-/// 8 = context-menu action tokens are per-request generations, not
-/// widget ids. A v7 journal's recorded `context_menu_action` tokens can
-/// never match a v8 build's minted generations, so its selections would
-/// be silently swallowed by the token gate (replay divergence with no
-/// refusal); the bump turns that into the loud preamble mismatch.
-pub const version: u32 = 8;
+/// before the app drained it (snapshots without a `protocol=` field
+/// predate the handshake entirely). 7 = the `widget-pinch` verb. 8 =
+/// context-menu action tokens as per-request generations, not widget
+/// ids — a SEMANTIC break with identical bytes, exactly the shape
+/// `semantic_epoch` now expresses.
+pub const fingerprint: u64 = layout_fingerprint.hash(layoutDescription(semantic_epoch));
+
+/// The escape hatch for protocol changes `layoutDescription` cannot
+/// see. Bump this ONLY for: a same-bytes MEANING change (the
+/// per-request context-menu action-token generations were exactly that
+/// — identical layout, values a stale peer could never match), a
+/// snapshot text-format change a stale binary would misread
+/// (snapshot.zig hand-writes that layout), or a verb spelling change in
+/// `Command.parse` (the wire strings live there, not in the `Action`
+/// enum). Declared-shape changes — new verbs, renamed actions, budget
+/// or naming changes — need NO action here: the fingerprint moves on
+/// its own.
+pub const semantic_epoch: u32 = 1;
+
+/// The canonical description the protocol fingerprint hashes: the
+/// command vocabulary (the `Action` enum, reflected — names and values,
+/// so additions, removals, renames, and reorders all move the
+/// identity), the `Command` shape, the dropbox directory and
+/// queue-entry naming, and the size budgets. Deliberate constants cover
+/// what reflection cannot see; anything else invisible to this string
+/// is `semantic_epoch`'s job (see its doc).
+fn layoutDescription(comptime epoch: u32) []const u8 {
+    comptime {
+        @setEvalBranchQuota(200_000);
+        return "native-sdk automation protocol layout\n" ++
+            std.fmt.comptimePrint("semantic_epoch={d}\n", .{epoch}) ++
+            "dropbox_dir=" ++ default_dir ++ "\n" ++
+            "queue_entry=" ++ queue_file_prefix ++ "<n>" ++ queue_file_suffix ++ "\n" ++
+            std.fmt.comptimePrint("max_command_bytes={d} max_queued_commands={d} max_screenshot_label_bytes={d}\n", .{
+                max_command_bytes, max_queued_commands, max_screenshot_label_bytes,
+            }) ++
+            "actions=" ++ layout_fingerprint.describe(Action) ++ "\n" ++
+            "command=" ++ layout_fingerprint.describe(Command) ++ "\n";
+    }
+}
 
 /// How many commands may sit in the dropbox queue at once. Automation
 /// drivers are scripts, not firehoses: the app drains one command per
@@ -297,6 +328,19 @@ test "queue entry names round-trip and reject non-queue files" {
     try std.testing.expectEqual(@as(?u64, null), queueFileSequence("command-1.png"));
     try std.testing.expectEqual(@as(?u64, null), queueFileSequence("snapshot.txt"));
     try std.testing.expectEqual(@as(?u64, null), queueFileSequence("bridge-response.txt"));
+}
+
+test "semantic epoch moves the protocol fingerprint" {
+    // Same layout, bumped epoch: the combined identity must move, so a
+    // meaning-only change still refuses stale peers loudly.
+    const bumped = layout_fingerprint.hash(comptime layoutDescription(semantic_epoch + 1));
+    try std.testing.expect(bumped != fingerprint);
+}
+
+test {
+    // The description builder's own suite (including the pinned proof
+    // that an added field moves a fingerprint with no manual step).
+    _ = layout_fingerprint;
 }
 
 test "screenshot file names stay inside the automation directory" {

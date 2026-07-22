@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
         // silently drove a days-old dropbox).
         var stdout_buffer: [128]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol v{d})\n", .{ version, cli_build_info.build_commit, automation_protocol.version });
+        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol 0x{x:0>16})\n", .{ version, cli_build_info.build_commit, automation_protocol.fingerprint });
         try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
         checkVerbFlags("init", args[2..], .{
