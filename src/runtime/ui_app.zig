@@ -3209,14 +3209,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const declared_key = std.hash.Wyhash.hash(0x76696465, src) | 1;
             const snapshot = self.effects.videoSnapshot();
             if (!snapshot.active or snapshot.key != declared_key) return;
+            var moved = false;
             if (declaration.loop != self.video_declared_loop) {
                 self.video_declared_loop = declaration.loop;
                 self.effects.setVideoLoop(declaration.loop);
+                moved = true;
             }
             if (declaration.muted != self.video_declared_muted) {
                 self.video_declared_muted = declaration.muted;
                 self.effects.setVideoMuted(declaration.muted);
+                moved = true;
             }
+            // A flag delta moves the channel mirrors without any
+            // dispatch or drain behind it, so the runtime mirror
+            // republishes here exactly like the load and removal paths
+            // — an automation snapshot taken after a <video muted> or
+            // <video loop> flip must report the new value, not the one
+            // published before the reconcile.
+            if (moved) self.publishAudioState(runtime);
         }
 
         fn sceneFn(context: *anyopaque) anyerror!app_manifest.ShellConfig {

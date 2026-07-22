@@ -413,14 +413,16 @@ fn channelRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
 }
 
 /// A structurally valid u64 in a video record is not automatically an
-/// HONEST one: no recorder ever writes a position, duration, or
-/// dimension at or past 2^53 (285,000 years of milliseconds; dimensions
-/// orders of magnitude past every texture budget), and the TS delivery
-/// tier carries these scalars through the subset's exact-integer number
-/// window — feeding a larger value would trap in the bridge's numeric
-/// widening instead of refusing the hostile file at the gate.
+/// HONEST one: the engine clamps every video scalar into the
+/// exact-integer delivery window at the delivery boundary
+/// (`Effects.takeVideoMsg`, `max_effect_video_scalar_exclusive`), so no
+/// recorder can write a position, duration, or dimension at or past
+/// 2^53 whatever a host or embedder reports — and the TS delivery tier
+/// carries these scalars through the subset's exact-integer number
+/// window, where feeding a larger value would trap in the bridge's
+/// numeric widening instead of refusing the hostile file at the gate.
 fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
-    const max_exact: u64 = 1 << 53;
+    const max_exact: u64 = runtime_effects.max_effect_video_scalar_exclusive;
     return record.video_position_ms >= max_exact or
         record.video_duration_ms >= max_exact or
         record.video_width >= max_exact or

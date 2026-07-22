@@ -783,9 +783,11 @@ const DeclModel = struct {
     show: bool = true,
     second: bool = false,
     malformed: bool = false,
+    muted: bool = false,
+    loop: bool = false,
 };
 
-const DeclMsg = union(enum) { toggle_show, use_second, use_malformed, noop };
+const DeclMsg = union(enum) { toggle_show, use_second, use_malformed, toggle_muted, toggle_loop, noop };
 
 const DeclApp = ui_app_model.UiApp(DeclModel, DeclMsg);
 const DeclEffects = DeclApp.Effects;
@@ -796,6 +798,8 @@ fn declUpdate(model: *DeclModel, msg: DeclMsg, fx: *DeclEffects) void {
         .toggle_show => model.show = !model.show,
         .use_second => model.second = true,
         .use_malformed => model.malformed = true,
+        .toggle_muted => model.muted = !model.muted,
+        .toggle_loop => model.loop = !model.loop,
         .noop => {},
     }
 }
@@ -813,6 +817,8 @@ fn declView(ui: *DeclApp.Ui, model: *const DeclModel) DeclApp.Ui.Node {
             // gate refuses (`std.Uri.parse` fails on it).
             .src = if (model.malformed) "https://[" else if (model.second) "assets/clips/two.mp4" else "assets/clips/one.mp4",
             .controls = true,
+            .muted = model.muted,
+            .loop = model.loop,
             .width = 320,
             .height = 220,
             .label = "Clip",
@@ -900,6 +906,20 @@ test "a declared <video src> loads on first rebuild, reloads on src change, and 
     // unchanged src must not restart the playback.
     try h.app_state.dispatch(&h.harness.runtime, 1, .noop);
     try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
+
+    // Same-src flag deltas apply in place AND republish the runtime
+    // mirror in the same reconcile: an automation snapshot taken right
+    // after the flip must already report the new value.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_muted);
+    try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
+    try std.testing.expect(np.video.muted);
+    try std.testing.expect(fx.videoSnapshot().muted);
+    try std.testing.expect(h.harness.runtime.video_muted);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_loop);
+    try std.testing.expect(np.video.looping);
+    try std.testing.expect(h.harness.runtime.video_looping);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_muted);
+    try std.testing.expect(!h.harness.runtime.video_muted);
 
     // A changed src replaces the playback whole (loadVideo's replace
     // semantics: the first playback stops on the way).
@@ -1868,6 +1888,146 @@ test "a completion handler's chained load replays in recorded order" {
         try std.testing.expect(report.effects_fed > 0);
         try std.testing.expectEqual(@as(usize, 1), app_state.model.completed_count);
         try std.testing.expectEqual(clip_key + 1, app_state.model.last_key);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+        // Retired identities release as the replay advances — at most
+        // the final clip's park (whose closing pass the session's end
+        // cut off) may remain; a playlist never accumulates one entry
+        // per clip (the drain-boundary sweep's contract, pinned
+        // directly in "retired video identities release once their
+        // delivery window closes").
+        try std.testing.expect(app_state.effects.retired_video_len <= 1);
+    }
+}
+
+test "retired video identities release at the next drain-pass boundary" {
+    // Bare channel, replay-armed: replaced and stopped loads park their
+    // identities; a park a journaled record references is consumed by
+    // the feed itself, and a never-referenced leftover releases at the
+    // first pass boundary after parking (its record, had one existed,
+    // would have fed before that pass's event dispatched) — the sweep
+    // that keeps a long replayed playlist from accumulating an entry
+    // per clip.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    fx.loadVideo(.{
+        .key = clip_key + 1,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    try std.testing.expectEqual(@as(usize, 1), fx.retired_video_len);
+
+    // A journaled record for the replaced load consumes the park (the
+    // deterministic token sequence: the first load minted token 1).
+    try fx.feedVideoRecord(clip_key, 1, .failed, 0, 0, false, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), fx.retired_video_len);
+
+    // A stopped load with no record behind it releases at the next
+    // boundary instead of lingering for the session.
+    fx.stopVideo();
+    try std.testing.expectEqual(@as(usize, 1), fx.retired_video_len);
+    _ = fx.drainBoundary();
+    try std.testing.expectEqual(@as(usize, 0), fx.retired_video_len);
+}
+
+test "a past-window host readout clamps at delivery and replays clamped" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record against a host reporting a duration past the exact-integer
+    // delivery window (the platform seam accepts any u64): the channel
+    // clamps at delivery, so the Msg, the mirrors, and the journaled
+    // record all carry the window's ceiling — an honest recording, not
+    // damage.
+    const past_window: u64 = effects_mod.max_effect_video_scalar_exclusive * 2;
+    const clamped: u64 = effects_mod.max_effect_video_scalar_exclusive - 1;
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", past_window, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.loaded, app_state.model.last_kind.?);
+        try std.testing.expectEqual(clamped, app_state.model.last_duration_ms);
+        try std.testing.expectEqual(clamped, app_state.effects.videoSnapshot().duration_ms);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the record carries the clamped value, so the
+    // damage gate (which refuses scalars at or past the window) admits
+    // the honest recording, and the replayed platform event clamps
+    // identically on its way into the mirrors.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.effects_fed > 0);
+        try std.testing.expectEqual(clamped, app_state.model.last_duration_ms);
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }

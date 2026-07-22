@@ -647,6 +647,16 @@ pub const EffectAudioSource = enum(u8) {
 /// `.rejected` video event Msg.
 pub const max_effect_video_path_bytes: usize = platform.max_video_path_bytes;
 
+/// Upper bound (exclusive) for every video scalar the channel delivers
+/// — position, duration, width, height: the exact-integer window every
+/// delivery tier can carry (the TS tier rides these through f64, whose
+/// exact integers end at 2^53). Platform video events clamp into the
+/// window at the delivery boundary (`takeVideoMsg`), whatever a host or
+/// embedder reports — the engine-side guarantee behind session replay's
+/// damage gate: a recorded video scalar at or past this bound can only
+/// be a damaged or hand-edited journal, never an honest readout.
+pub const max_effect_video_scalar_exclusive: u64 = 1 << 53;
+
 /// How a video event Msg came to be — the audio vocabulary plus the
 /// stream's decoded dimensions on `loaded`. `loaded` acknowledges a
 /// successful `loadVideo` with the platform player's duration readout
@@ -2841,13 +2851,19 @@ pub fn Effects(comptime Msg: type) type {
         /// replaced or stopped the playback drains AFTER that dispatch,
         /// so its record feeds when the channel has moved on). Parked
         /// by `loadVideo`/`stopVideo` under replay only, consumed by
-        /// `feedVideoRecord` on token match; entries whose load never
-        /// produced a late record simply age in place — a session's
-        /// loads bound the list, and each entry is three words.
+        /// `feedVideoRecord` on token match, and swept at the next
+        /// drain-pass boundary (`drainBoundary`) once its window has
+        /// provably closed — so a long replayed playlist parks and
+        /// releases one entry per clip instead of accumulating them
+        /// for the whole session.
         const RetiredVideo = struct {
             key: u64,
             token: u64,
             video_fn: ?VideoMsgFn,
+            /// `drain_pass_seq` at park time — the sweep's age stamp
+            /// (see `drainBoundary` for why one pass boundary is
+            /// enough).
+            parked_pass: u64 = 0,
         };
 
         /// One loop-side channel `.rejected` terminal awaiting drain —
@@ -3500,6 +3516,9 @@ pub fn Effects(comptime Msg: type) type {
         retired_videos: [max_effect_pending_images_inline]RetiredVideo = undefined,
         retired_video_spill: []RetiredVideo = &.{},
         retired_video_len: usize = 0,
+        /// Drain-pass counter (incremented in `drainBoundary`): the
+        /// retired-video sweep's clock. Loop-thread only.
+        drain_pass_seq: u64 = 0,
         /// Loop-thread-only caller-staged Msg stage (see
         /// `PendingStaged` for the non-lossy contract) — the image
         /// stage's storage discipline exactly: inline until a burst
@@ -6233,6 +6252,18 @@ pub fn Effects(comptime Msg: type) type {
             // stale recorded events are swallowed exactly as they were
             // live.
             if (!self.video.active or platform_event.token != self.video.token) return null;
+            // Scalars clamp into the exact-integer delivery window here
+            // (`max_effect_video_scalar_exclusive`), once, for the live
+            // Msg, the mirrors, the journaled record, AND the replayed
+            // steering below — so live and replay derive identical
+            // state from the same platform event, and no journaled
+            // record can carry a value replay's damage gate refuses.
+            // The macOS host clamps CMTimes host-side already; this
+            // makes the bound true for every host.
+            const position_ms = clampVideoScalar(platform_event.position_ms);
+            const duration_ms = clampVideoScalar(platform_event.duration_ms);
+            const width = clampVideoScalar(platform_event.width);
+            const height = clampVideoScalar(platform_event.height);
             const kind: EffectVideoEventKind = switch (platform_event.kind) {
                 .loaded => .loaded,
                 .position => .position,
@@ -6260,12 +6291,12 @@ pub fn Effects(comptime Msg: type) type {
                 _ = self.applyVideoEvent(.{
                     .key = 0,
                     .kind = kind,
-                    .position_ms = platform_event.position_ms,
-                    .duration_ms = platform_event.duration_ms,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
                     .playing = platform_event.playing,
                     .buffering = platform_event.buffering,
-                    .width = platform_event.width,
-                    .height = platform_event.height,
+                    .width = width,
+                    .height = height,
                 });
                 if (self.pending_video_len > 0) {
                     const head = self.pendingVideoStorage()[self.pending_video_head];
@@ -6289,12 +6320,12 @@ pub fn Effects(comptime Msg: type) type {
             const event = self.applyVideoEvent(.{
                 .key = 0,
                 .kind = kind,
-                .position_ms = platform_event.position_ms,
-                .duration_ms = platform_event.duration_ms,
+                .position_ms = position_ms,
+                .duration_ms = duration_ms,
                 .playing = platform_event.playing,
                 .buffering = platform_event.buffering,
-                .width = platform_event.width,
-                .height = platform_event.height,
+                .width = width,
+                .height = height,
             }) orelse return null;
             const event_fn = video_fn orelse return null;
             // The token rides the platform event, not the channel: a
@@ -6477,6 +6508,11 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            // Advance the pass clock and release replay-side retired
+            // video identities whose window closed (`sweepRetiredVideos`
+            // has the full argument). Cheap and empty outside replay.
+            self.drain_pass_seq += 1;
+            self.sweepRetiredVideos();
             // Drain the channel wake coalescers BEFORE snapshotting the
             // post order — `adoptMediaSurfaceFrames`' clear-before-
             // sample placement, matched exactly (it clears each slot's
@@ -8324,6 +8360,12 @@ pub fn Effects(comptime Msg: type) type {
         /// than misattributed). `.completed` pins position to the
         /// duration; `.failed`/`.rejected` release the surface claim
         /// and reset the channel (nothing is left to resume).
+        /// One video scalar into the exact-integer delivery window
+        /// (see `max_effect_video_scalar_exclusive`).
+        fn clampVideoScalar(value: u64) u64 {
+            return @min(value, max_effect_video_scalar_exclusive - 1);
+        }
+
         fn applyVideoEvent(self: *Self, event: EffectVideo) ?EffectVideo {
             if (!self.video.active) return null;
             var resolved = event;
@@ -8632,6 +8674,7 @@ pub fn Effects(comptime Msg: type) type {
                 .key = self.video.key,
                 .token = self.video.token,
                 .video_fn = self.video.on_event,
+                .parked_pass = self.drain_pass_seq,
             };
             self.retired_video_len += 1;
         }
@@ -8659,6 +8702,38 @@ pub fn Effects(comptime Msg: type) type {
                 return entry;
             }
             return null;
+        }
+
+        /// Release retired-load entries whose delivery window has
+        /// closed — called from `drainBoundary` after the pass counter
+        /// advances. WHY one boundary suffices: a retired load's only
+        /// post-retirement delivery is the ≤1 loop-staged terminal
+        /// pending when it was retired, and live that terminal drains
+        /// at the FIRST pass after staging, so the journal places its
+        /// record before that pass's event. Drain passes run only
+        /// during wake and frame dispatches — the same journaled
+        /// events replay re-dispatches — and no such event exists
+        /// between the retirement and that first pass. Replay feeds
+        /// records in file order between dispatches, so by the time
+        /// any pass counted PAST the parking one begins, the entry's
+        /// record (if the recording produced one) has already fed and
+        /// consumed it; whatever remains at an older stamp can never
+        /// be referenced again.
+        fn sweepRetiredVideos(self: *Self) void {
+            const storage = self.retiredVideoStorage();
+            var index: usize = 0;
+            while (index < self.retired_video_len) {
+                if (storage[index].parked_pass < self.drain_pass_seq) {
+                    self.retired_video_len -= 1;
+                    storage[index] = storage[self.retired_video_len];
+                    continue;
+                }
+                index += 1;
+            }
+            if (self.retired_video_len == 0 and self.retired_video_spill.len > 0) {
+                self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = &.{};
+            }
         }
 
         /// Pop the video stage's head — `takePendingImage`'s twin,
