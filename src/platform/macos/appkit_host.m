@@ -9129,7 +9129,12 @@ static double NativeSdkSecondsFromCMTime(CMTime time) {
 
 static CMTime NativeSdkCMTimeFromMs(uint64_t ms) {
     CMTime time;
-    time.value = (CMTimeValue)ms;
+    /* The millisecond position arrives as u64; CMTimeValue is signed
+     * 64-bit, so an absurd request past INT64_MAX must clamp rather
+     * than wrap negative. AVPlayer then clamps the (still enormous)
+     * positive time to the item's duration — seek-past-end lands at
+     * the end, per the transport contract. */
+    time.value = (ms > (uint64_t)INT64_MAX) ? INT64_MAX : (CMTimeValue)ms;
     time.timescale = 1000;
     time.flags = kCMTimeFlags_Valid;
     time.epoch = 0;
@@ -9989,7 +9994,11 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }
     CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
     void *base = CVPixelBufferGetBaseAddress(pixels);
-    int result = 0;
+    /* -1 = no push happened (NULL base address or a failed channel
+     * permutation). Only an actual push verdict may end the poster
+     * hunt or release the claim below; a converted-but-unpushed tick
+     * must keep hunting, or a paused load's surface stays blank. */
+    int result = -1;
     if (base) {
         /* BGRA -> RGBA is one channel permutation; vImage reads the
          * buffer's bytesPerRow stride and writes the tightly packed
