@@ -1233,6 +1233,45 @@ test "Ui.video records the declaration last-wins, formats times, and disables ch
     try testing.expect(chrome_ui.video_declaration == null);
 }
 
+test "Ui.video with controls keeps the media surface's zero-intrinsic contract" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // A hug-sized container and no declared width/height/grow: the
+    // element measures zero exactly like the bare surface — the
+    // transport bar must not size it into a controls-only strip.
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{ .cross = .start }, .{
+        ui.video(.{ .src = "assets/clips/one.mp4", .controls = true }),
+    }));
+    const element = tree.root.children[0];
+    try testing.expect(element.layout.zero_intrinsic);
+    try testing.expect(element.layout.clip_content);
+    var layout_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 400, 300), &layout_nodes);
+    const frame = layout.findById(element.id).?.frame;
+    try testing.expectEqual(@as(f32, 0), frame.width);
+    try testing.expectEqual(@as(f32, 0), frame.height);
+
+    // Declared sizes stay definite: the same element sized 320x180
+    // carries the surface above the transport bar, which keeps its
+    // intrinsic height inside the declared box.
+    var sized_ui = InboxUi.init(arena_state.allocator());
+    const sized_tree = try sized_ui.finalize(sized_ui.column(.{ .cross = .start }, .{
+        sized_ui.video(.{ .src = "assets/clips/one.mp4", .controls = true, .width = 320, .height = 180 }),
+    }));
+    const sized_element = sized_tree.root.children[0];
+    var sized_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const sized_layout = try canvas.layoutWidgetTree(sized_tree.root, geometry.RectF.init(0, 0, 400, 300), &sized_nodes);
+    const sized_frame = sized_layout.findById(sized_element.id).?.frame;
+    try testing.expectEqual(@as(f32, 320), sized_frame.width);
+    try testing.expectEqual(@as(f32, 180), sized_frame.height);
+    const surface_frame = sized_layout.findById(sized_element.children[0].id).?.frame;
+    const bar_frame = sized_layout.findById(sized_element.children[1].id).?.frame;
+    try testing.expect(bar_frame.height > 0);
+    try testing.expectApproxEqAbs(@as(f32, 180), surface_frame.height + bar_frame.height, 0.5);
+}
+
 test "chart builder copies, downsamples, and summarizes series" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

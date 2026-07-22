@@ -391,6 +391,17 @@ pub const WidgetLayoutStyle = struct {
     /// into both `min_size` and `max_size`, so intrinsic content can
     /// neither shrink nor silently grow the box past it.
     max_size: geometry.SizeF = .{},
+    /// The media sizing contract for a COMPOSED container: report no
+    /// intrinsic size, exactly like the media-surface leaf it wraps
+    /// (definite width/height or flex grow size it; a hug container
+    /// gives it nothing). Chrome composed beside a zero-intrinsic
+    /// surface — a transport bar — must not leak its own intrinsic
+    /// size into the element, or an unsized element would render as a
+    /// chrome-only strip. Declared sizes stay definite (they ride the
+    /// frame and the min/max bounds, never the intrinsic measure);
+    /// pair with `clip_content` so chrome cannot paint past a box the
+    /// layout granted nothing.
+    zero_intrinsic: bool = false,
 };
 
 pub const WidgetStyle = struct {

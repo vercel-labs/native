@@ -1515,6 +1515,12 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
 }
 
 fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    // The composed-media contract (`WidgetLayoutStyle.zero_intrinsic`):
+    // the container measures like the media-surface leaf regardless of
+    // what chrome it composes. Declared width/height still apply — they
+    // ride the widget frame and the min/max bounds, which every caller
+    // maxes against this measure.
+    if (widget.layout.zero_intrinsic) return geometry.SizeF.zero();
     return switch (widget.kind) {
         .text => intrinsicTextWidgetSize(widget, tokens, widgetBodyTextSize(widget, tokens)),
         .icon => geometry.SizeF.init(intrinsicIconExtent(widget, tokens), intrinsicIconExtent(widget, tokens)),

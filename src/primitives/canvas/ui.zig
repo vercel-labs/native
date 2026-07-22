@@ -1929,7 +1929,7 @@ pub fn Ui(comptime Msg: type) type {
                 .cross = .center,
                 .style_tokens = .{ .background = .surface },
             }, .{ toggle_button, elapsed, scrub, duration });
-            return self.el(.column, .{
+            var wrap = self.el(.column, .{
                 .key = options.key,
                 .global_key = options.global_key,
                 .width = options.width,
@@ -1937,6 +1937,15 @@ pub fn Ui(comptime Msg: type) type {
                 .grow = options.grow,
                 .gap = 0,
             }, .{ surface, controls_row });
+            // The controls-bearing form keeps the bare surface's
+            // no-intrinsic-size contract: the transport bar must never
+            // size the element (an unsized <video controls> in a hug
+            // container would otherwise render as a controls-only
+            // strip), and it clips away entirely when the layout grants
+            // the element nothing.
+            wrap.widget.layout.zero_intrinsic = true;
+            wrap.widget.layout.clip_content = true;
+            return wrap;
         }
 
         /// A playback time readout: h:mm:ss at an hour and beyond,
