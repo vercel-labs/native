@@ -941,6 +941,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the post-rebuild reconcile; the src slice lives in that
         /// build's arena, valid until the next rebuild.
         video_build_declaration: ?VideoBuildDeclaration = null,
+        /// The in-flight rebuild's capture, committed into
+        /// `video_build_declaration` only once the rebuild INSTALLS
+        /// (the `self.tree` assignment): a build that fails after the
+        /// capture never mounted, and the retained tree on the glass
+        /// still shows the old declaration — a later reconcile (a
+        /// secondary window's close) acting on the unmounted build's
+        /// capture would stop or replace a playback the presented tree
+        /// still declares. Seeded from the committed value at each
+        /// rebuild's start, so a failed rebuild changes nothing.
+        video_build_staged: ?VideoBuildDeclaration = null,
+        video_build_staged_src_buffer: [1024]u8 = undefined,
         /// The load identity of the playback the declarative
         /// reconciler started (`Effects.videoOwnerToken` right after
         /// its own loadVideo; 0 = owns nothing): the ownership proof
@@ -1541,6 +1552,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             errdefer if (live_tree_reset) {
                 self.tree = null;
             };
+            // Seed the staged video capture from the committed one, so
+            // a pass that fails before capturing (or an over-long
+            // declaration) leaves the committed state untouched.
+            self.stageVideoDeclarationFromCommitted();
             var built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             // Window-control clearance is a one-retry pass like the
             // virtual-window coverage retry inside the build: only when
@@ -1573,6 +1588,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.tree = tree;
             self.arena_index = next_index;
             live_tree_reset = false;
+            // The build INSTALLED: its video declaration now speaks
+            // for what the glass shows.
+            self.commitStagedVideoDeclaration();
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
@@ -1678,23 +1696,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // Capture the build's `<video src>` declaration for the
                 // post-rebuild reconcile (last pass wins — each pass
                 // resets the arena and re-records), COPIED out of the
-                // build arena (`video_build_src_buffer`): borrowing the
-                // arena would dangle after a later failed rebuild reset
-                // it. Over-long sources are not tracked and keep the
-                // previous capture — the slot captures' rule
-                // (`captureSlotVideoDeclaration`).
+                // build arena (`video_build_staged_src_buffer`):
+                // borrowing the arena would dangle after a later failed
+                // rebuild reset it. STAGED, not committed: the rebuild
+                // commits at install (`commitStagedVideoDeclaration`),
+                // so a build that fails downstream never speaks for the
+                // tree still on the glass. Over-long sources are not
+                // tracked and keep the previous capture — the slot
+                // captures' rule (`captureSlotVideoDeclaration`).
                 if (ui.video_declaration) |declaration| {
-                    if (declaration.src.len > 0 and declaration.src.len <= self.video_build_src_buffer.len) {
-                        @memcpy(self.video_build_src_buffer[0..declaration.src.len], declaration.src);
-                        self.video_build_declaration = .{
-                            .src = self.video_build_src_buffer[0..declaration.src.len],
+                    if (declaration.src.len > 0 and declaration.src.len <= self.video_build_staged_src_buffer.len) {
+                        @memcpy(self.video_build_staged_src_buffer[0..declaration.src.len], declaration.src);
+                        self.video_build_staged = .{
+                            .src = self.video_build_staged_src_buffer[0..declaration.src.len],
                             .autoplay = declaration.autoplay,
                             .loop = declaration.loop,
                             .muted = declaration.muted,
                         };
                     }
                 } else {
-                    self.video_build_declaration = null;
+                    self.video_build_staged = null;
                 }
                 self.rememberVirtualWindows(&ui);
                 // Measure the mounted rows of every variable-extent
@@ -3157,6 +3178,38 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .loop = entry.loop,
                 .muted = entry.muted,
             };
+        }
+
+        /// Seed the in-flight rebuild's staged capture from the
+        /// committed declaration (see `video_build_staged`).
+        fn stageVideoDeclarationFromCommitted(self: *Self) void {
+            if (self.video_build_declaration) |committed| {
+                @memcpy(self.video_build_staged_src_buffer[0..committed.src.len], committed.src);
+                self.video_build_staged = .{
+                    .src = self.video_build_staged_src_buffer[0..committed.src.len],
+                    .autoplay = committed.autoplay,
+                    .loop = committed.loop,
+                    .muted = committed.muted,
+                };
+            } else {
+                self.video_build_staged = null;
+            }
+        }
+
+        /// Commit the installed build's staged capture (see
+        /// `video_build_staged`).
+        fn commitStagedVideoDeclaration(self: *Self) void {
+            if (self.video_build_staged) |staged| {
+                @memcpy(self.video_build_src_buffer[0..staged.src.len], staged.src);
+                self.video_build_declaration = .{
+                    .src = self.video_build_src_buffer[0..staged.src.len],
+                    .autoplay = staged.autoplay,
+                    .loop = staged.loop,
+                    .muted = staged.muted,
+                };
+            } else {
+                self.video_build_declaration = null;
+            }
         }
 
         fn applyVideoDeclaration(self: *Self, runtime: *Runtime) void {

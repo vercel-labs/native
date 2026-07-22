@@ -256,6 +256,17 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Provenance consistency, gated BEFORE the regeneration
+                // skip below: a `.rejected` stamped onto a delivered
+                // record (nonzero token) would be skipped there and its
+                // handler Msg silently omitted from the stream.
+                if (effect.kind == .video and videoRecordProvenanceDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} claims .{s} with load token {d} - the recorder stamps token 0 exactly on loop-side rejections and a minted token on every delivery, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind), effect.video_token },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effect.kind == .video_load and videoLoadOutcomeDamaged(effect)) {
                     std.debug.print(
                         "replay refused after event {d}: video load record for key {d} claims outcome .{s} - the recorder stamps .loaded on a resolved cascade and .failed on a refusal, nothing else, so the journal is damaged or hand-edited; re-record the session\n",
@@ -459,6 +470,18 @@ fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
 /// and `.failed` on a synchronous refusal. Any other kind steers
 /// nothing honestly (a `.position` would leave the replayed fake load
 /// active where nothing is known), so it refuses at the gate.
+/// A `.video` record's kind and token are recorder-coupled: loop-side
+/// rejections never minted a token (they stamp 0) and every DELIVERY —
+/// position ticks, terminals, acknowledgments — carries the minted
+/// token of the load that produced it. A `.rejected` with a nonzero
+/// token would silently skip a real delivery through the regeneration
+/// gate; a delivery with token 0 could never have routed. Both are
+/// damage.
+fn videoRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
+    if (record.video_kind == .rejected) return record.video_token != 0;
+    return record.video_token == 0;
+}
+
 fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {
     return record.video_kind != .loaded and record.video_kind != .failed;
 }
