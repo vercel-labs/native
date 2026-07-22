@@ -457,11 +457,14 @@ test "real executor drives the platform player and events round-trip" {
     try h.app_state.dispatch(&h.harness.runtime, 1, .quiet);
     try std.testing.expectEqual(@as(f32, 0.25), np.video.volume);
 
-    // Advancing past the end delivers the one completion.
+    // Advancing past the end delivers the one completion, and the
+    // platform player retires with it (retire-before-emit, the live
+    // hosts' teardown order) — not merely paused.
     try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceVideo(60_000).?);
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
     try std.testing.expectEqual(@as(u64, 92_500), h.app_state.model.last_position_ms);
     try std.testing.expect(!h.app_state.model.last_playing);
+    try std.testing.expect(!np.video.loaded);
     try std.testing.expect(np.advanceVideo(500) == null);
 
     // Stop unloads; the snapshot goes honestly idle (null, not zeros).
@@ -490,6 +493,42 @@ test "a looping playback wraps at the end and never completes" {
     try std.testing.expectEqual(@as(u64, 500), h.app_state.model.last_position_ms);
     try std.testing.expect(h.app_state.model.last_playing);
     try std.testing.expectEqual(@as(usize, 0), h.app_state.model.completed_count);
+}
+
+test "transport after a non-looping completion refuses like a live host" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try np.setVideoMeta("orchard-flyover.mp4", 10_000, 640, 360);
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+
+    // The natural end retires the platform player before the completion
+    // emits, so every later transport call meets the same absent player
+    // a live host has after its teardown.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceVideo(10_500).?);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
+    try std.testing.expect(!np.video.loaded);
+
+    // Seek and pause against the retired player: swallowed on the
+    // platform side (the calls still arrive), position untouched — and
+    // no second completion can ever emit.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .seek_half);
+    try std.testing.expectEqual(@as(usize, 1), np.video_seek_count);
+    try std.testing.expectEqual(@as(u64, 0), np.video.position_ms);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pause);
+    try std.testing.expect(np.advanceVideo(500) == null);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
+
+    // Play cannot restart a retired player: the platform refuses and
+    // the channel degrades to one `.failed` event — the resume path is
+    // a fresh load, on every backend.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .play);
+    try h.drainWakes();
+    try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, h.app_state.model.last_kind.?);
+    try std.testing.expectEqual(clip_key, h.app_state.model.last_key);
+    try std.testing.expect(h.harness.runtime.automationSnapshot("Video").video == null);
 }
 
 test "decoded frames reach the claimed surface through the platform sink" {

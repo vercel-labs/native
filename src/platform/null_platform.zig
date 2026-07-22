@@ -1931,7 +1931,10 @@ pub const NullPlatform = struct {
     /// Test helper: advance fake playback by `delta_ms` and synthesize
     /// the event a live host's position timer would deliver — a
     /// `.position` tick, or `.completed` when a non-looping video
-    /// reaches its end (which pauses the player, matching AVPlayer). A
+    /// reaches its end. A non-looping completion unloads the player
+    /// (retire-before-emit, the live hosts' teardown): a later
+    /// `videoPlay`/`videoSeek` refuses exactly as it would against a
+    /// torn-down AVPlayer, and no second completion can ever emit. A
     /// LOOPING player wraps past the end and keeps ticking: no
     /// completion, because the playback never ends. Returns null when
     /// nothing is loaded or playing; position never advances on its own.
@@ -1951,13 +1954,15 @@ pub const NullPlatform = struct {
                     .playing = true,
                 } };
             }
-            self.video.playing = false;
-            self.video.position_ms = self.video.duration_ms;
+            const token = self.video.token;
+            const duration_ms = self.video.duration_ms;
+            self.video = .{ .volume = self.video.volume };
+            self.video_loaded_pending = false;
             return .{ .video = .{
                 .kind = .completed,
-                .token = self.video.token,
-                .position_ms = self.video.position_ms,
-                .duration_ms = self.video.duration_ms,
+                .token = token,
+                .position_ms = duration_ms,
+                .duration_ms = duration_ms,
                 .playing = false,
             } };
         }
