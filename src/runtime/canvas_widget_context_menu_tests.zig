@@ -46,6 +46,10 @@ const MenuTestApp = struct {
     /// window 1 — app code that compacts the runtime's view indices
     /// while a supersession is mid-dispatch.
     close_view_on_dismissal: ?[]const u8 = null,
+    /// When set, the dismissed-notice handler right-clicks this view's
+    /// declared-menu widget — app code that synchronously presents a
+    /// SUPERSEDING menu while a supersession is mid-dispatch.
+    present_menu_on_dismissal: ?[]const u8 = null,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -85,6 +89,10 @@ const MenuTestApp = struct {
                 if (self.close_view_on_dismissal) |close_label| {
                     self.close_view_on_dismissal = null;
                     try runtime.closeView(1, close_label);
+                }
+                if (self.present_menu_on_dismissal) |present_label| {
+                    self.present_menu_on_dismissal = null;
+                    try runtime.dispatchPlatformEvent(self.app(), rightClickOn(present_label, 50, 20));
                 }
                 if (self.dismissal_error) |err| return err;
             },
@@ -729,6 +737,45 @@ test "the automation menu verb names its view from the request after the dismiss
     try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
     try std.testing.expectEqualStrings("beta", app_state.last_menu_label[0..app_state.last_menu_label_len]);
     try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+}
+
+test "the automation menu verb refuses by name when the dismissal handler presents a superseding menu" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createCompactionHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Alpha's menu is pending; the verb targets alpha's own item, but
+    // the dismissal notice for the superseded presentation right-clicks
+    // beta — app code that synchronously presents a SUPERSEDING menu,
+    // replacing the verb's freshly armed request before its synthetic
+    // action dispatches.
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+    app_state.present_menu_on_dismissal = "beta";
+    try std.testing.expectError(
+        error.ContextMenuSuperseded,
+        harness.runtime.dispatchAutomationCommand(app, "widget-context-menu alpha 2 0"),
+    );
+
+    // Never a silent success: the requested item did not dispatch, and
+    // the driver heard why. Both supersessions were announced (the
+    // right-click's menu, then the verb's own).
+    try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.dismissed_count);
+
+    // The handler's successor menu is on the glass with its own pending
+    // request — nothing orphaned, still resolvable.
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    const successor_token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = "beta",
+        .token = successor_token,
+        .item_id = 2,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
 }
 
 test "a superseding presentation's shown event names the presenting view after the dismissal handler closes another" {

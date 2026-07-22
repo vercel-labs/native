@@ -4153,6 +4153,80 @@ test "a failing rebuild routed into the live arena under an open menu drops the 
     try std.testing.expect(app_state.context_menu_pin == null);
 }
 
+test "dismissing the menu after a failed pinned rebuild restores the dropped tree" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-dismiss-restore",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the menu, rebuild once under it, then fail the rebuild
+    // routed into the live arena: the tree reference drops.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // The model comes back in budget WITHOUT a Msg (an effect result,
+    // or the failing state was transient) — no rebuild has run yet.
+    app_state.model.row_count = 4;
+
+    // The user dismisses the open menu. Its resolution dispatches no
+    // Msg, so the release itself must restore the dropped tree —
+    // otherwise every handler no-ops (no tree, no Msgs) until an
+    // unrelated resize or effect happens to rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 0,
+    } });
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(app_state.context_menu_pin == null);
+}
+
 // ------------------------------------------------- press fall-through fixture
 
 const RowsModel = struct {

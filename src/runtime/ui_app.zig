@@ -2896,7 +2896,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
                 .canvas_widget_context_menu_shown => |shown_event| self.handleContextMenuShown(shown_event),
-                .canvas_widget_context_menu_dismissed => |dismissed_event| self.handleContextMenuDismissed(dismissed_event),
+                .canvas_widget_context_menu_dismissed => |dismissed_event| try self.handleContextMenuDismissed(runtime, dismissed_event),
                 .canvas_widget_context_menu_request => |request_event| try self.handleContextMenuRequest(runtime, request_event),
                 .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
                 .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
@@ -3695,9 +3695,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// The presented menu closed without a selection: a stale
         /// token's notice is ignored (a superseding presentation
         /// already replaced the snapshot and the pin).
-        fn handleContextMenuDismissed(self: *Self, dismissed_event: core.CanvasWidgetContextMenuDismissedEvent) void {
+        fn handleContextMenuDismissed(self: *Self, runtime: *Runtime, dismissed_event: core.CanvasWidgetContextMenuDismissedEvent) anyerror!void {
             if (dismissed_event.token == 0 or dismissed_event.token != self.context_menu_shown_token) return;
             self.releaseContextMenuSnapshot();
+            try self.restoreMissingTree(runtime);
+        }
+
+        /// A pinned rebuild failure dropped a live tree (`rebuild`'s
+        /// live-arena guard) while its menu stayed on the glass, and
+        /// the request just resolved WITHOUT a Msg dispatch (dismissal,
+        /// an out-of-range swallow, an unmapped item): restore the tree
+        /// now. No Msg-driven rebuild is coming, and with no handler
+        /// table every pointer, keyboard, and scroll event silently
+        /// no-ops until an unrelated resize, timer, or effect happens
+        /// to rebuild.
+        fn restoreMissingTree(self: *Self, runtime: *Runtime) anyerror!void {
+            if (!self.installed) return;
+            var missing = self.tree == null;
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (slot.installed and slot.tree == null) missing = true;
+            }
+            if (missing) try self.rebuildAllViews(runtime);
         }
 
         /// A native context-menu selection: resolve the selected item's
@@ -3721,10 +3739,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // Msg's slice payloads live in the pinned build arena
                 // until `update` (and the rebuild it triggers) has run.
                 defer self.releaseContextMenuSnapshot();
-                if (menu_event.item_index >= count) return;
-                if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
-                    try self.dispatch(runtime, menu_event.window_id, msg);
+                if (menu_event.item_index < count) {
+                    if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
+                        try self.dispatch(runtime, menu_event.window_id, msg);
+                        return;
+                    }
                 }
+                // Swallowed without a Msg (out of range, or an item the
+                // presented tree never mapped): no dispatch rebuilds, so
+                // restore a live tree a failed pinned rebuild dropped.
+                try self.restoreMissingTree(runtime);
                 return;
             }
             const tree = self.treeForViewLabel(menu_event.view_label) orelse return;

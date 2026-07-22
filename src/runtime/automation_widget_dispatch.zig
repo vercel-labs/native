@@ -198,8 +198,9 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// replays, and resolves through `dispatchContextMenuAction`
         /// into the widget's `.context_menu` handler. Named errors say
         /// why an invocation cannot happen: no declared menu, an index
-        /// past the declared items, a separator slot, or a disabled
-        /// item — the same items the snapshot lists per widget.
+        /// past the declared items, a separator slot, a disabled item —
+        /// the same items the snapshot lists per widget — or a dismissal
+        /// handler that presented a superseding menu mid-verb.
         pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, item.target);
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.target.id) orelse return error.InvalidCommand;
@@ -238,6 +239,18 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // elsewhere: bookkeeping settles first, the error still
             // surfaces).
             const notice = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
+            // The notice ran arbitrary app code that may itself have
+            // PRESENTED a menu, superseding this verb's freshly armed
+            // request: the synthetic action below would fail the token
+            // gate and the command would report success without ever
+            // dispatching its item. Refuse by name instead — the
+            // handler's successor menu is on the glass with its own
+            // pending request, so nothing is orphaned.
+            const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == token else false;
+            if (!still_armed) {
+                try notice;
+                return error.ContextMenuSuperseded;
+            }
             // The synthetic event names its view from the request's own
             // bounded copy, never `self.views[view_index]` re-read here:
             // the notice above ran arbitrary app code that may have
