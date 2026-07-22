@@ -2106,6 +2106,84 @@ test "the cascade's resolved source replays without the recording host's files" 
     }
 }
 
+test "replayed video records must name the load at their position" {
+    // The reminted token sequence pairs records with replayed loads by
+    // POSITION; the journaled key is the cross-check that the load at
+    // that position is the load the recording issued. A mismatch — a
+    // hand-edited journal or a timeline that diverged before the feed
+    // — refuses instead of delivering through the wrong playback.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    fx.loadVideo(.{
+        .key = clip_key + 1,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+
+    // Wrong key against the retired first load (token 1).
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 1, .failed, 0, 0, false, false, 0, 0));
+    // Wrong key against the live load (token 2).
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 2, .position, 0, 0, true, false, 0, 0));
+    // The honest pairing still delivers.
+    try fx.feedVideoRecord(clip_key + 1, 2, .position, 500, 92_500, true, false, 0, 0);
+}
+
+test "unclaimed or misclaimed cascade resolutions fail the finish check" {
+    // A structurally valid journal whose `.video_load` records the
+    // replayed timeline never consumed — or consumed under a different
+    // key — is divergence, not success (`finishReplay`, run by the
+    // replayer at the journal's end).
+    {
+        var fx = VideoEffects.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.pushReplayVideoSource(clip_key, 999, .stream);
+        try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
+    }
+    {
+        var fx = VideoEffects.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        // The record names key clip_key+7 at position (token) 1, but
+        // the replayed dispatch loads clip_key: the consume latches the
+        // divergence the void-returning loadVideo cannot raise.
+        fx.pushReplayVideoSource(clip_key + 7, 1, .stream);
+        fx.loadVideo(.{
+            .key = clip_key,
+            .surface = clip_surface,
+            .path = clip_path,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        });
+        try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
+    }
+    {
+        // The clean shape: consumed by the load it named, finish is
+        // silent.
+        var fx = VideoEffects.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.pushReplayVideoSource(clip_key, 1, .stream);
+        fx.loadVideo(.{
+            .key = clip_key,
+            .surface = clip_surface,
+            .path = clip_path,
+            .url = clip_url,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        });
+        try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, fx.videoSnapshot().source);
+        try fx.finishReplay();
+    }
+}
+
 test "a load burst past the resolution queue's inline capacity replays whole" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

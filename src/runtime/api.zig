@@ -370,10 +370,15 @@ pub const Event = union(enum) {
 /// switches the app's effects channel into replay mode (fake executor,
 /// journaled results as the only terminal source) before the first
 /// replayed event; `.feed` delivers one journaled effect result into
-/// the stub executor's pending request with the matching key.
+/// the stub executor's pending request with the matching key; `.finish`
+/// runs the end-of-journal consistency checks — every queued record
+/// consumed by the load it named — so a structurally valid journal
+/// whose records the replayed timeline never claimed fails as
+/// divergence instead of reporting success.
 pub const ReplayControl = union(enum) {
     arm,
     feed: runtime_effects.EffectResultRecord,
+    finish,
 };
 
 pub fn App(comptime Runtime: type) type {

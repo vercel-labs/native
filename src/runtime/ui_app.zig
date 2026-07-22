@@ -1251,9 +1251,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // cannot probe the filesystem. Queued, not applied:
                     // the record precedes the event whose dispatch
                     // issues the load (see `pushReplayVideoSource`).
-                    .video_load => self.effects.pushReplayVideoSource(record.video_token, record.video_source),
+                    .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source),
                     .timer => {},
                 },
+                .finish => try self.effects.finishReplay(),
             }
         }
 

@@ -2892,8 +2892,12 @@ pub fn Effects(comptime Msg: type) type {
 
         /// One journaled `.video_load` cascade resolution awaiting the
         /// replayed load that will consume it (see
-        /// `pushReplayVideoSource`).
+        /// `pushReplayVideoSource`). The key rides along as the
+        /// cross-check: the reminted token sequence pairs records with
+        /// loads by POSITION, and the journaled key proves the load at
+        /// that position is the same load the recording issued.
         const ReplayVideoSource = struct {
+            key: u64,
             token: u64,
             source: EffectVideoSource,
         };
@@ -3556,6 +3560,11 @@ pub fn Effects(comptime Msg: type) type {
         replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
         replay_video_source_spill: []ReplayVideoSource = &.{},
         replay_video_source_len: usize = 0,
+        /// A journaled cascade resolution paired against a different
+        /// key than it named (see `takeReplayVideoSource`) — latched
+        /// for `finishReplay`, which turns it into the divergence
+        /// refusal the void-returning `loadVideo` cannot raise itself.
+        replay_video_diverged: bool = false,
         /// Drain-pass counter (incremented in `drainBoundary`): the
         /// retired-video sweep's clock. Loop-thread only.
         drain_pass_seq: u64 = 0,
@@ -4273,6 +4282,23 @@ pub fn Effects(comptime Msg: type) type {
         pub fn armReplay(self: *Self) void {
             self.executor = .fake;
             self.replay = true;
+        }
+
+        /// End-of-journal consistency check (the `.finish` replay
+        /// control): every journaled video cascade resolution must have
+        /// been consumed by the load it named, and none may have paired
+        /// against a different key. A leftover or mismatched record
+        /// means the replayed updates issued different loads than the
+        /// recording — divergence, not success.
+        pub fn finishReplay(self: *Self) error{ReplayVideoDivergence}!void {
+            if (self.replay_video_diverged) return error.ReplayVideoDivergence;
+            if (self.replay_video_source_len > 0) {
+                std.debug.print(
+                    "session replay: {d} journaled video load resolution(s) were never consumed by a replayed load - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                    .{self.replay_video_source_len},
+                );
+                return error.ReplayVideoDivergence;
+            }
         }
 
         /// Report one delivered result to the bound session recorder.
@@ -6494,8 +6520,14 @@ pub fn Effects(comptime Msg: type) type {
             // entry (see `PendingVideo`).
             var video_fn: ?VideoMsgFn = undefined;
             if (self.video.active and self.video.token == token) {
+                // The reminted token pairs by position; the journaled
+                // key proves the load at that position is the load the
+                // recording issued. A mismatch is divergence, not a
+                // delivery.
+                if (self.video.key != key) return error.EffectNotFound;
                 video_fn = self.video.on_event;
             } else if (self.takeRetiredVideo(token)) |retired| {
+                if (retired.key != key) return error.EffectNotFound;
                 video_fn = retired.video_fn;
             } else {
                 return error.EffectNotFound;
@@ -6528,7 +6560,7 @@ pub fn Effects(comptime Msg: type) type {
         /// sequence is deterministic, so each entry pairs with exactly
         /// the load that journaled it, and a load whose cascade failed
         /// live (no record) simply finds no entry.
-        pub fn pushReplayVideoSource(self: *Self, token: u64, source: EffectVideoSource) void {
+        pub fn pushReplayVideoSource(self: *Self, key: u64, token: u64, source: EffectVideoSource) void {
             const storage = self.replayVideoSourceStorage();
             if (self.replay_video_source_len == storage.len) {
                 // Loads per dispatch are unbounded by contract, so the
@@ -6542,7 +6574,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.replay_video_source_spill = grown;
             }
             const active = self.replayVideoSourceStorage();
-            active[self.replay_video_source_len] = .{ .token = token, .source = source };
+            active[self.replay_video_source_len] = .{ .key = key, .token = token, .source = source };
             self.replay_video_source_len += 1;
         }
 
@@ -6569,6 +6601,21 @@ pub fn Effects(comptime Msg: type) type {
                     continue;
                 }
                 if (entry.token == self.video.token) {
+                    if (entry.key != self.video.key) {
+                        // The load at this position is not the load the
+                        // recording issued: the replayed updates
+                        // diverged. Latched for `finishReplay` (this is
+                        // the live `loadVideo` API — no error channel)
+                        // and consumed; it can never pair honestly.
+                        std.debug.print(
+                            "session replay: the journaled video load at this position carries key {d} but the replayed dispatch loaded key {d} - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                            .{ entry.key, self.video.key },
+                        );
+                        self.replay_video_diverged = true;
+                        self.replay_video_source_len -= 1;
+                        storage[index] = storage[self.replay_video_source_len];
+                        break;
+                    }
                     self.video.source = entry.source;
                     // The live cascade starts an autoplaying fresh
                     // stream buffering optimistically (`loadVideo`);
