@@ -228,7 +228,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         _ = c.close(slave);
         return error.PtyOpenFailed;
     }
-    setCloexec(exec_pipe[1]);
+    // CLOEXEC on the write end is load-bearing, not best-effort: if it
+    // does not take, a successful exec leaves the child holding a copy
+    // of the write end and the parent's `readAll` below blocks until
+    // the child exits. A failed fcntl aborts the spawn instead.
+    if (!setCloexec(exec_pipe[1])) {
+        _ = c.close(master);
+        _ = c.close(slave);
+        _ = c.close(exec_pipe[0]);
+        _ = c.close(exec_pipe[1]);
+        return error.PtyOpenFailed;
+    }
 
     const pid = c.fork();
     if (pid < 0) {
@@ -271,9 +281,10 @@ fn reportExecFailure(write_fd: c_int) noreturn {
     c._exit(127);
 }
 
-fn setCloexec(fd: c_int) void {
+fn setCloexec(fd: c_int) bool {
     const flags = c.fcntl(fd, f_getfd, @as(c_int, 0));
-    if (flags >= 0) _ = c.fcntl(fd, f_setfd, flags | fd_cloexec);
+    if (flags < 0) return false;
+    return c.fcntl(fd, f_setfd, flags | fd_cloexec) >= 0;
 }
 
 /// Read into `buf` until EOF or full, retrying EINTR. Returns the byte
@@ -314,8 +325,9 @@ fn resolveExecutable(arg0: []const u8, env: ?[]const EnvVar, buf: []u8) ?[]const
     const path = lookupEnv(env, "PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
     var it = std.mem.splitScalar(u8, path, ':');
-    while (it.next()) |dir| {
-        if (dir.len == 0) continue;
+    while (it.next()) |component| {
+        // A POSIX empty PATH component names the current directory.
+        const dir = if (component.len == 0) "." else component;
         const joined = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, arg0 }) catch continue;
         if (!executableAt(&scratch, joined)) continue;
         return joined;
@@ -442,10 +454,13 @@ const c = struct {
 };
 
 /// A nudge pipe for the io thread: [read end, write end]. BOTH ends are
-/// non-blocking: the write side so a burst of loop-thread nudges against
-/// a full pipe can never block the UI loop (a full pipe already means
-/// wakes are pending — the nudge coalesced), and the read side so the
-/// eager drain never parks the io thread.
+/// non-blocking (the write side so a burst of loop-thread nudges against
+/// a full pipe can never block the UI loop — a full pipe already means a
+/// wake is pending; the read side so the eager drain never parks the io
+/// thread) and BOTH ends are close-on-exec: a pty child inherits every
+/// parent fd across fork, and without CLOEXEC a daemonized descendant
+/// would keep these descriptors — and the pipe itself — alive past the
+/// runtime closing its copies. The child needs neither end.
 pub fn pipePair() Error![2]c_int {
     if (comptime !supported) return error.PtyUnsupported;
     var fds: [2]c_int = undefined;
@@ -453,6 +468,11 @@ pub fn pipePair() Error![2]c_int {
     for (fds) |fd| {
         const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
         if (flags >= 0) _ = c.fcntl(fd, f_setfl, flags | o_nonblock);
+        if (!setCloexec(fd)) {
+            _ = c.close(fds[0]);
+            _ = c.close(fds[1]);
+            return error.PtyOpenFailed;
+        }
     }
     return fds;
 }

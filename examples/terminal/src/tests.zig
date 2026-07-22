@@ -131,6 +131,66 @@ test "the grid paints real text runs with theme-derived ANSI and exact truecolor
     try testing.expect(saw_exact);
 }
 
+test "inverse video paints text in the background color, not on itself" {
+    const session = try createSession(20, 3);
+    defer session.destroy();
+    // Default colors, reverse-video on: the text must read as the theme
+    // background painted over the theme foreground, never foreground on
+    // an identical foreground (invisible).
+    session.feed("\x1b[7mREV\x1b[0m\r\n");
+
+    var commands: [256]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const tokens: canvas.DesignTokens = .{};
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = tokens,
+        .running = true,
+        .selecting = false,
+    });
+    var saw_rev = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| if (std.mem.eql(u8, text.text, "REV")) {
+                saw_rev = true;
+                // Text is the background token; distinctly not the fg.
+                try testing.expectApproxEqAbs(tokens.colors.background.r, text.color.r, 0.01);
+                try testing.expect(text.color.r != tokens.colors.text.r);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_rev);
+}
+
+test "the grid never emits past its command budget" {
+    const session = try createSession(80, 24);
+    defer session.destroy();
+    // A worst case for run-merging: alternate the foreground every cell
+    // so no two adjacent cells share a style and every cell is its own
+    // run. The budget must still hold.
+    var line: [512]u8 = undefined;
+    for (0..24) |_| {
+        var w: usize = 0;
+        for (0..80) |col| {
+            const code: u8 = if (col % 2 == 0) 31 else 32;
+            w += (std.fmt.bufPrint(line[w..], "\x1b[{d}mX", .{code}) catch break).len;
+        }
+        session.feed(line[0..w]);
+        session.feed("\r\n");
+    }
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 900, 560),
+        .tokens = .{},
+        .running = true,
+        .selecting = false,
+        .command_budget = 1700,
+    });
+    try testing.expect(builder.displayList().commands.len <= 1700);
+}
+
 test "grid clamping trades rows for columns inside the cell budget" {
     const clamped = grid.Session.clampGrid(4000, 4000);
     try testing.expect(@as(usize, clamped.x) <= grid.max_cols);

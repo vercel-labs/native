@@ -478,7 +478,13 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
 /// regenerating admission refusal, `.spawn_failed` = executor-truth
 /// start failure, the rest = real endings).
 fn ptyRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
-    return record.pty_kind == .output and record.exit_reason != .exited;
+    // Output records always carry `.exited` (the live drain never
+    // touches the reason on an output).
+    if (record.pty_kind == .output and record.exit_reason != .exited) return true;
+    // The regenerating-provenance bit only ever rides an admission
+    // refusal — an `.exit` record whose reason is `.rejected`.
+    if (record.truncated and (record.pty_kind != .exit or record.exit_reason != .rejected)) return true;
+    return false;
 }
 
 fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
@@ -585,10 +591,13 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
     return switch (record.kind) {
         .timer => true,
         .exit => record.exit_reason == .rejected,
-        // Pty admission refusals are loop-side validation that refuses
-        // again identically; executor-truth start failures, output,
-        // and real exits are external inputs and must be fed.
-        .pty => record.pty_kind == .exit and record.exit_reason == .rejected,
+        // Only DETERMINISTIC admission refusals regenerate — marked by
+        // the provenance bit the recorder set (`truncated`, unused for
+        // pty otherwise). Executor-truth terminals — start failures,
+        // the platform-unsupported rejection, output, and real exits —
+        // are external inputs and must be fed, even when their reason
+        // is `.rejected`.
+        .pty => record.pty_kind == .exit and record.truncated,
         .response => record.fetch_outcome == .rejected,
         .file => record.file_outcome == .rejected,
         .clipboard => record.clipboard_outcome == .rejected,

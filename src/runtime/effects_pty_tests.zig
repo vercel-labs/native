@@ -161,13 +161,38 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
 }
 
+test "a fake pty refuses a second feed after its exit is queued" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.ptySpawn(.{ .key = 71, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    try fx.feedPtyExit(71, 0, 0, .exited, 0);
+    // One terminal per spawn: a feed before the exit drains is refused
+    // loudly, never enqueued and silently dropped.
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyOutput(71, "late"));
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(71, 0, 0, .exited, 0));
+    _ = try expectExit(&fx, 71, .exited);
+}
+
+test "a fed output batch over the chunk bound is refused, never truncated" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.ptySpawn(.{ .key = 72, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    var over: [effects_mod.max_effect_pty_chunk_bytes + 1]u8 = undefined;
+    @memset(&over, 'x');
+    try testing.expectError(error.PtyChunkTooLarge, fx.feedPtyOutput(72, &over));
+}
+
 test "a fed output batch past the inline entry bound rides a heap payload intact" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
 
     fx.ptySpawn(.{ .key = 21, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
-    var big: [effects_mod.max_effect_line_bytes * 3]u8 = undefined;
+    var big: [effects_mod.max_effect_line_bytes + 128]u8 = undefined;
     for (&big, 0..) |*byte, index| byte.* = @intCast('a' + (index % 26));
     try fx.feedPtyOutput(21, &big);
     const msg = fx.takeMsg() orelse return error.TestExpectedMsg;

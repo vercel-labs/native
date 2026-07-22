@@ -245,6 +245,14 @@ pub const PaintOptions = struct {
     running: bool,
     /// Selection mode is armed (the head cell paints a focus outline).
     selecting: bool,
+    /// Hard ceiling on display-list commands this paint may emit — the
+    /// chrome prefix budget the app reserved. A pathological screen
+    /// (every cell a different style, so no run merges) can generate
+    /// more commands than the budget; painting stops row-wise at the
+    /// ceiling rather than overflowing the frame, so a busy screen
+    /// degrades to fewer painted rows instead of a failed render. 0
+    /// means unbounded (tests that size their own builder).
+    command_budget: usize = 0,
 };
 
 /// Paint the session's viewport into the display list: per-row
@@ -279,9 +287,23 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     const cell_w = session.cell_width;
     const cell_h = session.cell_height;
 
+    // One row emits at most ~2 commands per column (a background run
+    // plus a text run) plus a selection wash and an underline: reserve
+    // that worst case so the LAST painted row can never push the list
+    // past the budget. The cursor and scrollbar (+2) fit under the same
+    // reserve.
+    const row_reserve: usize = max_cols * 2 + 4;
+    const row_ceiling: usize = if (options.command_budget > row_reserve)
+        options.command_budget - row_reserve
+    else
+        0;
+
     var text_scratch: [max_cols * 4]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
+        // Row-wise budget stop: once the list is within one row's worst
+        // case of the ceiling, stop painting further rows.
+        if (options.command_budget > 0 and builder.displayList().commands.len >= row_ceiling) break;
         const row = rs.row_data.get(row_index);
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         if (row_y + cell_h > options.frame.y + options.frame.height + cell_h) break;
@@ -568,8 +590,16 @@ const Palette = struct {
     }
 
     fn resolveFg(palette: *const Palette, style: vt.Style, bg: ?canvas.Color) canvas.Color {
+        _ = bg;
         if (style.flags.inverse) {
-            return bg orelse palette.background;
+            // Inverse paints the text in the cell's BACKGROUND color
+            // (the theme background when the cell chose none) — the
+            // opposite of `cellBackground`, which paints the swapped
+            // foreground behind it. Resolving the real bg here, rather
+            // than the already-swapped `bg` argument, is what keeps
+            // default inverse text visible instead of foreground on
+            // an identical foreground.
+            return palette.resolveBgRaw(style);
         }
         var color = palette.resolveFgRaw(style);
         if (style.flags.faint) color = blend(color, palette.background, 0.5);
@@ -579,6 +609,14 @@ const Palette = struct {
     fn resolveFgRaw(palette: *const Palette, style: vt.Style) canvas.Color {
         return switch (style.fg_color) {
             .none => palette.foreground,
+            .palette => |index| palette.indexed(index),
+            .rgb => |rgb| canvas.Color.rgb8(rgb.r, rgb.g, rgb.b),
+        };
+    }
+
+    fn resolveBgRaw(palette: *const Palette, style: vt.Style) canvas.Color {
+        return switch (style.bg_color) {
+            .none => palette.background,
             .palette => |index| palette.indexed(index),
             .rgb => |rgb| canvas.Color.rgb8(rgb.r, rgb.g, rgb.b),
         };

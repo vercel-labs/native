@@ -44,10 +44,13 @@ const clipboard_key: u64 = 2;
 /// minus headroom for the widget header/status and their chrome.
 const grid_command_budget: usize = 1700;
 
-/// The default interactive shell per platform — a deterministic pick
-/// (both ship on every supported install) so a replayed update issues
-/// the identical spawn.
-const default_shell: []const u8 = if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/bash";
+/// The default interactive shell per platform — a deterministic pick so
+/// a replayed update issues the identical spawn (reading $SHELL here
+/// would be nondeterminism outside the effect boundary). macOS's login
+/// shell has been zsh since Catalina; Linux uses `/bin/sh`, the only
+/// interpreter POSIX guarantees present (a bare `/bin/bash` is absent on
+/// Alpine and other minimal installs).
+const default_shell: []const u8 = if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/sh";
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -419,6 +422,7 @@ fn buildChrome(model: *const Model, builder: *canvas.Builder, size: geometry.Siz
         .tokens = tokens,
         .running = model.phase == .live or model.phase == .starting,
         .selecting = model.selecting,
+        .command_budget = grid_command_budget,
     });
 }
 

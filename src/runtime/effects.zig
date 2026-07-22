@@ -1568,6 +1568,12 @@ const PtyShared = struct {
     out_head: usize = 0,
     out_len: usize = 0,
     out_data: [max_effect_pty_outbound_bytes]u8 = undefined,
+    /// Accepted `ptyWrite` payloads still staged (not yet fully sent):
+    /// incremented per accepted write, cleared when the FIFO drains
+    /// empty. On a discard (child gone, teardown) this many payloads
+    /// are added to `dropped_writes` so the count reflects distinct
+    /// lost writes, not one lumped event.
+    out_writes: u32 = 0,
     dropped_writes: u32 = 0,
     /// `ptyKill` ran (the exit reports `.cancelled`, the spawn cancel
     /// convention: after the verb, the exit always says so).
@@ -1828,10 +1834,13 @@ fn fallbackEnviron() std.process.Environ {
 
 /// Flatten the bound environ into the pty transport's env list — the
 /// spawn effect's inherit-the-host policy, made explicit because execve
-/// takes a flat envp. Entries past the transport's bounds are dropped
-/// from the END (a pathological environ, not a session shape); TERM is
-/// injected by the transport whether or not the host carried one.
-fn flattenPtyEnviron(environ: std.process.Environ, buffer: []pty_transport.EnvVar) []const pty_transport.EnvVar {
+/// takes a flat envp. TERM is injected by the transport whether or not
+/// the host carried one. Returns null when the environ exceeds the
+/// transport's bounds: the child MUST see the whole environment the API
+/// promised, so an over-bound environ fails the spawn loudly rather
+/// than handing the child a silently truncated one (a required variable
+/// past the cutoff would otherwise vanish).
+fn flattenPtyEnviron(environ: std.process.Environ, buffer: []pty_transport.EnvVar) ?[]const pty_transport.EnvVar {
     if (comptime std.process.Environ.Block != std.process.Environ.PosixBlock) return buffer[0..0];
     var count: usize = 0;
     var total_bytes: usize = 0;
@@ -1841,8 +1850,8 @@ fn flattenPtyEnviron(environ: std.process.Environ, buffer: []pty_transport.EnvVa
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse continue;
         // The transport injects its own TERM; a host TERM would race it.
         if (std.mem.eql(u8, text[0..eq], "TERM")) continue;
-        if (count == buffer.len) break;
-        if (total_bytes + text.len > pty_transport.max_env_bytes) break;
+        if (count == buffer.len) return null;
+        if (total_bytes + text.len > pty_transport.max_env_bytes) return null;
         buffer[count] = .{ .name = text[0..eq], .value = text[eq + 1 ..] };
         count += 1;
         total_bytes += text.len;
@@ -1864,6 +1873,7 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     read_loop: while (true) {
         shared.mutex.lock();
         const shutdown = shared.shutdown;
+        const killed = shared.kill_requested;
         const staged = if (shared.staging) |staging| staging.len else max_effect_pty_staging_bytes;
         const room = max_effect_pty_staging_bytes - staged;
         const want_read = room > 0;
@@ -1871,13 +1881,18 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         const want_write = shared.out_len > 0;
         shared.mutex.unlock();
 
-        // Teardown (or a kill) asked the thread to wind down: stop
-        // reading and go reap. Checked here so a reader PARKED on a
-        // full staging ring — which polls only the nudge pipe, never
-        // the master, so it can never observe the post-kill hangup —
-        // still exits promptly on the teardown nudge instead of
-        // parking forever and forcing the abandon path.
-        if (shutdown) break :read_loop;
+        // Teardown or a kill asked the thread to wind down: stop reading
+        // and go reap. Checked here so a reader PARKED on a full staging
+        // ring — which polls only the nudge pipe, never the master, so
+        // it can never observe a hangup — still exits promptly on the
+        // nudge. The kill case is load-bearing beyond teardown: the
+        // SIGKILL fells the direct child, but a new-session descendant
+        // that kept the slave open leaves the master with no EOF, so
+        // waiting for the pty to close would strand the exit forever.
+        // The direct child is dead, so `reapBlocking` below returns at
+        // once; the escaped descendant runs on detached, the spawn
+        // family's documented limit.
+        if (shutdown or killed) break :read_loop;
 
         const ready = pty_transport.wait(transport.master, nudge_fd, want_read, want_write);
         if (ready.nudged) pty_transport.drainNudges(nudge_fd);
@@ -1903,10 +1918,12 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     shared.mutex.lock();
     if (shared.open and shared.generation == generation) {
         // Outbound bytes still staged at exit never reached the child:
-        // count them so `dropped_writes == 0` keeps its promise.
+        // count each lost payload so `dropped_writes == 0` keeps its
+        // promise (distinct writes, not one lumped event).
         if (shared.out_len > 0) {
-            shared.dropped_writes +|= 1;
+            shared.dropped_writes +|= shared.out_writes;
             shared.out_len = 0;
+            shared.out_writes = 0;
         }
         const cancelled = shared.kill_requested;
         shared.exit_signal = exit.signal;
@@ -1987,8 +2004,9 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             // silent.
             shared.mutex.lock();
             if (shared.out_len > 0) {
-                shared.dropped_writes +|= 1;
+                shared.dropped_writes +|= shared.out_writes;
                 shared.out_len = 0;
+                shared.out_writes = 0;
             }
             shared.mutex.unlock();
             return;
@@ -1998,6 +2016,8 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
         shared.out_head = (shared.out_head + wrote) % max_effect_pty_outbound_bytes;
         shared.out_len -= @min(wrote, shared.out_len);
         const drained = shared.out_len == 0;
+        // The FIFO emptied: every staged payload reached the child.
+        if (drained) shared.out_writes = 0;
         shared.mutex.unlock();
         if (drained or wrote < take) return;
     }
@@ -5965,7 +5985,7 @@ pub fn Effects(comptime Msg: type) type {
         /// line-bound discipline). Live REAL occupancies refuse the
         /// feed — fed events are for parked fakes and replay, never a
         /// second producer beside a live io thread.
-        pub fn feedPtyOutput(self: *Self, key: u64, bytes: []const u8) error{ EffectNotFound, EffectQueueFull, PtyLiveFeed, ReplayDamagedRecord }!void {
+        pub fn feedPtyOutput(self: *Self, key: u64, bytes: []const u8) error{ EffectNotFound, EffectQueueFull, PtyLiveFeed, PtyChunkTooLarge, ReplayDamagedRecord }!void {
             const slot_index = blk: {
                 for (&self.pty_slots, 0..) |*slot, index| {
                     if (slot.state != .idle and slot.key == key) break :blk index;
@@ -5983,7 +6003,12 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDamagedRecord;
             }
-            const staged_len = @min(bytes.len, max_effect_pty_chunk_bytes);
+            // One batch never exceeds the chunk bound (the live ring
+            // splits at it, and the replay damage gate refuses a bigger
+            // record) — reject an over-bound feed rather than deliver a
+            // silently truncated prefix.
+            if (bytes.len > max_effect_pty_chunk_bytes) return error.PtyChunkTooLarge;
+            const staged_len = bytes.len;
             var entry: Entry = .{
                 .kind = .pty,
                 .slot_index = @intCast(slot_index),
@@ -6080,7 +6105,12 @@ pub fn Effects(comptime Msg: type) type {
                 .pty_dropped_writes = dropped_writes,
             };
             if (!self.enqueue(&entry)) return error.EffectQueueFull;
-            if (slot.park_state != .none) slot.park_state = .terminated;
+            // One terminal per spawn, on every fake — not just replay
+            // parks: mark terminated so a second output or exit fed
+            // before this one drains is refused loudly instead of
+            // enqueued and then silently dropped by the delivery
+            // generation gate once the exit retires the slot.
+            slot.park_state = .terminated;
             self.wakeHost();
         }
 
@@ -6173,11 +6203,18 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectPty(options.key, options.on_event, true);
             }
             // A build without a pty transport (Windows until ConPTY
-            // lands; a libc-free Linux build) refuses up front — the
-            // same deterministic validation class as the bounds above,
-            // regenerated identically by a same-platform replay.
+            // lands; a libc-free Linux build) refuses up front. Unlike
+            // the argv/dims/key bounds above, this is EXECUTOR TRUTH,
+            // not regenerating validation: whether a spawn can start is
+            // a property of the recording host, so the rejection is
+            // journaled (`regenerates = false`) and FED under replay —
+            // a session recorded where ptys are unsupported replays its
+            // rejection verbatim on a host where they are supported (and
+            // the replay executor is always the fake, which parks every
+            // spawn), instead of the replayed spawn parking with no
+            // journaled terminal to retire it.
             if (comptime !pty_transport.supported) {
-                if (self.executor != .fake) return self.rejectPty(options.key, options.on_event, true);
+                if (self.executor != .fake) return self.rejectPty(options.key, options.on_event, false);
             }
 
             const slot = &self.pty_slots[slot_index];
@@ -6268,6 +6305,7 @@ pub fn Effects(comptime Msg: type) type {
                     shared.out_data[(shared.out_head + shared.out_len + index) % max_effect_pty_outbound_bytes] = bytes[index];
                 }
                 shared.out_len += bytes.len;
+                shared.out_writes +|= 1;
                 break :accepted true;
             };
             shared.mutex.unlock();
@@ -6306,13 +6344,21 @@ pub fn Effects(comptime Msg: type) type {
             // already staged but not yet delivered rewrites to
             // `.cancelled` with the -1 sentinel code — after this verb
             // the exit always says cancelled, never a stale child code.
+            const already_reaped = shared.exit_staged or shared.io_done;
             if (shared.exit_staged) {
                 shared.exit_reason = .cancelled;
                 shared.exit_code = effect_error_exit_code;
                 shared.exit_signal = 0;
             }
             shared.mutex.unlock();
-            if (slot.transport) |transport| transport.kill(false);
+            // Signal ONLY while the io thread has not reaped the child:
+            // once it has, the pid is free for the OS to reuse and
+            // signalling it could hit an unrelated process. The nudge
+            // still wakes the io thread so a read parked short of EOF
+            // winds down through the kill_requested break below.
+            if (!already_reaped) {
+                if (slot.transport) |transport| transport.kill(false);
+            }
             pty_transport.nudge(slot.wake_pipe[1]);
         }
 
@@ -8263,12 +8309,15 @@ pub fn Effects(comptime Msg: type) type {
                                     self.retirePtySlot(parked);
                                 }
                             }
-                            // The channel arm's journal encoding:
-                            // only regenerating admission refusals
-                            // mark themselves with `.rejected`
-                            // provenance; executor-truth start
-                            // failures journal their real reason and
-                            // feed.
+                            // Provenance rides `truncated` (unused for
+                            // pty records): a pty exit's `reason` is
+                            // meaningful data, so unlike channels it
+                            // cannot double as the regenerating marker.
+                            // Only deterministic admission refusals
+                            // regenerate under replay and are skipped;
+                            // executor-truth terminals (start failures,
+                            // and the platform-unsupported rejection)
+                            // keep `truncated = false` and feed.
                             self.journalNote(.{
                                 .kind = .pty,
                                 .key = entry.event.key,
@@ -8277,6 +8326,7 @@ pub fn Effects(comptime Msg: type) type {
                                 .exit_reason = entry.event.reason,
                                 .pty_signal = entry.event.signal,
                                 .pty_dropped_writes = entry.event.dropped_writes,
+                                .truncated = entry.regenerates,
                             });
                             const pty_fn = entry.pty_fn orelse continue;
                             return pty_fn(entry.event);
@@ -10083,7 +10133,12 @@ pub fn Effects(comptime Msg: type) type {
                 return self.failPtyStart(slot, options);
             };
             var env_buffer: [pty_transport.max_env_entries]pty_transport.EnvVar = undefined;
-            const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer);
+            const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer) orelse {
+                process_allocator.destroy(staging);
+                pty_transport.closeFd(pipe[0]);
+                pty_transport.closeFd(pipe[1]);
+                return self.failPtyStart(slot, options);
+            };
             const transport = pty_transport.spawn(self.allocator, .{
                 .argv = slot.requestArgv(),
                 .env = env,
