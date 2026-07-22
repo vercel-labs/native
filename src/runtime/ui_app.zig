@@ -3609,18 +3609,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (0..count) |item_index| {
                 self.context_menu_shown_msgs[item_index] = blk: {
                     const msg = tree.msgForContextMenu(shown_event.target_id, item_index) orelse break :blk null;
-                    // OOM: disarm THIS item, loudly, rather than
-                    // snapshot a slice that may dangle by selection
-                    // time — and keep the rest of the snapshot armed
-                    // (dropping the whole snapshot would resolve every
-                    // item through the live tree, the misdirection this
-                    // snapshot exists to prevent).
-                    break :blk dupeSlicesDeep(MsgT, snapshot_arena, msg) catch {
+                    // A failed copy (out of memory, or a payload graph
+                    // past the slice-hop budget) never kills the
+                    // visible, enabled item: the snapshot keeps the
+                    // UNCOPIED value, loudly, and the item dispatches
+                    // under the rule that governed every deferred Msg
+                    // before the copy existed — its payload storage
+                    // must outlive the menu, never the build arena.
+                    break :blk dupeSlicesDeep(MsgT, snapshot_arena, msg, context_menu_snapshot_max_slice_hops) catch |err| {
                         ui_app_log.warn(
-                            "context menu snapshot: out of memory copying item {d}'s Msg payload; selecting that item will dispatch nothing",
-                            .{item_index},
+                            "context menu snapshot: {s} copying item {d}'s Msg payload; the item dispatches the uncopied value, whose slice storage must outlive the menu (model-owned or static, never the build arena)",
+                            .{ @errorName(err), item_index },
                         );
-                        break :blk null;
+                        break :blk msg;
                     };
                 };
             }
@@ -3769,34 +3770,48 @@ fn effectsQuitApp(context: *anyopaque) bool {
     return true;
 }
 
+/// The snapshot copier's slice-hop budget: how many nested levels of
+/// slice indirection a context-menu Msg payload may carry. Cycles are
+/// impossible without a slice hop per lap (struct/union/optional
+/// nesting is finite by construction), so the budget is also the cycle
+/// guard — a self-referential payload graph runs out of hops instead of
+/// stack. Menu payloads are identifiers and display strings (one hop);
+/// thirty-two is bounded-and-generous, in the toolkit's
+/// complexity-bounds tradition.
+const context_menu_snapshot_max_slice_hops: usize = 32;
+
 /// Deep-copy every const slice reachable in `value` into
-/// `allocator`-owned storage, returning a value that no longer aliases
-/// the source's slice payloads. The context-menu snapshot uses this at
-/// present time: a declared item's Msg may carry build-arena slices
-/// (the documented payload shape — `ui.fmt` strings and allocator-form
-/// bindings, always const), and a native menu stays open across
-/// arbitrarily many rebuilds while the build arenas double-buffer only
-/// two. Non-slice pointers pass through by reference (their contract is
-/// static or model-owned storage). Shapes the deferred copy cannot
-/// handle SOUNDLY are teaching errors at compile time, never a silent
-/// guess:
-/// - mutable slices: unknowable aliasing — `[]u8` from the build arena
-///   must be copied before the arena resets, while `[]u8` into
-///   app-owned storage must NOT be (update may write through it);
-/// - slices inside fixed arrays: an array's length says nothing about
-///   which elements are initialized (count-plus-buffer leaves the tail
-///   undefined), so walking every element reads undefined values;
-/// - slices inside untagged unions: no tag, no active arm to copy.
-/// Slice-free arrays and untagged unions are plain bytes and pass by
-/// value with the enclosing copy.
-fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) error{OutOfMemory}!T {
+/// `allocator`-owned storage, returning a value whose const slice
+/// payloads no longer alias the source. The context-menu snapshot uses
+/// this at present time: a declared item's Msg may carry build-arena
+/// slices (the documented payload shape — `ui.fmt` strings and
+/// allocator-form bindings, always const), and a native menu stays open
+/// across arbitrarily many rebuilds while the build arenas
+/// double-buffer only two. The walk covers struct fields, tagged-union
+/// arms, optionals, and error-union success payloads; equality is by
+/// VALUE — a copied slice carries the same bytes at a different address,
+/// because a deferred dispatch can never promise pointer identity (the
+/// model may have reallocated while the menu was open).
+///
+/// Everything else passes through uncopied, under the rule that has
+/// always governed deferred Msgs: the storage must outlive the menu —
+/// model-owned or static, never the build arena (whose blessed payload
+/// shape is const):
+/// - mutable slices: `update` may write through them, so a copy would
+///   swallow the writes into discarded snapshot storage;
+/// - fixed arrays: an array's length says nothing about which elements
+///   are initialized (count-plus-buffer leaves the tail undefined), so
+///   walking its elements would interpret undefined values;
+/// - untagged unions: no tag, no active arm to walk;
+/// - non-slice pointers: referenced storage is not the copier's to own.
+fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T, slice_hops: usize) error{ OutOfMemory, PayloadTooDeep }!T {
     switch (@typeInfo(T)) {
         .pointer => |pointer_info| switch (pointer_info.size) {
             .slice => {
-                if (comptime !pointer_info.is_const) @compileError(
-                    "a context-menu Msg payload carries the mutable slice '" ++ @typeName(T) ++
-                        "', and the presented menu's deferred snapshot cannot know whether it aliases model-owned storage (writes through it must land) or the build arena (its bytes must be copied before the arena resets) - carry a const slice, or an index update resolves against the model",
-                );
+                if (comptime !pointer_info.is_const) return value;
+                // A cyclic payload graph must cross a slice on every
+                // lap, so the hop budget is where it terminates.
+                if (slice_hops == 0) return error.PayloadTooDeep;
                 // The copy keeps the declared alignment and sentinel, so
                 // it coerces back to the payload's exact slice type.
                 const copy = try allocator.allocWithOptions(
@@ -3806,7 +3821,7 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
                     comptime pointer_info.sentinel(),
                 );
                 for (copy, value) |*element, source| {
-                    element.* = try dupeSlicesDeep(pointer_info.child, allocator, source);
+                    element.* = try dupeSlicesDeep(pointer_info.child, allocator, source, slice_hops - 1);
                 }
                 return copy;
             },
@@ -3816,87 +3831,57 @@ fn dupeSlicesDeep(comptime T: type, allocator: std.mem.Allocator, value: T) erro
             var copy = value;
             inline for (struct_info.fields) |field| {
                 if (comptime !field.is_comptime) {
-                    @field(copy, field.name) = try dupeSlicesDeep(field.type, allocator, @field(value, field.name));
+                    @field(copy, field.name) = try dupeSlicesDeep(field.type, allocator, @field(value, field.name), slice_hops);
                 }
             }
             return copy;
         },
         .@"union" => |union_info| {
-            if (comptime union_info.tag_type == null) {
-                if (comptime typeCanReachSlice(T)) @compileError(
-                    "a context-menu Msg payload carries slices inside the untagged union '" ++ @typeName(T) ++
-                        "', and without a tag the presented menu's deferred snapshot cannot know which arm to copy - use a tagged union",
-                );
-                return value;
-            }
+            if (comptime union_info.tag_type == null) return value;
             switch (value) {
                 inline else => |payload, tag| {
-                    return @unionInit(T, @tagName(tag), try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
+                    return @unionInit(T, @tagName(tag), try dupeSlicesDeep(@TypeOf(payload), allocator, payload, slice_hops));
                 },
             }
         },
         .optional => {
             const payload = value orelse return null;
-            return try dupeSlicesDeep(@TypeOf(payload), allocator, payload);
+            return try dupeSlicesDeep(@TypeOf(payload), allocator, payload, slice_hops);
         },
         .error_union => {
             const payload = value catch |err| return @as(T, err);
-            return @as(T, try dupeSlicesDeep(@TypeOf(payload), allocator, payload));
-        },
-        .array => {
-            // A slice's length defines exactly its initialized elements;
-            // a fixed array's length defines only its storage. Walking a
-            // count-plus-buffer array would interpret the undefined tail
-            // as slices, so slice-bearing arrays are refused outright and
-            // slice-free arrays pass by value as plain bytes.
-            if (comptime typeCanReachSlice(T)) @compileError(
-                "a context-menu Msg payload carries slices inside the fixed array '" ++ @typeName(T) ++
-                    "', whose length says nothing about which elements are initialized (count-plus-buffer leaves the tail undefined), so the presented menu's deferred snapshot cannot copy them soundly - carry a slice of slices, whose length defines exactly the initialized elements",
-            );
-            return value;
+            return @as(T, try dupeSlicesDeep(@TypeOf(payload), allocator, payload, slice_hops));
         },
         else => return value,
     }
 }
 
-/// Whether a value of `T` can transitively reach a slice through the
-/// shapes `dupeSlicesDeep` walks: struct fields, union arms, optionals,
-/// error-union payloads, and array elements. Non-slice pointers stop
-/// the walk — they pass by reference, so nothing behind them is copied.
-fn typeCanReachSlice(comptime T: type) bool {
-    @setEvalBranchQuota(10_000);
-    return switch (@typeInfo(T)) {
-        .pointer => |pointer_info| pointer_info.size == .slice,
-        .@"struct" => |struct_info| for (struct_info.fields) |field| {
-            if (typeCanReachSlice(field.type)) break true;
-        } else false,
-        .@"union" => |union_info| for (union_info.fields) |field| {
-            if (typeCanReachSlice(field.type)) break true;
-        } else false,
-        .optional => |optional_info| typeCanReachSlice(optional_info.child),
-        .error_union => |error_union_info| typeCanReachSlice(error_union_info.payload),
-        .array => |array_info| typeCanReachSlice(array_info.child),
-        else => false,
-    };
-}
-
-test "dupeSlicesDeep copies const slices with their alignment and sentinel, recurses error unions, and passes slice-free arrays as bytes" {
+test "dupeSlicesDeep copies const slices exactly, passes uncopyable shapes by reference, and budgets slice hops" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    const Raw = union {
+        text: []const u8,
+        number: u64,
+    };
     const Payload = struct {
         name: []const u8,
         aligned: []align(64) const u8,
         maybe: ?[]const u8,
         result: error{Overloaded}![]const u8,
         terminated: [:0]const u8,
-        // The count-plus-buffer shape WITHOUT slices: plain bytes, so
-        // the undefined tail is copied as bytes and never interpreted.
+        mutable: []u8,
+        // The count-plus-buffer shape: its length says nothing about
+        // which elements are initialized, so the array passes by value
+        // and its undefined tail is never interpreted — even when the
+        // element type carries slices.
         used: usize,
-        slots: [4]u32,
+        slots: [4]?[]const u8,
+        raw: Raw,
     };
 
+    var mutable_storage: [4]u8 = .{ 1, 2, 3, 4 };
     const aligned_storage: [8]u8 align(64) = @splat(7);
     var source: Payload = .{
         .name = "model-name",
@@ -3904,12 +3889,14 @@ test "dupeSlicesDeep copies const slices with their alignment and sentinel, recu
         .maybe = "maybe",
         .result = "ok",
         .terminated = "zed",
+        .mutable = &mutable_storage,
         .used = 1,
         .slots = undefined,
+        .raw = .{ .text = "raw" },
     };
-    source.slots[0] = 42;
+    source.slots[0] = "first";
 
-    const copy = try dupeSlicesDeep(Payload, allocator, source);
+    const copy = try dupeSlicesDeep(Payload, allocator, source, context_menu_snapshot_max_slice_hops);
 
     // Const slices are copied...
     try std.testing.expect(copy.name.ptr != source.name.ptr);
@@ -3929,12 +3916,30 @@ test "dupeSlicesDeep copies const slices with their alignment and sentinel, recu
     const copied_result = try copy.result;
     try std.testing.expect(copied_result.ptr != (source.result catch unreachable).ptr);
     try std.testing.expectEqualStrings("ok", copied_result);
-    // The slice-free array's initialized region survives by value.
+    // Mutable slices pass by reference (update may write through them),
+    // arrays pass by value without walking their elements (the
+    // initialized one still aliases the source), and untagged unions
+    // pass by value untouched.
+    try std.testing.expect(copy.mutable.ptr == &mutable_storage);
     try std.testing.expectEqual(@as(usize, 1), copy.used);
-    try std.testing.expectEqual(@as(u32, 42), copy.slots[0]);
+    try std.testing.expect(copy.slots[0].?.ptr == source.slots[0].?.ptr);
+    try std.testing.expect(copy.raw.text.ptr == source.raw.text.ptr);
 
     // A failed error union passes the error through as the value.
     const failing: error{Overloaded}![]const u8 = error.Overloaded;
-    const copied_failing = try dupeSlicesDeep(error{Overloaded}![]const u8, allocator, failing);
+    const copied_failing = try dupeSlicesDeep(error{Overloaded}![]const u8, allocator, failing, context_menu_snapshot_max_slice_hops);
     try std.testing.expectError(error.Overloaded, copied_failing);
+
+    // A cyclic payload graph terminates at the slice-hop budget instead
+    // of recursing until the stack dies; the caller answers the error
+    // by keeping the uncopied value.
+    const Node = struct {
+        children: []const @This() = &.{},
+    };
+    var cycle: [1]Node = .{.{}};
+    cycle[0].children = &cycle;
+    try std.testing.expectError(
+        error.PayloadTooDeep,
+        dupeSlicesDeep(Node, allocator, cycle[0], context_menu_snapshot_max_slice_hops),
+    );
 }
