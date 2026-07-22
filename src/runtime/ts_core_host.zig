@@ -210,11 +210,14 @@
 //!                  retires the bridge entry — no events for that key
 //!                  after it.
 //!   video_load  -> `fx.loadVideo` on the bridge's single video entry.
-//!                  The entry itself is `video_key_base` (the engine
-//!                  has ONE player, so the bridge holds one stream),
-//!                  non-retiring the audio way, keyed by the wire key:
-//!                  every `EffectVideo` event (loaded/position/
-//!                  completed/failed/rejected) routes the event arm —
+//!                  The engine key is `videoKeyForTag` (the
+//!                  `video_key_base` namespace with the load's event
+//!                  tag in the low byte; the engine has ONE player, so
+//!                  the bridge holds one stream), non-retiring the
+//!                  audio way, gated by the wire key for verbs: every
+//!                  `EffectVideo` event (loaded/position/completed/
+//!                  failed/rejected) routes the arm of the load whose
+//!                  key it echoes —
 //!                  a seven-field record built by field NAME (state/
 //!                  positionMs/durationMs/playing/buffering/width/
 //!                  height; `state`'s enum members are matched by
@@ -347,11 +350,19 @@ pub const spawn_key_base: u64 = 0x5453_5350_0000_0000;
 /// is the whole surface, so one constant key is the honest shape.
 pub const audio_key_base: u64 = 0x5453_4155_0000_0000;
 
-/// The engine key of the bridge's single video playback channel
-/// ("TSVI") — the audio key's twin: video keys are their own engine
-/// namespace and one player is the whole surface, so one constant key
-/// is the honest shape.
+/// The engine-key namespace of the bridge's single video playback
+/// channel ("TSVI") — the audio key's twin, except the low byte
+/// carries the issuing load's event-arm tag: every `EffectVideo` event
+/// echoes the key of the playback that produced it, so a staged
+/// synchronous `.failed` that delivers AFTER a replacing load re-keyed
+/// the entry still routes the arm of the load it answers (the mutable
+/// entry's tag would misroute it to the replacement's arm).
 pub const video_key_base: u64 = 0x5453_5649_0000_0000;
+
+/// The engine key for a video load routed to `event_tag`'s arm.
+pub fn videoKeyForTag(event_tag: u8) u64 {
+    return video_key_base | event_tag;
+}
 
 /// The spawn wire record's "no line routing" tag sentinel (mirrors
 /// rt.zig's `spawn_no_line_tag`).
@@ -1029,7 +1040,10 @@ pub fn TsCoreHost(comptime core: type) type {
                         const url = takeLongBytes(cmd, &at);
                         const flags = takeByte(cmd, &at);
                         const options: Fx.LoadVideoOptions = .{
-                            .key = video_key_base,
+                            // The tag rides the key's low byte so every
+                            // event routes the arm of the load that
+                            // produced it (see `videoKeyForTag`).
+                            .key = videoKeyForTag(event_tag),
                             // The wire carries the app's number; a surface
                             // that is not an exactly-carried positive
                             // integer (0, negatives, fractions, 2^53 and
@@ -1058,7 +1072,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         // the entry — and the engine — untouched.
                         if (Fx.videoLoadRejected(options)) {
                             fx.stageLoopMsg(msgFromTagVideo(event_tag, .{
-                                .key = video_key_base,
+                                .key = videoKeyForTag(event_tag),
                                 .kind = .rejected,
                             }));
                         } else {
@@ -1368,15 +1382,19 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         /// `VideoMsgFn` for the video stream: every playback event
-        /// routes the entry's event arm. The entry never retires here —
-        /// `completed`/`failed` streams may still speak (the app often
-        /// starts the next clip from `completed`), and video_ctl `stop`
-        /// is the explicit close.
+        /// routes by the TAG its own key carries (`videoKeyForTag`) —
+        /// never the mutable entry's tag, which a replacing load in the
+        /// same batch may already have re-pointed at another arm while
+        /// the replaced playback's staged terminal was still awaiting
+        /// its drain. The entry never retires here — `completed`/
+        /// `failed` streams may still speak (the app often starts the
+        /// next clip from `completed`), and video_ctl `stop` is the
+        /// explicit close.
         fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
             if (!video_entry.used) {
                 @panic("ts core host: a video event arrived with no open bridge stream");
             }
-            return msgFromTagVideo(video_entry.event_tag, event);
+            return msgFromTagVideo(@intCast(event.key & 0xFF), event);
         }
 
         /// Issue one image load. The keyed-effect discipline here is

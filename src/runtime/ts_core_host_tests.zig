@@ -124,6 +124,9 @@ const mini_core = struct {
         v_w: f64,
         v_h: f64,
         video_events: i64,
+        // Second-arm mirrors (the replaced-load straggler probe).
+        video2_state: VideoState,
+        video2_events: i64,
     };
 
     pub const Msg = union(enum) {
@@ -234,6 +237,17 @@ const mini_core = struct {
         vloop_it, // 65: video_ctl loop "clip" 1
         vctl_stray, // 66: video_ctl pause "other" (key gate no-op)
         vload_bad, // 67: video_load "bad" with surface 0 (bridge-refused)
+        vload2, // 68: video_load "clip2" routed to video_evt2
+        video_evt2: struct { // 69: a second video event arm so a
+            // replaced load's straggling terminal stays distinguishable
+            state: VideoState,
+            positionMs: f64,
+            durationMs: f64,
+            playing: bool,
+            buffering: bool,
+            width: f64,
+            height: f64,
+        },
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -286,6 +300,8 @@ const mini_core = struct {
                 .v_w = -1,
                 .v_h = -1,
                 .video_events = 0,
+                .video2_state = .rejected,
+                .video2_events = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -526,6 +542,13 @@ const mini_core = struct {
             // Surface 0 is the engine's own refusal class: the bridge
             // must reject WITHOUT re-routing the single entry.
             .vload_bad => return .{ .model = model, .cmd = cmdVideoLoad("bad", 58, 0, "media/x.mp4", "", 0b001) },
+            .vload2 => return .{ .model = model, .cmd = cmdVideoLoad("clip2", 69, 5, "media/clip2.mp4", "", 0b001) },
+            .video_evt2 => |event| {
+                const out = frameCreate(model.*);
+                out.video2_state = event.state;
+                out.video2_events = model.video2_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -1654,7 +1677,9 @@ test "video_load decodes whole and events route the seven-field arm by name" {
 
     Host.dispatch(fx, .vload);
     const request = fx.pendingVideo().?;
-    try std.testing.expectEqual(ts_core_host.video_key_base, request.key);
+    // The engine key is the video namespace with the load's event tag
+    // (video_evt = 58) in the low byte — the per-load routing stamp.
+    try std.testing.expectEqual(ts_core_host.videoKeyForTag(58), request.key);
     try std.testing.expectEqual(@as(u64, 5), request.surface);
     try std.testing.expectEqualStrings("media/clip.mp4", request.path);
     try std.testing.expectEqualStrings("", request.url);
@@ -1730,6 +1755,32 @@ test "a rejected video_load keeps the live stream's routing and key gate" {
     try std.testing.expectEqual(mini_core.VideoState.position, Host.model().video_state);
     Host.dispatch(fx, .vpause_it);
     try std.testing.expect(!fx.videoSnapshot().playing);
+}
+
+test "a replaced load's straggling terminal routes its own arm, not the replacement's" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // Open stream A and let its terminal stage: the fed `.failed`
+    // carries A's key (the arm tag rides the low byte), and it is
+    // still awaiting its drain when the replacing load re-keys the
+    // bridge entry.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.dispatch(fx, .vload2);
+
+    // The drain delivers A's terminal to A's arm (video_evt) and B's
+    // stream keeps its own arm (video_evt2) — routing by the mutable
+    // entry's tag would have handed A's failure to B.
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.failed, Host.model().video_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video2_events), 0), Host.model().video2_events);
+
+    try fx.feedVideoEvent(.loaded, 0, 8_000, true, false, 640, 360);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video2_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video2_events), 1), Host.model().video2_events);
 }
 
 test "video_ctl verbs drive the engine channel, gated by the wire key" {

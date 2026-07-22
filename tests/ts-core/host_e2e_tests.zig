@@ -698,7 +698,9 @@ test "video playback streams events into the transpiled core through the fake ch
     // whole under the bridge's video key, the media-surface id included.
     try h.menu("core.vplay");
     const request = fx.pendingVideo().?;
-    try std.testing.expectEqual(runtime_ns.ts_core_video_key_base, request.key);
+    // The key's high bits are the bridge's video namespace; the low
+    // byte carries the issuing load's event-arm tag (per-load routing).
+    try std.testing.expectEqual(runtime_ns.ts_core_video_key_base, request.key & ~@as(u64, 0xFF));
     try std.testing.expectEqual(@as(u64, 5), request.surface);
     try std.testing.expectEqualStrings("media/clip.mp4", request.path);
     try std.testing.expect(request.playing);
