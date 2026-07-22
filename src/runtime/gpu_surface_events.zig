@@ -448,6 +448,29 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             if (widget_text_input_event) |text_input_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
+            } else if (input_event.kind == .text_input and !widget_surface_dismissed) {
+                // No focused text widget consumed this committed text:
+                // it still reaches the app, as a TARGET-LESS text
+                // event — the key_down fallback's typing twin. This is
+                // the seam for apps that consume typing without a
+                // text-entry widget focused (a terminal grid): the
+                // ui-app layer maps it through `Options.on_text`, and
+                // the committed UTF-8 (IME results included) arrives
+                // verbatim — key names never reconstruct text.
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
+                        try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
+                            .window_id = input_event.window_id,
+                            .view_label = self.views[index].label,
+                            .keyboard = .{
+                                .phase = .text_input,
+                                .key = input_event.key,
+                                .text = input_event.text,
+                                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                            },
+                        } });
+                    }
+                }
             }
             // Wheel and keyboard scroll mutations above noted pending
             // scroll events on the view; deliver them after the input's

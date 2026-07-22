@@ -176,14 +176,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         pub const ChromeOptions = struct {
             /// Number of chrome commands preserved in front of the
-            /// widget-generated commands.
+            /// widget-generated commands. With `variable_prefix`, the
+            /// BUDGET instead: `build` may emit any count up to it.
             prefix_commands: usize,
             /// Number of chrome commands preserved after the
-            /// widget-generated commands.
+            /// widget-generated commands. Always exact.
             suffix_commands: usize = 0,
+            /// The prefix length is whatever `build` emitted this
+            /// rebuild (minus the fixed suffix) rather than an exact
+            /// pin — for chrome whose command count is model-derived
+            /// (a terminal grid, a data plot). The runtime re-learns
+            /// the split at every install, so its internal widget-span
+            /// regenerations keep preserving the right commands; the
+            /// exact-count default stays the teaching check for
+            /// fixed-shape chrome, where a drifted count is a bug.
+            variable_prefix: bool = false,
             /// Builds the chrome display-list commands: exactly
             /// `prefix_commands` commands followed by `suffix_commands`
-            /// commands.
+            /// commands (up to `prefix_commands` under
+            /// `variable_prefix`).
             build: *const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void,
         };
 
@@ -537,6 +548,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// can never steal typing — a fallback that yields to every
             /// consuming widget can carry them safely.
             on_key: ?*const fn (keyboard: canvas.WidgetKeyboardEvent) ?MsgT = null,
+            /// Optional mapping from unclaimed COMMITTED TEXT into
+            /// messages — `on_key`'s typing sibling for apps that
+            /// consume text themselves without a text-entry widget
+            /// focused (a terminal grid). Delivered for `.text_input`
+            /// phases only, after the same widget-precedence routing
+            /// `on_key` yields to: a focused editable widget keeps its
+            /// typing, and only unclaimed text falls through. The
+            /// event's `text` carries the committed UTF-8 (IME
+            /// composition results included), so consumers stay
+            /// layout- and input-method-correct — key names never
+            /// reconstruct text.
+            on_text: ?*const fn (keyboard: canvas.WidgetKeyboardEvent) ?MsgT = null,
             /// Optional mapping from trackpad pinch gestures into
             /// messages — the app-level gesture channel (the `on_key`
             /// shape). Pinch deliberately bypasses the widget pipeline:
@@ -2787,15 +2810,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var chrome_builder = canvas.Builder.init(&chrome_commands);
             try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
             const chrome_list = chrome_builder.displayList();
-            if (chrome_list.commands.len != chrome.prefix_commands + chrome.suffix_commands) {
+            if (chrome.variable_prefix) {
+                if (chrome_list.commands.len < chrome.suffix_commands or
+                    chrome_list.commands.len - chrome.suffix_commands > chrome.prefix_commands)
+                {
+                    return error.InvalidChromeCommandCount;
+                }
+            } else if (chrome_list.commands.len != chrome.prefix_commands + chrome.suffix_commands) {
                 return error.InvalidChromeCommandCount;
             }
+            const prefix_len = chrome_list.commands.len - chrome.suffix_commands;
 
             var commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var builder = canvas.Builder.init(&commands);
-            for (chrome_list.commands[0..chrome.prefix_commands]) |command| try builder.append(command);
+            for (chrome_list.commands[0..prefix_len]) |command| try builder.append(command);
             try layout.emitDisplayList(&builder, tokens);
-            for (chrome_list.commands[chrome.prefix_commands..]) |command| try builder.append(command);
+            for (chrome_list.commands[prefix_len..]) |command| try builder.append(command);
 
             _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
             // The main install window opens at the layout's true
@@ -2804,7 +2834,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // tree.
             try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
             _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
-                .prefix_command_count = chrome.prefix_commands,
+                .prefix_command_count = prefix_len,
                 .suffix_command_count = chrome.suffix_commands,
             });
         }
@@ -5090,6 +5120,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         }
                     }
                 }
+            }
+            if (keyboard_event.keyboard.phase == .text_input) {
+                const text_map = self.options.on_text orelse return;
+                if (text_map(keyboard_event.keyboard)) |msg| {
+                    try self.dispatch(runtime, keyboard_event.window_id, msg);
+                }
+                return;
             }
             const map = self.options.on_key orelse return;
             if (keyboard_event.keyboard.phase != .key_down) return;
