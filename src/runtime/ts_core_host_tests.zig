@@ -1728,6 +1728,26 @@ test "video_load decodes whole and events route the seven-field arm by name" {
     try std.testing.expect(replaced.muted);
 }
 
+test "a staged terminal outlives stop and still delivers its arm" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The batch shape: a load whose terminal stages synchronously,
+    // then stop retires the entry in the same cycle. The staged
+    // `.failed` is the load call's only answer and drains AFTER the
+    // stop — it must route its own arm, never panic on the retired
+    // entry.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(!fx.videoSnapshot().active);
+
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.failed, Host.model().video_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video_events), 1), Host.model().video_events);
+}
+
 test "a rejected video_load keeps the live stream's routing and key gate" {
     const fx = freshChannel();
     defer fx.deinit();

@@ -1386,14 +1386,19 @@ pub fn TsCoreHost(comptime core: type) type {
         /// never the mutable entry's tag, which a replacing load in the
         /// same batch may already have re-pointed at another arm while
         /// the replaced playback's staged terminal was still awaiting
-        /// its drain. The entry never retires here — `completed`/
-        /// `failed` streams may still speak (the app often starts the
-        /// next clip from `completed`), and video_ctl `stop` is the
-        /// explicit close.
+        /// its drain. No entry gate either: a retired entry (video_ctl
+        /// `stop`) can still owe a staged synchronous terminal — a
+        /// `Cmd.batch([videoLoad, videoStop])` on a host whose load
+        /// fails at once stages the `.failed` BEFORE the stop retires
+        /// the entry, and that terminal is the load call's only answer,
+        /// delivered at the next drain. Every event reaching this fn
+        /// was produced by a bridge-issued load (the engine swallows
+        /// its own post-stop stragglers), so the key's tag always
+        /// names the owed arm. The entry never retires here —
+        /// `completed`/`failed` streams may still speak (the app often
+        /// starts the next clip from `completed`), and video_ctl
+        /// `stop` is the explicit close.
         fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
-            if (!video_entry.used) {
-                @panic("ts core host: a video event arrived with no open bridge stream");
-            }
             return msgFromTagVideo(@intCast(event.key & 0xFF), event);
         }
 
