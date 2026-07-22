@@ -6292,13 +6292,23 @@ pub fn Effects(comptime Msg: type) type {
         /// new position.
         pub fn seekVideo(self: *Self, position_ms: u64) void {
             if (!self.video.active) return;
-            self.video.position_ms = if (self.video.duration_ms > 0)
+            const clamped = if (self.video.duration_ms > 0)
                 @min(position_ms, self.video.duration_ms)
             else
                 position_ms;
-            if (self.video.fake) return;
+            if (self.video.fake) {
+                self.video.position_ms = clamped;
+                return;
+            }
             const services = self.services orelse return;
-            services.videoSeek(position_ms) catch {};
+            // Platform first, mirror second: a player the host has
+            // already retired (a completed non-looping playback)
+            // refuses the seek, and moving the mirror anyway would
+            // scrub the snapshot and the house slider away from the
+            // frame actually on the glass. A refused seek changes
+            // nothing — the slider springs back to the truth.
+            services.videoSeek(position_ms) catch return;
+            self.video.position_ms = clamped;
         }
 
         /// Set playback volume, clamped to 0.0—1.0 and remembered

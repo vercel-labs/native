@@ -10170,14 +10170,13 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 /* Attach the frame tap once the item is ready — presentationSize is
  * only decoded then. The output's pixel buffers are BGRA fitted to the
  * frame budget; the STREAM dimensions recorded here are what LOADED
- * reports. An item with no video geometry at all (an audio-only file
- * loaded as video) attaches nothing: the transport still works, the
- * acknowledgment carries zeros, and no frames flow — honest absence,
- * not an error (returns YES). Returns NO only when the conversion
- * buffer cannot be allocated: geometry was decoded, frames were
- * promised, and none could ever be delivered — the caller reports the
- * load FAILED instead of acknowledging a playback that can never
- * paint. */
+ * reports. Returns NO when this playback could never paint a frame:
+ * an item with no video geometry at all (an audio-only file loaded as
+ * video — sound over a permanently blank surface is a broken video
+ * playback, and audio-only sources belong to the audio channel), or a
+ * conversion buffer that cannot be allocated after geometry promised
+ * frames. Either way the caller reports the load FAILED instead of
+ * acknowledging a playback that can never paint. */
 - (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item {
     CGSize natural = item.presentationSize;
     if (natural.width < 1.0 || natural.height < 1.0) {
@@ -10191,7 +10190,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
             natural = CGSizeMake(fabs(transformed.width), fabs(transformed.height));
         }
     }
-    if (natural.width < 1.0 || natural.height < 1.0) return YES;
+    if (natural.width < 1.0 || natural.height < 1.0) return NO;
     self.videoStreamWidth = (uint64_t)llround(natural.width);
     self.videoStreamHeight = (uint64_t)llround(natural.height);
     size_t fitted_width = 0;
@@ -10271,9 +10270,9 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         if (self.videoLoadedEmitted) return;
         self.videoLoadedEmitted = YES;
         if (![self videoAttachOutputForItem:item]) {
-            /* Geometry decoded but the conversion buffer could not be
-             * allocated: acknowledging LOADED would promise frames
-             * that can never arrive, so the load fails honestly. */
+            /* No video geometry (an audio-only asset) or no conversion
+             * buffer: acknowledging LOADED would promise frames that
+             * can never arrive, so the load fails honestly. */
             [self videoDidFail];
             return;
         }

@@ -569,12 +569,15 @@ test "transport after a non-looping completion refuses like a live host" {
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
     try std.testing.expect(!np.video.loaded);
 
-    // Seek and pause against the retired player: swallowed on the
+    // Seek and pause against the retired player: refused on the
     // platform side (the calls still arrive), position untouched — and
-    // no second completion can ever emit.
+    // the CHANNEL mirror stays at the completion's terminal position
+    // too: a refused seek must not scrub the snapshot and the house
+    // slider away from the frame actually on the glass.
     try h.app_state.dispatch(&h.harness.runtime, 1, .seek_half);
     try std.testing.expectEqual(@as(usize, 1), np.video_seek_count);
     try std.testing.expectEqual(@as(u64, 0), np.video.position_ms);
+    try std.testing.expectEqual(@as(u64, 10_000), h.app_state.effects.videoSnapshot().position_ms);
     try h.app_state.dispatch(&h.harness.runtime, 1, .pause);
     try std.testing.expect(np.advanceVideo(500) == null);
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
