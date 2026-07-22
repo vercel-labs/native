@@ -9307,9 +9307,14 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
         double duration = self.audioItem ? NativeSdkSecondsFromCMTime(self.audioItem.duration) : 0.0;
         if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
-        /* rate > 0 is the transport intent (un-paused); the buffering
-         * flag beside it says whether audio is actually coming out.
-         * Local files never buffer — the flag is stream-only. */
+        /* rate > 0 is the transport intent (un-paused), NOT the
+         * effective rate: a stream stalled in AVPlayer's waiting state
+         * keeps rate at the requested value (see the video twin in
+         * emitVideoEventOfKind for the AVPlayer.h contract), so a
+         * stalled-but-unpaused stream reports playing=1 with the
+         * buffering flag beside it saying whether audio is actually
+         * coming out. Local files never buffer — the flag is
+         * stream-only. */
         playing = player.rate > 0 ? 1 : 0;
         buffering = (!self.audioSourceIsLocal && self.audioBuffering) ? 1 : 0;
     }
@@ -9892,9 +9897,21 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         double duration = self.videoItem ? NativeSdkSecondsFromCMTime(self.videoItem.duration) : 0.0;
         if (position > 0) position_ms = (uint64_t)llround(position * 1000.0);
         if (duration > 0) duration_ms = (uint64_t)llround(duration * 1000.0);
-        /* rate > 0 is the transport intent (un-paused); the buffering
-         * flag beside it says whether frames are actually coming out.
-         * Local files never buffer — the flag is stream-only. */
+        /* rate > 0 is the transport intent (un-paused), NOT the
+         * effective rate: while a stream stalls into
+         * AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate, the
+         * AVPlayer.h contract keeps rate at the requested value ("the
+         * value of the rate property is not currently effective but
+         * instead indicates the rate at which playback will start or
+         * resume"), so a stalled-but-unpaused playback reports
+         * playing=1 with the buffering flag beside it saying whether
+         * frames are actually coming out — the transport control keeps
+         * offering Pause. AVPlayer resets rate to 0.0 on its own only
+         * with waits-to-minimize-stalling disabled (our LOCAL-file
+         * configuration, where a mid-file stall has no bytes to wait
+         * for and playback would not self-resume — reporting paused,
+         * and offering Play, is then the honest affordance). Local
+         * files never buffer — the flag is stream-only. */
         playing = player.rate > 0 ? 1 : 0;
         buffering = (!self.videoSourceIsLocal && self.videoBuffering) ? 1 : 0;
     }
