@@ -127,8 +127,9 @@ test "runtime next canvas frame applies render override dirty regions" {
     try std.testing.expectEqual(@as(usize, 0), moved_frame.changes.len);
     try std.testing.expectEqual(@as(f32, 0.5), moved_frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(canvas.Affine.translate(10, 0), moved_frame.render_plan.commands[0].transform);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 20, 10), moved_frame.dirty_bounds.?);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 20, 10), harness.runtime.views[0].canvas_frame_dirty_bounds.?);
+    // Override extent union, inflated by the AA bleed and clipped.
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 21, 11), moved_frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 21, 11), harness.runtime.views[0].canvas_frame_dirty_bounds.?);
 
     const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
         .frame_index = 3,
@@ -246,7 +247,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expectEqual(@as(usize, 0), mid_frame.changes.len);
     try std.testing.expectEqual(@as(f32, 0.5), mid_frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(canvas.Affine.translate(5, 0), mid_frame.render_plan.commands[0].transform);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), mid_frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 16, 11), mid_frame.dirty_bounds.?);
     try std.testing.expect(harness.runtime.invalidated);
 
     harness.runtime.invalidated = false;
@@ -258,7 +259,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expect(final_frame.requiresRender());
     try std.testing.expectEqual(@as(f32, 1), final_frame.render_plan.commands[0].opacity);
     try std.testing.expectEqualDeep(canvas.Affine.identity(), final_frame.render_plan.commands[0].transform);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), final_frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 16, 11), final_frame.dirty_bounds.?);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
     try std.testing.expectEqual(@as(usize, 0), runtimeViewCanvasFrameRenderOverrides(&harness.runtime.views[0]).len);

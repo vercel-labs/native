@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const render_model = @import("render.zig");
@@ -606,7 +607,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
     } else {
         changes = try DisplayList.diff(previous.?, next, storage.changes);
-        dirty_bounds = clippedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.surface_size);
+        // Incremental damage carries a one-device-pixel AA bleed
+        // allowance (see the runtime planner's dirty finalization):
+        // host rasterizers ink up to a device pixel past a command's
+        // bounds, so a region cut to the exact bounds strands a stale
+        // fringe around content that shrank, moved, or disappeared.
+        dirty_bounds = clippedDirtyBounds(inflatedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), dirtyBleedInset(options.scale)), options.surface_size);
     }
 
     return .{
@@ -647,6 +653,18 @@ fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
         result = unionOptionalBounds(result, change.dirty_bounds);
     }
     return result;
+}
+
+/// One device pixel in logical points at `scale` — the AA bleed
+/// allowance incremental damage adds around changed content.
+fn dirtyBleedInset(scale: f32) f32 {
+    const normalized = if (std.math.isFinite(scale) and scale > 0) scale else 1;
+    return 1.0 / normalized;
+}
+
+fn inflatedDirtyBounds(bounds: ?geometry.RectF, bleed: f32) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    return dirty.normalized().inflate(geometry.InsetsF.all(bleed));
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {

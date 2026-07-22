@@ -308,7 +308,9 @@ test "runtime canvas frame plan computes incremental dirty from previous display
     try std.testing.expectEqual(@as(usize, 1), frame.changes.len);
     try std.testing.expectEqual(canvas.DiffKind.changed, frame.changes[0].kind);
     try std.testing.expectEqual(@as(?canvas.ObjectId, 1), frame.changes[0].id);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 60, 40), frame.dirty_bounds.?);
+    // Old extent (0,0,40,40) union new (20,0,40,40), inflated by the
+    // one-device-pixel AA bleed and clipped to the surface.
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 61, 41), frame.dirty_bounds.?);
 }
 
 test "runtime next canvas frame tracks presented state and resource cache" {
@@ -396,7 +398,8 @@ test "runtime next canvas frame tracks presented state and resource cache" {
     try std.testing.expect(moved_frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 1), moved_frame.changes.len);
     try std.testing.expectEqual(canvas.DiffKind.changed, moved_frame.changes[0].kind);
-    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 60, 40), moved_frame.dirty_bounds.?);
+    // Both extents' union, inflated by the AA bleed and surface-clipped.
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 61, 41), moved_frame.dirty_bounds.?);
     try std.testing.expectEqual(@as(usize, 1), moved_frame.resource_cache_plan.retainCount());
     try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].presented_canvas_revision);
 }

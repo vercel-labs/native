@@ -16,6 +16,8 @@ pub const normalizedCanvasPresentationScale = canvas_frame_helpers.normalizedCan
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 pub const canvasColorToRgba8 = canvas_frame_helpers.canvasColorToRgba8;
 pub const clippedCanvasDirtyBounds = canvas_frame_helpers.clippedCanvasDirtyBounds;
+pub const canvasDirtyBleedInset = canvas_frame_helpers.canvasDirtyBleedInset;
+pub const inflatedCanvasDirtyBounds = canvas_frame_helpers.inflatedCanvasDirtyBounds;
 pub const unionRects = canvas_frame_helpers.unionRects;
 pub const canvasWidgetPointerEventFromGpuInput = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
 pub const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
@@ -1031,6 +1033,18 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const dirty_bounds = if (full_repaint)
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
             else dirty: {
+                // Every incremental dirty rect leaves here inflated by
+                // one device pixel (`canvasDirtyBleedInset`): the damage
+                // region must cover the PAINTED extent of what changed —
+                // antialiased edges and glyph overshoot ink up to a
+                // device pixel past a command's bounds on host
+                // rasterizers — or content that shrinks, moves, or
+                // disappears strands a stale fringe the repaint never
+                // clears. Inflation lands on the finalized rects (the
+                // refined union, each refined cluster, and the summary
+                // fallback), which covers every contribution: dilation
+                // distributes over union.
+                const bleed = canvasDirtyBleedInset(frame_options.scale);
                 const overrides_dirty = unionRects(render_override_dirty_bounds, render_animation_dirty_bounds);
                 // Msg rebuilds: the presented summary records ids and
                 // bounds but not content, so a rebuild marks every keyed
@@ -1066,12 +1080,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
                             var refined = patch_dirty;
                             if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
-                            const clipped = clippedCanvasDirtyBounds(refined.bounds, frame_options.surface_size);
+                            const clipped = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(refined.bounds, bleed), frame_options.surface_size);
                             // A list of one rect adds nothing over the
                             // scissor; ship it only when it splits.
                             if (clipped != null and refined.rect_count > 1) {
                                 for (refined.rects[0..refined.rect_count]) |rect| {
-                                    const clipped_rect = clippedCanvasDirtyBounds(rect, frame_options.surface_size) orelse continue;
+                                    const clipped_rect = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, bleed), frame_options.surface_size) orelse continue;
                                     dirty_rects[dirty_rect_count] = clipped_rect;
                                     dirty_rect_count += 1;
                                 }
@@ -1081,7 +1095,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         }
                     }
                 }
-                break :dirty clippedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.surface_size);
+                break :dirty clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), bleed), frame_options.surface_size);
             };
 
             const canvas_frame = canvas.CanvasFrame{

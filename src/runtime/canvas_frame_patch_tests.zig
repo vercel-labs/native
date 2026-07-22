@@ -511,23 +511,25 @@ test "rebuild dirty bounds derive from the patch edit script, not the window" {
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
     try std.testing.expect(harness.runtime.views[0].canvas_packet_baseline_valid);
 
-    // Rebuild with ONE color change: dirty is that command's rect, the
-    // present is a one-upsert patch, and the wire scissor matches.
+    // Rebuild with ONE color change: dirty is that command's rect plus
+    // the one-device-pixel AA bleed allowance, the present is a
+    // one-upsert patch, and the wire scissor matches.
     rects[13].fill_rect.fill = .{ .color = canvas.Color.rgb8(37, 99, 235) };
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
     const toggled = try presentFrame(harness, &buffers, 61);
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, toggled.mode);
-    try std.testing.expectEqualDeep(buildGrid.rectAt(13), toggled.frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(buildGrid.rectAt(13).inflate(geometry.InsetsF.all(1)), toggled.frame.dirty_bounds.?);
     try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, harness.runtime.views[0].gpu_present_packet_mode);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].gpu_present_patch_upsert_count);
 
-    // Rebuild that MOVES a command: dirty covers old and new extents.
+    // Rebuild that MOVES a command: dirty covers old and new extents
+    // (plus the bleed).
     const moved_from = buildGrid.rectAt(20);
     const moved_to = geometry.RectF.init(moved_from.x + 60, moved_from.y + 30, 30, 18);
     rects[20].fill_rect.rect = moved_to;
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
     const moved = try presentFrame(harness, &buffers, 62);
-    try std.testing.expectEqualDeep(geometry.RectF.unionWith(moved_from, moved_to), moved.frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(geometry.RectF.unionWith(moved_from, moved_to).inflate(geometry.InsetsF.all(1)), moved.frame.dirty_bounds.?);
 
     // Identical rebuild (revision bumps, content does not): the edit
     // script is empty, so nothing presents at all.
@@ -585,15 +587,121 @@ test "rebuild dirty bounds derive from the edit script on small command lists to
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
     try std.testing.expect(harness.runtime.views[0].canvas_packet_baseline_valid);
 
-    // Rebuild with ONE color change: dirty is that command's rect, not
-    // the window, and the present is a one-upsert patch.
+    // Rebuild with ONE color change: dirty is that command's rect plus
+    // the AA bleed, not the window, and the present is a one-upsert
+    // patch.
     rects[7].fill_rect.fill = .{ .color = canvas.Color.rgb8(37, 99, 235) };
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &rects });
     const toggled = try presentFrame(harness, &buffers, 71);
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, toggled.mode);
-    try std.testing.expectEqualDeep(buildRow.rectAt(7), toggled.frame.dirty_bounds.?);
+    try std.testing.expectEqualDeep(buildRow.rectAt(7).inflate(geometry.InsetsF.all(1)), toggled.frame.dirty_bounds.?);
     try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, harness.runtime.views[0].gpu_present_packet_mode);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].gpu_present_patch_upsert_count);
+}
+
+fn expectDirtyCovers(dirty: geometry.RectF, painted: geometry.RectF) !void {
+    // The damage region must cover the painted extent of the rect plus
+    // the one-device-pixel AA bleed hosts can ink past its bounds.
+    const required = painted.normalized().inflate(geometry.InsetsF.all(1));
+    const epsilon: f32 = 1e-4;
+    try std.testing.expect(dirty.minX() <= required.minX() + epsilon);
+    try std.testing.expect(dirty.minY() <= required.minY() + epsilon);
+    try std.testing.expect(dirty.maxX() >= required.maxX() - epsilon);
+    try std.testing.expect(dirty.maxY() >= required.maxY() - epsilon);
+}
+
+fn expectDirtyRectsCover(rects: []const geometry.RectF, painted: geometry.RectF) !void {
+    // Refined dirty rect lists are what retained hosts CLEAR: at least
+    // one rect must cover the painted extent plus its AA bleed, or the
+    // vacated fringe survives the repaint.
+    const required = painted.normalized().inflate(geometry.InsetsF.all(1));
+    const epsilon: f32 = 1e-4;
+    for (rects) |rect| {
+        if (rect.minX() <= required.minX() + epsilon and
+            rect.minY() <= required.minY() + epsilon and
+            rect.maxX() >= required.maxX() - epsilon and
+            rect.maxY() >= required.maxY() - epsilon) return;
+    }
+    return error.DirtyRectsMissPaintedExtent;
+}
+
+test "reflow damage covers vacated pixels plus the anti-aliasing bleed" {
+    // The master-detail regression shape: a selection change reflows a
+    // row of rounded pills at fractional coordinates — pills get
+    // removed, shrunk, moved, and replaced under new keys. Each
+    // incremental present's damage must cover the OLD painted extent
+    // (bounds plus the one-device-pixel AA bleed host rasterizers ink
+    // past them) as well as the new one; anything less leaves stale
+    // fringes at the old pills' edges.
+    var app_state: PatchHarnessApp = .{};
+    const harness = try createPatchHarness(&app_state);
+    defer harness.destroy(std.testing.allocator);
+    var buffers = try PresentBuffers.init(std.testing.allocator);
+    defer buffers.deinit(std.testing.allocator);
+
+    const anchor = canvas.CanvasCommand{ .fill_rect = .{
+        .id = 100,
+        .rect = geometry.RectF.init(4, 4, 24, 12),
+        .fill = .{ .color = canvas.Color.rgb8(51, 65, 85) },
+    } };
+    const pill_wide = geometry.RectF.init(30.4, 60.6, 120.2, 24.8);
+    const pill_second = geometry.RectF.init(160.9, 60.6, 80.3, 24.8);
+    const pill_shrunk = geometry.RectF.init(30.4, 60.6, 70.1, 20.3);
+    const pill_moved = geometry.RectF.init(90.7, 130.2, 70.1, 20.3);
+    const pill_replacement = geometry.RectF.init(42.5, 132.9, 96.6, 22.4);
+
+    const pillAt = struct {
+        fn command(id: canvas.ObjectId, rect: geometry.RectF) canvas.CanvasCommand {
+            return .{ .fill_rounded_rect = .{
+                .id = id,
+                .rect = rect,
+                .radius = canvas.Radius.all(rect.height * 0.5),
+                .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
+            } };
+        }
+    }.command;
+
+    // Baseline: two pills; the first present is necessarily full.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(201, pill_wide), pillAt(202, pill_second) } });
+    const baseline = try presentFrame(harness, &buffers, 80);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
+    try std.testing.expect(harness.runtime.views[0].canvas_packet_baseline_valid);
+
+    // Removed: the second pill's arm turns off. Damage must cover the
+    // vacated pill plus its bleed.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(201, pill_wide) } });
+    const removed = try presentFrame(harness, &buffers, 81);
+    try std.testing.expect(!removed.frame.full_repaint);
+    try expectDirtyCovers(removed.frame.dirty_bounds.?, pill_second);
+
+    // Shrunk: the surviving pill narrows and shortens. Damage must
+    // cover the OLD, larger extent.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(201, pill_shrunk) } });
+    const shrunk = try presentFrame(harness, &buffers, 82);
+    try std.testing.expect(!shrunk.frame.full_repaint);
+    try expectDirtyCovers(shrunk.frame.dirty_bounds.?, pill_wide);
+    try expectDirtyCovers(shrunk.frame.dirty_bounds.?, pill_shrunk);
+
+    // Moved: same pill, new position. Damage covers both poses.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(201, pill_moved) } });
+    const moved = try presentFrame(harness, &buffers, 83);
+    try std.testing.expect(!moved.frame.full_repaint);
+    try expectDirtyCovers(moved.frame.dirty_bounds.?, pill_shrunk);
+    try expectDirtyCovers(moved.frame.dirty_bounds.?, pill_moved);
+
+    // Keyed replacement: the subtree swaps — the old pill's key
+    // vanishes, a new key mounts elsewhere. Damage covers the evicted
+    // extent and the mounted one, and the refined rect list (what a
+    // retained host actually clears) covers each with its bleed.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pillAt(301, pill_replacement), pillAt(302, geometry.RectF.init(200.2, 20.7, 60.4, 18.6)) } });
+    const replaced = try presentFrame(harness, &buffers, 84);
+    try std.testing.expect(!replaced.frame.full_repaint);
+    try expectDirtyCovers(replaced.frame.dirty_bounds.?, pill_moved);
+    try expectDirtyCovers(replaced.frame.dirty_bounds.?, pill_replacement);
+    if (replaced.frame.dirtyRects().len > 0) {
+        try expectDirtyRectsCover(replaced.frame.dirtyRects(), pill_moved);
+        try expectDirtyRectsCover(replaced.frame.dirtyRects(), pill_replacement);
+    }
 }
 
 test "a host that refuses patches gets a full resync in the same frame" {
@@ -1066,8 +1174,8 @@ test "pixel presents adopt a dirty-refinement baseline only for opted-in hosts a
         .scale = 1,
     }, canvasFrameScratchStorage(&harness.runtime), buffers.pixels, buffers.scratch, canvas.Color.rgb8(15, 23, 42));
     try std.testing.expect(!toggled.full_repaint);
-    try std.testing.expectEqualDeep(buildGrid.rectAt(13), toggled.dirty_bounds.?);
-    try std.testing.expectEqualDeep(buildGrid.rectAt(13), harness.null_platform.gpu_surface_present_dirty_bounds.?);
+    try std.testing.expectEqualDeep(buildGrid.rectAt(13).inflate(geometry.InsetsF.all(1)), toggled.dirty_bounds.?);
+    try std.testing.expectEqualDeep(buildGrid.rectAt(13).inflate(geometry.InsetsF.all(1)), harness.null_platform.gpu_surface_present_dirty_bounds.?);
 
     // A packet present against the pixel-adopted mirror resyncs FULL —
     // the patch gate refuses it even though the baseline is valid.

@@ -112,6 +112,28 @@ pub fn clippedCanvasDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.
     return if (normalized.isEmpty()) null else normalized;
 }
 
+/// One device pixel in logical points at `scale`: the anti-aliasing
+/// bleed allowance incremental damage adds around changed content.
+/// Host rasterizers ink up to a device pixel past a command's bounds
+/// (antialiased shape edges and glyph overshoot — the packet host's
+/// raster cache carries a one-pixel apron for exactly this), so a
+/// damage region cut to the exact bounds strands that fringe: content
+/// that shrinks, moves, or disappears leaves stale edge pixels the
+/// repaint never touches. Full repaints cover the surface and need no
+/// allowance.
+pub fn canvasDirtyBleedInset(scale: f32) f32 {
+    const normalized = if (std.math.isFinite(scale) and scale > 0) scale else 1;
+    return 1.0 / normalized;
+}
+
+/// Inflate an incremental dirty rect by the AA bleed allowance (see
+/// `canvasDirtyBleedInset`); null stays null so "nothing changed"
+/// never becomes a repaint.
+pub fn inflatedCanvasDirtyBounds(bounds: ?geometry.RectF, bleed: f32) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    return dirty.normalized().inflate(geometry.InsetsF.all(bleed));
+}
+
 fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
     const rect = geometry.RectF.fromSize(surface_size).normalized();
     return if (rect.isEmpty()) null else rect;
