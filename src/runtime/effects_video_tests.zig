@@ -64,6 +64,7 @@ const VideoMsg = union(enum) {
     load_url,
     load_url_only,
     load_no_source,
+    load_rejected_burst,
     load_zero_surface,
     load_reserved_surface,
     load_bad_scheme,
@@ -84,6 +85,9 @@ const VideoEffects = VideoApp.Effects;
 
 const clip_key: u64 = 61;
 const clip_surface: u64 = 907;
+/// Past the shared pending ring's capacity (32), so a burst proves the
+/// video stage never evicts a promised terminal.
+const rejected_burst_count: usize = 40;
 const clip_path = "assets/clips/orchard-flyover.mp4";
 const clip_url = "https://media.example.test/clips/orchard-flyover.mp4";
 
@@ -111,6 +115,15 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             .on_event = VideoEffects.videoMsg(.video_event),
         }),
         .load_no_source => fx.loadVideo(.{
+            .key = clip_key,
+            .surface = clip_surface,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        }),
+        // One dispatch, more refusals than the shared pending ring
+        // holds: every `.rejected` terminal is a load call's only
+        // answer and must survive to the next drain (the non-lossy
+        // video stage's contract).
+        .load_rejected_burst => for (0..rejected_burst_count) |_| fx.loadVideo(.{
             .key = clip_key,
             .surface = clip_surface,
             .on_event = VideoEffects.videoMsg(.video_event),
@@ -348,6 +361,27 @@ test "load requests that cannot run are rejected loudly, never silently" {
         try std.testing.expectEqual(clip_key, h.app_state.model.last_key);
         try std.testing.expect(fx.pendingVideo() == null);
     }
+}
+
+test "a rejection burst past the pending ring's capacity delivers every terminal" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.executor = .fake;
+
+    // One update issues more refused loads than the shared pending
+    // ring holds. Each `.rejected` is that call's ONLY terminal —
+    // none may be evicted on the way to the drain.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load_rejected_burst);
+    var drains: usize = 0;
+    while (h.app_state.model.event_count < rejected_burst_count) : (drains += 1) {
+        if (drains > rejected_burst_count) break;
+        try h.drainWakes();
+        try h.harness.runtime.dispatchPlatformEvent(h.app, .wake);
+    }
+    try std.testing.expectEqual(rejected_burst_count, h.app_state.model.event_count);
+    try std.testing.expectEqual(effects_mod.EffectVideoEventKind.rejected, h.app_state.model.last_kind.?);
+    try std.testing.expect(fx.pendingVideo() == null);
 }
 
 // ------------------------------------------------------------ real executor
@@ -1037,6 +1071,104 @@ test "a handler-less house-chrome session replays with live mirrors and identica
         try std.testing.expect(report.checkpoints_verified > 0);
         try std.testing.expectEqual(@as(u64, 0), report.effects_fed);
         try std.testing.expectEqual(recorded_position, app_state.effects.videoSnapshot().position_ms);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "a recorded mid-playback failure replays its Msg and fingerprints identically" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record: a real playback that dies mid-stream. The app HAS a
+    // handler bound, so the `.failed` delivery journals an effect
+    // record — and the platform `.failed` event that steered the
+    // mirrors journals right behind it. Replay must deliver that Msg:
+    // the platform event's mirror apply resets the channel first, so
+    // a delivery resolved against the live channel at drain time
+    // would find nothing and silently drop what the recording
+    // dispatched.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(500).?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        // The stream dies: one `.failed`, channel gone.
+        try harness.runtime.dispatchPlatformEvent(app, np.failVideo().?);
+        try dispatchFrame(harness, app, 3);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try std.testing.expect(!app_state.effects.videoSnapshot().active);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the journaled `.failed` effect record must reach
+    // `update` even though the replayed platform event resets the
+    // channel before the drain delivers it.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.effects_fed > 0);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
 }

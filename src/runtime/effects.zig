@@ -2662,9 +2662,13 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
-            /// The audio entry's exact shape for the video channel:
-            /// `resolve` marks fed events (fake executor / replay) that
-            /// take key and handler from the live channel at delivery.
+            /// The audio entry's shape for the video channel, staged
+            /// in the non-lossy `pending_videos` (see `PendingVideo`)
+            /// and taking this union shape only at drain time.
+            /// `resolve` marks fed events (fake executor / replay)
+            /// that update the live channel's mirrors at delivery; the
+            /// handler is captured at stage time either way (the
+            /// `PendingVideo` doc has the replay ordering argument).
             video: struct { event: EffectVideo, video_fn: ?VideoMsgFn, resolve: bool },
             /// Loop-thread image terminals (rejections, fake cancels,
             /// feed fallbacks) — always payload-free, fully formed at
@@ -2715,8 +2719,12 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
-                    // Same for EffectVideo.
-                    .video => {},
+                    // Video events never enter the ring (they stage in
+                    // the non-lossy `pending_videos`): a loop-side
+                    // `.rejected`/`.failed` is its load's only
+                    // terminal and a fed event is one recorded
+                    // delivery — eviction would silently break both.
+                    .video => unreachable,
                     // EffectHostResult carries none: its terminals are
                     // one-per-request by construction.
                     .host => {},
@@ -2746,9 +2754,9 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
-                    .video => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
+                    .video => unreachable,
                     .image => unreachable,
                     .channel => unreachable,
                     .staged => unreachable,
@@ -2776,12 +2784,37 @@ pub fn Effects(comptime Msg: type) type {
             regenerates: bool,
         };
 
+        /// One loop-side video event awaiting drain — non-lossy like
+        /// `PendingImage` and `PendingChannel`, and for the same
+        /// contract: a loop-side `.rejected` or `.failed` is its
+        /// `loadVideo` call's ONLY terminal, refusals are unbounded
+        /// per dispatch, and `EffectVideo` carries no drop counter
+        /// that could make an eviction visible (the ring's audio
+        /// eviction rationale — "the next position tick supersedes a
+        /// lost one" — never covers a terminal). Fed events (fake
+        /// executor / session replay) stage here too: each fed record
+        /// is one recorded delivery, owed exactly once. `video_fn` is
+        /// captured at STAGE time for fed events as well as loop-side
+        /// terminals: any fed record corresponds to a delivery that
+        /// really ran at record time, and under replay the journaled
+        /// platform `.video` event that follows the record in the
+        /// file may apply a channel-resetting terminal before this
+        /// delivery runs — delivery-time capture would find the
+        /// handler already cleared and drop a Msg the recording
+        /// delivered.
+        const PendingVideo = struct {
+            seq: u64,
+            event: EffectVideo,
+            video_fn: ?VideoMsgFn,
+            resolve: bool,
+        };
+
         /// One loop-side channel `.rejected` terminal awaiting drain —
         /// the channel twin of `PendingImage`, non-lossy for the same
         /// contract (exactly one terminal per refused open, no drop
         /// counter that could make an eviction visible, unbounded per
         /// dispatch). Shares the `pending_seq` stamp so the drain
-        /// merges all three loop-side stages in enqueue order.
+        /// merges all the loop-side stages in enqueue order.
         const PendingChannel = struct {
             seq: u64,
             event: EffectChannelEvent,
@@ -3408,6 +3441,15 @@ pub fn Effects(comptime Msg: type) type {
         pending_channel_spill: []PendingChannel = &.{},
         pending_channel_head: usize = 0,
         pending_channel_len: usize = 0,
+        /// Loop-thread-only video-event stage (see `PendingVideo` for
+        /// the non-lossy contract) — the image stage's storage
+        /// discipline exactly: inline until a burst outgrows it,
+        /// geometric spill after, freed when it drains empty and at
+        /// `deinit`.
+        pending_videos: [max_effect_pending_images_inline]PendingVideo = undefined,
+        pending_video_spill: []PendingVideo = &.{},
+        pending_video_head: usize = 0,
+        pending_video_len: usize = 0,
         /// Loop-thread-only caller-staged Msg stage (see
         /// `PendingStaged` for the non-lossy contract) — the image
         /// stage's storage discipline exactly: inline until a burst
@@ -3820,6 +3862,13 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_channel_head = 0;
             self.pending_channel_len = 0;
+            // And undrained staged video events.
+            if (self.pending_video_spill.len > 0) {
+                self.allocator.free(self.pending_video_spill);
+                self.pending_video_spill = &.{};
+            }
+            self.pending_video_head = 0;
+            self.pending_video_len = 0;
             // And undrained caller-staged Msgs.
             if (self.pending_staged_spill.len > 0) {
                 self.allocator.free(self.pending_staged_spill);
@@ -5911,28 +5960,38 @@ pub fn Effects(comptime Msg: type) type {
         /// event — never a crash, never silence. The video key is its
         /// own namespace (like audio keys) and identifies the playback
         /// in every event; it consumes no `max_effects` slots.
-        pub fn loadVideo(self: *Self, options: LoadVideoOptions) void {
+        /// The deterministic loop-side validation `loadVideo` refuses
+        /// with — pure and public so a caller-side validator (the TS
+        /// bridge) can refuse the SAME shapes before committing its own
+        /// routing state, staging its own rejection Msg instead of the
+        /// engine's (`stageLoopMsg`, the channel-admission precedent).
+        /// One source of truth: `loadVideo` consults exactly this.
+        pub fn videoLoadRejected(options: LoadVideoOptions) bool {
             // The same surface ids `acquireMediaSurfaceProducer`
             // refuses, refused before any claim: 0 is the no-surface
             // sentinel, the high bit is the derived-texture namespace.
             const surface_invalid = options.surface == 0 or
                 (options.surface & canvas.media_surface_image_id_bit) != 0;
-            var rejected = surface_invalid or
+            if (surface_invalid or
                 (options.path.len == 0 and options.url.len == 0) or
                 options.path.len > max_effect_video_path_bytes or
-                options.url.len > max_effect_video_path_bytes;
-            if (!rejected and options.url.len > 0) {
+                options.url.len > max_effect_video_path_bytes) return true;
+            if (options.url.len > 0) {
                 // The image loader's scheme check: http(s) only, before
                 // the platform is asked.
                 if (std.Uri.parse(options.url)) |uri| {
                     const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
                         std.ascii.eqlIgnoreCase(uri.scheme, "https");
-                    if (!scheme_ok) rejected = true;
+                    if (!scheme_ok) return true;
                 } else |_| {
-                    rejected = true;
+                    return true;
                 }
             }
-            if (rejected) {
+            return false;
+        }
+
+        pub fn loadVideo(self: *Self, options: LoadVideoOptions) void {
+            if (videoLoadRejected(options)) {
                 self.deliverLoopVideo(.{ .key = options.key, .kind = .rejected }, options.on_event);
                 return;
             }
@@ -6200,7 +6259,13 @@ pub fn Effects(comptime Msg: type) type {
         /// playback is active to receive it.
         pub fn feedVideoEvent(self: *Self, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
             if (!self.video.active) return error.EffectNotFound;
-            self.deliverPending(.{ .video = .{
+            // Handler captured NOW, not at delivery: a fed event is one
+            // recorded delivery, and under replay the platform `.video`
+            // event that follows this record in the journal can apply a
+            // channel-resetting terminal before the drain delivers this
+            // entry (see `PendingVideo`).
+            self.stagePendingVideo(.{
+                .seq = self.nextPendingSeq(),
                 .event = .{
                     .key = self.video.key,
                     .kind = kind,
@@ -6211,9 +6276,9 @@ pub fn Effects(comptime Msg: type) type {
                     .width = width,
                     .height = height,
                 },
-                .video_fn = null,
+                .video_fn = self.video.on_event,
                 .resolve = true,
-            } });
+            });
         }
 
         /// Number of effects currently in flight (running slots).
@@ -6236,6 +6301,7 @@ pub fn Effects(comptime Msg: type) type {
             return self.pending_exit_len > 0 or
                 self.pending_image_len > 0 or
                 self.pending_channel_len > 0 or
+                self.pending_video_len > 0 or
                 self.pending_staged_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.queue_count.load(.seq_cst) > 0;
@@ -6433,15 +6499,22 @@ pub fn Effects(comptime Msg: type) type {
                         },
                         .video => |entry| {
                             var event = entry.event;
-                            var video_fn = entry.video_fn;
+                            const video_fn = entry.video_fn;
                             if (entry.resolve) {
-                                // Fed events resolve against the live
-                                // channel exactly like a platform event
-                                // (the audio arm's contract). Capture
-                                // the handler first — a `.failed` apply
-                                // resets it.
-                                video_fn = self.video.on_event;
-                                event = self.applyVideoEvent(event) orelse continue;
+                                // Fed events move the live channel's
+                                // mirrors at delivery exactly like a
+                                // platform event — when the channel
+                                // still answers. Under replay the
+                                // journaled platform `.video` event may
+                                // ALREADY have applied this terminal
+                                // (a `.failed` resets the channel), so
+                                // an unresolvable fed event delivers
+                                // its journaled values verbatim: they
+                                // ARE the record-time resolved event,
+                                // and the handler was captured at feed
+                                // time (`PendingVideo`), so the Msg the
+                                // recording delivered is never dropped.
+                                if (self.applyVideoEvent(event)) |resolved| event = resolved;
                             }
                             const event_fn = video_fn orelse continue;
                             self.journalNote(.{
@@ -8135,11 +8208,18 @@ pub fn Effects(comptime Msg: type) type {
             self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event);
         }
 
-        /// Queue a video event Msg produced on the loop thread
-        /// (rejections and synchronous failures) for the next drain.
+        /// Stage a video event Msg produced on the loop thread
+        /// (rejections and synchronous failures) for the next drain —
+        /// through the non-lossy video stage, never the ring: each is
+        /// its load call's only terminal (`PendingVideo`).
         fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn) void {
             if (video_fn == null) return;
-            self.deliverPending(.{ .video = .{ .event = event, .video_fn = video_fn, .resolve = false } });
+            self.stagePendingVideo(.{
+                .seq = self.nextPendingSeq(),
+                .event = event,
+                .video_fn = video_fn,
+                .resolve = false,
+            });
         }
 
         /// Release the channel's media-surface claim, if one is held.
@@ -8317,6 +8397,56 @@ pub fn Effects(comptime Msg: type) type {
             return entry;
         }
 
+        /// The video-event stage's current backing storage —
+        /// `pendingImageStorage`'s twin.
+        fn pendingVideoStorage(self: *Self) []PendingVideo {
+            if (self.pending_video_spill.len > 0) return self.pending_video_spill;
+            return &self.pending_videos;
+        }
+
+        /// Stage one loop-side video event for the next drain — never
+        /// dropping one (`stagePendingImage`'s discipline and growth
+        /// story: each staged terminal is one load call's only answer
+        /// and each fed event one recorded delivery, loud refusal on
+        /// allocation failure for the same stranded-issuer reason).
+        /// Stamps are monotonic here (no fed entry ever carries an
+        /// older stamp — video has no park to inherit one from), so
+        /// staging appends.
+        fn stagePendingVideo(self: *Self, entry: PendingVideo) void {
+            const storage = self.pendingVideoStorage();
+            if (self.pending_video_len == storage.len) {
+                const grown = self.allocator.alloc(PendingVideo, storage.len * 2) catch
+                    @panic("effects: out of memory staging a video event - each staged terminal is one loadVideo call's only answer and must never be dropped");
+                for (grown[0..self.pending_video_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_video_head + index) % storage.len];
+                }
+                if (self.pending_video_spill.len > 0) self.allocator.free(self.pending_video_spill);
+                self.pending_video_spill = grown;
+                self.pending_video_head = 0;
+            }
+            const active = self.pendingVideoStorage();
+            active[(self.pending_video_head + self.pending_video_len) % active.len] = entry;
+            self.pending_video_len += 1;
+            self.wakeHost();
+        }
+
+        /// Pop the video stage's head — `takePendingImage`'s twin,
+        /// spill released when the stage drains empty.
+        fn takePendingVideo(self: *Self) PendingVideo {
+            const storage = self.pendingVideoStorage();
+            const entry = storage[self.pending_video_head];
+            self.pending_video_head = (self.pending_video_head + 1) % storage.len;
+            self.pending_video_len -= 1;
+            if (self.pending_video_len == 0) {
+                self.pending_video_head = 0;
+                if (self.pending_video_spill.len > 0) {
+                    self.allocator.free(self.pending_video_spill);
+                    self.pending_video_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
         /// The channel-terminal stage's current backing storage —
         /// `pendingImageStorage`'s twin.
         fn pendingChannelStorage(self: *Self) []PendingChannel {
@@ -8469,14 +8599,26 @@ pub fn Effects(comptime Msg: type) type {
                 self.pendingChannelStorage()[self.pending_channel_head].seq
             else
                 no_seq;
+            const video_seq: u64 = if (self.pending_video_len > 0)
+                self.pendingVideoStorage()[self.pending_video_head].seq
+            else
+                no_seq;
             const staged_seq: u64 = if (self.pending_staged_len > 0)
                 self.pendingStagedStorage()[self.pending_staged_head].seq
             else
                 no_seq;
-            const min_seq = @min(@min(ring_seq, staged_seq), @min(image_seq, channel_seq_head));
+            const min_seq = @min(@min(@min(ring_seq, staged_seq), video_seq), @min(image_seq, channel_seq_head));
             if (min_seq == no_seq or min_seq >= before) return null;
             if (min_seq == staged_seq) {
                 return .{ .staged = self.takePendingStaged().msg };
+            }
+            if (min_seq == video_seq) {
+                const staged = self.takePendingVideo();
+                return .{ .video = .{
+                    .event = staged.event,
+                    .video_fn = staged.video_fn,
+                    .resolve = staged.resolve,
+                } };
             }
             if (min_seq == image_seq) {
                 const staged = self.takePendingImage();
