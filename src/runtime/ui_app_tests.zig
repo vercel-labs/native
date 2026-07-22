@@ -4015,6 +4015,144 @@ test "rebuilds under an open menu stay bounded at two trees" {
     try std.testing.expect(app_state.context_menu_pin != null);
 }
 
+// ---------------------------------------- pinned rebuild failure recovery
+
+const PinFailureModel = struct {
+    row_count: usize = 4,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+
+    pub fn rows(model: *const PinFailureModel, arena: std.mem.Allocator) []const usize {
+        const out = arena.alloc(usize, model.row_count) catch return &.{};
+        for (out, 0..) |*slot, index| slot.* = index;
+        return out;
+    }
+};
+
+const PinFailureMsg = union(enum) {
+    set_rows: usize,
+    send: []const u8,
+};
+
+const PinFailureApp = ui_app_model.UiApp(PinFailureModel, PinFailureMsg);
+
+fn pinFailureUpdate(model: *PinFailureModel, msg: PinFailureMsg) void {
+    switch (msg) {
+        .set_rows => |count| model.row_count = count,
+        .send => |bytes| {
+            const len = @min(bytes.len, model.received_storage.len);
+            @memcpy(model.received_storage[0..len], bytes[0..len]);
+            model.received_len = len;
+            model.sends += 1;
+        },
+    }
+}
+
+fn pinFailureKey(index: *const usize) canvas.UiKey {
+    return canvas.uiKey(@as(u64, index.*));
+}
+
+fn pinFailureRow(ui: *PinFailureApp.Ui, index: *const usize) PinFailureApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Row {d}", .{index.*}));
+}
+
+fn pinFailureView(ui: *PinFailureApp.Ui, model: *const PinFailureModel) PinFailureApp.Ui.Node {
+    const payload = ui.fmt("payload-rows-{d:0>4}", .{model.row_count});
+    return ui.column(.{ .gap = 2, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Ship the release",
+            .context_menu = &.{.{ .label = "Send", .msg = .{ .send = payload } }},
+        }, .{}),
+        ui.column(.{ .gap = 2 }, ui.each(model.rows(ui.arena), pinFailureKey, pinFailureRow)),
+    });
+}
+
+test "a failing rebuild routed into the live arena under an open menu drops the tree instead of dangling" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-rebuild-failure",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+
+    // Present the row's menu: the presenting build's arena is pinned.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } });
+    const shown_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(app_state.context_menu_pin != null);
+
+    // One successful rebuild under the open menu lands in the partner
+    // arena; from here every rebuild reuses that LIVE side (the pinned
+    // side stays frozen).
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expect(app_state.tree != null);
+
+    // The over-budget rebuild resets the live arena and fails mid-pass
+    // under the harness's `.propagate` policy: the tree reference must
+    // drop with it — a handler table dangling into reset, partially
+    // rewritten storage must never stay dispatchable.
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // Recovery: the next in-budget rebuild restores the tree.
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 4 });
+    try std.testing.expect(app_state.tree != null);
+
+    // The pinned presentation rode through the failure untouched: the
+    // user's pick still dispatches the presented generation's payload
+    // from the frozen arena.
+    try std.testing.expect(app_state.context_menu_pin != null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = shown_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-rows-0004", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expect(app_state.context_menu_pin == null);
+}
+
 // ------------------------------------------------- press fall-through fixture
 
 const RowsModel = struct {

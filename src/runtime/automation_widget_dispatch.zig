@@ -238,9 +238,15 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // elsewhere: bookkeeping settles first, the error still
             // surfaces).
             const notice = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
+            // The synthetic event names its view from the request's own
+            // bounded copy, never `self.views[view_index]` re-read here:
+            // the notice above ran arbitrary app code that may have
+            // closed views and compacted their indices — a stale index
+            // would dispatch this target against another view, or strand
+            // the pending token behind the action gate's window check.
             try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
-                .window_id = self.views[view_index].window_id,
-                .view_label = self.views[view_index].label,
+                .window_id = pending.window_id,
+                .view_label = pending.viewLabel(),
                 .token = token,
                 .item_id = @intCast(item.item_index + 1),
             } });

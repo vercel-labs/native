@@ -137,7 +137,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         .window_id = input_event.window_id,
                         .target_id = widget.id,
                         .kind = .app,
-                    }, point, items[0..count])) {
+                    }, point, items[0..count])) |shown| {
                         // Presentation is asynchronous on GTK (and the
                         // snapshot is harmless where the presenter blocks):
                         // tell the app WHAT is on the glass, keyed by the
@@ -145,12 +145,16 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                         // resolves against the shown items' dispatch
                         // payloads — never a tree that rebuilt (reordering
                         // or re-mapping items) while the menu was open.
-                        const pending = self.canvas_widget_context_menu_pending.?;
+                        // The event's fields come from the returned request
+                        // itself, never `self.views[index]` re-read here:
+                        // `showMenu` ran the superseded menu's dismissal
+                        // notice — arbitrary app code that may have closed
+                        // views and compacted their indices.
                         try self.dispatchEvent(app, .{ .canvas_widget_context_menu_shown = .{
-                            .window_id = input_event.window_id,
-                            .view_label = self.views[index].label,
+                            .window_id = shown.window_id,
+                            .view_label = shown.viewLabel(),
                             .target_id = widget.id,
-                            .token = pending.token,
+                            .token = shown.token,
                             .item_count = count,
                         } });
                         return;
@@ -234,11 +238,15 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
-        /// Returns whether the platform accepted the presentation; a
-        /// refusal is not fatal (app-declared menus fall back to the
-        /// anchored canvas surface, the zero-code defaults degrade to
-        /// their keyboard paths).
-        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
+        /// Returns the committed pending request when the platform
+        /// accepted the presentation, null on a refusal — which is not
+        /// fatal (app-declared menus fall back to the anchored canvas
+        /// surface, the zero-code defaults degrade to their keyboard
+        /// paths). Callers must describe the presented menu from the
+        /// RETURNED request, not from `self.views[view_index]`: the
+        /// superseded menu's dismissal notice below runs arbitrary app
+        /// code that may close views and compact their indices.
+        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!?PendingCanvasWidgetContextMenu {
             var pending = request;
             pending.token = nextContextMenuToken(self);
             pending.setViewLabel(self.views[view_index].label);
@@ -254,7 +262,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 }
                 // Presentation refused: nothing superseded — the old
                 // pending (and its popover, if any) is still the truth.
-                return false;
+                return null;
             };
             // The platform accepted: commit the replacement BEFORE the
             // fallible superseded-notice dispatch, so the runtime's
@@ -262,7 +270,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const superseded = self.canvas_widget_context_menu_pending;
             self.canvas_widget_context_menu_pending = pending;
             try notifySupersededPending(self, app, superseded);
-            return true;
+            return pending;
         }
 
         /// The platform reported the menu outcome: resolve the pending

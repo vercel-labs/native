@@ -1385,6 +1385,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // canvas itself stays surface-sized so chrome and the clear
             // color still paint edge to edge under notches and bars.
             const bounds = geometry.RectF.fromSize(self.canvas_size).deflate(self.layoutViewportInsets(runtime, window_id));
+            // Under an open menu's pin, consecutive rebuilds route into
+            // the LIVE tree's arena (`contextMenuRebuildIndex` freezes
+            // the pinned side): the pass below resets that arena, so a
+            // failure anywhere before the assignments would leave
+            // `self.tree` dangling into reset, partially rewritten
+            // storage. Drop the reference instead — handlers go quiet
+            // until the next successful rebuild, and a stale-arena Msg
+            // can never dispatch. The pinned snapshot is untouched: the
+            // presented menu still resolves.
+            var live_tree_reset = next_index == self.arena_index;
+            errdefer if (live_tree_reset) {
+                self.tree = null;
+            };
             var built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             // Window-control clearance is a one-retry pass like the
             // virtual-window coverage retry inside the build: only when
@@ -1416,6 +1429,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             self.tree = tree;
             self.arena_index = next_index;
+            live_tree_reset = false;
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
@@ -2058,6 +2072,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
+            // Same live-arena guard as the main canvas rebuild: under
+            // this window's pin the build routes into the slot's LIVE
+            // arena, so a failing pass must drop `slot.tree` rather
+            // than leave it dangling into the reset storage.
+            var live_tree_reset = next_index == slot.arena_index;
+            errdefer if (live_tree_reset) {
+                slot.tree = null;
+            };
             var built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
             // The same one-retry window-control clearance the main
             // rebuild runs (see `rebuild`): a secondary hidden-inset
@@ -2077,6 +2099,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             slot.tree = tree;
             slot.arena_index = next_index;
+            live_tree_reset = false;
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
