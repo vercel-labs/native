@@ -778,6 +778,46 @@ test "the automation menu verb refuses by name when the dismissal handler presen
     try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
 }
 
+test "a presentation superseded mid-notice by the dismissal handler's own menu announces nothing" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createCompactionHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Menu A is pending on alpha. Right-clicking beta presents menu B,
+    // whose supersession notice for A synchronously re-presents alpha's
+    // menu (C) — replacing B's freshly committed request before B's
+    // shown event dispatches.
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+    try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+    app_state.present_menu_on_dismissal = "alpha";
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("beta", 50, 20));
+
+    // Three presentations reached the platform (A, B, C), but only TWO
+    // announced themselves: B was superseded mid-notice, so its late
+    // shown event must not overwrite the successor's snapshot — the
+    // last announcement is C's, carrying C's token on alpha's canvas.
+    try std.testing.expectEqual(@as(usize, 3), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.shown_count);
+    const successor_token = harness.null_platform.context_menu_token;
+    try std.testing.expectEqual(successor_token, app_state.last_shown_token);
+    try std.testing.expectEqualStrings("alpha", app_state.last_shown_label[0..app_state.last_shown_label_len]);
+    // Both supersessions were announced: A's (by B), then B's (by C).
+    try std.testing.expectEqual(@as(u32, 2), app_state.dismissed_count);
+
+    // The successor resolves normally against its own token.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = "alpha",
+        .token = successor_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
+    try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+}
+
 test "a superseding presentation's shown event names the presenting view after the dismissal handler closes another" {
     var app_state: MenuTestApp = .{};
     const app = app_state.app();

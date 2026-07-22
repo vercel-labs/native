@@ -133,31 +133,41 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                             .separator = item.separator,
                         };
                     }
-                    if (try showMenu(self, app, index, .{
+                    switch (try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
                         .target_id = widget.id,
                         .kind = .app,
-                    }, point, items[0..count])) |shown| {
-                        // Presentation is asynchronous on GTK (and the
-                        // snapshot is harmless where the presenter blocks):
-                        // tell the app WHAT is on the glass, keyed by the
-                        // request's token, so the eventual selection
-                        // resolves against the shown items' dispatch
-                        // payloads — never a tree that rebuilt (reordering
-                        // or re-mapping items) while the menu was open.
-                        // The event's fields come from the returned request
-                        // itself, never `self.views[index]` re-read here:
-                        // `showMenu` ran the superseded menu's dismissal
-                        // notice — arbitrary app code that may have closed
-                        // views and compacted their indices.
-                        try self.dispatchEvent(app, .{ .canvas_widget_context_menu_shown = .{
-                            .window_id = shown.window_id,
-                            .view_label = shown.viewLabel(),
-                            .target_id = widget.id,
-                            .token = shown.token,
-                            .item_count = count,
-                        } });
-                        return;
+                    }, point, items[0..count])) {
+                        .shown => |shown| {
+                            // Presentation is asynchronous on GTK (and the
+                            // snapshot is harmless where the presenter blocks):
+                            // tell the app WHAT is on the glass, keyed by the
+                            // request's token, so the eventual selection
+                            // resolves against the shown items' dispatch
+                            // payloads — never a tree that rebuilt (reordering
+                            // or re-mapping items) while the menu was open.
+                            // The event's fields come from the returned request
+                            // itself, never `self.views[index]` re-read here:
+                            // `showMenu` ran the superseded menu's dismissal
+                            // notice — arbitrary app code that may have closed
+                            // views and compacted their indices.
+                            try self.dispatchEvent(app, .{ .canvas_widget_context_menu_shown = .{
+                                .window_id = shown.window_id,
+                                .view_label = shown.viewLabel(),
+                                .target_id = widget.id,
+                                .token = shown.token,
+                                .item_count = count,
+                            } });
+                            return;
+                        },
+                        // The dismissal notice's app code presented a
+                        // successor that replaced this request: the
+                        // successor already announced itself, so announce
+                        // NOTHING here — and never the anchored fallback,
+                        // which would mount a second surface under the
+                        // successor's native menu.
+                        .superseded => return,
+                        .refused => {},
                     }
                 }
                 try self.dispatchEvent(app, .{ .canvas_widget_context_menu_request = .{
@@ -238,15 +248,34 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
-        /// Returns the committed pending request when the platform
-        /// accepted the presentation, null on a refusal — which is not
-        /// fatal (app-declared menus fall back to the anchored canvas
-        /// surface, the zero-code defaults degrade to their keyboard
-        /// paths). Callers must describe the presented menu from the
-        /// RETURNED request, not from `self.views[view_index]`: the
-        /// superseded menu's dismissal notice below runs arbitrary app
-        /// code that may close views and compact their indices.
-        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!?PendingCanvasWidgetContextMenu {
+        const ShowMenuOutcome = union(enum) {
+            /// The platform accepted and the request is still the
+            /// pending truth: announce it
+            /// (`canvas_widget_context_menu_shown`).
+            shown: PendingCanvasWidgetContextMenu,
+            /// The platform refused — not fatal (app-declared menus
+            /// fall back to the anchored canvas surface, the zero-code
+            /// defaults degrade to their keyboard paths). The old
+            /// pending (and its popover, if any) is still the truth.
+            refused,
+            /// The platform accepted, but the superseded menu's
+            /// dismissal notice synchronously presented a SUCCESSOR
+            /// that replaced this request. The successor is the truth
+            /// and already announced itself: announcing this request
+            /// late would overwrite the successor's snapshot with a
+            /// menu whose token the action gate no longer accepts,
+            /// stranding the successor on live-tree resolution and the
+            /// stale pin unreleased.
+            superseded,
+        };
+
+        /// Present `request` natively. Callers must describe the
+        /// presented menu from the returned `.shown` request, not from
+        /// `self.views[view_index]`: the superseded menu's dismissal
+        /// notice below runs arbitrary app code that may close views
+        /// and compact their indices — or present a successor menu
+        /// (see `ShowMenuOutcome.superseded`).
+        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!ShowMenuOutcome {
             var pending = request;
             pending.token = nextContextMenuToken(self);
             pending.setViewLabel(self.views[view_index].label);
@@ -262,7 +291,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 }
                 // Presentation refused: nothing superseded — the old
                 // pending (and its popover, if any) is still the truth.
-                return null;
+                return .refused;
             };
             // The platform accepted: commit the replacement BEFORE the
             // fallible superseded-notice dispatch, so the runtime's
@@ -270,7 +299,9 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const superseded = self.canvas_widget_context_menu_pending;
             self.canvas_widget_context_menu_pending = pending;
             try notifySupersededPending(self, app, superseded);
-            return pending;
+            const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == pending.token else false;
+            if (!still_armed) return .superseded;
+            return .{ .shown = pending };
         }
 
         /// The platform reported the menu outcome: resolve the pending
