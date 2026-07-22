@@ -941,6 +941,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the post-rebuild reconcile; the src slice lives in that
         /// build's arena, valid until the next rebuild.
         video_build_declaration: ?VideoBuildDeclaration = null,
+        /// The load identity of the playback the declarative
+        /// reconciler started (`Effects.videoOwnerToken` right after
+        /// its own loadVideo; 0 = owns nothing): the ownership proof
+        /// for the stop and flag-delta paths. The derived key alone
+        /// is not one — it is a pure function of the source string,
+        /// and a manual load could carry the same key.
+        video_declared_token: u64 = 0,
         /// Backing bytes for `video_build_declaration.src`, copied out
         /// of the build arena at capture (the slot captures' rule): the
         /// declaration outlives the pass that recorded it — a later
@@ -1258,7 +1265,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // cannot probe the filesystem. Queued, not applied:
                     // the record precedes the event whose dispatch
                     // issues the load (see `pushReplayVideoSource`).
-                    .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source),
+                    .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source, record.video_kind == .failed),
                     .timer => {},
                 },
                 .finish => try self.effects.finishReplay(),
@@ -3164,9 +3171,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // declarative ownership must never kill a playback
                     // it does not own.
                     const snapshot = self.effects.videoSnapshot();
-                    if (snapshot.active and snapshot.key == declared_key) {
+                    if (snapshot.active and snapshot.key == declared_key and
+                        self.effects.videoOwnerToken() == self.video_declared_token)
+                    {
                         self.effects.stopVideo();
                     }
+                    self.video_declared_token = 0;
                     self.publishAudioState(runtime);
                 }
                 return;
@@ -3224,6 +3234,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.video_declared_loop = declaration.loop;
                 self.video_declared_muted = declaration.muted;
                 self.effects.loadVideo(options);
+                self.video_declared_token = self.effects.videoOwnerToken();
                 self.publishAudioState(runtime);
                 return;
             }
@@ -3233,9 +3244,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // update handler that replaced it (its own key) took the
             // single player over, and the reconciler yields until the
             // declaration itself changes.
+            // Ownership is the TOKEN of the load this reconciler
+            // issued, not the derived key: the key is a pure function
+            // of the source string, and an update's manual load could
+            // carry the same one — the reconciler must never stop or
+            // mutate a playback it did not start.
             const declared_key = std.hash.Wyhash.hash(0x76696465, src) | 1;
             const snapshot = self.effects.videoSnapshot();
-            if (!snapshot.active or snapshot.key != declared_key) return;
+            if (!snapshot.active or snapshot.key != declared_key or
+                self.effects.videoOwnerToken() != self.video_declared_token) return;
             var moved = false;
             if (declaration.loop != self.video_declared_loop) {
                 self.video_declared_loop = declaration.loop;

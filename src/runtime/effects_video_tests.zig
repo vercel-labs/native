@@ -37,6 +37,7 @@ const video_scene: app_manifest.ShellConfig = .{ .windows = &video_windows };
 const VideoModel = struct {
     event_count: usize = 0,
     chain_next: bool = false,
+    probed_active: ?bool = null,
     last_kind: ?effects_mod.EffectVideoEventKind = null,
     last_key: u64 = 0,
     last_position_ms: u64 = 0,
@@ -76,6 +77,7 @@ const VideoMsg = union(enum) {
     load_looping,
     load_then_stop,
     load_then_stream,
+    load_then_probe,
     load_source_burst,
     play,
     pause,
@@ -189,6 +191,19 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             });
             fx.stopVideo();
         },
+        // The snapshot probe: an update that inspects the channel
+        // right after its own load. A synchronous refusal resets the
+        // channel before loadVideo returns, and the probe must read
+        // the same answer live and replayed.
+        .load_then_probe => {
+            fx.loadVideo(.{
+                .key = clip_key,
+                .surface = clip_surface,
+                .path = clip_path,
+                .on_event = VideoEffects.videoMsg(.video_event),
+            });
+            model.probed_active = fx.videoSnapshot().active;
+        },
         // The replace shape under the same app key: the first load's
         // synchronous `.failed` must keep its own identity while the
         // replacing stream plays on — the key alone cannot tell the
@@ -248,6 +263,7 @@ fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.arm-chain")) return .arm_chain;
     if (std.mem.eql(u8, name, "video.load-url")) return .load_url;
     if (std.mem.eql(u8, name, "video.load-then-stop")) return .load_then_stop;
+    if (std.mem.eql(u8, name, "video.load-then-probe")) return .load_then_probe;
     if (std.mem.eql(u8, name, "video.load-then-stream")) return .load_then_stream;
     if (std.mem.eql(u8, name, "video.load-source-burst")) return .load_source_burst;
     if (std.mem.eql(u8, name, "video.seek-half")) return .seek_half;
@@ -865,14 +881,22 @@ const DeclModel = struct {
     loop: bool = false,
 };
 
-const DeclMsg = union(enum) { toggle_show, use_second, use_malformed, toggle_muted, toggle_loop, noop };
+const DeclMsg = union(enum) { toggle_show, use_second, use_malformed, toggle_muted, toggle_loop, hijack_key, noop };
 
 const DeclApp = ui_app_model.UiApp(DeclModel, DeclMsg);
 const DeclEffects = DeclApp.Effects;
 
 fn declUpdate(model: *DeclModel, msg: DeclMsg, fx: *DeclEffects) void {
-    _ = fx;
     switch (msg) {
+        // A manual load deliberately carrying the reconciler's derived
+        // key for "assets/clips/one.mp4": the key is a pure function of
+        // the source string, so a collision is expressible — ownership
+        // must ride the load token.
+        .hijack_key => fx.loadVideo(.{
+            .key = std.hash.Wyhash.hash(0x76696465, "assets/clips/one.mp4") | 1,
+            .surface = canvas.video_playback_surface_id,
+            .path = "assets/clips/one.mp4",
+        }),
         .toggle_show => model.show = !model.show,
         .use_second => model.second = true,
         .use_malformed => model.malformed = true,
@@ -1031,6 +1055,25 @@ test "a declared <video src> loads on first rebuild, reloads on src change, and 
     // Redeclaring it loads afresh.
     try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
     try std.testing.expectEqual(@as(usize, 3), np.video_load_count);
+    try std.testing.expect(np.video.loaded);
+}
+
+test "the reconciler never stops a manual playback sharing its derived key" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // An update replaces the declared playback with its OWN load that
+    // happens to carry the reconciler's derived key. Ownership is the
+    // load token, not the key: removing the declaration must leave the
+    // manual playback running.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .hijack_key);
+    try std.testing.expect(fx.videoSnapshot().active);
+    const stops_before = np.video_stop_count;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
+    try std.testing.expectEqual(stops_before, np.video_stop_count);
+    try std.testing.expect(fx.videoSnapshot().active);
     try std.testing.expect(np.video.loaded);
 }
 
@@ -2007,14 +2050,14 @@ test "retired video identities release at the next drain-pass boundary" {
     defer fx.deinit();
     fx.armReplay();
 
-    fx.pushReplayVideoSource(clip_key, 1, .local);
+    fx.pushReplayVideoSource(clip_key, 1, .local, false);
     fx.loadVideo(.{
         .key = clip_key,
         .surface = clip_surface,
         .path = clip_path,
         .on_event = VideoEffects.videoMsg(.video_event),
     });
-    fx.pushReplayVideoSource(clip_key + 1, 2, .local);
+    fx.pushReplayVideoSource(clip_key + 1, 2, .local, false);
     fx.loadVideo(.{
         .key = clip_key + 1,
         .surface = clip_surface,
@@ -2138,14 +2181,14 @@ test "replayed video records must name the load at their position" {
     defer fx.deinit();
     fx.armReplay();
 
-    fx.pushReplayVideoSource(clip_key, 1, .local);
+    fx.pushReplayVideoSource(clip_key, 1, .local, false);
     fx.loadVideo(.{
         .key = clip_key,
         .surface = clip_surface,
         .path = clip_path,
         .on_event = VideoEffects.videoMsg(.video_event),
     });
-    fx.pushReplayVideoSource(clip_key + 1, 2, .local);
+    fx.pushReplayVideoSource(clip_key + 1, 2, .local, false);
     fx.loadVideo(.{
         .key = clip_key + 1,
         .surface = clip_surface,
@@ -2170,7 +2213,7 @@ test "unclaimed or misclaimed cascade resolutions fail the finish check" {
         var fx = VideoEffects.init(std.testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.pushReplayVideoSource(clip_key, 999, .stream);
+        fx.pushReplayVideoSource(clip_key, 999, .stream, false);
         try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
     }
     {
@@ -2180,7 +2223,7 @@ test "unclaimed or misclaimed cascade resolutions fail the finish check" {
         // The record names key clip_key+7 at position (token) 1, but
         // the replayed dispatch loads clip_key: the consume latches the
         // divergence the void-returning loadVideo cannot raise.
-        fx.pushReplayVideoSource(clip_key + 7, 1, .stream);
+        fx.pushReplayVideoSource(clip_key + 7, 1, .stream, false);
         fx.loadVideo(.{
             .key = clip_key,
             .surface = clip_surface,
@@ -2195,7 +2238,7 @@ test "unclaimed or misclaimed cascade resolutions fail the finish check" {
         var fx = VideoEffects.init(std.testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        fx.pushReplayVideoSource(clip_key, 1, .stream);
+        fx.pushReplayVideoSource(clip_key, 1, .stream, false);
         fx.loadVideo(.{
             .key = clip_key,
             .surface = clip_surface,
@@ -2555,6 +2598,126 @@ test "a regenerated rejection never reorders a paired delivery under replay" {
         try std.testing.expectEqualDeep(recorded_model, app_state.model);
         try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
+}
+
+test "a synchronous load failure resets the snapshot identically under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record on an assets-absent host: the update loads and probes the
+    // snapshot in the same dispatch. The refusal reset the channel
+    // before loadVideo returned, so the probe reads inactive.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_local_files = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+        harness.runtime.options.session_recorder = recorder;
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load-then-probe", .window_id = 1, .view_label = canvas_label } });
+        try std.testing.expectEqual(@as(?bool, false), app_state.model.probed_active);
+        while (harness.null_platform.takeWake()) |_| {}
+        try harness.runtime.dispatchPlatformEvent(app, .wake);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, app_state.model.last_kind.?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the journaled load resolution carries the
+    // refusal, so the fake load resets at the same instant and the
+    // replayed probe reads the same inactive snapshot.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expectEqual(@as(?bool, false), app_state.model.probed_active);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
+}
+
+test "stopping a stream cancels only its own staged answers" {
+    // Two loads share one public key (the TS tier routes every load of
+    // one event arm through the same tag-derived key); the replaced
+    // first load still owes its staged terminal when the second is
+    // stopped. The cancel is token-scoped: B's stop never silences A.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    // A's terminal stages (token 1)...
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    // ...then B replaces under the same key (token 2), stages its own
+    // tick, and is stopped: only B's answers cancel.
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .url = clip_url,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    try fx.feedVideoEvent(.position, 500, 92_500, true, false, 0, 0);
+    fx.stopVideoCancel();
+
+    var boundary = fx.drainBoundary();
+    const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectVideoEventKind.failed, msg.video_event.kind);
+    try std.testing.expectEqual(clip_key, msg.video_event.key);
+    try std.testing.expect(fx.takeMsgWithin(&boundary) == null);
 }
 
 test "a past-window host readout clamps at delivery and replays clamped" {

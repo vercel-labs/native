@@ -2909,6 +2909,10 @@ pub fn Effects(comptime Msg: type) type {
             key: u64,
             token: u64,
             source: EffectVideoSource,
+            /// The recording's load refused synchronously — its live
+            /// channel reset before `loadVideo` returned, and the
+            /// replayed fake load must reset at the same instant.
+            failed: bool,
         };
 
         /// One loop-side channel `.rejected` terminal awaiting drain —
@@ -6243,6 +6247,7 @@ pub fn Effects(comptime Msg: type) type {
             self.journalNote(.{
                 .kind = .video_load,
                 .key = options.key,
+                .video_kind = .loaded,
                 .video_token = self.video.token,
                 .video_source = self.video.source,
             });
@@ -6277,32 +6282,44 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// `stopVideo` plus the stream CANCEL the TS wire promises:
-        /// every staged-but-undrained answer for `key` — a synchronous
-        /// terminal from the very batch that stops it, a loop-side
-        /// rejection — is removed before the channel goes idle, so no
-        /// event for the key ever reaches the app after this call
+        /// the stopped stream's staged-but-undrained answers — a
+        /// synchronous terminal from the very batch that stops it —
+        /// are removed before the channel goes idle, so no event for
+        /// the stream ever reaches the app after this call
         /// (`Cmd.videoStop`: "no events for the key after this"). The
-        /// Zig-native `stopVideo` keeps every staged answer instead
-        /// (one terminal per load, never silence); an adapter whose
-        /// public stop is the stream's cancel goes through here. A
-        /// cancelled answer never journals, so replay regenerates and
-        /// cancels the same entries and the timelines stay identical.
-        pub fn stopVideoCancel(self: *Self, key: u64) void {
-            self.cancelPendingVideo(key);
+        /// stream is identified by its TOKEN, not the public key: the
+        /// key is caller-controlled and shared by every load routed
+        /// through one event arm, and a REPLACED predecessor under
+        /// the same key still speaks its owed terminal — only stop
+        /// cancels. The stream being stopped is the latest ACCEPTED
+        /// load (the wire entry re-keys only on acceptance, and
+        /// acceptance is what mints), so its identity is the last
+        /// minted token even when a synchronous failure already reset
+        /// the channel. The Zig-native `stopVideo` keeps every staged
+        /// answer instead (one terminal per load, never silence); an
+        /// adapter whose public stop is the stream's cancel goes
+        /// through here. A cancelled answer never journals, so replay
+        /// regenerates and cancels the same entries and the timelines
+        /// stay identical.
+        pub fn stopVideoCancel(self: *Self) void {
+            self.cancelPendingVideo(self.video_token_seq);
             self.stopVideo();
         }
 
-        /// Remove every staged entry answering `key` — the cancel
-        /// behind `stopVideoCancel`. Surviving entries keep their
-        /// relative (seq) order.
-        fn cancelPendingVideo(self: *Self, key: u64) void {
+        /// Remove every staged entry belonging to load `token` — the
+        /// cancel behind `stopVideoCancel`. Surviving entries keep
+        /// their relative (seq) order. Loop-side rejections carry
+        /// token 0 (a refused load never minted one) and are never
+        /// cancelled — they answer commands, not streams.
+        fn cancelPendingVideo(self: *Self, token: u64) void {
+            if (token == 0) return;
             const storage = self.pendingVideoStorage();
             var kept: usize = 0;
             var offset: usize = 0;
             while (offset < self.pending_video_len) : (offset += 1) {
                 const from = (self.pending_video_head + offset) % storage.len;
                 const entry = storage[from];
-                if (entry.event.key == key) continue;
+                if (entry.token == token) continue;
                 const to = (self.pending_video_head + kept) % storage.len;
                 storage[to] = entry;
                 kept += 1;
@@ -6509,6 +6526,16 @@ pub fn Effects(comptime Msg: type) type {
             return event_fn(event);
         }
 
+        /// The CURRENT playback's load identity (`VideoChannel.token`;
+        /// 0 when idle) — how the declarative reconciler proves the
+        /// playback it is about to stop or mutate is the one IT
+        /// started: the public key alone is caller-controlled, and a
+        /// manual load could collide with the reconciler's derived
+        /// key.
+        pub fn videoOwnerToken(self: *const Self) u64 {
+            return if (self.video.active) self.video.token else 0;
+        }
+
         /// The video playback state mirrors, for the automation
         /// snapshot.
         pub fn videoSnapshot(self: *const Self) VideoSnapshot {
@@ -6624,7 +6651,7 @@ pub fn Effects(comptime Msg: type) type {
         /// sequence is deterministic, so each entry pairs with exactly
         /// the load that journaled it, and a load whose cascade failed
         /// live (no record) simply finds no entry.
-        pub fn pushReplayVideoSource(self: *Self, key: u64, token: u64, source: EffectVideoSource) void {
+        pub fn pushReplayVideoSource(self: *Self, key: u64, token: u64, source: EffectVideoSource, failed: bool) void {
             const storage = self.replayVideoSourceStorage();
             if (self.replay_video_source_len == storage.len) {
                 // Loads per dispatch are unbounded by contract, so the
@@ -6638,7 +6665,7 @@ pub fn Effects(comptime Msg: type) type {
                 self.replay_video_source_spill = grown;
             }
             const active = self.replayVideoSourceStorage();
-            active[self.replay_video_source_len] = .{ .key = key, .token = token, .source = source };
+            active[self.replay_video_source_len] = .{ .key = key, .token = token, .source = source, .failed = failed };
             self.replay_video_source_len += 1;
         }
 
@@ -6701,6 +6728,18 @@ pub fn Effects(comptime Msg: type) type {
                     self.replay_video_source_len -= 1;
                     storage[index] = storage[self.replay_video_source_len];
                     matched = true;
+                    if (entry.failed) {
+                        // The recording's load refused synchronously:
+                        // its channel reset before `loadVideo`
+                        // returned, so the fake resets NOW — the
+                        // snapshot an update reads inside this very
+                        // dispatch must match the recording's. The
+                        // identity parks for the journaled `.failed`
+                        // terminal, which delivers at its recorded
+                        // drain.
+                        self.parkRetiredVideo();
+                        self.video = .{ .volume = self.video.volume };
+                    }
                     break;
                 }
                 index += 1;
@@ -8693,13 +8732,19 @@ pub fn Effects(comptime Msg: type) type {
         /// `.video_load` record FIRST — every non-rejected load
         /// journals exactly one, resolved or refused, which is what
         /// lets replay pair every replayed load with a record and
-        /// refuse extras — then degrade through `failVideoChannel`
-        /// (whose `.failed` terminal journals later, at its drain, so
-        /// replay resets the channel in the recording's order).
+        /// refuse extras — then degrade through `failVideoChannel`.
+        /// The record's `video_kind` carries the outcome (`.failed`
+        /// here): the live channel resets before `loadVideo` returns,
+        /// so the replayed fake load must reset at the same instant
+        /// (`takeReplayVideoSource`) — a snapshot an update reads
+        /// inside the very dispatch must match the recording's. The
+        /// `.failed` terminal Msg still journals separately, at its
+        /// drain.
         fn failVideoLoad(self: *Self) void {
             self.journalNote(.{
                 .kind = .video_load,
                 .key = self.video.key,
+                .video_kind = .failed,
                 .video_token = self.video.token,
                 .video_source = self.video.source,
             });

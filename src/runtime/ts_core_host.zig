@@ -1366,14 +1366,17 @@ pub fn TsCoreHost(comptime core: type) type {
                 1 => fx.pauseVideo(),
                 2 => {
                     // `Cmd.videoStop` is the stream's CANCEL: the
-                    // engine drops the key's staged-but-undrained
-                    // answers with the player, so nothing for this
-                    // key can reach the app after the stop — even the
-                    // synchronous terminal of a batch that loaded,
-                    // failed, and stopped in one dispatch, and even
-                    // when a later load reuses the same event tag.
+                    // engine drops the stopped stream's staged answers
+                    // with the player, so nothing for it can reach the
+                    // app after the stop — even the synchronous
+                    // terminal of a batch that loaded, failed, and
+                    // stopped in one dispatch, and even when a later
+                    // load reuses the same event tag. A REPLACED
+                    // predecessor sharing this arm keeps its own owed
+                    // terminal (the cancel is token-scoped inside the
+                    // engine — only stop cancels).
                     video_entry.used = false;
-                    fx.stopVideoCancel(videoKeyForTag(video_entry.event_tag));
+                    fx.stopVideoCancel();
                 },
                 // The wire carries the app's f64; anything that is not a
                 // millisecond offset seeks to 0 (the engine clamps the

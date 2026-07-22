@@ -120,8 +120,11 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// own. Epoch 2: `.video_load` records became one-per-load (refused
 /// cascades journal one too) and replay verifies the bijection — an
 /// earlier journal's failed loads would replay as false divergence, so
-/// the identical bytes must refuse.
-pub const format_semantic_epoch: u32 = 2;
+/// the identical bytes must refuse. Epoch 3: the `video_kind` field on
+/// `.video_load` records became the load's OUTCOME (`.loaded` or
+/// `.failed`, steering the replayed fake's synchronous reset) where it
+/// previously rode its default — same bytes, new meaning.
+pub const format_semantic_epoch: u32 = 3;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record
