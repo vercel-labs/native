@@ -939,6 +939,11 @@ pub const max_effect_pty_write_bytes: usize = 4096;
 /// refused and counted into `EffectPtyEvent.dropped_writes` on the
 /// exit event — never silence.
 pub const max_effect_pty_outbound_bytes: usize = 64 * 1024;
+/// Distinct un-fully-sent `ptyWrite` payloads tracked for the
+/// `dropped_writes` count (see `PtyShared.out_write_lens`). Realistic
+/// input is a handful of small writes in flight; a backlog past this
+/// merges into the last record (bounded undercount), never overflows.
+pub const max_effect_pty_write_records: usize = 128;
 /// Longest TERM value `ptySpawn` accepts.
 pub const max_effect_pty_term_bytes: usize = 32;
 /// Bytes of `ptyWrite` input a FAKE pty retains for test assertions
@@ -1568,13 +1573,28 @@ const PtyShared = struct {
     out_head: usize = 0,
     out_len: usize = 0,
     out_data: [max_effect_pty_outbound_bytes]u8 = undefined,
-    /// Accepted `ptyWrite` payloads still staged (not yet fully sent):
-    /// incremented per accepted write, cleared when the FIFO drains
-    /// empty. On a discard (child gone, teardown) this many payloads
-    /// are added to `dropped_writes` so the count reflects distinct
-    /// lost writes, not one lumped event.
-    out_writes: u32 = 0,
+    /// Per-payload accounting for `dropped_writes`, so a discard counts
+    /// the writes NOT yet fully sent — never the ones already delivered.
+    /// `out_write_lens` is a ring of the byte length of each staged-but-
+    /// not-fully-sent `ptyWrite`; `out_front_sent` is how many bytes of
+    /// the head payload have already left. As bytes flush, fully-sent
+    /// payloads pop; on a discard, the surviving `out_write_count` is
+    /// what was truly lost. A pathological backlog past the record cap
+    /// merges into the tail entry (a bounded undercount, never a wrong
+    /// overcount of delivered writes).
+    out_write_lens: [max_effect_pty_write_records]u32 = @splat(0),
+    out_write_head: usize = 0,
+    out_write_count: usize = 0,
+    out_front_sent: usize = 0,
     dropped_writes: u32 = 0,
+    /// Set by the io thread under the mutex BEFORE it calls `waitpid`,
+    /// so a `ptyKill` or teardown that observes it never signals the
+    /// pid: `waitpid` may reap and free the pid for OS reuse the instant
+    /// after it returns, and setting the flag before the call means the
+    /// child is still alive (unwaited) for the whole window a signal
+    /// could be sent. This closes the pid-reuse race that a
+    /// post-`waitpid` `exit_staged` check alone leaves open.
+    reaping: bool = false,
     /// `ptyKill` ran (the exit reports `.cancelled`, the spawn cancel
     /// convention: after the verb, the exit always says so).
     kill_requested: bool = false,
@@ -1913,7 +1933,14 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     // The stream is over: reap the child (EOF follows the last slave
     // close, so this wait is a formality after a normal exit and
     // bounded after a kill) and stage the exit. Deliberately the
-    // thread's LAST shared touch before the wake.
+    // thread's LAST shared touch before the wake. Publish `reaping`
+    // BEFORE `waitpid` so a racing ptyKill/teardown never signals a
+    // pid that reapBlocking is about to free for reuse — until the
+    // wait returns the child is still alive, so declining to signal
+    // loses nothing.
+    shared.mutex.lock();
+    shared.reaping = true;
+    shared.mutex.unlock();
     const exit = transport.reapBlocking();
     shared.mutex.lock();
     if (shared.open and shared.generation == generation) {
@@ -1921,9 +1948,10 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         // count each lost payload so `dropped_writes == 0` keeps its
         // promise (distinct writes, not one lumped event).
         if (shared.out_len > 0) {
-            shared.dropped_writes +|= shared.out_writes;
+            shared.dropped_writes +|= @intCast(shared.out_write_count);
             shared.out_len = 0;
-            shared.out_writes = 0;
+            shared.out_write_count = 0;
+            shared.out_front_sent = 0;
         }
         const cancelled = shared.kill_requested;
         shared.exit_signal = exit.signal;
@@ -2004,9 +2032,10 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             // silent.
             shared.mutex.lock();
             if (shared.out_len > 0) {
-                shared.dropped_writes +|= shared.out_writes;
+                shared.dropped_writes +|= @intCast(shared.out_write_count);
                 shared.out_len = 0;
-                shared.out_writes = 0;
+                shared.out_write_count = 0;
+                shared.out_front_sent = 0;
             }
             shared.mutex.unlock();
             return;
@@ -2015,9 +2044,22 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
         shared.mutex.lock();
         shared.out_head = (shared.out_head + wrote) % max_effect_pty_outbound_bytes;
         shared.out_len -= @min(wrote, shared.out_len);
+        // Pop every payload these bytes fully sent, so a later discard
+        // counts only the writes that never reached the child.
+        var sent = wrote;
+        while (sent > 0 and shared.out_write_count > 0) {
+            const front = shared.out_write_lens[shared.out_write_head] - shared.out_front_sent;
+            if (sent >= front) {
+                sent -= front;
+                shared.out_front_sent = 0;
+                shared.out_write_head = (shared.out_write_head + 1) % max_effect_pty_write_records;
+                shared.out_write_count -= 1;
+            } else {
+                shared.out_front_sent += sent;
+                sent = 0;
+            }
+        }
         const drained = shared.out_len == 0;
-        // The FIFO emptied: every staged payload reached the child.
-        if (drained) shared.out_writes = 0;
         shared.mutex.unlock();
         if (drained or wrote < take) return;
     }
@@ -4260,13 +4302,19 @@ pub fn Effects(comptime Msg: type) type {
                     continue;
                 }
                 if (comptime pty_transport.supported) {
+                    var skip_signal = false;
                     if (pty_slot.shared) |shared| {
                         shared.mutex.lock();
                         shared.shutdown = true;
                         shared.kill_requested = true;
+                        // Same pid-reuse guard as ptyKill: never signal
+                        // once the io thread has begun reaping.
+                        skip_signal = shared.reaping or shared.exit_staged or shared.io_done;
                         shared.mutex.unlock();
                     }
-                    if (pty_slot.transport) |transport| transport.kill(false);
+                    if (!skip_signal) {
+                        if (pty_slot.transport) |transport| transport.kill(false);
+                    }
                     pty_transport.nudge(pty_slot.wake_pipe[1]);
                     var io_done = pty_slot.shared == null;
                     if (pty_slot.shared) |shared| {
@@ -6186,12 +6234,24 @@ pub fn Effects(comptime Msg: type) type {
                 return self.rejectPty(options.key, options.on_event, true);
             }
             var total_bytes: usize = 0;
-            for (options.argv) |arg| total_bytes += arg.len;
+            for (options.argv) |arg| {
+                total_bytes += arg.len;
+                // An embedded NUL would be silently truncated at the C
+                // boundary — reject the spawn rather than hand the child
+                // a cut argument (validated here so the fake executor
+                // and replay refuse identically, before the real
+                // transport's own guard).
+                if (std.mem.indexOfScalar(u8, arg, 0) != null) return self.rejectPty(options.key, options.on_event, true);
+            }
             if (total_bytes > max_effect_argv_bytes) return self.rejectPty(options.key, options.on_event, true);
             if (options.cols == 0 or options.rows == 0) return self.rejectPty(options.key, options.on_event, true);
             if (options.term.len == 0 or options.term.len > max_effect_pty_term_bytes) {
                 return self.rejectPty(options.key, options.on_event, true);
             }
+            // TERM rides the child environment; an embedded NUL would
+            // truncate it at the C boundary, so a spawn that "succeeded"
+            // would hand the child a different TERM than requested.
+            if (std.mem.indexOfScalar(u8, options.term, 0) != null) return self.rejectPty(options.key, options.on_event, true);
             if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectPty(options.key, options.on_event, true);
             const slot_index = self.findIdlePtySlot() orelse return self.rejectPty(options.key, options.on_event, true);
             // Table capacity obeys the replay-hold invariant, the
@@ -6305,7 +6365,17 @@ pub fn Effects(comptime Msg: type) type {
                     shared.out_data[(shared.out_head + shared.out_len + index) % max_effect_pty_outbound_bytes] = bytes[index];
                 }
                 shared.out_len += bytes.len;
-                shared.out_writes +|= 1;
+                if (shared.out_write_count == max_effect_pty_write_records) {
+                    // Backlog past the record cap: fold into the tail so
+                    // the count never overflows (a bounded undercount of
+                    // an absurd keystroke backlog, never a miscount of
+                    // delivered writes).
+                    const tail = (shared.out_write_head + shared.out_write_count - 1) % max_effect_pty_write_records;
+                    shared.out_write_lens[tail] +|= @intCast(bytes.len);
+                } else {
+                    shared.out_write_lens[(shared.out_write_head + shared.out_write_count) % max_effect_pty_write_records] = @intCast(bytes.len);
+                    shared.out_write_count += 1;
+                }
                 break :accepted true;
             };
             shared.mutex.unlock();
@@ -6344,19 +6414,21 @@ pub fn Effects(comptime Msg: type) type {
             // already staged but not yet delivered rewrites to
             // `.cancelled` with the -1 sentinel code — after this verb
             // the exit always says cancelled, never a stale child code.
-            const already_reaped = shared.exit_staged or shared.io_done;
+            // Signal ONLY while the io thread has not begun reaping:
+            // once `reaping` is set (before its `waitpid`) the pid may
+            // be freed for OS reuse the instant the wait returns, so
+            // signalling could hit an unrelated process. Before that
+            // point the child is alive and the signal is safe. The
+            // nudge still wakes the io thread so a read parked short of
+            // EOF winds down through the kill_requested break.
+            const skip_signal = shared.reaping or shared.exit_staged or shared.io_done;
             if (shared.exit_staged) {
                 shared.exit_reason = .cancelled;
                 shared.exit_code = effect_error_exit_code;
                 shared.exit_signal = 0;
             }
             shared.mutex.unlock();
-            // Signal ONLY while the io thread has not reaped the child:
-            // once it has, the pid is free for the OS to reuse and
-            // signalling it could hit an unrelated process. The nudge
-            // still wakes the io thread so a read parked short of EOF
-            // winds down through the kill_requested break below.
-            if (!already_reaped) {
+            if (!skip_signal) {
                 if (slot.transport) |transport| transport.kill(false);
             }
             pty_transport.nudge(slot.wake_pipe[1]);

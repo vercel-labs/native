@@ -213,6 +213,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         .ypixel = 0,
     };
     if (c.openpty(&master, &slave, null, null, &ws) != 0) return error.PtyOpenFailed;
+    // CLOEXEC on both pty ends: a concurrent process spawn (or another
+    // pty spawn) forking on another thread would otherwise inherit
+    // these descriptors, keeping THIS pty open after its child exits
+    // (no EOF, no exit event) and leaking master fds into unrelated
+    // children. The child's own stdio survives because `login_tty`
+    // dup2's the slave onto 0/1/2 and dup2 clears CLOEXEC on the copies.
+    if (!setCloexec(master) or !setCloexec(slave)) {
+        _ = c.close(master);
+        _ = c.close(slave);
+        return error.PtyOpenFailed;
+    }
 
     // The exec self-pipe: close-on-exec on the write end, so a
     // successful `execve` closes it and the parent reads EOF (exec
@@ -231,8 +242,10 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // CLOEXEC on the write end is load-bearing, not best-effort: if it
     // does not take, a successful exec leaves the child holding a copy
     // of the write end and the parent's `readAll` below blocks until
-    // the child exits. A failed fcntl aborts the spawn instead.
-    if (!setCloexec(exec_pipe[1])) {
+    // the child exits. The read end is CLOEXEC too so a concurrent
+    // spawn on another thread cannot inherit it between fork and the
+    // parent's read. A failed fcntl aborts the spawn instead.
+    if (!setCloexec(exec_pipe[1]) or !setCloexec(exec_pipe[0])) {
         _ = c.close(master);
         _ = c.close(slave);
         _ = c.close(exec_pipe[0]);
@@ -466,9 +479,11 @@ pub fn pipePair() Error![2]c_int {
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) return error.PtyOpenFailed;
     for (fds) |fd| {
+        // Non-blocking is load-bearing, not best-effort: without it a
+        // burst of `ptyWrite` nudges against a full pipe would block
+        // the UI thread inside `nudge`. A failed fcntl aborts the pair.
         const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
-        if (flags >= 0) _ = c.fcntl(fd, f_setfl, flags | o_nonblock);
-        if (!setCloexec(fd)) {
+        if (flags < 0 or c.fcntl(fd, f_setfl, flags | o_nonblock) < 0 or !setCloexec(fd)) {
             _ = c.close(fds[0]);
             _ = c.close(fds[1]);
             return error.PtyOpenFailed;

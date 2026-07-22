@@ -353,6 +353,20 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
     try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
 }
 
+test "a fed output batch over the chunk bound and NUL-bearing term/argv are refused" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // TERM with an embedded NUL: refused (a truncated TERM would reach
+    // the child as a different value than requested).
+    fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .term = "xterm\x00evil", .on_event = DirectFx.ptyMsg(.pty) });
+    _ = try expectExit(&fx, 81, .rejected);
+    // argv with an embedded NUL: refused (fake and real agree).
+    fx.ptySpawn(.{ .key = 82, .argv = &.{ "sh", "a\x00b" }, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = try expectExit(&fx, 82, .rejected);
+}
+
 test "live pty resize lands as the child's window size" {
     if (comptime !pty_transport.supported) return;
     var fx = DirectFx.init(testing.allocator);
