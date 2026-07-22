@@ -386,9 +386,38 @@ pub fn build(b: *std.Build) void {
     // Registry pin printer: emits the ui_schema table counts and
     // fingerprints in the exact form ui_schema_tests.zig pins, plus the
     // next free code per table for reserving codes ahead of parallel
-    // work. `zig build print-pins` after registry additions.
+    // work, plus this build's layout fingerprints (session journal
+    // format, automation protocol). `zig build print-pins` after
+    // registry additions. The journal fingerprint lives in the full
+    // framework module, and the tool runs on the build HOST by
+    // construction (addRunArtifact), so it builds against a host clone
+    // of the framework module — cross-compiled `-Dtarget` builds keep a
+    // runnable print-pins, and the fingerprints are layout identities
+    // (type shapes, never target-sized values), identical either way.
+    const pins_json_mod = module(b, host_target, optimize, "src/primitives/json/root.zig");
+    const pins_canvas_mod = module(b, host_target, optimize, "src/primitives/canvas/root.zig");
+    pins_canvas_mod.addImport("geometry", host_geometry_mod);
+    pins_canvas_mod.addImport("json", pins_json_mod);
+    if (host_target.result.os.tag == .macos) {
+        // Same CoreText linkage the target canvas module carries (see
+        // canvas_mod above): the shaping path calls it on macOS hosts.
+        pins_canvas_mod.linkFramework("CoreFoundation", .{});
+        pins_canvas_mod.linkFramework("CoreGraphics", .{});
+        pins_canvas_mod.linkFramework("CoreText", .{});
+        pins_canvas_mod.linkSystemLibrary("c", .{});
+    }
+    const pins_native_mod = module(b, host_target, optimize, "src/root.zig");
+    pins_native_mod.addImport("geometry", host_geometry_mod);
+    pins_native_mod.addImport("app_dirs", host_app_dirs_mod);
+    pins_native_mod.addImport("assets", host_assets_mod);
+    pins_native_mod.addImport("trace", host_trace_mod);
+    pins_native_mod.addImport("app_manifest", host_app_manifest_mod);
+    pins_native_mod.addImport("diagnostics", host_diagnostics_mod);
+    pins_native_mod.addImport("platform_info", host_platform_info_mod);
+    pins_native_mod.addImport("json", pins_json_mod);
+    pins_native_mod.addImport("canvas", pins_canvas_mod);
     const print_pins_mod = module(b, host_target, optimize, "tools/print_pins.zig");
-    print_pins_mod.addImport("ui_schema", module(b, host_target, optimize, "src/primitives/canvas/ui_schema.zig"));
+    print_pins_mod.addImport("native_sdk", pins_native_mod);
     const print_pins_exe = b.addExecutable(.{
         .name = "print-pins",
         .root_module = print_pins_mod,
