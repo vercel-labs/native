@@ -9954,12 +9954,21 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     /* The pixel clock (1/60 s, the scheduleFrame cadence). Common
      * modes so frames keep flowing during live resize and menu
      * tracking (default-mode timers do not fire in tracking
-     * runloops). */
+     * runloops). Block-based with a WEAK host: a target-selector
+     * repeating timer retains its target through the run loop, so a
+     * host destroyed mid-playback could never dealloc — the timer
+     * self-invalidates when the host is gone instead. */
+    __weak NativeSdkAppKitHost *weakSelf = self;
     NSTimer *tick = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
-                                            target:self
-                                          selector:@selector(videoFrameTimerFired:)
-                                          userInfo:nil
-                                           repeats:YES];
+                                           repeats:YES
+                                             block:^(NSTimer *timer) {
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf) {
+            [timer invalidate];
+            return;
+        }
+        [strongSelf videoFrameTimerFired:timer];
+    }];
     [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
     self.videoFrameTimer = tick;
 }
@@ -10394,12 +10403,19 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (!self.videoPositionTimer) {
         /* Common modes for the same reason app timers use them: the
          * readout must keep ticking while a menu is open or the window
-         * is live-resizing. */
+         * is live-resizing. Weak-host block timer, the pixel clock's
+         * rule: no retain cycle through the run loop. */
+        __weak NativeSdkAppKitHost *weakSelf = self;
         NSTimer *tick = [NSTimer timerWithTimeInterval:0.5
-                                                target:self
-                                              selector:@selector(videoPositionTimerFired:)
-                                              userInfo:nil
-                                               repeats:YES];
+                                               repeats:YES
+                                                 block:^(NSTimer *timer) {
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (!strongSelf) {
+                [timer invalidate];
+                return;
+            }
+            [strongSelf videoPositionTimerFired:timer];
+        }];
         [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
         self.videoPositionTimer = tick;
     }

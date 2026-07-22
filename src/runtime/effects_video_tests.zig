@@ -1732,6 +1732,101 @@ test "a replaced load's terminal keeps its own identity under replay" {
     }
 }
 
+/// Overwrite the `video_kind` byte of the first journaled `.video_load`
+/// record, in place. Per `journal.encodeEffect` the video fields are
+/// the LAST 44 bytes of the effect payload and `video_kind` is the
+/// first of them. Framing and every other field stay valid: only
+/// replay's outcome gate can catch the value. Returns whether a record
+/// was damaged.
+fn patchFirstVideoLoadKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool {
+    var pos: usize = journal.preamble_len;
+    while (bytes.len - pos >= 5) {
+        const record_kind = bytes[pos];
+        const len = std.mem.readInt(u32, bytes[pos + 1 ..][0..4], .little);
+        const payload = bytes[pos + 5 .. pos + 5 + len];
+        pos += 5 + len;
+        if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
+        const record = journal.decodeEffect(payload) catch continue;
+        if (record.kind != .video_load) continue;
+        payload[payload.len - 44] = @intFromEnum(kind);
+        return true;
+    }
+    return false;
+}
+
+test "a video load record claiming a non-outcome kind refuses replay as damage" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record one resolved load, then hand-damage its `.video_load`
+    // record's outcome: the recorder writes .loaded or .failed and
+    // nothing else, so a .position there is damage, never a shape to
+    // interpret.
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.takeVideoLoaded().?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+    }
+
+    try std.testing.expect(patchFirstVideoLoadKind(buffer.bytes[0..buffer.len], .position));
+
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = false,
+            .require_same_platform = false,
+        });
+        try std.testing.expectError(error.ReplayDamagedRecord, result);
+    }
+}
+
 /// Overwrite the `video_position_ms` field of the first journaled
 /// video effect record, in place. Per `journal.encodeEffect` the video
 /// fields are the LAST 44 bytes of the effect payload — video_kind

@@ -256,6 +256,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .video_load and videoLoadOutcomeDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video load record for key {d} claims outcome .{s} - the recorder stamps .loaded on a resolved cascade and .failed on a refusal, nothing else, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -445,6 +452,15 @@ fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
         record.video_duration_ms >= max_exact or
         record.video_width >= max_exact or
         record.video_height >= max_exact;
+}
+
+/// A `.video_load` record's `video_kind` is the load's OUTCOME, and the
+/// recorder writes exactly two values: `.loaded` on a resolved cascade
+/// and `.failed` on a synchronous refusal. Any other kind steers
+/// nothing honestly (a `.position` would leave the replayed fake load
+/// active where nothing is known), so it refuses at the gate.
+fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {
+    return record.video_kind != .loaded and record.video_kind != .failed;
 }
 
 fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
