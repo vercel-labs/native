@@ -2943,10 +2943,18 @@ pub const PlatformServices = struct {
     /// Load an http(s) video source into the app's single video player,
     /// streaming progressively (see `video_load_url_fn`). Platforms
     /// without video playback answer `error.UnsupportedService`; bad
-    /// arguments are rejected here before the platform is asked.
+    /// arguments are rejected here before the platform is asked —
+    /// including any non-http(s) scheme: hosts hand the URL to their
+    /// media stack whole (AVPlayer opens file: URLs happily), so the
+    /// seam is where the streaming-only contract holds for every
+    /// caller, not just the engine's own gated loads.
     pub fn videoLoadUrl(self: PlatformServices, url: []const u8, token: u64, sink: VideoFrameSink) anyerror!void {
         if (url.len == 0) return error.InvalidVideoOptions;
         if (url.len > max_video_path_bytes) return error.VideoPathTooLarge;
+        const uri = std.Uri.parse(url) catch return error.InvalidVideoOptions;
+        const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+            std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!scheme_ok) return error.InvalidVideoOptions;
         const load_fn = self.video_load_url_fn orelse return error.UnsupportedService;
         return load_fn(self.context, url, token, sink);
     }
