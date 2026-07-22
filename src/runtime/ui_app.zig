@@ -3090,15 +3090,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // journaled at the delivery boundary. Without an app
                 // Msg the report still moved the channel mirrors, and
                 // the house `<video controls>` chrome renders those —
-                // so publish and rebuild anyway, keeping the transport
-                // live with no model plumbing (position ticks arrive at
-                // the platform's coarse ~2 Hz cadence, so the extra
-                // rebuilds stay cheap).
+                // so publish and rebuild anyway (window slots included:
+                // a secondary window's tree consumes the same
+                // snapshot), keeping the transport live with no model
+                // plumbing (position ticks arrive at the platform's
+                // coarse ~2 Hz cadence, so the extra rebuilds stay
+                // cheap).
                 .video => |video_event| if (self.effects.takeVideoMsg(video_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 } else if (self.installed) {
-                    self.publishAudioState(runtime);
-                    try self.rebuild(runtime, self.canvas_window_id);
+                    try self.rebuildVideoChrome(runtime);
                 },
                 .effects_wake => try self.drainEffects(runtime),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
@@ -3639,13 +3640,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // mirrors.
                 if (tree.findWidget(target.id)) |widget| {
                     if (widget.video_control == .toggle) {
-                        if (self.effects.videoSnapshot().playing) {
-                            self.effects.pauseVideo();
-                        } else {
-                            self.effects.playVideo();
-                        }
-                        self.publishAudioState(runtime);
-                        try self.rebuild(runtime, pointer_event.window_id);
+                        try self.toggleVideoControl(runtime);
                         return;
                     }
                 }
@@ -3658,6 +3653,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
+        }
+
+        /// Re-render the house video chrome from the moved channel
+        /// mirrors, everywhere it shows: the main canvas rebuilds
+        /// against ITS window (never a control event's origin window —
+        /// the main canvas label resolves only there), and the window
+        /// slots rebuild after it, so a `<video controls>` declared in
+        /// a secondary window's tree repaints too — `dispatch`'s exact
+        /// rebuild discipline, minus the Msg.
+        fn rebuildVideoChrome(self: *Self, runtime: *Runtime) anyerror!void {
+            self.publishAudioState(runtime);
+            try self.rebuild(runtime, self.canvas_window_id);
+            try self.rebuildWindowSlots(runtime);
+        }
+
+        /// Activate the house transport's play/pause control — the
+        /// runtime-consumed action both the pointer release and the
+        /// keyboard control intent (Enter/Space on the focused button)
+        /// resolve to: no app Msg exists, the video channel is driven
+        /// directly and the chrome re-renders from the moved mirrors.
+        fn toggleVideoControl(self: *Self, runtime: *Runtime) anyerror!void {
+            if (self.effects.videoSnapshot().playing) {
+                self.effects.pauseVideo();
+            } else {
+                self.effects.playVideo();
+            }
+            try self.rebuildVideoChrome(runtime);
         }
 
         fn disarmHold(self: *Self, runtime: *Runtime) void {
@@ -3752,7 +3774,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (tree.findWidget(target.id)) |widget| {
                     if (!widget.state.disabled) {
                         if (canvas.isWidgetTextEntry(widget)) return;
-                        if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard) != null) return;
+                        if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard)) |intent| {
+                            // Keyboard activation of the house video
+                            // transport's play/pause control drives the
+                            // channel exactly like the pointer release
+                            // — the control advertises Play/Pause to
+                            // focus and accessibility, so Enter/Space
+                            // must act, not be consumed silently. (The
+                            // seek slider's keyboard steps already
+                            // arrive as widget change events and take
+                            // the scrub path.)
+                            if (widget.video_control == .toggle and intent.kind == .press) {
+                                try self.toggleVideoControl(runtime);
+                            }
+                            return;
+                        }
                     }
                 }
             }
@@ -3822,8 +3858,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         const fraction: f64 = std.math.clamp(change_event.value, 0, 1);
                         self.effects.seekVideo(@intFromFloat(fraction * @as(f64, @floatFromInt(snap.duration_ms))));
                     }
-                    self.publishAudioState(runtime);
-                    try self.rebuild(runtime, change_event.window_id);
+                    try self.rebuildVideoChrome(runtime);
                     return;
                 }
             }

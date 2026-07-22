@@ -832,6 +832,51 @@ test "the house chrome toggle pauses and resumes the platform player without an 
     try std.testing.expect(fx.videoSnapshot().playing);
 }
 
+test "keyboard activation of the house chrome toggle drives the channel like the pointer" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    // Target the toggle control exactly as the runtime's focus routing
+    // would: the control advertises Play/Pause to focus and
+    // accessibility, so Enter/Space must act, never be consumed
+    // silently.
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var target: ?canvas.WidgetFocusTarget = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.widget.video_control == .toggle) {
+            target = .{
+                .id = node.widget.id,
+                .kind = node.widget.kind,
+                .bounds = node.frame,
+                .index = index,
+                .state = node.widget.state,
+            };
+        }
+    }
+    try h.harness.runtime.dispatchEvent(h.app, .{ .canvas_widget_keyboard = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .keyboard = .{ .phase = .key_down, .focused_id = target.?.id, .key = "enter" },
+        .target = target,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), np.video_pause_count);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+
+    // Space resumes, and the chrome re-rendered from the moved mirrors.
+    try h.harness.runtime.dispatchEvent(h.app, .{ .canvas_widget_keyboard = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .keyboard = .{ .phase = .key_down, .focused_id = target.?.id, .key = "space" },
+        .target = target,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), np.video_play_count);
+    try std.testing.expect(fx.videoSnapshot().playing);
+}
+
 test "the house chrome slider seeks proportionally into the playback" {
     var h = try DeclHarness.create();
     defer h.destroy();
