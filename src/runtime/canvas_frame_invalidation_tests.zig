@@ -821,12 +821,111 @@ test "device-grid re-alignment survives the float round-trip" {
     try std.testing.expect(!swapped.full_repaint);
     try std.testing.expect(swapped.dirty_bounds != null);
     // The dirty edge's round trip must land on its device boundary —
-    // never past it.
+    // never past it. The presented-scale rework carries one presented
+    // device pixel of bleed past the plan edge's boundary (114), so
+    // the reconstructed product may ceil to 115 but never beyond.
     const dirty = swapped.dirty_bounds.?;
-    try std.testing.expect(@ceil(dirty.maxX() * presentation_scale) <= 114);
+    try std.testing.expect(@ceil(dirty.maxX() * presentation_scale) <= 115);
 
     _ = try presentScaled(harness, 3, true, full, scratch, clear_color, &no_gpu_commands, &no_packet_bytes);
     try std.testing.expectEqualSlices(u8, full, incremental);
+}
+
+test "bleed-aligned dirty edges round-trip onto their device boundaries" {
+    // The stored rect's f32 fields must hand consumers products that
+    // land exactly on the intended integer device boundaries — one
+    // whole device pixel of bleed outside the input's floor/ceil — in
+    // BOTH directions: the stored min edge and the RECONSTRUCTED max
+    // edge (x + width). A rounded 1/scale inflation falls a whole
+    // pixel short at fractional scales, and a re-encoded width can
+    // push the reconstructed product past its boundary.
+    const scales = [_]f32{ 1, 1.1, 1.2, 1.25, 1.3, 1.5, 1.75, 2, 2.5, 3 };
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        const x: f32 = @as(f32, @floatFromInt(i)) * 0.173 + 0.07;
+        const w: f32 = @as(f32, @floatFromInt(i % 37)) * 0.61 + 0.4;
+        const rect = geometry.RectF.init(x, x * 0.5, w, w * 0.8);
+        for (scales) |scale| {
+            const aligned = canvas_frame.bleedAlignedCanvasDirtyBounds(rect, scale, 1).?;
+            const min_boundary = @floor(rect.minX() * scale) - 1;
+            const max_boundary = @ceil(rect.maxX() * scale) + 1;
+            const min_product = aligned.minX() * scale;
+            const max_product = aligned.maxX() * scale;
+            try std.testing.expect(min_product >= min_boundary);
+            try std.testing.expect(@floor(min_product) == min_boundary);
+            try std.testing.expect(max_product <= max_boundary);
+            try std.testing.expect(@ceil(max_product) == max_boundary);
+        }
+    }
+}
+
+test "reflow damage reaches a whole device pixel past changed bounds at fractional scales" {
+    // The AA bleed allowance is one DEVICE pixel: at scale 1.3 a pill
+    // starting at x=170 occupies device column 220, so removing it must
+    // dirty column 219 too — inflating by a rounded 1/scale in logical
+    // points multiplies back to exactly 220 and falls a whole pixel
+    // short.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-fractional-bleed", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const surface = geometry.SizeF.init(320, 240);
+    const scale: f32 = 1.3;
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, surface.width, surface.height),
+    });
+
+    const anchor = canvas.CanvasCommand{ .fill_rect = .{
+        .id = 100,
+        .rect = geometry.RectF.init(4, 4, 24, 12),
+        .fill = .{ .color = canvas.Color.rgb8(51, 65, 85) },
+    } };
+    const pill = canvas.CanvasCommand{ .fill_rounded_rect = .{
+        .id = 200,
+        .rect = geometry.RectF.init(170, 60, 40, 24),
+        .radius = canvas.Radius.all(12),
+        .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
+    } };
+
+    const pixel_size = try canvas_frame_helpers.canvasSurfacePixelSize(surface, scale);
+    const pixels = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+    const clear_color = canvas.Color.rgb8(15, 23, 42);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ anchor, pill } });
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 1,
+        .timestamp_ns = 16_000_000,
+        .surface_size = surface,
+        .scale = scale,
+    }, canvasFrameScratchStorage(&harness.runtime), pixels, scratch, clear_color);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{anchor} });
+    const removed = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = 32_000_000,
+        .surface_size = surface,
+        .scale = scale,
+    }, canvasFrameScratchStorage(&harness.runtime), pixels, scratch, clear_color);
+    try std.testing.expect(!removed.full_repaint);
+    // The vacated pill starts in device column 220; its bleed pixel is
+    // column 219, which the damage must reach.
+    const dirty = removed.dirty_bounds.?;
+    try std.testing.expect(@floor(dirty.minX() * scale) <= 219);
 }
 
 test "keyed subtree swap leaves no stale pixels on the summary-dirty pixel path" {

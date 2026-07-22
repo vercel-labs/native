@@ -609,12 +609,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         changes = try DisplayList.diff(previous.?, next, storage.changes);
         // Incremental damage carries a one-device-pixel AA bleed
         // allowance and lands snapped outward on the device-pixel grid
-        // (see the runtime planner's dirty finalization): the inflation
+        // (see the runtime planner's dirty finalization): the bleed
         // covers the up-to-a-device-pixel ink past a command's bounds,
         // and the snap keeps the cull region identical to the cleared
         // pixels so a fractional dirty edge cannot erase an unchanged
         // neighbor's boundary-pixel coverage without redrawing it.
-        dirty_bounds = clippedDirtyBounds(deviceAlignedDirtyBounds(inflatedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), dirtyBleedInset(options.scale)), options.scale), options.surface_size);
+        dirty_bounds = clippedDirtyBounds(bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1), options.surface_size);
     }
 
     return .{
@@ -657,44 +657,38 @@ fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
     return result;
 }
 
-/// One device pixel in logical points at `scale` — the AA bleed
-/// allowance incremental damage adds around changed content.
-fn dirtyBleedInset(scale: f32) f32 {
-    const normalized = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    return 1.0 / normalized;
-}
-
-fn inflatedDirtyBounds(bounds: ?geometry.RectF, bleed: f32) ?geometry.RectF {
-    const dirty = bounds orelse return null;
-    return dirty.normalized().inflate(geometry.InsetsF.all(bleed));
-}
-
-fn deviceAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32) ?geometry.RectF {
+/// Bleed-and-snap for incremental damage, the twin of the runtime's
+/// `bleedAlignedCanvasDirtyBounds` (see that doc comment): whole device
+/// pixels of AA bleed folded in on integer device boundaries, edges
+/// chosen so the STORED rect's f32 round trip lands exactly on them.
+fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32) ?geometry.RectF {
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = alignedDirtyFloorEdge(normalized.minX(), device);
-    const min_y = alignedDirtyFloorEdge(normalized.minY(), device);
-    const max_x = alignedDirtyCeilEdge(normalized.maxX(), device);
-    const max_y = alignedDirtyCeilEdge(normalized.maxY(), device);
-    return geometry.RectF.init(min_x, min_y, @max(0, max_x - min_x), @max(0, max_y - min_y));
+    const min_x = dirtyEdgeForFloorBoundary(@floor(normalized.minX() * device) - bleed_pixels, device);
+    const min_y = dirtyEdgeForFloorBoundary(@floor(normalized.minY() * device) - bleed_pixels, device);
+    const width = dirtySpanForCeilBoundary(min_x, @ceil(normalized.maxX() * device) + bleed_pixels, device);
+    const height = dirtySpanForCeilBoundary(min_y, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    return geometry.RectF.init(min_x, min_y, width, height);
 }
 
-/// The snapped max edge, chosen so its f32 product with `device` never
-/// exceeds the ceil boundary (see the runtime helper twin): a rounded-up
-/// edge would clear one pixel more than culling against the rect admits.
-fn alignedDirtyCeilEdge(value: f32, device: f32) f32 {
-    const boundary = @ceil(value * device);
+/// Smallest representable coordinate whose product with `device`
+/// reaches `boundary` (see the runtime twin's doc comment).
+fn dirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
     var edge = boundary / device;
-    while (edge * device > boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
-    return @max(edge, value);
-}
-
-fn alignedDirtyFloorEdge(value: f32, device: f32) f32 {
-    const boundary = @floor(value * device);
-    var edge = boundary / device;
+    while (edge * device >= boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
     while (edge * device < boundary) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
-    return @min(edge, value);
+    return edge;
+}
+
+/// Largest span whose reconstructed max edge (`min_edge + span`) keeps
+/// its product with `device` at or under `boundary` (see the runtime
+/// twin's doc comment).
+fn dirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    var span = @max(0, boundary / device - min_edge);
+    while ((min_edge + span) * device <= boundary) span = std.math.nextAfter(f32, span, std.math.inf(f32));
+    while (span > 0 and (min_edge + span) * device > boundary) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+    return span;
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {

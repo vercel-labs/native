@@ -112,69 +112,67 @@ pub fn clippedCanvasDirtyBounds(bounds: ?geometry.RectF, surface_size: geometry.
     return if (normalized.isEmpty()) null else normalized;
 }
 
-/// One device pixel in logical points at `scale`: the anti-aliasing
-/// bleed allowance incremental damage adds around changed content.
-/// Host rasterizers ink up to a device pixel past a command's bounds
-/// (antialiased shape edges and glyph overshoot — the packet host's
-/// raster cache carries a one-pixel apron for exactly this), so a
-/// damage region cut to the exact bounds strands that fringe: content
-/// that shrinks, moves, or disappears leaves stale edge pixels the
-/// repaint never touches. Full repaints cover the surface and need no
-/// allowance.
-pub fn canvasDirtyBleedInset(scale: f32) f32 {
-    const normalized = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    return 1.0 / normalized;
-}
-
-/// Inflate an incremental dirty rect by the AA bleed allowance (see
-/// `canvasDirtyBleedInset`); null stays null so "nothing changed"
-/// never becomes a repaint.
-pub fn inflatedCanvasDirtyBounds(bounds: ?geometry.RectF, bleed: f32) ?geometry.RectF {
-    const dirty = bounds orelse return null;
-    return dirty.normalized().inflate(geometry.InsetsF.all(bleed));
-}
-
 /// Snap an incremental dirty rect OUTWARD to the device-pixel grid at
-/// `scale`. Clears happen on whole pixels while command culling tests
-/// the float rect, so a fractional dirty edge erases the boundary
-/// pixel's antialiased coverage without redrawing the unchanged
-/// neighbor that painted it — a missing fringe. With the rect on the
-/// pixel grid, every command overlapping a cleared pixel overlaps the
-/// rect and repaints.
-pub fn deviceAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32) ?geometry.RectF {
+/// `scale`, folding in `bleed_pixels` whole device pixels of
+/// anti-aliasing bleed allowance on every side. The allowance covers
+/// the PAINTED extent of changed content — host rasterizers ink up to
+/// a device pixel past a command's bounds (antialiased shape edges and
+/// glyph overshoot; the packet host's raster cache carries a one-pixel
+/// apron for exactly this) — so content that shrinks, moves, or
+/// disappears cannot strand a stale fringe. The snap keeps the CULL
+/// region identical to the CLEARED pixels: clears land on whole pixels
+/// while culling tests the float rect, so a fractional dirty edge would
+/// erase the boundary pixel's antialiased coverage without redrawing
+/// the unchanged neighbor that painted it.
+///
+/// Which pixels are cleared is decided on INTEGER device boundaries
+/// (floor/ceil of the input edges, moved by whole `bleed_pixels` —
+/// never by a rounded `1/scale` in logical points, which can fall a
+/// whole pixel short at fractional scales). The logical edges are then
+/// chosen so the STORED rect (x, y, width, height in f32) hands
+/// consumers back products that land exactly on those boundaries: the
+/// min edges are the smallest representable values whose product
+/// reaches their boundary, and the spans the largest whose
+/// RECONSTRUCTED max edge (`x + width`, the f32 a stored rect yields)
+/// stays on theirs — so consumers re-deriving pixels clear exactly the
+/// pixels command culling admits, in both directions.
+pub fn bleedAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32) ?geometry.RectF {
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = alignedCanvasDirtyFloorEdge(normalized.minX(), device);
-    const min_y = alignedCanvasDirtyFloorEdge(normalized.minY(), device);
-    const max_x = alignedCanvasDirtyCeilEdge(normalized.maxX(), device);
-    const max_y = alignedCanvasDirtyCeilEdge(normalized.maxY(), device);
-    return geometry.RectF.init(min_x, min_y, @max(0, max_x - min_x), @max(0, max_y - min_y));
+    const min_x = canvasDirtyEdgeForFloorBoundary(@floor(normalized.minX() * device) - bleed_pixels, device);
+    const min_y = canvasDirtyEdgeForFloorBoundary(@floor(normalized.minY() * device) - bleed_pixels, device);
+    const width = canvasDirtySpanForCeilBoundary(min_x, @ceil(normalized.maxX() * device) + bleed_pixels, device);
+    const height = canvasDirtySpanForCeilBoundary(min_y, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    return geometry.RectF.init(min_x, min_y, width, height);
 }
 
-/// The snapped max edge in logical points, chosen so its f32 product
-/// with `device` never exceeds the ceil boundary: `@ceil(v*s)/s` can
-/// round UP past the boundary (an edge at 5 points re-snapped at 1.5x
-/// becomes 5.3333335, whose product ceils to 9), and a consumer
-/// re-deriving pixels from the product would then clear one pixel more
-/// than culling against the rect admits — a missing fringe. Nudged
-/// down ulp by ulp until the round trip lands on the boundary; never
-/// below the original value, so the snap stays outward.
-fn alignedCanvasDirtyCeilEdge(value: f32, device: f32) f32 {
-    const boundary = @ceil(value * device);
+/// Smallest representable logical coordinate whose f32 product with
+/// `device` reaches `boundary`. Consumers floor the product to pick the
+/// first cleared pixel — a product below the boundary clears one extra
+/// pixel culling excludes — and culling must admit every command
+/// painting into the cleared region, which the MINIMAL such edge
+/// guarantees: anything smaller has a product below the boundary and
+/// paints only uncleared pixels.
+fn canvasDirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
     var edge = boundary / device;
-    while (edge * device > boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
-    return @max(edge, value);
-}
-
-/// Floor-side twin of `alignedCanvasDirtyCeilEdge`: the product must
-/// not round below the floor boundary, or the consumer clears one
-/// extra pixel on the leading edge.
-fn alignedCanvasDirtyFloorEdge(value: f32, device: f32) f32 {
-    const boundary = @floor(value * device);
-    var edge = boundary / device;
+    while (edge * device >= boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
     while (edge * device < boundary) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
-    return @min(edge, value);
+    return edge;
+}
+
+/// Largest span whose RECONSTRUCTED max edge (`min_edge + span`, the
+/// f32 a stored rect hands back) keeps its product with `device` at or
+/// under `boundary`. Consumers ceil that product to pick the last
+/// cleared pixel — one ulp past the maximum clears a pixel culling
+/// refuses to repaint — and the MAXIMAL such span admits every command
+/// painting into the cleared region: anything larger has a product past
+/// the boundary.
+fn canvasDirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    var span = @max(0, boundary / device - min_edge);
+    while ((min_edge + span) * device <= boundary) span = std.math.nextAfter(f32, span, std.math.inf(f32));
+    while (span > 0 and (min_edge + span) * device > boundary) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+    return span;
 }
 
 fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
