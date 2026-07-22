@@ -2583,6 +2583,11 @@ pub fn Effects(comptime Msg: type) type {
             surface: u64 = 0,
             playing: bool = false,
             buffering: bool = false,
+            /// A non-looping natural end was reached and the platform
+            /// player retired (`VideoChannel.completed`): play and
+            /// seek refuse from here — the resume path is
+            /// `restartVideo` (or a fresh load).
+            completed: bool = false,
             looping: bool = false,
             muted: bool = false,
             source: EffectVideoSource = .local,
@@ -6304,6 +6309,39 @@ pub fn Effects(comptime Msg: type) type {
             services.videoPlay() catch return self.failVideoChannel();
         }
 
+        /// Restart the current playback from the start: a fresh load
+        /// of the channel's own remembered source with autoplay,
+        /// keeping the key, surface claim, handler, and the loop and
+        /// mute flags. THE resume path after a non-looping natural
+        /// end — the platform player was retired there, so play and
+        /// seek refuse — and the house transport's Play goes through
+        /// here when the completion latch is set. Idle channels no-op
+        /// (nothing to restart). An ordinary load in every other
+        /// respect: it journals its cascade resolution, replaces the
+        /// player whole, and delivers a fresh `.loaded`
+        /// acknowledgment.
+        pub fn restartVideo(self: *Self) void {
+            if (!self.video.active) return;
+            // Copies, not slices: loadVideo writes the channel's own
+            // source buffers, and the options must not alias them.
+            var path_buffer: [max_effect_video_path_bytes]u8 = undefined;
+            var url_buffer: [max_effect_video_path_bytes]u8 = undefined;
+            const path_len = self.video.path_len;
+            const url_len = self.video.url_len;
+            @memcpy(path_buffer[0..path_len], self.video.path());
+            @memcpy(url_buffer[0..url_len], self.video.url());
+            self.loadVideo(.{
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .path = path_buffer[0..path_len],
+                .url = url_buffer[0..url_len],
+                .autoplay = true,
+                .loop = self.video.looping,
+                .muted = self.video.muted,
+                .on_event = self.video.on_event,
+            });
+        }
+
         /// Pause the current playback in place; the surface keeps its
         /// last adopted frame. Idle channels no-op; no event echoes —
         /// the caller commanded it, so the caller knows.
@@ -6584,6 +6622,7 @@ pub fn Effects(comptime Msg: type) type {
                 .surface = self.video.surface_id,
                 .playing = self.video.playing,
                 .buffering = self.video.buffering,
+                .completed = self.video.completed,
                 .looping = self.video.looping,
                 .muted = self.video.muted,
                 .source = self.video.source,

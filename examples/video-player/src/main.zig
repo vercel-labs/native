@@ -197,9 +197,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // Toggle against the channel's own mirror, not the event-fed
         // model state: commands echo no events, so mid-gesture truth
         // lives in the snapshot (the next tick reconciles the model).
+        // A FINISHED playback has no player left to resume (play would
+        // answer with one failed event), so Play means from-the-start:
+        // restartVideo reloads the same source.
         .toggle_play => if (fx.videoSnapshot().playing) {
             model.playing = false;
             fx.pauseVideo();
+        } else if (fx.videoSnapshot().completed) {
+            model.playing = true;
+            fx.restartVideo();
         } else {
             model.playing = true;
             fx.playVideo();

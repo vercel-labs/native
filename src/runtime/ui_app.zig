@@ -3126,6 +3126,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .active = snap.active,
                 .playing = snap.playing,
                 .buffering = snap.buffering,
+                .completed = snap.completed,
                 .position_ms = snap.position_ms,
                 .duration_ms = snap.duration_ms,
             };
@@ -3968,8 +3969,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// resolve to: no app Msg exists, the video channel is driven
         /// directly and the chrome re-renders from the moved mirrors.
         fn toggleVideoControl(self: *Self, runtime: *Runtime) anyerror!void {
-            if (self.effects.videoSnapshot().playing) {
+            const snapshot = self.effects.videoSnapshot();
+            if (snapshot.playing) {
                 self.effects.pauseVideo();
+            } else if (snapshot.completed) {
+                // The natural end retired the player, so play would
+                // refuse with one `.failed` — a broken answer to a
+                // valid control. Play on a finished playback means
+                // from-the-start: a fresh load of the same source.
+                self.effects.restartVideo();
             } else {
                 self.effects.playVideo();
             }

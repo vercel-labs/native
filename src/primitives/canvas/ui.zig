@@ -1793,6 +1793,11 @@ pub fn Ui(comptime Msg: type) type {
             active: bool = false,
             playing: bool = false,
             buffering: bool = false,
+            /// The playback reached its non-looping natural end: the
+            /// player is retired, so seeking is dead (the scrub
+            /// disables) while Play stays live — the runtime restarts
+            /// the playback from the start on it.
+            completed: bool = false,
             position_ms: u64 = 0,
             duration_ms: u64 = 0,
         };
@@ -1912,7 +1917,11 @@ pub fn Ui(comptime Msg: type) type {
             var scrub = self.el(.slider, .{
                 .grow = 1,
                 .value = fraction,
-                .disabled = !state.active,
+                // A completed playback's player is retired: a seek
+                // would refuse and the thumb spring back, so the
+                // scrub disables — Play (which restarts) is the live
+                // affordance.
+                .disabled = !state.active or state.completed,
                 .semantics = .{ .label = "Seek" },
             }, .{});
             scrub.widget.video_control = .scrub;

@@ -1191,6 +1191,38 @@ test "keyboard activation of the house chrome toggle drives the channel like the
     try std.testing.expect(fx.videoSnapshot().playing);
 }
 
+test "the house chrome toggle restarts a finished playback from the start" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // Run the declared playback to its natural end: the player
+    // retires, the completion latches, and the scrub goes dead while
+    // Play stays live.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceVideo(95_000).?);
+    try std.testing.expect(fx.videoSnapshot().completed);
+    try std.testing.expect(!np.video.loaded);
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.video_control == .scrub) try std.testing.expect(node.widget.state.disabled);
+        if (node.widget.video_control == .toggle) try std.testing.expect(!node.widget.state.disabled);
+    }
+
+    // Play on the finished playback: a fresh load of the same source,
+    // not a failed event.
+    const loads_before = np.video_load_count;
+    const toggle = try h.controlFrame(.toggle);
+    try h.clickAt(toggle.center().x, toggle.center().y);
+    try std.testing.expectEqual(loads_before + 1, np.video_load_count);
+    try std.testing.expect(np.video.loaded);
+    try std.testing.expect(np.video.playing);
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expect(!fx.videoSnapshot().completed);
+    try std.testing.expect(fx.videoSnapshot().playing);
+}
+
 test "the house chrome slider seeks proportionally into the playback" {
     var h = try DeclHarness.create();
     defer h.destroy();
