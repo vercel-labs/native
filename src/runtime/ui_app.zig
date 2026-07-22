@@ -851,6 +851,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Scratch handed to `status_item_fn`; on the app struct so the
         /// returned slices outlive the apply.
         tray_scratch: StatusItemScratch = .{},
+        /// Hover target (`ElementOptions.on_hover`) whose enter edge last
+        /// dispatched. Move/hover re-dispatches only when this changes, so
+        /// a SET-style arm fires once per target, not per pointer sample.
+        hover_dispatched_id: canvas.ObjectId = 0,
         /// Press-and-hold gesture state (`ElementOptions.on_hold`): the
         /// widget id whose press armed the hold timer, and whether the
         /// timer fired for the current gesture (a fired hold suppresses
@@ -3392,6 +3396,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handlePointer(self: *Self, runtime: *Runtime, pointer_event: core.CanvasWidgetPointerEvent) anyerror!void {
             const tree = self.treeForViewLabel(pointer_event.view_label) orelse return;
             switch (pointer_event.pointer.phase) {
+                .hover, .move => try self.dispatchHoverEdge(runtime, tree, pointer_event),
                 .down => {
                     self.disarmHold(runtime);
                     if (pointer_event.press_target) |target| {
@@ -3444,6 +3449,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
+        }
+
+        /// Dispatch the topmost `on_hover` target's Msg on the enter edge.
+        /// Move/hover fires many samples per gesture; tracking the last
+        /// dispatched target collapses them to one Msg per target change.
+        fn dispatchHoverEdge(self: *Self, runtime: *Runtime, tree: *const Ui.Tree, pointer_event: core.CanvasWidgetPointerEvent) anyerror!void {
+            var hover_id: canvas.ObjectId = 0;
+            for (pointer_event.route) |entry| {
+                if (tree.msgForHover(entry.id) != null) {
+                    hover_id = entry.id;
+                    break;
+                }
+            }
+            if (hover_id == self.hover_dispatched_id) return;
+            self.hover_dispatched_id = hover_id;
+            if (hover_id == 0) return;
+            if (tree.msgForHover(hover_id)) |msg| try self.dispatch(runtime, pointer_event.window_id, msg);
         }
 
         fn disarmHold(self: *Self, runtime: *Runtime) void {

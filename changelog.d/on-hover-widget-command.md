@@ -1,0 +1,1 @@
+feature: **`on_hover` widget command**: bind `on_hover` (markup `hover=`) on any element to dispatch a Msg on the pointer's hover-enter edge; the runtime fires once per resolved target change, not per pointer sample.

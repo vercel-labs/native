@@ -318,7 +318,7 @@ test "structural validation reports positions for grammar misuse" {
         .{ .source = "<column>\n  <weird />\n</column>", .message = "unknown element" },
         .{ .source = "<column bogus=\"1\" />", .message = "unknown attribute" },
         .{ .source = "<row>\n  <button on-press=\"a + b\">X</button>\n</row>", .message = "invalid message expression: on-* takes a Msg tag (\"add\") or tag with one binding payload (\"toggle:{item.id}\")" },
-        .{ .source = "<row>\n  <button on-hover=\"x\">X</button>\n</row>", .message = "unknown event attribute" },
+        .{ .source = "<row>\n  <button on-teleport=\"x\">X</button>\n</row>", .message = "unknown event attribute" },
         .{ .source = "<column>\n  <row on-change=\"select\">\n    <text>press me</text>\n  </row>\n</column>", .message = markup.non_hit_target_handler_message },
         .{ .source = "<column on-input=\"draft\">\n  <text>x</text>\n</column>", .message = markup.non_hit_target_handler_message },
         .{ .source = "<table>\n  <table-row on-submit=\"pick\">\n    <table-cell>x</table-cell>\n  </table-row>\n</table>", .message = markup.non_hit_target_handler_message },

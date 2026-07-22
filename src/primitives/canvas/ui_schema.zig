@@ -508,6 +508,7 @@ pub const events = [_]EventInfo{
     .{ .code = 8, .name = "hold" },
     .{ .code = 9, .name = "resize", .payload = .fraction, .only_on_element = "split" },
     .{ .code = 10, .name = "reach-end", .only_on_element = "scroll" },
+    .{ .code = 11, .name = "hover" },
 };
 
 // ------------------------------------------------------- token vocabulary
