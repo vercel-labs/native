@@ -289,7 +289,7 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
 
     try session.render.update(session.gpa, &session.term);
     const rs = &session.render;
-    const palette = Palette.init(tokens, &rs.colors);
+    const palette = Palette.init(tokens, &rs.colors, &session.term.colors.palette);
 
     // The terminal surface: full-bleed theme background under the grid.
     try builder.fillRect(.{
@@ -588,8 +588,12 @@ const Palette = struct {
     selection: canvas.Color,
     ansi: [16]canvas.Color,
     terminal: *const vt.RenderState.Colors,
+    /// The emulator's live palette WITH its override mask, so an
+    /// explicit OSC 4 set is honored even when it happens to equal the
+    /// default RGB — the mask, not RGB equality, decides "untouched".
+    dynamic: *const vt.color.DynamicPalette,
 
-    fn init(tokens: canvas.DesignTokens, terminal_colors: *const vt.RenderState.Colors) Palette {
+    fn init(tokens: canvas.DesignTokens, terminal_colors: *const vt.RenderState.Colors, dynamic: *const vt.color.DynamicPalette) Palette {
         const colors = tokens.colors;
         const dark = colors.background.r + colors.background.g + colors.background.b < 1.5;
         const dim: f32 = if (dark) 0.85 else 1.0;
@@ -607,6 +611,7 @@ const Palette = struct {
             .cursor = if (terminal_colors.cursor) |cur| rgbToColor(cur) else colors.accent,
             .selection = colors.accent,
             .terminal = terminal_colors,
+            .dynamic = dynamic,
             .ansi = .{
                 // 0-7: black, red, green, yellow, blue, magenta, cyan, white.
                 blend(colors.text, colors.background, if (dark) 0.35 else 0.95),
@@ -630,16 +635,17 @@ const Palette = struct {
         };
     }
 
-    /// Palette index -> color: theme-derived for untouched ANSI-16
-    /// entries, the emulator's live palette everywhere else.
+    /// Palette index -> color: theme-derived for UNTOUCHED ANSI-16
+    /// entries, the emulator's live palette everywhere else. "Untouched"
+    /// is the emulator's own override mask, not RGB equality — a program
+    /// that OSC-4-sets a slot to exactly the default RGB has still
+    /// chosen it, and its choice is honored rather than replaced by the
+    /// theme color.
     fn indexed(palette: *const Palette, index: u8) canvas.Color {
-        const live = palette.terminal.palette[index];
-        if (index < 16) {
-            const default_entry = vt.color.default[index];
-            if (live.r == default_entry.r and live.g == default_entry.g and live.b == default_entry.b) {
-                return palette.ansi[index];
-            }
+        if (index < 16 and !palette.dynamic.mask.isSet(index)) {
+            return palette.ansi[index];
         }
+        const live = palette.dynamic.current[index];
         return canvas.Color.rgb8(live.r, live.g, live.b);
     }
 

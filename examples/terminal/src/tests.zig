@@ -191,6 +191,42 @@ test "the grid never emits past its command budget" {
     try testing.expect(builder.displayList().commands.len <= 1700);
 }
 
+test "an OSC 4 palette override is honored even when it equals the default RGB" {
+    const session = try createSession(20, 3);
+    defer session.destroy();
+    const default_red = vt.color.default[1];
+    // OSC 4: set ANSI 1 (red) to EXACTLY the emulator's default red RGB,
+    // then print red text. RGB equality with the default must not fool
+    // the renderer into substituting the theme color — the override
+    // mask says the program chose it.
+    var seq: [64]u8 = undefined;
+    session.feed(std.fmt.bufPrint(&seq, "\x1b]4;1;rgb:{x:0>2}/{x:0>2}/{x:0>2}\x07", .{ default_red.r, default_red.g, default_red.b }) catch unreachable);
+    session.feed("\x1b[31mR\x1b[0m\r\n");
+
+    var commands: [256]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const tokens: canvas.DesignTokens = .{};
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = tokens,
+        .running = true,
+        .selecting = false,
+    });
+    var saw = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| if (std.mem.eql(u8, text.text, "R")) {
+                saw = true;
+                // The live (overridden) RGB, not the theme destructive.
+                try testing.expectApproxEqAbs(@as(f32, @floatFromInt(default_red.r)) / 255.0, text.color.r, 0.004);
+                try testing.expect(text.color.r != tokens.colors.destructive.r);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw);
+}
+
 test "grid clamping trades rows for columns inside the cell budget" {
     const clamped = grid.Session.clampGrid(4000, 4000);
     try testing.expect(@as(usize, clamped.x) <= grid.max_cols);

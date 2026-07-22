@@ -18,6 +18,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Serializes `ptsname`'s shared static buffer across every pty spawn in
+/// the process (spawns can originate from independent runtime instances
+/// on different threads). A tiny spinlock — the guarded section is a
+/// bounded name copy, microseconds at worst.
+const SpinLock = struct {
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    fn lock(self: *SpinLock) void {
+        while (self.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+    fn unlock(self: *SpinLock) void {
+        self.locked.store(false, .release);
+    }
+};
+var ptsname_mutex: SpinLock = .{};
+
 /// pty support is a POSIX story: openpty + a controlling terminal.
 /// Windows (ConPTY) is staged separately; every non-posix target reports
 /// the effect as unsupported rather than pretending. macOS always links
@@ -282,11 +297,31 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         _ = c.close(master);
         return error.PtyOpenFailed;
     }
-    const slave_name = c.ptsname(master) orelse {
-        _ = c.close(master);
-        return error.PtyOpenFailed;
+    // `ptsname` returns libc-managed SHARED storage (not thread-safe):
+    // two runtimes spawning ptys on different threads could otherwise
+    // race, the second call overwriting the first's slave name before
+    // it opens. A process-wide mutex serializes the resolve-and-copy so
+    // each spawn opens its own slave. (`ptsname_r` is not portably
+    // available — macOS lacks it on older SDKs — so a copy under the
+    // lock is the portable answer.)
+    var name_buf: [128]u8 = undefined;
+    const slave_name = blk: {
+        ptsname_mutex.lock();
+        defer ptsname_mutex.unlock();
+        const shared_name = c.ptsname(master) orelse {
+            _ = c.close(master);
+            return error.PtyOpenFailed;
+        };
+        const span = std.mem.span(shared_name);
+        if (span.len + 1 > name_buf.len) {
+            _ = c.close(master);
+            return error.PtyOpenFailed;
+        }
+        @memcpy(name_buf[0..span.len], span);
+        name_buf[span.len] = 0;
+        break :blk name_buf[0..span.len :0];
     };
-    var slave = c.open(slave_name, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
+    var slave = c.open(slave_name.ptr, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
     if (slave < 0) {
         _ = c.close(master);
         return error.PtyOpenFailed;

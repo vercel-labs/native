@@ -4391,27 +4391,25 @@ pub fn Effects(comptime Msg: type) type {
                     // idle included: the header is process-lifetime and
                     // reused, so a retired session's slow `wake_fn` may
                     // still be in flight, and the services snapshot and
-                    // platform it dereferences are about to be freed.
+                    // platform it dereferences are about to be freed. A
+                    // still-executing call at the deadline is abandoned,
+                    // counted, and the platform signalled to outlive it.
+                    //
+                    // The header itself is DELIBERATELY NEVER FREED — the
+                    // `ChannelShared` permanent-leak invariant, verbatim.
+                    // Quiescing proves only `in_flight == 0`, not that
+                    // the io thread has RETURNED: the thread publishes
+                    // its exit and then calls `requestHostWake`, and a
+                    // thread descheduled in that pre-wake window (or a
+                    // mid-life-retired, detached thread whose violating
+                    // wake still runs) will lock this header's wake mutex
+                    // later, so freeing it here would be a use-after-
+                    // free. The leak is bounded (at most `max_effect_ptys`
+                    // ~64 KiB headers per Effects instance) and never
+                    // grows during a runtime's life (headers are reused
+                    // across sessions), matching every channel header.
                     if (pty_slot.shared) |shared| {
-                        if (quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
-                            // Clean: no producer is inside the host call
-                            // and the io thread has returned, so NOTHING
-                            // can touch this header again. Unlike a
-                            // channel header (which an app thread may
-                            // post to forever, hence its permanent
-                            // leak), the pty io thread is the sole
-                            // toucher and it is gone — free the header so
-                            // repeatedly creating and destroying runtimes
-                            // that used a pty does not leak ~64 KiB each.
-                            if (shared.staging) |st| process_allocator.destroy(st);
-                            self.channel_storage_allocator.destroy(shared);
-                            pty_slot.shared = null;
-                        } else {
-                            // A call still executing at the deadline is
-                            // abandoned, counted, and the platform
-                            // signalled to outlive it; its header LEAKS
-                            // (the stale call can still touch it) — the
-                            // channel teardown's containment, verbatim.
+                        if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
                             self.abandoned_channel_wakes += 1;
                             if (self.services) |services| services.noteChannelWakeAbandoned();
                         }
