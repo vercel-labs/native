@@ -3756,17 +3756,23 @@ pub fn Effects(comptime Msg: type) type {
         /// that failed allocation leaves producer wakes disarmed,
         /// posts accepted in that window latch nothing, and the next
         /// successful publication's sweep is what un-strands them.
-        /// Returns whether THIS call published.
+        ///
+        /// FAILURE CONTAINMENT differs by site: `openChannel` REFUSES
+        /// the open outright (no channel exists whose accepted posts
+        /// could strand wakeless), so only a channel opened BEFORE
+        /// `bindServices` can be live through a failed publication —
+        /// and `drainBoundary` retries at every pass boundary until it
+        /// heals. Returns whether THIS call published.
         fn materializeWakeSnapshot(self: *Self) bool {
             if (self.wake_services.load(.seq_cst) != null) return false;
             const services = self.services orelse return false;
             const snapshot = self.channel_storage_allocator.create(platform.PlatformServices) catch {
                 // No storage for the snapshot: leave the producer-side
                 // mirror disarmed (loop-side stages still wake through
-                // the plain `services` field, and the next publication
-                // attempt retries) rather than publish a pointer whose
-                // owner can die before an abandoned call dereferences
-                // it.
+                // the plain `services` field, and the boundary retry
+                // above heals any live open-before-bind channel) rather
+                // than publish a pointer whose owner can die before an
+                // abandoned call dereferences it.
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print("effects: cannot allocate the process-lived services snapshot; producer-thread host wakes stay disarmed until a later open retries\n", .{});
                 }
@@ -4546,6 +4552,26 @@ pub fn Effects(comptime Msg: type) type {
                 slot.park_state = .reserved;
                 return dead;
             }
+            // Materialize the services snapshot BEFORE committing the
+            // occupancy (the lazy half of the ownership rule at
+            // `wake_snapshot`; a no-op once published or while no
+            // services are bound — `bindServices` publishes then). A
+            // channel whose snapshot cannot allocate can never wake the
+            // host from a producer thread — its accepted posts would
+            // strand until unrelated traffic — so the open REFUSES
+            // instead of handing out a handle that cannot fulfill the
+            // posting contract: the same executor-truth rejection class
+            // as the header/staging allocation failures below. A
+            // publication is followed by its Dekker sweep (see
+            // `materializeWakeSnapshot` — load-bearing only for posts
+            // stranded by an earlier failed bind-site publication).
+            if (self.services != null and self.wake_services.load(.seq_cst) == null) {
+                if (!self.materializeWakeSnapshot()) {
+                    self.rejectChannel(options.key, options.on_event, false);
+                    return dead;
+                }
+                if (self.hasPending()) self.wakeHost();
+            }
             // The posting header is process-lifetime storage: created
             // at the slot's first open, reused forever (see
             // `ChannelShared`). Failing to stage the channel is NOT
@@ -4599,19 +4625,6 @@ pub fn Effects(comptime Msg: type) type {
             shared.wake.services = &self.wake_services;
             shared.wake.pending.store(false, .seq_cst);
             shared.wake.mutex.unlock();
-            // First live channel wake of this bind generation (or a
-            // retry after a failed publication): materialize the
-            // process-lived snapshot the poster's `requestHostWake`
-            // dereferences — the lazy half of the ownership rule at
-            // `wake_snapshot` — BEFORE the handle escapes to any
-            // producer thread. A no-op when already published or when
-            // no services are bound yet (`bindServices` publishes
-            // then). A publication is followed by its Dekker sweep
-            // (see `materializeWakeSnapshot` — load-bearing only for
-            // posts stranded by an earlier failed publication).
-            if (self.materializeWakeSnapshot()) {
-                if (self.hasPending()) self.wakeHost();
-            }
             return .{ .shared = shared, .generation = generation };
         }
 
@@ -5648,6 +5661,23 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            // Heal a failed bind-site snapshot publication: an
+            // open-before-bind channel is the one shape that can be
+            // LIVE with producer wakes disarmed (`openChannel` refuses
+            // opens that cannot publish, but a channel opened before
+            // `bindServices` was already committed when the bind-time
+            // attempt failed). Retrying at every pass boundary bounds
+            // the stranding to one loop wake of any origin — the bind's
+            // own catch-up sweep, a timer, a frame — and the
+            // publication's Dekker sweep then un-strands any posts
+            // accepted during the disarmed window. One atomic load on
+            // the common path; the allocation retries only while a
+            // live wake header actually needs it.
+            if (self.wake_services.load(.seq_cst) == null and self.services != null and self.liveChannelWakeArmed()) {
+                if (self.materializeWakeSnapshot()) {
+                    if (self.hasPending()) self.wakeHost();
+                }
+            }
             // Drain the channel wake coalescers BEFORE snapshotting the
             // post order — `adoptMediaSurfaceFrames`' clear-before-
             // sample placement, matched exactly (it clears each slot's

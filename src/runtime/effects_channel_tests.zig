@@ -2629,11 +2629,12 @@ test "an executor-truth channel rejection record still feeds and retires the par
 /// everything else to the page allocator — `process_allocator`'s
 /// backing, which keeps retire/teardown's `process_allocator` frees
 /// valid for every allocation that succeeds. The seam
-/// (`channel_storage_allocator`) is consulted ONLY by `openChannel`'s
-/// posting-header and staging-FIFO creates, so failing the next call
-/// through it is exactly one open's start failure — the surgical
-/// one-shot the image tests get from their buffer-size-matched
-/// wrapper (`ImageBufferFailingAllocator` in the session tests).
+/// (`channel_storage_allocator`) is consulted only by `openChannel`'s
+/// posting-header, staging-FIFO, and services-snapshot creates, so
+/// failing the next call through it is exactly one open's (or one
+/// publication's) start failure — the surgical one-shot the image
+/// tests get from their buffer-size-matched wrapper
+/// (`ImageBufferFailingAllocator` in the session tests).
 const ChannelStorageFailingAllocator = struct {
     backing: std.mem.Allocator = std.heap.page_allocator,
     armed: bool = false,
@@ -2722,6 +2723,79 @@ test "an alloc-failed open reserves table capacity until its rejection drains" {
     // The earlier table-full refusal's terminal still delivers exactly
     // once.
     try expectRejected(&fx, 302);
+}
+
+test "an open that cannot allocate the services snapshot refuses as executor truth" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    fx.channel_storage_allocator = failing.allocator();
+    const null_platform = try testing.allocator.create(platform_mod.NullPlatform);
+    defer testing.allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    const host_platform = null_platform.platform();
+    fx.bindServices(&host_platform.services);
+
+    // The snapshot allocation fails at the open's pre-flight: NO
+    // handle exists — a live channel here could accept posts that
+    // never wake the host (producer wakes stay disarmed until another
+    // publication), so the open refuses up front, the same
+    // executor-truth class as a header/staging start failure.
+    failing.armed = true;
+    const dead = fx.openChannel(.{ .key = 90, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(dead.shared == null);
+    try testing.expect(!failing.armed);
+    try testing.expectEqual(PostResult.closed, dead.post("never lands"));
+    try expectRejected(&fx, 90);
+
+    // Storage recovered: the key retired with the rejection, the next
+    // open publishes the snapshot and its posts wake the host.
+    const handle = fx.openChannel(.{ .key = 90, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(handle.shared != null);
+    try testing.expect(fx.wake_services.load(.seq_cst) != null);
+    try testing.expectEqual(PostResult.accepted, handle.post("healed"));
+    try testing.expect(null_platform.wake_count.load(.acquire) >= 1);
+    _ = try expectData(&fx, 90, "healed");
+    fx.closeChannel(90);
+    while (fx.takeMsg()) |_| {}
+}
+
+test "a failed bind-site snapshot publication heals at the next pass boundary" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var failing: ChannelStorageFailingAllocator = .{};
+    fx.channel_storage_allocator = failing.allocator();
+    const null_platform = try testing.allocator.create(platform_mod.NullPlatform);
+    defer testing.allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    const host_platform = null_platform.platform();
+
+    // Open BEFORE bind: the one shape that can be live through a
+    // failed publication (the open-site pre-flight is a no-op while no
+    // services are bound, and `openChannel` cannot refuse what was
+    // committed before the bind existed).
+    const handle = fx.openChannel(.{ .key = 91, .on_event = DirectFx.channelMsg(.event) });
+    try testing.expect(handle.shared != null);
+
+    // The bind-time publication fails: producer wakes stay disarmed...
+    failing.armed = true;
+    fx.bindServices(&host_platform.services);
+    try testing.expect(fx.wake_services.load(.seq_cst) == null);
+    // ...so a post in that window is accepted but latches no host wake.
+    try testing.expectEqual(PostResult.accepted, handle.post("stranded?"));
+    try testing.expectEqual(@as(usize, 0), null_platform.wake_count.load(.acquire));
+
+    // The next pass boundary heals: the retried publication lands and
+    // its Dekker sweep un-strands the accepted post with a host wake.
+    var boundary = fx.drainBoundary();
+    try testing.expect(fx.wake_services.load(.seq_cst) != null);
+    try testing.expect(null_platform.wake_count.load(.acquire) >= 1);
+    const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;
+    try testing.expectEqualStrings("stranded?", msg.event.bytes);
+    fx.closeChannel(91);
+    while (fx.takeMsg()) |_| {}
 }
 
 test "regenerating channel refusals do not reserve table capacity" {
