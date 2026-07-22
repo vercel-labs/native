@@ -9992,7 +9992,15 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         CFRelease(pixels);
         return;
     }
-    CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    /* A failed lock never mapped the buffer: the base address would be
+     * garbage and the matching unlock would unbalance the buffer's lock
+     * count. Drop this frame and keep hunting — the poster latch stays
+     * set for the same reason a converted-but-unpushed tick keeps it
+     * (below): only an actual push verdict may end the hunt. */
+    if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+        CFRelease(pixels);
+        return;
+    }
     void *base = CVPixelBufferGetBaseAddress(pixels);
     /* -1 = no push happened (NULL base address or a failed channel
      * permutation). Only an actual push verdict may end the poster
