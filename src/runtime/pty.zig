@@ -64,12 +64,14 @@ pub const Pty = struct {
     /// Read available output bytes into `buf`. Returns 0 at EOF — which a
     /// pty master reports as EIO on Linux once the child exits, normalized
     /// here — and `error.ReadFailed` for anything else.
-    pub fn read(self: Pty, buf: []u8) error{ReadFailed}!usize {
+    pub fn read(self: Pty, buf: []u8) error{ ReadFailed, WouldBlock }!usize {
         while (true) {
             const r = c.read(self.master, buf.ptr, buf.len);
             if (r >= 0) return @intCast(r);
             switch (errnoValue()) {
                 eintr => continue,
+                // Non-blocking master with nothing ready: not EOF.
+                eagain => return error.WouldBlock,
                 // EIO from a pty master is the hangup after child exit:
                 // the stream is over, not broken.
                 eio => return 0,
@@ -79,13 +81,17 @@ pub const Pty = struct {
     }
 
     /// Write input bytes toward the child. Partial writes are possible;
-    /// the caller loops.
-    pub fn write(self: Pty, bytes: []const u8) error{WriteFailed}!usize {
+    /// the caller loops. `error.WouldBlock` means the non-blocking
+    /// master's input buffer is full (the child is not reading) — the
+    /// caller leaves the bytes staged and retries on the next writable
+    /// poll, never blocking the io thread.
+    pub fn write(self: Pty, bytes: []const u8) error{ WriteFailed, WouldBlock }!usize {
         while (true) {
             const r = c.write(self.master, bytes.ptr, bytes.len);
             if (r >= 0) return @intCast(r);
             switch (errnoValue()) {
                 eintr => continue,
+                eagain => return error.WouldBlock,
                 else => return error.WriteFailed,
             }
         }
@@ -261,6 +267,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     const master = c.posix_openpt(o_rdwr | o_noctty | o_cloexec_open);
     if (master < 0) return error.PtyOpenFailed;
     _ = setCloexec(master);
+    // Non-blocking master: the sole io thread must never block inside a
+    // write when the child stops reading its stdin (a full pty input
+    // buffer), which would stall stdout draining and deadlock both
+    // sides. Reads and writes handle EAGAIN; the poll loop paces both.
+    {
+        const flags = c.fcntl(master, f_getfl, @as(c_int, 0));
+        if (flags < 0 or c.fcntl(master, f_setfl, flags | o_nonblock) < 0) {
+            _ = c.close(master);
+            return error.PtyOpenFailed;
+        }
+    }
     if (c.grantpt(master) != 0 or c.unlockpt(master) != 0) {
         _ = c.close(master);
         return error.PtyOpenFailed;
@@ -564,6 +581,13 @@ const sighup: c_int = 1;
 const eintr: c_int = 4;
 const eio: c_int = 5;
 const echild: c_int = 10;
+// EAGAIN (== EWOULDBLOCK on both platforms): no progress on a
+// non-blocking fd right now.
+const eagain: c_int = switch (builtin.os.tag) {
+    .linux => 11,
+    .macos => 35,
+    else => 11,
+};
 // F_DUPFD_CLOEXEC differs by platform.
 const f_dupfd_cloexec: c_int = switch (builtin.os.tag) {
     .linux => 1030,
@@ -736,6 +760,26 @@ const pollhup: c_short = 0x10;
 
 // ------------------------------------------------------------------ tests
 
+/// Read the child's whole output, polling the non-blocking master to
+/// EOF — the effects io loop's poll discipline, condensed for the
+/// in-file tests (which have no effects channel).
+fn testReadAll(p: Pty, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const ready = wait(p.master, p.master, true, false);
+        if (p.read(buf[total..])) |n| {
+            if (n == 0) return total; // EOF
+            total += n;
+        } else |err| switch (err) {
+            error.WouldBlock => {
+                if (ready.hangup) return total;
+            },
+            error.ReadFailed => return total,
+        }
+    }
+    return total;
+}
+
 test "spawn rejects an empty argv and a missing command" {
     if (comptime !supported) return;
     try std.testing.expectError(error.PtyArgvInvalid, spawn(std.testing.allocator, .{ .argv = &.{} }));
@@ -755,12 +799,7 @@ test "live pty round trip: output, exit code, controlling terminal" {
     });
     defer p.close();
     var buf: [256]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = p.read(buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
-    }
+    const total = testReadAll(p, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "hello") != null);
     const exit = p.reapBlocking();
     try std.testing.expectEqual(@as(i32, 7), exit.code);
@@ -786,12 +825,7 @@ test "the child environment is exactly env plus TERM" {
     });
     defer p.close();
     var buf: [256]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = p.read(buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
-    }
+    const total = testReadAll(p, &buf);
     _ = p.reapBlocking();
     const out = buf[0..total];
     // TERM injected, MARKER passed through, HOME absent (clean env).

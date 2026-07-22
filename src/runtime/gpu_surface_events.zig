@@ -467,7 +467,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         break :blk if (input_event.text.len > 0) input_event.text else null;
                     },
                     .ime_set_composition => blk: {
-                        const len = @min(input_event.text.len, self.targetless_ime_preedit.len);
+                        // Truncate on a UTF-8 boundary, never mid-code-
+                        // point: a byte-wise cut could split a multibyte
+                        // sequence and an empty commit would then forward
+                        // invalid UTF-8 as committed text.
+                        const len = utf8TruncatedLen(input_event.text, self.targetless_ime_preedit.len);
                         @memcpy(self.targetless_ime_preedit[0..len], input_event.text[0..len]);
                         self.targetless_ime_preedit_len = len;
                         break :blk null; // preedit is provisional
@@ -783,4 +787,16 @@ fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []co
 
 fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
+/// The largest length <= `max` at which `text` (valid UTF-8) can be cut
+/// without splitting a code point: if the byte at the cut is a UTF-8
+/// continuation byte (0b10xxxxxx), back up to the start of that
+/// sequence. Keeps a truncated IME preedit from later committing
+/// invalid UTF-8.
+fn utf8TruncatedLen(text: []const u8, max: usize) usize {
+    var len = @min(text.len, max);
+    if (len == text.len) return len;
+    while (len > 0 and (text[len] & 0xC0) == 0x80) len -= 1;
+    return len;
 }

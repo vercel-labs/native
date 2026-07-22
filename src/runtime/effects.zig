@@ -1922,7 +1922,13 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         if (ready.writable) ptyFlushOutbound(shared, transport, generation);
         if (ready.readable and want_read) {
             const take = @min(local.len, room);
-            const n = transport.read(local[0..take]) catch 0;
+            const n = transport.read(local[0..take]) catch |err| switch (err) {
+                // Nothing ready on the non-blocking master (a spurious
+                // readable): not EOF — re-poll.
+                error.WouldBlock => continue :read_loop,
+                // A real read error (or normalized EOF) ends the stream.
+                error.ReadFailed => break :read_loop,
+            };
             if (n == 0) break :read_loop;
             ptyStageOutput(shared, generation, local[0..n]);
             continue :read_loop;
@@ -2028,21 +2034,28 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             chunk[index] = shared.out_data[(shared.out_head + index) % max_effect_pty_outbound_bytes];
         }
         shared.mutex.unlock();
-        const wrote = transport.write(chunk[0..take]) catch {
-            // The child closed its read end (or the write errored):
-            // the staged bytes can never reach it. Drop them and count
-            // it, so `dropped_writes == 0` keeps meaning "every write
-            // landed" — a write lost to a just-exited child is not
-            // silent.
-            shared.mutex.lock();
-            if (shared.out_len > 0) {
-                shared.dropped_writes +|= @intCast(shared.out_write_count);
-                shared.out_len = 0;
-                shared.out_write_count = 0;
-                shared.out_front_sent = 0;
-            }
-            shared.mutex.unlock();
-            return;
+        const wrote = transport.write(chunk[0..take]) catch |err| switch (err) {
+            // The child's input buffer is full (it is not reading): the
+            // bytes STAY staged and retry on the next writable poll.
+            // Returning here — rather than looping — is what keeps a
+            // non-reading child from blocking the io thread and
+            // stalling stdout: one bounded write attempt per POLLOUT.
+            error.WouldBlock => return,
+            // A real write error (the child closed its read end): the
+            // staged bytes can never reach it. Drop and count each lost
+            // payload so `dropped_writes == 0` keeps meaning "every
+            // write landed".
+            error.WriteFailed => {
+                shared.mutex.lock();
+                if (shared.out_len > 0) {
+                    shared.dropped_writes +|= @intCast(shared.out_write_count);
+                    shared.out_len = 0;
+                    shared.out_write_count = 0;
+                    shared.out_front_sent = 0;
+                }
+                shared.mutex.unlock();
+                return;
+            },
         };
         if (wrote == 0) return;
         shared.mutex.lock();
@@ -10205,7 +10218,21 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (comptime pty_transport.supported) {
                 if (slot.io_thread) |thread| {
-                    thread.join();
+                    // DETACH, never join. Retirement runs at exit
+                    // delivery — inside the very dispatch a
+                    // synchronous-marshal `wake_fn` may be waiting on —
+                    // and the io thread's LAST act is that host wake, so
+                    // joining here would deadlock a violating hook
+                    // exactly the way `ChannelWake` forbids (revoke
+                    // mid-life, quiesce only at teardown). By retirement
+                    // the thread has published `io_done` and is past all
+                    // transport, staging, and pipe access (it only
+                    // touches the process-lifetime wake header from here
+                    // on), so detaching and reclaiming its fds is safe:
+                    // a conforming enqueue-only wake means the thread has
+                    // already exited, and a violating one lingers
+                    // harmlessly against the process-lived header.
+                    thread.detach();
                     slot.io_thread = null;
                 }
                 if (slot.transport) |transport| {
