@@ -952,21 +952,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         video_declared_src_len: usize = 0,
         video_declared_loop: bool = false,
         video_declared_muted: bool = false,
-        /// The `<video src>` declaration a SECONDARY window's build
-        /// recorded, copied out of the slot arena (slot builds and the
-        /// main build interleave, so a borrowed slice could die under
-        /// the reconciler). `Ui.video` promises that declaring the
-        /// element IS the playback in every window's tree; the main
-        /// canvas build wins when both declare (one player, one owner),
-        /// and among slots the first declaring window keeps ownership
-        /// until it stops declaring or closes.
-        video_slot_declared: bool = false,
-        video_slot_declaration_window: platform.WindowId = 0,
-        video_slot_src_buffer: [1024]u8 = undefined,
-        video_slot_src_len: usize = 0,
-        video_slot_autoplay: bool = false,
-        video_slot_loop: bool = false,
-        video_slot_muted: bool = false,
+        /// The `<video src>` declarations SECONDARY windows' builds
+        /// recorded, one retained entry per declaring window, copied
+        /// out of the slot arenas (slot builds and the main build
+        /// interleave, so a borrowed slice could die under the
+        /// reconciler). `Ui.video` promises that declaring the element
+        /// IS the playback in every window's tree; the main canvas
+        /// build wins when it declares (one player, one owner), and
+        /// among slots the current owner keeps the player until it
+        /// stops declaring or closes — at which point the next
+        /// RETAINED declaration promotes immediately, no rebuild
+        /// required (`slotVideoDeclaration`).
+        video_slot_declarations: [max_ui_windows]SlotVideoDeclaration = @splat(.{}),
+        /// The slot window currently owning the declarative playback
+        /// (0 while none does).
+        video_slot_owner: platform.WindowId = 0,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -2160,10 +2160,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.releaseContextMenuSnapshotForWindow(window_id);
             // The reconcile-closed window's video declaration dies with
             // it, exactly as in `handleWindowClosed`.
-            if (self.video_slot_declared and self.video_slot_declaration_window == window_id) {
-                self.captureSlotVideoDeclaration(window_id, null);
-                self.applyVideoDeclaration(runtime);
-            }
+            self.captureSlotVideoDeclaration(window_id, null);
+            self.applyVideoDeclaration(runtime);
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
@@ -2247,30 +2245,54 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyVideoDeclaration(runtime);
         }
 
+        /// One retained secondary-window `<video src>` declaration
+        /// (see `video_slot_declarations`): the window's latest build
+        /// output, kept even while another window owns the player so
+        /// the owner's close or withdrawal promotes it without waiting
+        /// for the declaring window's next rebuild.
+        const SlotVideoDeclaration = struct {
+            used: bool = false,
+            window_id: platform.WindowId = 0,
+            src_buffer: [1024]u8 = undefined,
+            src_len: usize = 0,
+            autoplay: bool = false,
+            loop: bool = false,
+            muted: bool = false,
+        };
+
         /// Record (or withdraw) a secondary window's `<video src>`
-        /// declaration, copied out of the slot build's arena. First
-        /// declaring window wins among slots and keeps ownership until
-        /// it stops declaring or closes; over-long and empty sources
-        /// are not tracked (`loadVideo` would reject them, and tracking
-        /// one would reload every rebuild).
+        /// declaration, copied out of the slot build's arena — one
+        /// retained entry per window (the table matches the window
+        /// budget, so an upsert always finds room). Over-long and
+        /// empty sources are not tracked (`loadVideo` would reject
+        /// them, and tracking one would reload every rebuild).
         fn captureSlotVideoDeclaration(self: *Self, window_id: platform.WindowId, declaration: ?Ui.VideoDeclaration) void {
             if (declaration) |decl| {
-                if (self.video_slot_declared and self.video_slot_declaration_window != window_id) return;
-                if (decl.src.len == 0 or decl.src.len > self.video_slot_src_buffer.len) return;
-                @memcpy(self.video_slot_src_buffer[0..decl.src.len], decl.src);
-                self.video_slot_src_len = decl.src.len;
-                self.video_slot_declaration_window = window_id;
-                self.video_slot_autoplay = decl.autoplay;
-                self.video_slot_loop = decl.loop;
-                self.video_slot_muted = decl.muted;
-                self.video_slot_declared = true;
+                if (decl.src.len == 0 or decl.src.len > 1024) return;
+                const entry = blk: {
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (candidate.used and candidate.window_id == window_id) break :blk candidate;
+                    }
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (!candidate.used) break :blk candidate;
+                    }
+                    return;
+                };
+                @memcpy(entry.src_buffer[0..decl.src.len], decl.src);
+                entry.src_len = decl.src.len;
+                entry.window_id = window_id;
+                entry.autoplay = decl.autoplay;
+                entry.loop = decl.loop;
+                entry.muted = decl.muted;
+                entry.used = true;
                 return;
             }
-            if (self.video_slot_declared and self.video_slot_declaration_window == window_id) {
-                self.video_slot_declared = false;
-                self.video_slot_src_len = 0;
-                self.video_slot_declaration_window = 0;
+            for (&self.video_slot_declarations) |*candidate| {
+                if (candidate.used and candidate.window_id == window_id) {
+                    candidate.* = .{};
+                }
             }
+            if (self.video_slot_owner == window_id) self.video_slot_owner = 0;
         }
 
         /// One view-build + flex-layout pass of `rebuildWindowSlot`,
@@ -3050,16 +3072,32 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// from the replayed rebuilds — never a journal write of its
         /// own.
         /// The secondary-window declaration as the reconciler consumes
-        /// it — null unless some slot build recorded one (see
-        /// `captureSlotVideoDeclaration`). The src borrows the app
-        /// struct's own copy, stable across builds.
+        /// it — the current owner window's retained entry while it
+        /// still declares, otherwise the first retained declaration
+        /// PROMOTES on the spot (the previous owner closed or stopped
+        /// declaring; a mounted video in another window must not wait
+        /// for an unrelated rebuild to start). Null when no slot
+        /// declares. The src borrows the app struct's own copy, stable
+        /// across builds.
         fn slotVideoDeclaration(self: *Self) ?VideoBuildDeclaration {
-            if (!self.video_slot_declared) return null;
+            const entry = blk: {
+                if (self.video_slot_owner != 0) {
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (candidate.used and candidate.window_id == self.video_slot_owner) break :blk candidate;
+                    }
+                }
+                for (&self.video_slot_declarations) |*candidate| {
+                    if (candidate.used) break :blk candidate;
+                }
+                self.video_slot_owner = 0;
+                return null;
+            };
+            self.video_slot_owner = entry.window_id;
             return .{
-                .src = self.video_slot_src_buffer[0..self.video_slot_src_len],
-                .autoplay = self.video_slot_autoplay,
-                .loop = self.video_slot_loop,
-                .muted = self.video_slot_muted,
+                .src = entry.src_buffer[0..entry.src_len],
+                .autoplay = entry.autoplay,
+                .loop = entry.loop,
+                .muted = entry.muted,
             };
         }
 
@@ -3229,12 +3267,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleWindowClosed(self: *Self, runtime: *Runtime, closed: core.WindowClosedEvent) anyerror!void {
             const index = self.windowSlotIndexByWindowId(closed.window_id) orelse return;
             // A closed window's video declaration dies with it: withdraw
-            // the slot claim and reconcile, so the playback the vanished
-            // tree declared stops instead of playing on unowned.
-            if (self.video_slot_declared and self.video_slot_declaration_window == closed.window_id) {
-                self.captureSlotVideoDeclaration(closed.window_id, null);
-                self.applyVideoDeclaration(runtime);
-            }
+            // its retained entry and reconcile — an owning window's
+            // playback stops (or the next retained declaration promotes
+            // in its place), a non-owner just drops out of the table.
+            self.captureSlotVideoDeclaration(closed.window_id, null);
+            self.applyVideoDeclaration(runtime);
             const on_close = self.forgetWindowSlot(index);
             if (on_close) |msg| {
                 try self.dispatch(runtime, self.canvas_window_id, msg);

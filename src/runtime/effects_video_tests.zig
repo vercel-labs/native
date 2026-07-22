@@ -1314,3 +1314,118 @@ test "a video record claiming a past-2^53 scalar refuses replay as damage" {
     });
     try std.testing.expectError(error.ReplayDamagedRecord, result);
 }
+
+// --------------------------------------- multi-window declarations
+
+const PromoModel = struct { show_a: bool = true };
+
+const PromoMsg = union(enum) { noop };
+
+const PromoApp = ui_app_model.UiApp(PromoModel, PromoMsg);
+
+fn promoUpdate(model: *PromoModel, msg: PromoMsg) void {
+    _ = model;
+    switch (msg) {
+        .noop => {},
+    }
+}
+
+fn promoView(ui: *PromoApp.Ui, model: *const PromoModel) PromoApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.text(.{}, "main"),
+    });
+}
+
+fn promoWindows(model: *const PromoModel, scratch: *PromoApp.WindowsScratch) []const PromoApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.show_a) {
+        scratch.windows[count] = .{
+            .label = "win-a",
+            .canvas_label = "win-a-canvas",
+            .title = "A",
+            .width = 320,
+            .height = 240,
+        };
+        count += 1;
+    }
+    scratch.windows[count] = .{
+        .label = "win-b",
+        .canvas_label = "win-b-canvas",
+        .title = "B",
+        .width = 320,
+        .height = 240,
+    };
+    count += 1;
+    return scratch.windows[0..count];
+}
+
+fn promoWindowView(ui: *PromoApp.Ui, model: *const PromoModel, window_label: []const u8) PromoApp.Ui.Node {
+    _ = model;
+    const src = if (std.mem.eql(u8, window_label, "win-a")) "assets/clips/a.mp4" else "assets/clips/b.mp4";
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.video(.{ .src = src, .width = 128, .height = 72 }),
+    });
+}
+
+test "a closed window's declared video promotes the next window's declaration at once" {
+    const gpa = std.testing.allocator;
+    const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    const np = &harness.null_platform;
+    try np.setVideoMeta("a.mp4", 30_000, 640, 360);
+    try np.setVideoMeta("b.mp4", 45_000, 640, 360);
+
+    const app_state = try gpa.create(PromoApp);
+    defer gpa.destroy(app_state);
+    app_state.* = PromoApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-video-promo",
+        .scene = video_scene,
+        .canvas_label = canvas_label,
+        .update = promoUpdate,
+        .view = promoView,
+        .windows_fn = promoWindows,
+        .window_view = promoWindowView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try dispatchFrame(harness, app, 1);
+
+    // Both windows exist; install their canvases so the slot builds
+    // run and record their declarations.
+    var window_a: u64 = 0;
+    var window_b: u64 = 0;
+    {
+        var buffer: [platform.max_windows]platform.WindowInfo = undefined;
+        for (harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, "win-a")) window_a = info.id;
+            if (std.mem.eql(u8, info.label, "win-b")) window_b = info.id;
+        }
+    }
+    try std.testing.expect(window_a != 0 and window_b != 0);
+    inline for (.{ .{ "win-a-canvas", 0 }, .{ "win-b-canvas", 1 } }) |entry| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = if (entry[1] == 0) window_a else window_b,
+            .label = entry[0],
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 2_000_000,
+            .nonblank = true,
+        } });
+    }
+    try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "noop", .window_id = 1, .view_label = canvas_label } });
+
+    // The first declaring window owns the single player.
+    try std.testing.expect(std.mem.endsWith(u8, np.video.path(), "a.mp4"));
+
+    // The user closes window A: no on_close Msg, no rebuild — the
+    // retained declaration from window B must promote on the spot,
+    // not wait for an unrelated rebuild.
+    const close_event = np.userCloseWindow(window_a).?;
+    try harness.runtime.dispatchPlatformEvent(app, close_event);
+    try std.testing.expect(std.mem.endsWith(u8, np.video.path(), "b.mp4"));
+    try std.testing.expect(np.video.playing);
+}
