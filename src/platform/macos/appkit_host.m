@@ -10247,7 +10247,17 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
  * buffering state now, not at the next 500ms tick. */
 - (void)videoTimeControlChanged {
     AVPlayer *player = self.videoPlayer;
-    if (!player || self.videoSourceIsLocal) return;
+    if (!player) return;
+    /* Playback actually rolling: make sure the pixel clock runs. The
+     * poster hunt may have stopped the frame timer while the stream
+     * buffered (or surrendered past its bound), and nothing else
+     * restarts it when AVPlayer's waiting phase finally ends —
+     * startVideoFrameTimer is idempotent, so a timer videoPlay already
+     * armed is untouched. */
+    if (player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+        [self startVideoFrameTimer];
+    }
+    if (self.videoSourceIsLocal) return;
     BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
     if (buffering == self.videoBuffering) return;
     self.videoBuffering = buffering;
