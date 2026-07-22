@@ -847,7 +847,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     }) catch |err| {
         switch (err) {
             error.JournalBadMagic,
-            error.JournalUnsupportedVersion,
+            error.JournalFormatMismatch,
             error.JournalTruncated,
             error.JournalCorrupt,
             error.JournalRecordOverBudget,

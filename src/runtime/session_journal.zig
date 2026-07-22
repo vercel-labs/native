@@ -25,7 +25,7 @@
 //! Format (the wire-packet precedent: length-prefixed little-endian
 //! binary, explicit budgets, hostile input fails loudly):
 //!
-//!   magic "NSDKSJNL" | u32 format version | records...
+//!   magic "NSDKSJNL" | u64 format fingerprint | records...
 //!
 //! Every record is `u8 kind | u32 payload_len | payload`. The first
 //! record must be the header; the last must be the end record, whose
@@ -51,8 +51,9 @@
 //! ends — delivers, and journals, under the NEXT wake's event record.
 //!
 //! Enum payloads ride as their declaration-order integer values, so
-//! reordering any journaled enum is a format break: bump
-//! `format_version` when one moves.
+//! reordering any journaled enum is a format break — one
+//! `format_fingerprint` sees on its own (the layout description
+//! renders every journaled enum's names AND values).
 //!
 //! Coverage note: automation driving is fully journaled. Verbs that
 //! synthesize PLATFORM events (widget-click/hold/context-press/drag/
@@ -70,6 +71,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const automation_protocol = @import("../automation/protocol.zig");
+const layout_fingerprint = @import("../automation/layout_fingerprint.zig");
 const runtime_effects = @import("effects.zig");
 
 pub const EffectResultRecord = runtime_effects.EffectResultRecord;
@@ -77,33 +79,110 @@ pub const EffectResultRecord = runtime_effects.EffectResultRecord;
 /// File magic: first eight bytes of every session journal.
 pub const magic = "NSDKSJNL";
 
-/// Journal format version. Any change to record layouts or journaled
-/// enum orders bumps this; readers refuse other versions loudly rather
-/// than misreading yesterday's shape. v2 added the stream `buffering`
-/// flag to audio event and audio effect records; v3 added the spectrum
-/// band bytes to both (and the `.spectrum` audio kind); v4 added the
-/// composition verbs (`set_composition`/`commit_composition`/
-/// `cancel_composition`, codes 11-13) to the accessibility-action
-/// record's verb enum — a v3 reader hitting one of those codes would
-/// have reported the file corrupt instead of refusing the skew; v5
-/// added the pinch magnification `scale` field to gpu-surface input
-/// records (a layout change every v4 reader would misparse) plus the
+/// Journal format identity. Any change to record layouts or journaled
+/// enum orders moves this fingerprint ON ITS OWN — the layout
+/// description below reflects over the actual record and event types —
+/// and readers refuse a journal whose fingerprint differs from their
+/// own, loudly, rather than misreading yesterday's shape.
+///
+/// This replaces the manually-bumped integer counter the preamble
+/// carried through v8. No journal is ever migrated (replay refuses
+/// every skew with the re-record teaching), so an ORDERED version
+/// carried no information — "same or different" is the entire question
+/// — while costing two recurring failures: parallel branches contending
+/// for the next integer, and forgettable bumps.
+///
+/// History of the retired counter, kept because it documents real
+/// breaks: v2 added the stream `buffering` flag to audio event and
+/// audio effect records; v3 added the spectrum band bytes to both (and
+/// the `.spectrum` audio kind); v4 added the composition verbs
+/// (`set_composition`/`commit_composition`/`cancel_composition`, codes
+/// 11-13) to the accessibility-action record's verb enum — a v3 reader
+/// hitting one of those codes would have reported the file corrupt
+/// instead of refusing the skew; v5 added the pinch magnification
+/// `scale` field to gpu-surface input records plus the
 /// `pinch_begin`/`pinch_change`/`pinch_end` input kinds (codes 12-14);
-/// v6 added the `hidden` flag to window-frame records (the
-/// `close_policy = .hide` window state — a layout change every v5
-/// reader would misparse); v7 added the `.image` effect-result kind
-/// (code 11) with its outcome/dimension fields and the blob-store
-/// content address (`image_blob_hash`/`image_blob_len`) appended to
-/// every effect record — a v6 reader would have called an image
-/// record's kind code corrupt and misparsed the longer layouts, so it
-/// refuses the skew at the preamble instead; v8 added the `.channel`
-/// effect-result kind (code 12, the external-source channel family)
-/// with its event kind and cumulative drop total appended to every
-/// effect record — a CONSCIOUS break, same reasoning as v7: a v7
-/// reader would have called a channel record's kind code corrupt and
-/// misparsed the longer layouts, so the version-skew refusal at the
-/// preamble is the honest answer for old journals.
-pub const format_version: u32 = 8;
+/// v6 added the `hidden` flag to window-frame records; v7 added the
+/// `.image` effect-result kind (code 11) with its outcome/dimension
+/// fields and the blob-store content address appended to every effect
+/// record; v8 added the `.channel` effect-result kind (code 12) with
+/// its event kind and cumulative drop total appended to every effect
+/// record. Every one of those changes would now move the fingerprint
+/// with no manual step.
+pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescription(format_semantic_epoch));
+
+/// The escape hatch for a change in MEANING that leaves the journal
+/// bytes identical, which no layout description can see (the
+/// automation-protocol side had exactly one: context-menu action tokens
+/// becoming per-request generations — same bytes, values a stale build
+/// could never match). Bump this ONLY for such semantics-only changes;
+/// layout changes need NO action here — the fingerprint moves on its
+/// own.
+pub const format_semantic_epoch: u32 = 1;
+
+/// The canonical description `format_fingerprint` hashes: everything
+/// that defines the on-disk record layout. Reflection covers the record
+/// kinds, the event-tag set, every record struct's field names/types/
+/// order, the full effect record (including every journaled effect
+/// enum's names and values), and each event variant's payload type.
+/// Deliberate constants state what the hand-written codecs alone decide
+/// — framing, string/optional/enum encodings, the modifier bit
+/// assignments, the accessibility verb's i32 width, the
+/// `gpu_surface_frame` journaled subset — each commented at its codec.
+fn formatLayoutDescription(comptime epoch: u32) []const u8 {
+    comptime {
+        @setEvalBranchQuota(2_000_000);
+        return "native-sdk session journal layout\n" ++
+            std.fmt.comptimePrint("semantic_epoch={d}\n", .{epoch}) ++
+            "magic=" ++ magic ++ "\n" ++
+            "preamble=magic|u64 format fingerprint le\n" ++
+            "framing=u8 kind|u32 payload_len le|payload\n" ++
+            // Hand-written codec facts reflection cannot see; the
+            // couplings are commented at WriteCursor, writeModifiers,
+            // and the widget_accessibility_action arm.
+            "codec=ints le;str=u32 len|bytes;bool=u8;enum=u8 of declaration value;optional=u8 presence|payload;" ++
+            "modifiers=u8 bits primary=1 command=2 control=4 option=8 shift=16;" ++
+            "accessibility action verb=i32;insets=top,right,bottom,left f32;rect=x,y,w,h f32\n" ++
+            std.fmt.comptimePrint("max_drop_paths={d} (u16 count)\n", .{max_session_drop_paths}) ++
+            "record_kinds=" ++ layout_fingerprint.describe(RecordKind) ++ "\n" ++
+            "header=" ++ layout_fingerprint.describe(Header) ++ "\n" ++
+            "checkpoint=" ++ layout_fingerprint.describe(Checkpoint) ++ "\n" ++
+            "screenshot=" ++ layout_fingerprint.describe(ScreenshotMark) ++ "\n" ++
+            "end=" ++ layout_fingerprint.describe(End) ++ "\n" ++
+            "effect=" ++ layout_fingerprint.describe(EffectResultRecord) ++ "\n" ++
+            "event_tags=" ++ layout_fingerprint.describe(EventTag) ++ "\n" ++
+            // Per-variant payload types, reflected. Payload-free tags
+            // (app_start, wake, ...) are covered by the tag set above; a
+            // NEW tag moves the fingerprint through the tag set even
+            // before its payload line lands here. `native_handle` never
+            // rides the wire but its type is fixed; describing the full
+            // Surface is the conservative direction (a false re-record
+            // is cheap, a silent misread is not).
+            "appearance_changed=" ++ layout_fingerprint.describe(platform.Appearance) ++ "\n" ++
+            "surface_resized=" ++ layout_fingerprint.describe(platform.Surface) ++ "\n" ++
+            "window_frame_changed=" ++ layout_fingerprint.describe(platform.WindowState) ++ "\n" ++
+            "window_focused=" ++ layout_fingerprint.describe(platform.WindowId) ++ "\n" ++
+            "bridge_message=" ++ layout_fingerprint.describe(platform.BridgeMessage) ++ "\n" ++
+            "tray_action=" ++ layout_fingerprint.describe(platform.TrayItemId) ++ "\n" ++
+            "shortcut=" ++ layout_fingerprint.describe(platform.ShortcutEvent) ++ "\n" ++
+            "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
+            "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
+            "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
+            "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
+            // gpu_surface_frame journals a deliberate SUBSET of a
+            // telemetry-heavy struct (the rest is host render telemetry,
+            // meaningless under replay), so its wire layout is stated by
+            // hand — the coupling is commented at the encodeEvent arm.
+            "gpu_surface_frame=window_id:u64,label:str,width:f32,height:f32,scale_factor:f32," ++
+            "frame_index:u64,timestamp_ns:u64,frame_interval_ns:u64,input_timestamp_ns:u64,canvas_frame_full_repaint:bool\n" ++
+            "gpu_surface_resized=" ++ layout_fingerprint.describe(platform.GpuSurfaceResizeEvent) ++ "\n" ++
+            "gpu_surface_input=" ++ layout_fingerprint.describe(platform.GpuSurfaceInputEvent) ++ "\n" ++
+            "gpu_surface_scroll_driver=" ++ layout_fingerprint.describe(platform.GpuSurfaceScrollDriverEvent) ++ "\n" ++
+            "context_menu_action=" ++ layout_fingerprint.describe(platform.ContextMenuActionEvent) ++ "\n" ++
+            "widget_accessibility_action=" ++ layout_fingerprint.describe(platform.WidgetAccessibilityActionEvent) ++ "\n";
+    }
+}
 
 // ------------------------------------------------------------- budgets
 //
@@ -140,9 +219,10 @@ pub const JournalError = error{
     /// The file does not start with the session-journal magic — it is
     /// not a journal (or the first bytes were destroyed).
     JournalBadMagic,
-    /// The journal was written by a different format version; replaying
-    /// it here would misread payloads. Re-record with this build.
-    JournalUnsupportedVersion,
+    /// The journal was written by a build whose journal format
+    /// fingerprint differs from this one; replaying it here would
+    /// misread payloads. Re-record with this build.
+    JournalFormatMismatch,
     /// The byte stream ends mid-record (or the end record is missing):
     /// the recording was cut off — replay would silently stop early, so
     /// it refuses instead.
@@ -234,6 +314,13 @@ pub const EventDecodeStorage = struct {
 };
 
 // ------------------------------------------------------------ cursors
+//
+// The primitive encodings these cursors hand-write (little-endian ints,
+// u32-length-prefixed strings, u8 bools, enums as their u8 declaration
+// value, bool-prefixed optionals) are stated as deliberate constants in
+// `formatLayoutDescription` — reflection cannot see them, so changing
+// one here means updating that description's `codec=` line in the same
+// change.
 
 const WriteCursor = struct {
     buffer: []u8,
@@ -359,6 +446,9 @@ const EventTag = enum(u8) {
     audio = 24,
 };
 
+// The bit assignments below are hand-written wire layout: they are
+// stated in `formatLayoutDescription` (reflection sees the bool fields,
+// not the bits), so changing a bit here means updating that line too.
 fn writeModifiers(cursor: *WriteCursor, modifiers: platform.ShortcutModifiers) JournalError!void {
     var bits: u8 = 0;
     if (modifiers.primary) bits |= 1;
@@ -520,6 +610,11 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u16, @intCast(drop.paths.len));
             for (drop.paths) |path| try cursor.writeStr(path);
         },
+        // This arm journals a deliberate SUBSET of the frame event (the
+        // fields dispatch semantics depend on — see the fn doc). The
+        // subset is stated by hand in `formatLayoutDescription`, so
+        // journaling another field here means adding it to that line in
+        // the same change.
         .gpu_surface_frame => |frame| {
             try cursor.writeEnum(EventTag.gpu_surface_frame);
             try cursor.writeInt(u64, frame.window_id);
@@ -583,6 +678,8 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, action.window_id);
             try cursor.writeStr(action.label);
             try cursor.writeInt(u64, action.id);
+            // The verb rides i32, not the u8 every other enum takes — a
+            // hand-written width stated in `formatLayoutDescription`.
             try cursor.writeInt(i32, @intFromEnum(action.action));
             try cursor.writeStr(action.text);
             try cursor.writeBool(action.selection != null);
@@ -1035,14 +1132,18 @@ pub fn frameRecord(kind: RecordKind, payload: []const u8, buffer: []u8) JournalE
     return buffer[0 .. 5 + payload.len];
 }
 
-/// The journal preamble (magic + format version).
+/// The journal preamble (magic + format fingerprint). The fingerprint
+/// field widened from the retired u32 counter to the full u64 hash when
+/// identity replaced ordering — this change refuses every older journal
+/// anyway, and the full width keeps the refuse-on-mismatch tripwire's
+/// collision odds at 2^-64 instead of 2^-32 for free.
 pub fn writePreamble(buffer: []u8) []const u8 {
     @memcpy(buffer[0..magic.len], magic);
-    std.mem.writeInt(u32, buffer[magic.len..][0..4], format_version, .little);
-    return buffer[0 .. magic.len + 4];
+    std.mem.writeInt(u64, buffer[magic.len..][0..8], format_fingerprint, .little);
+    return buffer[0 .. magic.len + 8];
 }
 
-pub const preamble_len: usize = magic.len + 4;
+pub const preamble_len: usize = magic.len + 8;
 
 /// Sequential journal reader over a whole in-memory journal. Validates
 /// the preamble at init, enforces record budgets, and requires header
@@ -1063,8 +1164,8 @@ pub const Reader = struct {
     pub fn init(bytes: []const u8) JournalError!Reader {
         if (bytes.len < preamble_len) return error.JournalBadMagic;
         if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.JournalBadMagic;
-        const version = std.mem.readInt(u32, bytes[magic.len..][0..4], .little);
-        if (version != format_version) return error.JournalUnsupportedVersion;
+        const recorded = std.mem.readInt(u64, bytes[magic.len..][0..8], .little);
+        if (recorded != format_fingerprint) return error.JournalFormatMismatch;
         return .{ .bytes = bytes, .pos = preamble_len };
     }
 
@@ -1130,7 +1231,7 @@ pub const Reader = struct {
 pub fn describeError(err: JournalError) []const u8 {
     return switch (err) {
         error.JournalBadMagic => "not a session journal (bad magic) - record one with NATIVE_SDK_SESSION_RECORD=<path>",
-        error.JournalUnsupportedVersion => std.fmt.comptimePrint("journal format version differs from the v{d} this build reads and writes - re-record the session with the same build that replays it", .{format_version}),
+        error.JournalFormatMismatch => "journal was recorded by a build whose journal format differs from this build's - re-record the session with the same build that replays it",
         error.JournalTruncated => "journal ends mid-record (the recording was cut off) - re-record, and keep the app running until it exits cleanly",
         error.JournalCorrupt => "journal payload does not decode (damaged or hand-edited bytes)",
         error.JournalRecordOverBudget => "journal claims a record beyond max_session_record_bytes - the file is damaged or hostile",
@@ -1554,34 +1655,43 @@ test "reader walks a whole journal and stops at the end record" {
     try testing.expectEqual(@as(?Record, null), try reader.next());
 }
 
-test "reader refuses bad magic and version skew" {
+test "reader refuses bad magic and format skew" {
     var buffer: [16384]u8 = undefined;
     const len = try buildTestJournal(&buffer);
     try testing.expectError(error.JournalBadMagic, Reader.init("not a journal at all"));
     try testing.expectError(error.JournalBadMagic, Reader.init(""));
+    // A journal whose recorded fingerprint differs from this build's —
+    // any other build's journal, in either direction — is refused at
+    // the preamble, before any record layout is consulted, instead of
+    // reporting an unknown payload code as corruption.
     var skewed: [16384]u8 = undefined;
     @memcpy(skewed[0..len], buffer[0..len]);
-    std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version + 1, .little);
-    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
-    // Older journals are refused the same way — and, symmetrically, a
-    // reader built before a version bump refuses a NEWER journal at the
-    // preamble instead of reporting an unknown payload code as
-    // corruption (the v4 bump's reason: v3 readers would have called a
-    // journaled composition verb code corrupt).
-    std.mem.writeInt(u32, skewed[magic.len..][0..4], format_version - 1, .little);
-    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(skewed[0..len]));
-    // A concrete v7 journal (the version main ships, without the channel
-    // fields on effect records) is version skew, never corruption: the
-    // preamble gate must fire before any record layout is consulted.
-    var v7_preamble: [preamble_len]u8 = undefined;
-    @memcpy(v7_preamble[0..magic.len], magic);
-    std.mem.writeInt(u32, v7_preamble[magic.len..][0..4], 7, .little);
-    try testing.expectError(error.JournalUnsupportedVersion, Reader.init(&v7_preamble));
-    // The teaching names the version this build speaks, so the reader of
-    // the error can see the skew rather than suspect file damage.
-    const teaching = describeError(error.JournalUnsupportedVersion);
-    try testing.expect(std.mem.indexOf(u8, teaching, "v8") != null);
+    std.mem.writeInt(u64, skewed[magic.len..][0..8], format_fingerprint +% 1, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(skewed[0..len]));
+    std.mem.writeInt(u64, skewed[magic.len..][0..8], format_fingerprint -% 1, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(skewed[0..len]));
+    // A journal from the retired integer-counter era (u32 version after
+    // the magic, so this reader's u64 read spans the counter plus the
+    // first record's framing bytes) is the same honest mismatch.
+    var legacy: [preamble_len]u8 = undefined;
+    @memcpy(legacy[0..magic.len], magic);
+    std.mem.writeInt(u32, legacy[magic.len..][0..4], 8, .little);
+    legacy[magic.len + 4] = @intFromEnum(RecordKind.header);
+    std.mem.writeInt(u24, legacy[magic.len + 5 ..][0..3], 42, .little);
+    try testing.expectError(error.JournalFormatMismatch, Reader.init(&legacy));
+    // The teaching says whose build differs and what to do about it,
+    // so the reader of the error never suspects file damage.
+    const teaching = describeError(error.JournalFormatMismatch);
+    try testing.expect(std.mem.indexOf(u8, teaching, "journal format") != null);
     try testing.expect(std.mem.indexOf(u8, teaching, "re-record") != null);
+}
+
+test "layout description moves with the semantic epoch" {
+    // Same layout, bumped epoch: the combined fingerprint must move, so
+    // a meaning-only change (identical bytes) still refuses replay of
+    // journals recorded before it.
+    const bumped = layout_fingerprint.hash(comptime formatLayoutDescription(format_semantic_epoch + 1));
+    try testing.expect(bumped != format_fingerprint);
 }
 
 test "reader fails loudly on truncation at every boundary" {
