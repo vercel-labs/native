@@ -250,6 +250,7 @@ fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.load-then-stop")) return .load_then_stop;
     if (std.mem.eql(u8, name, "video.load-then-stream")) return .load_then_stream;
     if (std.mem.eql(u8, name, "video.load-source-burst")) return .load_source_burst;
+    if (std.mem.eql(u8, name, "video.seek-half")) return .seek_half;
     return null;
 }
 
@@ -2366,6 +2367,97 @@ test "a zero-record recording still fails replay when the timeline loads video" 
             .require_same_platform = false,
         });
         try std.testing.expectError(error.ReplayEffectDivergence, result);
+    }
+}
+
+test "a post-completion seek keeps the terminal position under replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record: the playback completes naturally (the host retires the
+    // player, retire-before-emit), then a later dispatch scrubs. The
+    // retired player refuses the seek, so the mirrors keep the
+    // terminal position.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(93_000).?);
+        try std.testing.expectEqual(@as(usize, 1), app_state.model.completed_count);
+        // The scrub after the natural end: refused by the retired
+        // player, position pinned at the duration.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.seek-half", .window_id = 1, .view_label = canvas_label } });
+        try std.testing.expectEqual(@as(u64, 92_500), app_state.effects.videoSnapshot().position_ms);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    // Replay offline: the fake channel refuses the same seek — the
+    // completion latched the retire — so the mirrors and the chrome
+    // land exactly where the recording left them.
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expectEqual(@as(u64, 92_500), app_state.effects.videoSnapshot().position_ms);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
     }
 }
 

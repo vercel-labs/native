@@ -2539,6 +2539,15 @@ pub fn Effects(comptime Msg: type) type {
             surface_id: u64 = 0,
             on_event: ?VideoMsgFn = null,
             playing: bool = false,
+            /// Latched by a non-looping `.completed` apply: real hosts
+            /// retire the platform player at the natural end
+            /// (retire-before-emit), so any later transport meets an
+            /// absent player. The fake executor has no player to be
+            /// absent — this flag is how it models the same refusals
+            /// (a post-completion seek keeps the terminal position,
+            /// live and replayed alike). A fresh load resets it with
+            /// the rest of the channel.
+            completed: bool = false,
             source: EffectVideoSource = .local,
             buffering: bool = false,
             looping: bool = false,
@@ -6297,7 +6306,12 @@ pub fn Effects(comptime Msg: type) type {
             else
                 position_ms;
             if (self.video.fake) {
-                self.video.position_ms = clamped;
+                // The live hosts retire the player at a non-looping
+                // natural end, so a later seek refuses there — the
+                // fake refuses identically (`VideoChannel.completed`),
+                // keeping replay's mirrors on the terminal position
+                // the recording kept.
+                if (!self.video.completed) self.video.position_ms = clamped;
                 return;
             }
             const services = self.services orelse return;
@@ -8612,6 +8626,10 @@ pub fn Effects(comptime Msg: type) type {
                     self.video.position_ms = self.video.duration_ms;
                     self.video.playing = false;
                     self.video.buffering = false;
+                    // The natural end retired the platform player
+                    // (retire-before-emit); the fake transport refuses
+                    // from here like the live one (`VideoChannel.completed`).
+                    self.video.completed = true;
                 },
                 .failed, .rejected => {
                     resolved.playing = false;
