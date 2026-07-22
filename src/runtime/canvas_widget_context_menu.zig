@@ -238,7 +238,19 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             // the main queue); GTK popovers are asynchronous and CAN.
             if (pending.window_id != event.window_id or pending.token != event.token) return;
             self.canvas_widget_context_menu_pending = null;
-            if (event.item_id == 0) return; // dismissed
+            if (event.item_id == 0) {
+                // Dismissed without a selection. App menus tell the app:
+                // UiApp disarms the token's presented-items snapshot and
+                // releases the build storage pinned under it.
+                if (pending.kind == .app) {
+                    try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                        .window_id = event.window_id,
+                        .view_label = event.view_label,
+                        .token = pending.token,
+                    } });
+                }
+                return;
+            }
             const index = runtimeFindViewIndex(self, event.window_id, event.view_label) orelse return;
 
             switch (pending.kind) {

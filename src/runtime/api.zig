@@ -226,6 +226,17 @@ pub const CanvasWidgetContextMenuShownEvent = struct {
     item_count: usize,
 };
 
+/// The presented app-declared context menu closed WITHOUT a selection.
+/// `UiApp` answers by disarming the matching token's snapshot and
+/// releasing the presented build's pinned storage — without this
+/// notice, a dismissed menu's pin would hold that storage until the
+/// next presentation.
+pub const CanvasWidgetContextMenuDismissedEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    token: u64,
+};
+
 /// A right/ctrl-click landed on a widget with a declared context menu,
 /// but the platform could not present it natively (this host has no
 /// native menu presenter, or presenting failed). The app loop answers by
@@ -306,6 +317,7 @@ pub const Event = union(enum) {
     canvas_widget_drag: CanvasWidgetDragEvent,
     canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
     canvas_widget_context_menu_shown: CanvasWidgetContextMenuShownEvent,
+    canvas_widget_context_menu_dismissed: CanvasWidgetContextMenuDismissedEvent,
     canvas_widget_context_menu_request: CanvasWidgetContextMenuRequestEvent,
     canvas_widget_dismiss: CanvasWidgetDismissEvent,
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
@@ -334,6 +346,7 @@ pub const Event = union(enum) {
             .canvas_widget_drag => "canvas_widget_drag",
             .canvas_widget_context_menu => "canvas_widget_context_menu",
             .canvas_widget_context_menu_shown => "canvas_widget_context_menu_shown",
+            .canvas_widget_context_menu_dismissed => "canvas_widget_context_menu_dismissed",
             .canvas_widget_context_menu_request => "canvas_widget_context_menu_request",
             .canvas_widget_dismiss => "canvas_widget_dismiss",
             .canvas_widget_context_press => "canvas_widget_context_press",

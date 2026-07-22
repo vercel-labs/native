@@ -3583,17 +3583,19 @@ const ArenaPayloadModel = struct {
     sends: u32 = 0,
     received_storage: [64]u8 = undefined,
     received_len: usize = 0,
+    /// Address of the dispatched payload's first byte: the pinned-arena
+    /// design promises the ORIGINAL slice, so native selection carries
+    /// the same pointer identity the fallback surface and the
+    /// automation verb dispatch.
+    received_ptr: usize = 0,
 };
 
 const ArenaPayloadMsg = union(enum) {
     bump,
     send: []const u8,
-    /// The error-union shape: the snapshot copy must recurse through a
-    /// successful payload's slices too. (Aligned and MUTABLE slice
-    /// payloads are exercised directly against the copy helper in
-    /// runtime.ui_app — the markup interpreter compiled for every
-    /// UiApp Msg only constructs plain `[]const u8` slice payloads, so
-    /// such arms cannot instantiate a UiApp at all.)
+    /// The error-union shape: pinning is shape-blind (the ORIGINAL
+    /// value dispatches), so a payload behind an error union needs no
+    /// special handling — this arm proves it end to end.
     send_result: error{Overloaded}![]const u8,
 };
 
@@ -3611,16 +3613,19 @@ fn recordArenaPayload(model: *ArenaPayloadModel, bytes: []const u8) void {
     const len = @min(bytes.len, model.received_storage.len);
     @memcpy(model.received_storage[0..len], bytes[0..len]);
     model.received_len = len;
+    model.received_ptr = @intFromPtr(bytes.ptr);
     model.sends += 1;
 }
 
 fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) ArenaPayloadApp.Ui.Node {
-    // Pin the build arena to one address-stable chunk: the first
+    // Keep the build arena a single address-stable chunk: the first
     // allocation of every build is a slab larger than the whole build,
     // filled with sentinel bytes, so every later allocation lands at
-    // the same offset build after build. A rebuild after the arena
-    // reset therefore rewrites the payload's exact storage — the
-    // deterministic form of "the reset arena reused the memory".
+    // the same offset build after build. Under the pinned-arena design
+    // nothing here is ever overwritten while the menu is open; if the
+    // pin regresses, this determinism makes the failure exact — the
+    // reset arena rewrites the payload's storage with the next
+    // generation's bytes.
     const slab = ui.arena.alloc(u8, 256 * 1024) catch @panic("arena slab");
     @memset(slab, '!');
     // The documented Msg-payload shape: a display string formatted into
@@ -3641,7 +3646,7 @@ fn arenaPayloadView(ui: *ArenaPayloadApp.Ui, model: *const ArenaPayloadModel) Ar
     });
 }
 
-test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
+test "context menu selection dispatches the original arena payload across rebuilds (pinned build arena)" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
@@ -3701,6 +3706,12 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
     const shown_token = harness.null_platform.context_menu_token;
     try std.testing.expect(shown_token != 0);
+    // The presented build's arena is pinned while the request is
+    // pending, so the eventual dispatch is the ORIGINAL Msg value —
+    // capture its payload address at present time.
+    try std.testing.expect(app_state.context_menu_pin != null);
+    const presented_send = app_state.tree.?.msgForContextMenu(row_id, 0).?;
+    const presented_send_ptr = @intFromPtr(presented_send.send.ptr);
 
     for (0..2) |press| {
         const base: u64 = 3_000_000 + @as(u64, @intCast(press)) * 2_000_000;
@@ -3734,10 +3745,15 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
     try std.testing.expectEqualStrings("payload-gen-0000", app_state.model.received_storage[0..app_state.model.received_len]);
+    // Pointer identity: the dispatched slice IS the presented slice —
+    // the same value the fallback surface or the automation verb would
+    // have dispatched — and the resolved request released the pin.
+    try std.testing.expectEqual(presented_send_ptr, app_state.model.received_ptr);
+    try std.testing.expect(app_state.context_menu_pin == null);
 
-    // Round 2 — the error-union payload: the snapshot copy must recurse
-    // through the success arm, so the same two-rebuild race dispatches
-    // the presented generation's bytes, not the arena's current ones.
+    // Round 2 — the error-union payload: pinning is shape-blind, so
+    // the same two-rebuild race dispatches the presented generation's
+    // bytes (and address), not the arena's current ones.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -3750,6 +3766,8 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
     const result_token = harness.null_platform.context_menu_token;
     try std.testing.expect(result_token != shown_token);
+    const presented_result = app_state.tree.?.msgForContextMenu(row_id, 1).?;
+    const presented_result_ptr = @intFromPtr((presented_result.send_result catch unreachable).ptr);
 
     for (0..2) |press| {
         const base: u64 = 9_000_000 + @as(u64, @intCast(press)) * 2_000_000;
@@ -3780,12 +3798,13 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
     try std.testing.expectEqualStrings("payload-gen-0002", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expectEqual(presented_result_ptr, app_state.model.received_ptr);
+    try std.testing.expect(app_state.context_menu_pin == null);
 
-    // Round 3 — supersession and dismissal both release their snapshot
-    // copies: a re-presented menu replaces the previous snapshot, its
-    // successor is dismissed without a selection, and teardown (the
-    // deferred deinit) frees whatever is still armed — the backing
-    // allocator reports any copy that escapes.
+    // Round 3 — supersession and dismissal: a re-presented menu
+    // replaces the previous snapshot and pin, and the runtime's
+    // dismissed notice releases the successor's — an abandoned menu
+    // must not exempt an arena generation from resets forever.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = canvas_label,
@@ -3806,6 +3825,7 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
     } });
     try std.testing.expectEqual(@as(usize, 4), harness.null_platform.context_menu_request_count);
     const superseding_token = harness.null_platform.context_menu_token;
+    try std.testing.expect(app_state.context_menu_pin != null);
     try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
         .window_id = 1,
         .view_label = canvas_label,
@@ -3813,6 +3833,7 @@ test "context menu snapshot deep-copies arena slice payloads across rebuilds" {
         .item_id = 0,
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.model.sends);
+    try std.testing.expect(app_state.context_menu_pin == null);
 }
 
 // ------------------------------------------------- press fall-through fixture

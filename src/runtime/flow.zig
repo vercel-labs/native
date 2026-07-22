@@ -513,6 +513,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 // The shown notice only arms UiApp's selection snapshot:
                 // no visual change (the popover is an OS surface).
                 .canvas_widget_context_menu_shown => {},
+                // The dismissal notice only disarms UiApp's snapshot and
+                // pin: no visual change either.
+                .canvas_widget_context_menu_dismissed => {},
                 .canvas_widget_context_menu_request => {
                     // The app loop answers by mounting the anchored
                     // fallback surface: a visual change.
