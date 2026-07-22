@@ -6546,7 +6546,7 @@ pub fn Effects(comptime Msg: type) type {
             // new clip's `.loaded`) replays, or that event would be
             // swallowed against the old token.
             if (self.replay) {
-                _ = self.applyVideoEvent(.{
+                const resolved = self.applyVideoEvent(.{
                     .key = 0,
                     .kind = kind,
                     .position_ms = position_ms,
@@ -6567,6 +6567,21 @@ pub fn Effects(comptime Msg: type) type {
                 // drain-time order) must not block it — head-only
                 // pairing would reverse the recorded Msg order.
                 if (self.takePendingVideoMatching(platform_event.token)) |entry| {
+                    // The record was journaled FROM this very event at
+                    // record time, so its payload must equal what the
+                    // event resolves to now — a record whose scalars
+                    // or kind were altered around an intact identity
+                    // is a hand-edited journal, and delivering it
+                    // would hand the app a Msg the mirrors (steered by
+                    // the event) contradict.
+                    if (resolved == null or !std.meta.eql(entry.event, resolved.?)) {
+                        std.debug.print(
+                            "session replay: the journaled video result for key {d} does not match the platform event that delivered it live - the recorder journals every delivery verbatim, so the journal is damaged or hand-edited\n",
+                            .{entry.event.key},
+                        );
+                        self.replay_video_diverged = true;
+                        return null;
+                    }
                     const event_fn = entry.video_fn orelse return null;
                     return event_fn(entry.event);
                 }
@@ -6780,6 +6795,27 @@ pub fn Effects(comptime Msg: type) type {
                     continue;
                 }
                 if (entry.token == self.video.token) {
+                    // The resolution must be one this load's request
+                    // could have produced: `.local` needs a local path
+                    // and `.stream` needs a url — a journaled source
+                    // the cascade could never have selected is a
+                    // hand-edited journal, and applying it would
+                    // expose an impossible snapshot state.
+                    const source_possible = switch (entry.source) {
+                        .local => self.video.path_len > 0,
+                        .stream => self.video.url_len > 0,
+                    };
+                    if (!source_possible) {
+                        std.debug.print(
+                            "session replay: the journaled video load for key {d} resolved to .{s}, which its request shape cannot select - the journal is damaged or hand-edited\n",
+                            .{ entry.key, @tagName(entry.source) },
+                        );
+                        self.replay_video_diverged = true;
+                        self.replay_video_source_len -= 1;
+                        storage[index] = storage[self.replay_video_source_len];
+                        matched = true;
+                        break;
+                    }
                     if (entry.key != self.video.key) {
                         // The load at this position is not the load the
                         // recording issued: the replayed updates

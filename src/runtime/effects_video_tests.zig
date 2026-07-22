@@ -1804,6 +1804,97 @@ fn patchFirstVideoLoadKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) 
     return false;
 }
 
+test "a delivered record with altered scalars refuses replay as divergence" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record one delivered acknowledgment, then alter its position
+    // around the intact identity: the recorder journals every delivery
+    // verbatim from the platform event that produced it, so the
+    // pairing must refuse the mismatch instead of handing the app a
+    // Msg the mirrors contradict.
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.takeVideoLoaded().?);
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.advanceVideo(500).?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+    }
+
+    try std.testing.expect(patchFirstVideoPosition(buffer.bytes[0..buffer.len], 7_777));
+
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const result = session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = false,
+            .require_same_platform = false,
+        });
+        try std.testing.expectError(error.ReplayEffectDivergence, result);
+    }
+}
+
+test "an impossible journaled source shape fails the replayed load" {
+    // A URL-only request can never resolve .local: the consume refuses
+    // and latches the divergence the finish check reports.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    fx.pushReplayVideoSource(clip_key, 1, .local, false);
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .url = clip_url,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
+}
+
 test "a delivered record re-stamped as a rejection refuses replay as damage" {
     const gpa = std.testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

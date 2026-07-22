@@ -300,6 +300,10 @@ fn playerScreen(ui: *PlayerUi, model: *const Model) PlayerUi.Node {
 /// vocabulary. The model mirrors only what events told it.
 fn customScreen(ui: *PlayerUi, model: *const Model) PlayerUi.Node {
     const active = model.status != null and model.status != .failed and model.status != .rejected;
+    // A finished playback's player is retired: seeks refuse and the
+    // thumb would spring back, so the seek-family controls go dead —
+    // Play stays live and restarts from the start.
+    const seekable = active and model.status != .completed;
     const fraction: f32 = if (model.duration_ms > 0)
         @floatCast(@as(f64, @floatFromInt(model.position_ms)) / @as(f64, @floatFromInt(model.duration_ms)))
     else
@@ -307,11 +311,11 @@ fn customScreen(ui: *PlayerUi, model: *const Model) PlayerUi.Node {
     return ui.column(.{ .grow = 1, .gap = 0, .style_tokens = .{ .background = .surface, .radius = .lg } }, .{
         ui.mediaSurface(.{ .image = custom_surface, .grow = 1, .semantics = .{ .label = "Custom player video" } }),
         ui.row(.{ .padding = 10, .gap = 8, .cross = .center }, .{
-            ui.button(.{ .variant = .ghost, .size = .sm, .icon = "skip-back", .on_press = .back, .disabled = !active, .semantics = .{ .label = "Back 10 seconds" } }, ""),
+            ui.button(.{ .variant = .ghost, .size = .sm, .icon = "skip-back", .on_press = .back, .disabled = !seekable, .semantics = .{ .label = "Back 10 seconds" } }, ""),
             ui.button(.{ .variant = .ghost, .size = .sm, .icon = if (model.playing) "pause" else "play", .on_press = .toggle_play, .disabled = !active, .semantics = .{ .label = if (model.playing) "Pause" else "Play" } }, ""),
-            ui.button(.{ .variant = .ghost, .size = .sm, .icon = "skip-forward", .on_press = .forward, .disabled = !active, .semantics = .{ .label = "Forward 10 seconds" } }, ""),
+            ui.button(.{ .variant = .ghost, .size = .sm, .icon = "skip-forward", .on_press = .forward, .disabled = !seekable, .semantics = .{ .label = "Forward 10 seconds" } }, ""),
             ui.text(.{ .size = .sm, .width = 52, .wrap = false, .overflow = .clip, .style_tokens = .{ .foreground = .text_muted } }, formatClock(ui.arena, model.position_ms)),
-            ui.el(.slider, .{ .grow = 1, .value = fraction, .disabled = !active, .on_value = PlayerUi.valueMsg(.scrubbed), .semantics = .{ .label = "Seek" } }, .{}),
+            ui.el(.slider, .{ .grow = 1, .value = fraction, .disabled = !seekable, .on_value = PlayerUi.valueMsg(.scrubbed), .semantics = .{ .label = "Seek" } }, .{}),
             ui.text(.{ .size = .sm, .width = 52, .wrap = false, .overflow = .clip, .style_tokens = .{ .foreground = .text_muted } }, formatClock(ui.arena, model.duration_ms)),
             ui.el(.toggle_button, .{ .selected = model.looping, .on_toggle = .toggle_loop, .icon = "repeat", .semantics = .{ .label = "Loop" } }, .{}),
             ui.el(.toggle_button, .{ .selected = model.muted, .on_toggle = .toggle_mute, .icon = "volume", .semantics = .{ .label = "Mute" } }, .{}),
