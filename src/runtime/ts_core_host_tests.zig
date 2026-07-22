@@ -1728,7 +1728,7 @@ test "video_load decodes whole and events route the seven-field arm by name" {
     try std.testing.expect(replaced.muted);
 }
 
-test "stop closes the stream: a staged terminal is swallowed at the bridge" {
+test "stop cancels the stream: staged terminals never outlive it" {
     const fx = freshChannel();
     defer fx.deinit();
     Host.init(fx);
@@ -1736,20 +1736,21 @@ test "stop closes the stream: a staged terminal is swallowed at the bridge" {
     // The batch shape: a load whose terminal stages synchronously,
     // then stop closes the stream in the same cycle. `Cmd.videoStop`'s
     // wire contract is the stream's CANCEL — no events for the key
-    // after this — so the staged `.failed` drains through the engine
-    // (its bookkeeping already ran) but never reaches the app: the
-    // bridge swallows the closed tag, never panics on it.
+    // after this — so the stop drops the staged `.failed` inside the
+    // engine with the player, and the next drain has nothing to say.
     Host.dispatch(fx, .vload);
     try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
     Host.dispatch(fx, .vstop_it);
     try std.testing.expect(!fx.videoSnapshot().active);
 
+    // A load reusing the SAME event tag before the drain: the stopped
+    // stream's cancelled terminal must not resurface through the
+    // reopened tag — the cancel already removed it at the stop.
+    Host.dispatch(fx, .vload);
     Host.drain(fx);
     try std.testing.expectEqual(@as(@TypeOf(Host.model().video_events), 0), Host.model().video_events);
 
-    // Reopening the tag lifts the closed-stream latch: the fresh
-    // load's own events flow again.
-    Host.dispatch(fx, .vload);
+    // The fresh load's own events flow.
     try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
     Host.drain(fx);
     try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);

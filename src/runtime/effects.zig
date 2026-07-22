@@ -1823,12 +1823,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
-        /// Null swallows the delivery: the adapter tier's cancel gate
-        /// (a stream the caller explicitly closed must not speak — see
-        /// the TS bridge's video stop). The house `videoMsg`
-        /// constructor never returns null; Zig-native apps keep the
-        /// one-terminal-per-load delivery whole.
-        pub const VideoMsgFn = *const fn (event: EffectVideo) ?Msg;
+        pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
         pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
@@ -1922,7 +1917,7 @@ pub fn Effects(comptime Msg: type) type {
         /// must be `native_sdk.EffectVideo`.
         pub fn videoMsg(comptime tag: std.meta.Tag(Msg)) VideoMsgFn {
             return struct {
-                fn make(event: EffectVideo) ?Msg {
+                fn make(event: EffectVideo) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -6281,6 +6276,47 @@ pub fn Effects(comptime Msg: type) type {
             services.videoPause() catch {};
         }
 
+        /// `stopVideo` plus the stream CANCEL the TS wire promises:
+        /// every staged-but-undrained answer for `key` — a synchronous
+        /// terminal from the very batch that stops it, a loop-side
+        /// rejection — is removed before the channel goes idle, so no
+        /// event for the key ever reaches the app after this call
+        /// (`Cmd.videoStop`: "no events for the key after this"). The
+        /// Zig-native `stopVideo` keeps every staged answer instead
+        /// (one terminal per load, never silence); an adapter whose
+        /// public stop is the stream's cancel goes through here. A
+        /// cancelled answer never journals, so replay regenerates and
+        /// cancels the same entries and the timelines stay identical.
+        pub fn stopVideoCancel(self: *Self, key: u64) void {
+            self.cancelPendingVideo(key);
+            self.stopVideo();
+        }
+
+        /// Remove every staged entry answering `key` — the cancel
+        /// behind `stopVideoCancel`. Surviving entries keep their
+        /// relative (seq) order.
+        fn cancelPendingVideo(self: *Self, key: u64) void {
+            const storage = self.pendingVideoStorage();
+            var kept: usize = 0;
+            var offset: usize = 0;
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const from = (self.pending_video_head + offset) % storage.len;
+                const entry = storage[from];
+                if (entry.event.key == key) continue;
+                const to = (self.pending_video_head + kept) % storage.len;
+                storage[to] = entry;
+                kept += 1;
+            }
+            self.pending_video_len = kept;
+            if (kept == 0) {
+                self.pending_video_head = 0;
+                if (self.pending_video_spill.len > 0) {
+                    self.allocator.free(self.pending_video_spill);
+                    self.pending_video_spill = &.{};
+                }
+            }
+        }
+
         /// Stop playback, release the player AND the surface claim. No
         /// event echoes; the channel goes idle, later platform
         /// stragglers are swallowed, and the surface keeps its last
@@ -6967,10 +7003,7 @@ pub fn Effects(comptime Msg: type) type {
                                 .video_height = event.height,
                                 .video_token = entry.token,
                             });
-                            // A null is the handler's own swallow (the
-                            // adapter cancel gate): skip, never end the
-                            // pass — later entries are still owed.
-                            return event_fn(event) orelse continue;
+                            return event_fn(event);
                         },
                         .image => |entry| {
                             // Journal BEFORE the handler gate: a staged
