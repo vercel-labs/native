@@ -36,6 +36,7 @@ const video_scene: app_manifest.ShellConfig = .{ .windows = &video_windows };
 
 const VideoModel = struct {
     event_count: usize = 0,
+    chain_next: bool = false,
     last_kind: ?effects_mod.EffectVideoEventKind = null,
     last_key: u64 = 0,
     last_position_ms: u64 = 0,
@@ -62,6 +63,7 @@ const VideoModel = struct {
 
 const VideoMsg = union(enum) {
     load,
+    arm_chain,
     load_url,
     load_url_only,
     load_no_source,
@@ -100,6 +102,7 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             .path = clip_path,
             .on_event = VideoEffects.videoMsg(.video_event),
         }),
+        .arm_chain => model.chain_next = true,
         // The full cascade shape: local path first, url fallback.
         .load_url => fx.loadVideo(.{
             .key = clip_key,
@@ -169,12 +172,26 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
         .quiet => fx.setVideoVolume(0.25),
         .mute_on => fx.setVideoMuted(true),
         .loop_on => fx.setVideoLoop(true),
-        .video_event => |event| model.record(event),
+        .video_event => |event| {
+            model.record(event);
+            // The playlist shape: the completion handler starts the
+            // next clip from inside its own dispatch.
+            if (model.chain_next and event.kind == .completed) {
+                model.chain_next = false;
+                fx.loadVideo(.{
+                    .key = clip_key + 1,
+                    .surface = clip_surface,
+                    .path = clip_path,
+                    .on_event = VideoEffects.videoMsg(.video_event),
+                });
+            }
+        },
     }
 }
 
 fn videoCommand(name: []const u8) ?VideoMsg {
     if (std.mem.eql(u8, name, "video.load")) return .load;
+    if (std.mem.eql(u8, name, "video.arm-chain")) return .arm_chain;
     return null;
 }
 
@@ -691,9 +708,10 @@ const canvas = @import("canvas");
 const DeclModel = struct {
     show: bool = true,
     second: bool = false,
+    malformed: bool = false,
 };
 
-const DeclMsg = union(enum) { toggle_show, use_second, noop };
+const DeclMsg = union(enum) { toggle_show, use_second, use_malformed, noop };
 
 const DeclApp = ui_app_model.UiApp(DeclModel, DeclMsg);
 const DeclEffects = DeclApp.Effects;
@@ -703,6 +721,7 @@ fn declUpdate(model: *DeclModel, msg: DeclMsg, fx: *DeclEffects) void {
     switch (msg) {
         .toggle_show => model.show = !model.show,
         .use_second => model.second = true,
+        .use_malformed => model.malformed = true,
         .noop => {},
     }
 }
@@ -716,7 +735,9 @@ fn declView(ui: *DeclApp.Ui, model: *const DeclModel) DeclApp.Ui.Node {
     }
     return ui.column(.{ .padding = 8 }, .{
         ui.video(.{
-            .src = if (model.second) "assets/clips/two.mp4" else "assets/clips/one.mp4",
+            // The malformed arm is a URL the video loader's scheme
+            // gate refuses (`std.Uri.parse` fails on it).
+            .src = if (model.malformed) "https://[" else if (model.second) "assets/clips/two.mp4" else "assets/clips/one.mp4",
             .controls = true,
             .width = 320,
             .height = 220,
@@ -824,6 +845,32 @@ test "a declared <video src> loads on first rebuild, reloads on src change, and 
     try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
     try std.testing.expectEqual(@as(usize, 3), np.video_load_count);
     try std.testing.expect(np.video.loaded);
+}
+
+test "a refused declaration never takes ownership from the playback still running" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // A is playing from the installing rebuild's declaration.
+    try std.testing.expect(np.video.playing);
+    try std.testing.expectEqualStrings("assets/clips/one.mp4", np.video.path());
+
+    // The declaration changes to a source the loader's own gates
+    // refuse: the reconciler must not commit it — A keeps playing and
+    // remains the tracked owner.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .use_malformed);
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expectEqualStrings("assets/clips/one.mp4", np.video.path());
+    try std.testing.expectEqual(@as(usize, 1), np.video_load_count);
+
+    // Removing the element stops the playback the reconciler actually
+    // owns — a committed refused src would hash the wrong key here and
+    // leave A running forever.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
+    try std.testing.expect(!np.video.loaded);
+    try std.testing.expect(!fx.videoSnapshot().active);
 }
 
 test "the house chrome toggle pauses and resumes the platform player without an app Msg" {
@@ -1455,4 +1502,100 @@ test "a closed window's declared video promotes the next window's declaration at
     try harness.runtime.dispatchPlatformEvent(app, close_event);
     try std.testing.expect(std.mem.endsWith(u8, np.video.path(), "b.mp4"));
     try std.testing.expect(np.video.playing);
+}
+
+test "a completion handler's chained load replays in recorded order" {
+    const gpa = std.testing.allocator;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    // Record the playlist shape: clip A completes, its handler loads
+    // clip B from inside the completion dispatch, and B's `.loaded`
+    // acknowledgment is the very next platform event — no frame
+    // between. Replay must run the completion Msg DURING the replayed
+    // completed event, or B's loaded event would be swallowed against
+    // A's token and the whole tail would diverge.
+    var recorded_model: VideoModel = undefined;
+    var recorded_fingerprint: u64 = 0;
+    {
+        const recorder = try std.heap.page_allocator.create(session_record.SessionRecorder);
+        defer std.heap.page_allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(buffer.sink());
+        recorder.begin(.{ .platform_name = "test", .app_name = "effects-video", .window_width = 400, .window_height = 300 });
+
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.null_platform.setVideoMeta("orchard-flyover.mp4", 3_000, 1280, 720);
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+        const app = app_state.app();
+        try harness.start(app);
+        try dispatchFrame(harness, app, 1);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        const np = &harness.null_platform;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.arm-chain", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .native_command = .{ .name = "video.load", .window_id = 1, .view_label = canvas_label } });
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        // Run A to its natural end: the completion Msg loads B inside
+        // its own dispatch, and B's loaded ack replays as the very
+        // next event.
+        try harness.runtime.dispatchPlatformEvent(app, np.advanceVideo(3_000).?);
+        try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+        try dispatchFrame(harness, app, 2);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
+        try std.testing.expectEqual(@as(usize, 1), app_state.model.completed_count);
+        try std.testing.expectEqual(effects_mod.EffectVideoEventKind.loaded, app_state.model.last_kind.?);
+        try std.testing.expectEqual(clip_key + 1, app_state.model.last_key);
+
+        recorder.finish();
+        try std.testing.expect(!recorder.failed);
+        recorded_model = app_state.model;
+        recorded_fingerprint = harness.runtime.sessionStateFingerprint();
+    }
+
+    {
+        const harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(gpa);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.video_playback = false;
+        harness.runtime.options.platform = harness.null_platform.platform();
+
+        const app_state = try gpa.create(VideoApp);
+        defer gpa.destroy(app_state);
+        app_state.* = VideoApp.init(std.heap.page_allocator, .{}, .{
+            .name = "effects-video",
+            .scene = video_scene,
+            .canvas_label = canvas_label,
+            .update_fx = videoUpdate,
+            .view = videoView,
+            .on_command = videoCommand,
+        });
+        defer app_state.deinit();
+
+        const report = try session_replay.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+            .verify = true,
+            .require_same_platform = false,
+        });
+        try std.testing.expect(report.ok());
+        try std.testing.expect(report.effects_fed > 0);
+        try std.testing.expectEqual(@as(usize, 1), app_state.model.completed_count);
+        try std.testing.expectEqual(clip_key + 1, app_state.model.last_key);
+        try std.testing.expectEqualDeep(recorded_model, app_state.model);
+        try std.testing.expectEqual(recorded_fingerprint, harness.runtime.sessionStateFingerprint());
+    }
 }

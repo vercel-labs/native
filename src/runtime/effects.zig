@@ -2677,7 +2677,7 @@ pub fn Effects(comptime Msg: type) type {
             /// that update the live channel's mirrors at delivery; the
             /// handler is captured at stage time either way (the
             /// `PendingVideo` doc has the replay ordering argument).
-            video: struct { event: EffectVideo, video_fn: ?VideoMsgFn, resolve: bool },
+            video: struct { event: EffectVideo, video_fn: ?VideoMsgFn, resolve: bool, token: u64 = 0 },
             /// Loop-thread image terminals (rejections, fake cancels,
             /// feed fallbacks) — always payload-free, fully formed at
             /// enqueue. `regenerates` is true only for pre-executor
@@ -2815,6 +2815,14 @@ pub fn Effects(comptime Msg: type) type {
             event: EffectVideo,
             video_fn: ?VideoMsgFn,
             resolve: bool,
+            /// The load token of the playback this entry belongs to,
+            /// captured at stage time (`VideoChannel.token`): resolve
+            /// applies mirrors only while the LIVE channel still IS
+            /// that load — the public key alone cannot tell two loads
+            /// under the same app key apart, and a stale entry
+            /// resolving against a same-key replacement would reset
+            /// it.
+            token: u64 = 0,
         };
 
         /// One loop-side channel `.rejected` terminal awaiting drain —
@@ -6187,16 +6195,23 @@ pub fn Effects(comptime Msg: type) type {
                 .completed => .completed,
                 .failed => .failed,
             };
-            // Under replay the journaled effect records are the ONLY
-            // Msg source (fed through `feedVideoEvent`); the replayed
+            // Under replay the journaled effect records are the Msg
+            // source (fed through `feedVideoEvent`); the replayed
             // platform `.video` events must not double-deliver. They DO
             // still steer the channel mirrors — unlike audio, a video
             // playback routinely runs with NO Msg handler (the house
             // chrome renders straight from these mirrors, and a
-            // handler-less delivery journals no effect record), so the
-            // journaled platform events are the mirrors' only replay
-            // source. With a handler both sources apply the same
-            // recorded values, so the end state cannot diverge.
+            // handler-less delivery journals no effect record).
+            // TIMING: at record time this event's Msg dispatched
+            // SYNCHRONOUSLY inside this very event's dispatch, and the
+            // journal's contiguity invariant puts its effect record
+            // immediately before this event — so if the head of the
+            // video stage is a fed entry, it IS this event's recorded
+            // delivery and must dispatch NOW, not at the next drain: an
+            // update that loads the next clip from a `completed`
+            // handler has to run before the next recorded event (the
+            // new clip's `.loaded`) replays, or that event would be
+            // swallowed against the old token.
             if (self.replay) {
                 _ = self.applyVideoEvent(.{
                     .key = 0,
@@ -6208,6 +6223,18 @@ pub fn Effects(comptime Msg: type) type {
                     .width = platform_event.width,
                     .height = platform_event.height,
                 });
+                if (self.pending_video_len > 0) {
+                    const head = self.pendingVideoStorage()[self.pending_video_head];
+                    // Only a FED entry (a recorded delivery) pairs with
+                    // a platform event; a regenerating loop-side
+                    // rejection the replayed update staged keeps its
+                    // own drain-time position.
+                    if (head.resolve) {
+                        const entry = self.takePendingVideo();
+                        const event_fn = entry.video_fn orelse return null;
+                        return event_fn(entry.event);
+                    }
+                }
                 return null;
             }
             const video_fn = self.video.on_event;
@@ -6301,6 +6328,7 @@ pub fn Effects(comptime Msg: type) type {
                 },
                 .video_fn = self.video.on_event,
                 .resolve = true,
+                .token = self.video.token,
             });
         }
 
@@ -6541,7 +6569,7 @@ pub fn Effects(comptime Msg: type) type {
                                 // live channel alone: applying a
                                 // replaced stream's terminal would
                                 // reset the replacement.
-                                if (self.video.active and self.video.key == entry.event.key) {
+                                if (self.video.active and self.video.token == entry.token) {
                                     if (self.applyVideoEvent(event)) |resolved| event = resolved;
                                 }
                             } else {
@@ -8244,13 +8272,20 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// A synchronous refusal (the claim, load, or play errored, or
-        /// no services/binding are bound): release whatever was
-        /// claimed, reset the channel, and deliver one `.failed` event
-        /// on the next drain — the honest degrade for hosts without
-        /// video playback.
+        /// no services/binding are bound): silence whatever the
+        /// platform may have installed (best effort — a load that
+        /// succeeded before a later step refused would otherwise keep
+        /// its player decoding while this channel forgets it, and the
+        /// inactive channel would skip it at teardown too), release
+        /// whatever was claimed, reset the channel, and deliver one
+        /// `.failed` event on the next drain — the honest degrade for
+        /// hosts without video playback.
         fn failVideoChannel(self: *Self) void {
             const key = self.video.key;
             const on_event = self.video.on_event;
+            if (!self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
             self.releaseVideoSink();
             self.video = .{ .volume = self.video.volume };
             self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event);
@@ -8271,6 +8306,7 @@ pub fn Effects(comptime Msg: type) type {
                 .event = event,
                 .video_fn = video_fn,
                 .resolve = false,
+                .token = self.video.token,
             });
         }
 
@@ -8670,6 +8706,7 @@ pub fn Effects(comptime Msg: type) type {
                     .event = staged.event,
                     .video_fn = staged.video_fn,
                     .resolve = staged.resolve,
+                    .token = staged.token,
                 } };
             }
             if (min_seq == image_seq) {
