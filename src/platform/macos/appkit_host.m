@@ -973,7 +973,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (int)videoLoadPath:(NSString *)path pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
 - (int)videoLoadURL:(NSString *)urlString pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
 - (void)videoInstallItem:(AVPlayerItem *)item localSource:(BOOL)localSource pushFn:(native_sdk_appkit_video_sink_push_t)pushFn pushContext:(void *)pushContext;
-- (void)videoAttachOutputForItem:(AVPlayerItem *)item;
+- (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item;
 - (void)videoTearDownPlayer;
 - (void)videoItemStatusChanged;
 - (void)videoTimeControlChanged;
@@ -10086,8 +10086,12 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
  * reports. An item with no video geometry at all (an audio-only file
  * loaded as video) attaches nothing: the transport still works, the
  * acknowledgment carries zeros, and no frames flow — honest absence,
- * not an error. */
-- (void)videoAttachOutputForItem:(AVPlayerItem *)item {
+ * not an error (returns YES). Returns NO only when the conversion
+ * buffer cannot be allocated: geometry was decoded, frames were
+ * promised, and none could ever be delivered — the caller reports the
+ * load FAILED instead of acknowledging a playback that can never
+ * paint. */
+- (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item {
     CGSize natural = item.presentationSize;
     if (natural.width < 1.0 || natural.height < 1.0) {
         /* Fallback: the first video track's naturalSize with its
@@ -10100,7 +10104,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
             natural = CGSizeMake(fabs(transformed.width), fabs(transformed.height));
         }
     }
-    if (natural.width < 1.0 || natural.height < 1.0) return;
+    if (natural.width < 1.0 || natural.height < 1.0) return YES;
     self.videoStreamWidth = (uint64_t)llround(natural.width);
     self.videoStreamHeight = (uint64_t)llround(natural.height);
     size_t fitted_width = 0;
@@ -10114,11 +10118,16 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     [item addOutput:output];
     self.videoOutput = output;
     /* The reusable conversion target: one allocation per load at the
-     * output's max frame size, freed on stop/replace. */
+     * output's max frame size, freed on stop/replace. Allocation
+     * failure is a FAILED load, never a silent zero-frame playback. */
     if (self.videoFrameBuffer) free(self.videoFrameBuffer);
     self.videoFrameBufferLen = fitted_width * fitted_height * 4;
     self.videoFrameBuffer = malloc(self.videoFrameBufferLen);
-    if (!self.videoFrameBuffer) self.videoFrameBufferLen = 0;
+    if (!self.videoFrameBuffer) {
+        self.videoFrameBufferLen = 0;
+        return NO;
+    }
+    return YES;
 }
 
 /* Release the player, its observers, the frame tap, and the conversion
@@ -10171,7 +10180,13 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (item.status == AVPlayerItemStatusReadyToPlay) {
         if (self.videoLoadedEmitted) return;
         self.videoLoadedEmitted = YES;
-        [self videoAttachOutputForItem:item];
+        if (![self videoAttachOutputForItem:item]) {
+            /* Geometry decoded but the conversion buffer could not be
+             * allocated: acknowledging LOADED would promise frames
+             * that can never arrive, so the load fails honestly. */
+            [self videoDidFail];
+            return;
+        }
         [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED];
         return;
     }
