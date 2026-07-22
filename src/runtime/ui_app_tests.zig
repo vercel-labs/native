@@ -479,6 +479,157 @@ test "ui app presents pixels when the packet service is unsupported" {
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
 }
 
+// ---------------------------------- reflow stale-pixel oracle fixture
+
+const ReflowRow = struct {
+    id: u32,
+    open: bool,
+    in_progress: bool,
+    urgent: bool,
+    high: bool,
+    title: []const u8,
+};
+
+const reflow_rows_a = [_]ReflowRow{.{ .id = 1, .open = false, .in_progress = false, .urgent = true, .high = false, .title = "Login fails on retry" }};
+const reflow_rows_b = [_]ReflowRow{.{ .id = 2, .open = false, .in_progress = true, .urgent = false, .high = true, .title = "Sync is slow" }};
+// Same for-key as rows_a: the `<if>` arms swap INSIDE a stable keyed
+// subtree (a status change on the selected item, not a reselection).
+const reflow_rows_a_started = [_]ReflowRow{.{ .id = 1, .open = false, .in_progress = true, .urgent = false, .high = true, .title = "Login fails on retry" }};
+
+const ReflowModel = struct {
+    selected: []const ReflowRow = &reflow_rows_a,
+};
+
+const ReflowMsg = union(enum) {
+    select_second,
+    start_first,
+};
+
+const ReflowApp = ui_app_model.UiApp(ReflowModel, ReflowMsg);
+
+fn reflowUpdate(model: *ReflowModel, msg: ReflowMsg) void {
+    switch (msg) {
+        .select_second => model.selected = &reflow_rows_b,
+        .start_first => model.selected = &reflow_rows_a_started,
+    }
+}
+
+// The master-detail detail pane shape: a keyed subtree per selection
+// wrapping conditional badges plus trailing text, so switching the
+// selection removes pills, shrinks the row, and moves what remains.
+const reflow_markup =
+    \\<column grow="1" background="surface">
+    \\  <for each="selected" key="id" as="s">
+    \\    <column gap="14" padding="24">
+    \\      <text size="heading" wrap="true">{s.title}</text>
+    \\      <row gap="8" cross="center">
+    \\        <if test="{s.open}"><badge foreground="info">Open</badge></if>
+    \\        <if test="{s.in_progress}"><badge foreground="warning">In progress</badge></if>
+    \\        <if test="{s.urgent}"><badge foreground="destructive">Urgent priority</badge></if>
+    \\        <if test="{s.high}"><badge foreground="warning">High priority</badge></if>
+    \\        <text foreground="text_muted">#{s.id} · reported by a user</text>
+    \\      </row>
+    \\    </column>
+    \\  </for>
+    \\</column>
+;
+
+fn reflowOptions() ReflowApp.Options {
+    return .{
+        .name = "ui-app-reflow-oracle",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = reflowUpdate,
+        .markup = .{ .source = reflow_markup },
+    };
+}
+
+test "selection-change reflow leaves no stale pixels on the ui app pixel path" {
+    const surface = geometry.SizeF.init(400, 300);
+    const scale: f32 = 2;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = surface });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // Pixel-only host shape (a platform with no packet presenter wired,
+    // like the embed hosts): presents ride the CPU pixel path
+    // incrementally instead of forcing packet-fallback full repaints.
+    harness.runtime.options.platform.services.present_gpu_surface_packet_fn = null;
+    harness.runtime.options.platform.services.present_gpu_surface_packet_binary_fn = null;
+    // The refined dirty-bounds path: a Msg rebuild derives its damage
+    // from the retained key+fingerprint edit script — the derivation
+    // packet hosts and embed hosts consume — instead of degrading to
+    // the window.
+    harness.runtime.options.pixel_present_retained_baseline = true;
+
+    const app_state = try std.testing.allocator.create(ReflowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ReflowApp.init(std.heap.page_allocator, .{}, reflowOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Installing frame: full repaint of selection A through the CPU
+    // pixel path into the app's retained pixel buffer.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = surface,
+        .scale_factor = scale,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+
+    const byte_len = (try @import("canvas_frame_helpers.zig").canvasSurfacePixelSize(surface, scale)).byte_len;
+    const after_swap = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(after_swap);
+    const full = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(full);
+    const full_scratch = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(full_scratch);
+
+    // Two reflows: the `<if>` arms swapping inside a stable keyed
+    // subtree (status change), then the keyed subtree replaced whole
+    // (reselection). Each presents incrementally and must leave the
+    // retained buffer byte-identical to a full repaint of the same
+    // scene.
+    const steps = [_]struct { msg: ReflowMsg, frame_index: u64 }{
+        .{ .msg = .start_first, .frame_index = 2 },
+        .{ .msg = .select_second, .frame_index = 3 },
+    };
+    var present_count: usize = 1;
+    for (steps) |step| {
+        try app_state.dispatch(&harness.runtime, 1, step.msg);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = surface,
+            .scale_factor = scale,
+            .frame_index = step.frame_index,
+            .timestamp_ns = step.frame_index * 17_000_000,
+        } });
+        present_count += 1;
+        try std.testing.expectEqual(present_count, harness.null_platform.gpu_surface_present_count);
+        // Proof the reflow rode the incremental path: the present's
+        // dirty bounds are a sub-window region.
+        const swap_dirty = harness.null_platform.gpu_surface_present_dirty_bounds.?;
+        try std.testing.expect(swap_dirty.width < surface.width or swap_dirty.height < surface.height);
+        @memcpy(after_swap, app_state.pixel_buffer[0..byte_len]);
+
+        // Ground truth: the same scene fully repainted into a fresh
+        // buffer (a direct render, so the app's incremental buffer
+        // stays untouched).
+        _ = try harness.runtime.presentNextCanvasFramePixels(1, canvas_label, .{
+            .frame_index = step.frame_index + 100,
+            .timestamp_ns = (step.frame_index + 100) * 17_000_000,
+            .surface_size = surface,
+            .scale = scale,
+            .full_repaint = true,
+        }, harness.runtime.canvasFrameScratchStorage(), full, full_scratch, app_state.effectiveTokens().colors.background);
+        present_count += 1;
+        try std.testing.expectEqualSlices(u8, full, after_swap);
+    }
+}
+
 const counter_markup =
     \\<column gap="8" padding="12">
     \\  <text>Count {count}</text>

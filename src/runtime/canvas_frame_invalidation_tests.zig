@@ -478,6 +478,107 @@ test "runtime requests gpu surface frames for retained canvas changes" {
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_frame_request_count);
 }
 
+// Incremental-vs-full pixel oracle for reflow damage: present tree A,
+// swap to tree B through the SAME incremental machinery a selection
+// change drives (keyed subtree replaced, elements removed/shrunk/moved),
+// then compare the incrementally updated buffer against a fresh full
+// render of tree B. Any byte difference is a stale pixel the damage
+// region failed to cover.
+fn expectIncrementalPixelPresentMatchesFullRender(
+    comptime name: []const u8,
+    retained_baseline: bool,
+    scale: f32,
+) !void {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = name, .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const surface = geometry.SizeF.init(220, 80);
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = retained_baseline;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, surface.width, surface.height),
+    });
+
+    // Detail-pane shape: a surface panel behind a row of pills. Tree A
+    // shows two wide pills; tree B (another selection) shows one shorter,
+    // shifted pill under NEW ids — the keyed replacement a `for`/`if`
+    // reconciliation produces.
+    const tree_a = [_]canvas.Widget{
+        .{ .id = 10, .kind = .panel, .frame = geometry.RectF.init(0, 0, 220, 80) },
+        .{ .id = 20, .kind = .badge, .frame = geometry.RectF.init(10, 24, 120, 24), .text = "In progress" },
+        .{ .id = 21, .kind = .badge, .frame = geometry.RectF.init(140, 24, 70, 24), .text = "High" },
+    };
+    const tree_b = [_]canvas.Widget{
+        .{ .id = 10, .kind = .panel, .frame = geometry.RectF.init(0, 0, 220, 80) },
+        .{ .id = 30, .kind = .badge, .frame = geometry.RectF.init(10, 26, 60, 20), .text = "Open" },
+    };
+
+    const pixel_size = try canvas_frame.canvasSurfacePixelSize(surface, scale);
+    const incremental = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(incremental);
+    const full = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(full);
+    const scratch = try std.testing.allocator.alloc(u8, pixel_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+    const clear_color = canvas.Color.rgb8(15, 23, 42);
+
+    var nodes_a: [4]canvas.WidgetLayoutNode = undefined;
+    const layout_a = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &tree_a }, geometry.RectF.init(0, 0, surface.width, surface.height), &nodes_a);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout_a);
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 1,
+        .timestamp_ns = 16_000_000,
+        .surface_size = surface,
+        .scale = scale,
+    }, canvasFrameScratchStorage(&harness.runtime), incremental, scratch, clear_color);
+
+    var nodes_b: [4]canvas.WidgetLayoutNode = undefined;
+    const layout_b = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &tree_b }, geometry.RectF.init(0, 0, surface.width, surface.height), &nodes_b);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout_b);
+    const swapped = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = 32_000_000,
+        .surface_size = surface,
+        .scale = scale,
+    }, canvasFrameScratchStorage(&harness.runtime), incremental, scratch, clear_color);
+    // The oracle only proves anything if the swap actually rode the
+    // incremental path.
+    try std.testing.expect(!swapped.full_repaint);
+    try std.testing.expect(swapped.dirty_bounds != null);
+
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 3,
+        .timestamp_ns = 48_000_000,
+        .surface_size = surface,
+        .scale = scale,
+        .full_repaint = true,
+    }, canvasFrameScratchStorage(&harness.runtime), full, scratch, clear_color);
+
+    try std.testing.expectEqualSlices(u8, full, incremental);
+}
+
+test "keyed subtree swap leaves no stale pixels on the summary-dirty pixel path" {
+    try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary", false, 1);
+    try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary-2x", false, 2);
+}
+
+test "keyed subtree swap leaves no stale pixels on the refined-dirty pixel path" {
+    try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-refined", true, 1);
+    try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-refined-2x", true, 2);
+}
+
 test "runtime rejects duplicate canvas ids before replacing retained scene" {
     const TestApp = struct {
         fn app(self: *@This()) App {
