@@ -1245,6 +1245,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         record.video_width,
                         record.video_height,
                     ),
+                    // `.video_load` records carry the recording host's
+                    // cascade resolution — which source the load
+                    // actually played — because the replayed fake load
+                    // cannot probe the filesystem. Queued, not applied:
+                    // the record precedes the event whose dispatch
+                    // issues the load (see `pushReplayVideoSource`).
+                    .video_load => try self.effects.pushReplayVideoSource(record.video_token, record.video_source),
                     .timer => {},
                 },
             }

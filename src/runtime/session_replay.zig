@@ -462,6 +462,10 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // refused — are executor truth the replayed fake never
         // reproduces, so they feed like every other kind.
         .video => record.video_kind == .rejected,
+        // The cascade resolution is the recording host's filesystem
+        // truth — the replayed fake load cannot re-run the local
+        // probe, so the record must feed.
+        .video_load => false,
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,

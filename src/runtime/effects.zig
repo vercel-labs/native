@@ -1476,12 +1476,31 @@ pub const EffectResultKind = enum(u8) {
     /// value rides the journal, so a change here moves the format
     /// fingerprint.
     video = 13,
+    /// One `loadVideo` cascade resolution (`EffectVideoSource`),
+    /// journaled at the load itself — Msg-less engine truth like
+    /// `.clock` and `.env` records, handler or no handler. The
+    /// recording host's filesystem decides whether a local path plays
+    /// or falls through to the url, and the replay-side fake executor
+    /// cannot re-run that probe (replay routinely runs on a machine
+    /// without the assets), so the record is what steers the replayed
+    /// `source` and initial `buffering` mirrors
+    /// (`applyReplayVideoSource`). Kind codes are append-only and
+    /// never repack; the code value rides the journal, so a change
+    /// here moves the format fingerprint.
+    video_load = 14,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
 /// Bounded like everything else: more reads per drain window than this
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
+
+/// Journaled video cascade resolutions buffered for replay
+/// (`Effects.pushReplayVideoSource`). Records precede the event whose
+/// dispatch consumes them, so the queue holds at most one dispatch's
+/// loads; more than this many per dispatch is a runaway loop, not a
+/// session shape.
+pub const max_effect_replay_video_source_entries: usize = 64;
 
 /// Journaled launch-env deliveries buffered for replay (the `.env`
 /// record feed). Bounded like the clock queue: more launch variables
@@ -1572,6 +1591,9 @@ pub const EffectResultRecord = struct {
     /// `.rejected` records: a refused load never minted a token (and
     /// those records regenerate under replay anyway).
     video_token: u64 = 0,
+    /// `.video_load` records: the source the recording host's cascade
+    /// resolved (see the kind's doc).
+    video_source: EffectVideoSource = .local,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2866,6 +2888,14 @@ pub fn Effects(comptime Msg: type) type {
             parked_pass: u64 = 0,
         };
 
+        /// One journaled `.video_load` cascade resolution awaiting the
+        /// replayed load that will consume it (see
+        /// `pushReplayVideoSource`).
+        const ReplayVideoSource = struct {
+            token: u64,
+            source: EffectVideoSource,
+        };
+
         /// One loop-side channel `.rejected` terminal awaiting drain —
         /// the channel twin of `PendingImage`, non-lossy for the same
         /// contract (exactly one terminal per refused open, no drop
@@ -3516,6 +3546,11 @@ pub fn Effects(comptime Msg: type) type {
         retired_videos: [max_effect_pending_images_inline]RetiredVideo = undefined,
         retired_video_spill: []RetiredVideo = &.{},
         retired_video_len: usize = 0,
+        /// Journaled `.video_load` cascade resolutions awaiting their
+        /// replayed loads (see `pushReplayVideoSource`). Loop-thread
+        /// only, like the replay clock queue.
+        replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
+        replay_video_source_len: usize = 0,
         /// Drain-pass counter (incremented in `drainBoundary`): the
         /// retired-video sweep's clock. Loop-thread only.
         drain_pass_seq: u64 = 0,
@@ -6105,7 +6140,12 @@ pub fn Effects(comptime Msg: type) type {
             self.video.path_len = options.path.len;
             @memcpy(self.video.url_buffer[0..options.url.len], options.url);
             self.video.url_len = options.url.len;
-            if (self.video.fake) return;
+            if (self.video.fake) {
+                // Under replay the recorded cascade resolution stands
+                // in for the local-file probe this fake cannot run.
+                if (self.replay) self.takeReplayVideoSource();
+                return;
+            }
             const services = self.services orelse return self.failVideoChannel();
             // Claim the texture channel first: a surface another
             // producer holds (or a host with no channels left) fails
@@ -6136,6 +6176,18 @@ pub fn Effects(comptime Msg: type) type {
                 // acknowledgment is the authority from there.
                 self.video.buffering = true;
             }
+            // Journal the cascade's resolution for replay — Msg-less
+            // engine truth, journaled handler or no handler (the
+            // `.video_load` kind's doc has the full story). A later
+            // start failure journals its own `.failed` terminal after
+            // this record, so replay resets the channel in the same
+            // order the recording did.
+            self.journalNote(.{
+                .kind = .video_load,
+                .key = options.key,
+                .video_token = self.video.token,
+                .video_source = self.video.source,
+            });
             // Options that shape the fresh player (a load resets the
             // platform side, so defaults need no call). Best effort,
             // like the remembered audio volume.
@@ -6444,6 +6496,51 @@ pub fn Effects(comptime Msg: type) type {
                 .resolve = true,
                 .token = token,
             });
+        }
+
+        /// Session replay: queue a journaled `.video_load` cascade
+        /// resolution — the source the RECORDING host's filesystem
+        /// decided (a missing local file falls through to the url),
+        /// which the replay-side fake load cannot probe. The record
+        /// precedes the event whose dispatch issued the load (the
+        /// journal's ordering invariant), so it queues here and the
+        /// replayed `loadVideo` consumes it by token — the minted
+        /// sequence is deterministic, so each entry pairs with exactly
+        /// the load that journaled it, and a load whose cascade failed
+        /// live (no record) simply finds no entry.
+        pub fn pushReplayVideoSource(self: *Self, token: u64, source: EffectVideoSource) error{EffectNotFound}!void {
+            if (self.replay_video_source_len >= max_effect_replay_video_source_entries) return error.EffectNotFound;
+            self.replay_video_sources[self.replay_video_source_len] = .{ .token = token, .source = source };
+            self.replay_video_source_len += 1;
+        }
+
+        /// Consume the queued cascade resolution for the load just
+        /// minted, if the recording journaled one — the replayed fake
+        /// load's stand-in for the local-file probe. Entries for
+        /// already-minted tokens can never match again (tokens are
+        /// unique and monotone), so the scan drops them on the way —
+        /// the queue self-cleans.
+        fn takeReplayVideoSource(self: *Self) void {
+            var index: usize = 0;
+            while (index < self.replay_video_source_len) {
+                const entry = self.replay_video_sources[index];
+                if (entry.token < self.video.token) {
+                    self.replay_video_source_len -= 1;
+                    self.replay_video_sources[index] = self.replay_video_sources[self.replay_video_source_len];
+                    continue;
+                }
+                if (entry.token == self.video.token) {
+                    self.video.source = entry.source;
+                    // The live cascade starts a fresh stream buffering
+                    // optimistically (`loadVideo`); the fake load could
+                    // not know it resolved to a stream.
+                    if (entry.source == .stream) self.video.buffering = true;
+                    self.replay_video_source_len -= 1;
+                    self.replay_video_sources[index] = self.replay_video_sources[self.replay_video_source_len];
+                    return;
+                }
+                index += 1;
+            }
         }
 
         /// Number of effects currently in flight (running slots).

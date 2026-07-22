@@ -1026,6 +1026,8 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     // The producing load's identity, how replay routes the record
     // (`EffectResultRecord.video_token`).
     try cursor.writeInt(u64, record.video_token);
+    // `.video_load` records: the recording host's cascade resolution.
+    try cursor.writeEnum(record.video_source);
     return buffer[0..cursor.len];
 }
 
@@ -1076,6 +1078,7 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.video_width = try cursor.readInt(u64);
     record.video_height = try cursor.readInt(u64);
     record.video_token = try cursor.readInt(u64);
+    record.video_source = try cursor.readEnum(runtime_effects.EffectVideoSource);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
