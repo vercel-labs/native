@@ -63,8 +63,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const canvas = @import("canvas");
+const platform = @import("../platform/root.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_images = @import("canvas_images.zig");
+const effects_mod = @import("effects.zig");
 
 pub const max_media_surface_channels = canvas_limits.max_media_surface_channels;
 pub const max_media_surface_pixel_bytes = canvas_limits.max_media_surface_pixel_bytes;
@@ -335,6 +337,22 @@ pub const MediaSurfaceProducer = struct {
         wake.pending = true;
     }
 
+    /// The claim as a type-erased `platform.VideoFrameSink` — what the
+    /// video effect hands the platform decoder. The sink carries only
+    /// the slot pointer (process-lived by construction) and the claim
+    /// generation, so it is copyable across the C ABI and safe from any
+    /// thread: a push through a released claim reports
+    /// `error.MediaSurfaceReleased` exactly like the handle itself.
+    pub fn frameSink(self: MediaSurfaceProducer) platform.VideoFrameSink {
+        return .{ .context = self.slot, .generation = self.generation, .push_fn = sinkPushFrame };
+    }
+
+    fn sinkPushFrame(context: ?*anyopaque, generation: u64, width: usize, height: usize, rgba8: []const u8) anyerror!void {
+        const slot: *MediaSurfaceSlot = @ptrCast(@alignCast(context orelse return error.MediaSurfaceReleased));
+        const producer = MediaSurfaceProducer{ .slot = slot, .generation = generation, .surface_id = 0 };
+        return producer.pushFrame(width, height, rgba8);
+    }
+
     /// End this claim: later pushes through this handle (or any copy)
     /// report `error.MediaSurfaceReleased`, and the slot becomes
     /// claimable again. The runtime keeps the last ADOPTED texture — a
@@ -577,6 +595,34 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                 // re-render their next frame.
                 runtime_canvas_images.RuntimeCanvasImages(Runtime).noteCanvasImagesChanged(self);
             }
+        }
+
+        /// Type-erased handle the effects channel's video tier uses to
+        /// claim and release texture channels without knowing the
+        /// runtime type (`Effects.bindMediaSurfaces`) — the
+        /// `canvasImageRegistryBinding` pattern. `acquire` claims the
+        /// channel and answers the copyable frame sink the platform
+        /// decoder pushes through; `release` ends the claim by sink
+        /// (the sink IS the claim: slot pointer + generation).
+        pub fn mediaSurfaceBinding(self: *Runtime) effects_mod.MediaSurfaceBinding {
+            return .{
+                .context = self,
+                .acquire_fn = mediaSurfaceBindingAcquire,
+                .release_fn = mediaSurfaceBindingRelease,
+            };
+        }
+
+        fn mediaSurfaceBindingAcquire(context: *anyopaque, surface_id: u64) anyerror!platform.VideoFrameSink {
+            const self: *Runtime = @ptrCast(@alignCast(context));
+            const producer = try acquireMediaSurfaceProducer(self, surface_id);
+            return producer.frameSink();
+        }
+
+        fn mediaSurfaceBindingRelease(context: *anyopaque, sink: platform.VideoFrameSink) void {
+            _ = context;
+            const slot: *MediaSurfaceSlot = @ptrCast(@alignCast(sink.context orelse return));
+            const producer = MediaSurfaceProducer{ .slot = slot, .generation = sink.generation, .surface_id = 0 };
+            producer.release();
         }
 
         /// Disarm every wake binding this runtime armed: after this

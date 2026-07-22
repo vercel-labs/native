@@ -34,6 +34,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .frame_profile = automationFrameProfile(self),
                     .tray = automationTray(self),
                     .audio = automationAudio(self),
+                    .video = automationVideo(self),
                     .errors = self.dispatchErrors(),
                     .source = self.loaded_source,
                     .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
@@ -67,6 +68,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .frame_profile = automationFrameProfile(self),
                 .tray = automationTray(self),
                 .audio = automationAudio(self),
+                .video = automationVideo(self),
                 .errors = self.dispatchErrors(),
                 .source = self.loaded_source,
                 .widget_node_budget = canvas_limits.max_canvas_widget_nodes_per_view,
@@ -115,6 +117,28 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 .duration_ms = self.audio_duration_ms,
                 .spectrum_events = self.audio_spectrum_events,
                 .spectrum_bands = &self.audio_spectrum_bands,
+            };
+        }
+
+        /// Live video playback as the ui-app layer last mirrored it
+        /// (`Runtime.video_*`), or null when nothing is loaded — the
+        /// audio report's twin. Texture contents stay out of every
+        /// snapshot; the transport line plus the surface's placeholder
+        /// widget are the automation-visible evidence.
+        fn automationVideo(self: *Runtime) ?automation.snapshot.Video {
+            if (!self.video_active) return null;
+            return .{
+                .key = self.video_key,
+                .surface = self.video_surface_id,
+                .playing = self.video_playing,
+                .buffering = self.video_buffering,
+                .looping = self.video_looping,
+                .muted = self.video_muted,
+                .source = @tagName(self.video_source),
+                .position_ms = self.video_position_ms,
+                .duration_ms = self.video_duration_ms,
+                .width = self.video_width,
+                .height = self.video_height,
             };
         }
 

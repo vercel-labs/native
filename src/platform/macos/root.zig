@@ -753,6 +753,7 @@ pub const MacPlatform = struct {
             .audio_streaming,
             .audio_spectrum,
             => self.web_engine == .system,
+            .video_playback => false,
         };
     }
 

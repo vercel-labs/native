@@ -481,6 +481,10 @@ pub const WindowsPlatform = struct {
             // are macOS-only today; Win32 keeps the engine's wheel
             // physics.
             .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // Video decode (a Media Foundation session feeding the
+            // media-surface texture channel) is not implemented yet:
+            // an honest false rather than a half-implemented player.
+            .video_playback => false,
         };
     }
 

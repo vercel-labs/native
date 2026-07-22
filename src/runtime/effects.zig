@@ -226,6 +226,21 @@ pub const RegisteredImage = struct {
     height: usize = 0,
 };
 
+/// Type-erased handle to the runtime's media-surface texture channels,
+/// bound onto the effects channel (`bindMediaSurfaces`) so `loadVideo`
+/// can claim the surface a `<video>` widget binds and hand its frame
+/// sink to the platform decoder — without reaching for the runtime.
+/// Constructed by `Runtime.mediaSurfaceBinding()`. `acquire_fn` is
+/// loop-thread-only (it claims runtime-owned channel state) and answers
+/// the copyable `platform.VideoFrameSink` the decoder pushes through;
+/// `release_fn` ends the claim named by a previously acquired sink
+/// (idempotent — the sink carries its claim generation).
+pub const MediaSurfaceBinding = struct {
+    context: *anyopaque,
+    acquire_fn: *const fn (context: *anyopaque, surface_id: u64) anyerror!platform.VideoFrameSink,
+    release_fn: *const fn (context: *anyopaque, sink: platform.VideoFrameSink) void,
+};
+
 /// Type-erased handle to the runtime's window verbs, bound onto the
 /// effects channel (`bindWindowActions`) so `update` can drive REAL OS
 /// window actions — the seam behind app-drawn close/minimize controls
@@ -624,6 +639,60 @@ pub const EffectAudio = struct {
 pub const EffectAudioSource = enum(u8) {
     local,
     cache,
+    stream,
+};
+
+/// Longest video source string (path or url) `loadVideo` accepts,
+/// mirroring the platform bound. Longer strings deliver exactly one
+/// `.rejected` video event Msg.
+pub const max_effect_video_path_bytes: usize = platform.max_video_path_bytes;
+
+/// How a video event Msg came to be — the audio vocabulary plus the
+/// stream's decoded dimensions on `loaded`. `loaded` acknowledges a
+/// successful `loadVideo` with the platform player's duration readout
+/// (an estimate, exactly like audio's) and the stream's pixel
+/// dimensions; `position` ticks at the platform's coarse honest cadence
+/// (~500ms) only while playing, carrying the stream's `buffering` flag;
+/// `completed` fires exactly once when a NON-LOOPING video reaches its
+/// natural end (a looping playback wraps and keeps ticking — it never
+/// completes); `failed` reports a load/decode/device failure or a
+/// platform without video playback — always a Msg, never a crash and
+/// never silence; `rejected` reports a command the effects layer
+/// refused before the platform was asked (an empty or oversized source,
+/// a non-http(s) url, an invalid surface id). Pixels never ride these
+/// events: decoded frames flow platform-side into the media-surface
+/// texture channel the load named.
+pub const EffectVideoEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+    rejected,
+};
+
+/// Payload for `on_event` Msg constructors of video effects. Positions
+/// and durations are milliseconds; `playing`/`buffering` carry the
+/// audio payload's exact semantics; `width`/`height` are the stream's
+/// decoded pixel dimensions (delivered on `.loaded`, 0 elsewhere — the
+/// channel mirrors keep them for the snapshot). All fields are plain
+/// data — safe to store in the model.
+pub const EffectVideo = struct {
+    key: u64,
+    kind: EffectVideoEventKind,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+    buffering: bool = false,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Where the active video playback's bytes come from — the resolved end
+/// of the `loadVideo` source cascade (local file, then network stream).
+/// Exposed in the snapshot and the fake executor's request so tests and
+/// automation can pin the resolution order.
+pub const EffectVideoSource = enum(u8) {
+    local,
     stream,
 };
 
@@ -1390,6 +1459,13 @@ pub const EffectResultKind = enum(u8) {
     /// store to resolve it. `dropped_pending` rides the shared
     /// `dropped` field; the cumulative total gets its own field.
     channel = 12,
+    /// One video playback event (`EffectVideo`), journaled verbatim at
+    /// the delivery boundary exactly like `.audio` — the Msg source
+    /// under replay, while the platform's own `.video` events stay
+    /// inert. Kind codes are append-only and never repack; the code
+    /// value rides the journal, so a change here moves the format
+    /// fingerprint.
+    video = 13,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1467,6 +1543,16 @@ pub const EffectResultRecord = struct {
     /// occupancy's cumulative drop total.
     channel_kind: EffectChannelEventKind = .data,
     channel_dropped_total: u32 = 0,
+    /// `.video` records: the delivered video event, verbatim — the
+    /// audio record fields' twin, plus the stream dimensions the
+    /// `.loaded` acknowledgment carries.
+    video_kind: EffectVideoEventKind = .position,
+    video_position_ms: u64 = 0,
+    video_duration_ms: u64 = 0,
+    video_playing: bool = false,
+    video_buffering: bool = false,
+    video_width: u64 = 0,
+    video_height: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -1694,6 +1780,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
         pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
@@ -1776,6 +1863,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn audioMsg(comptime tag: std.meta.Tag(Msg)) AudioMsgFn {
             return struct {
                 fn make(event: EffectAudio) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_event` of video playback:
+        /// `videoMsg(.video_event)` builds
+        /// `Msg{ .video_event = event }` — the variant's payload type
+        /// must be `native_sdk.EffectVideo`.
+        pub fn videoMsg(comptime tag: std.meta.Tag(Msg)) VideoMsgFn {
+            return struct {
+                fn make(event: EffectVideo) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -2329,6 +2428,126 @@ pub fn Effects(comptime Msg: type) type {
             volume: f32,
         };
 
+        pub const LoadVideoOptions = struct {
+            /// Caller-chosen identity, stored in the model and echoed in
+            /// every event for this playback. Video keys are their own
+            /// namespace (like audio and timer keys); a new `loadVideo`
+            /// replaces the previous playback outright — one player is
+            /// the whole surface.
+            key: u64,
+            /// The media-surface texture channel decoded frames feed:
+            /// the SAME model-owned u64 a `<video>` (or
+            /// `<media-surface>`) widget binds. 0 and ids in the
+            /// reserved texture namespace
+            /// (`canvas.media_surface_image_id_bit`) are refused with
+            /// one `.rejected` event, mirroring
+            /// `acquireMediaSurfaceProducer`.
+            surface: u64,
+            /// Local file path, tried FIRST — the audio cascade's rule:
+            /// a present-but-missing file falls through to `url` when
+            /// one is given; every other local failure is terminal.
+            /// Bounded by `max_effect_video_path_bytes`.
+            path: []const u8 = "",
+            /// http(s) source, tried when the local path is absent or
+            /// missing: progressive streaming, playable before the
+            /// download finishes. Empty means local-only. Non-http(s)
+            /// schemes are rejected before the platform is asked — the
+            /// image loader's scheme check.
+            url: []const u8 = "",
+            /// Start playing as soon as the load lands. False loads
+            /// paused at position zero — `playVideo` starts it (the
+            /// poster-frame shape: the first decoded frame reaches the
+            /// surface either way).
+            autoplay: bool = true,
+            /// Wrap from the natural end back to zero and keep playing.
+            /// A looping playback never delivers `.completed`.
+            loop: bool = false,
+            /// Start with the audio track muted (a reversible switch,
+            /// independent of the remembered volume).
+            muted: bool = false,
+            /// Msg constructor every playback event flows through (see
+            /// `videoMsg`). Without one, playback still runs — frames
+            /// reach the surface; the app just hears nothing back.
+            on_event: ?VideoMsgFn = null,
+        };
+
+        /// The single video playback channel — one player is the whole
+        /// platform surface, mirroring `AudioChannel` exactly: a
+        /// platform service arm, no `max_effects` slots, keys in their
+        /// own namespace, mirrors tracking what the app has been told
+        /// (commands optimistically, platform events authoritatively).
+        /// The channel additionally owns the media-surface claim for
+        /// the playback's surface: `sink` is the frame conduit handed
+        /// to the platform decoder, released on stop/replace/failure so
+        /// the surface becomes claimable again (the runtime keeps the
+        /// last adopted frame either way).
+        const VideoChannel = struct {
+            active: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            surface_id: u64 = 0,
+            on_event: ?VideoMsgFn = null,
+            playing: bool = false,
+            source: EffectVideoSource = .local,
+            buffering: bool = false,
+            looping: bool = false,
+            muted: bool = false,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+            width: u64 = 0,
+            height: u64 = 0,
+            volume: f32 = 1.0,
+            /// The live media-surface claim (real executor only): a
+            /// zeroed sink means no claim is held. Fake channels never
+            /// claim — replay stays producer-free by construction.
+            sink: platform.VideoFrameSink = .{},
+            path_buffer: [max_effect_video_path_bytes]u8 = undefined,
+            path_len: usize = 0,
+            url_buffer: [max_effect_video_path_bytes]u8 = undefined,
+            url_len: usize = 0,
+
+            fn path(channel: *const VideoChannel) []const u8 {
+                return channel.path_buffer[0..channel.path_len];
+            }
+
+            fn url(channel: *const VideoChannel) []const u8 {
+                return channel.url_buffer[0..channel.url_len];
+            }
+        };
+
+        /// Video playback state the automation snapshot exposes: honest
+        /// — it reports what the platform has told us.
+        pub const VideoSnapshot = struct {
+            active: bool = false,
+            key: u64 = 0,
+            surface: u64 = 0,
+            playing: bool = false,
+            buffering: bool = false,
+            looping: bool = false,
+            muted: bool = false,
+            source: EffectVideoSource = .local,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+            width: u64 = 0,
+            height: u64 = 0,
+            volume: f32 = 1.0,
+        };
+
+        /// A recorded video playback request, exposed by the fake
+        /// executor for test assertions. The strings borrow the
+        /// channel's storage — valid until the next `loadVideo`.
+        pub const VideoRequest = struct {
+            key: u64,
+            surface: u64,
+            path: []const u8,
+            url: []const u8,
+            playing: bool,
+            looping: bool,
+            muted: bool,
+            position_ms: u64,
+            volume: f32,
+        };
+
         /// `draining`: the worker is done and the terminal entry is
         /// queued, but the slot still owns a heap buffer (a fetch's body
         /// or a collect spawn's stdout) until the drain delivers (and
@@ -2443,6 +2662,10 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            /// The audio entry's exact shape for the video channel:
+            /// `resolve` marks fed events (fake executor / replay) that
+            /// take key and handler from the live channel at delivery.
+            video: struct { event: EffectVideo, video_fn: ?VideoMsgFn, resolve: bool },
             /// Loop-thread image terminals (rejections, fake cancels,
             /// feed fallbacks) — always payload-free, fully formed at
             /// enqueue. `regenerates` is true only for pre-executor
@@ -2492,6 +2715,8 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    // Same for EffectVideo.
+                    .video => {},
                     // EffectHostResult carries none: its terminals are
                     // one-per-request by construction.
                     .host => {},
@@ -2521,6 +2746,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
+                    .video => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
                     .image => unreachable,
@@ -3008,6 +3234,13 @@ pub fn Effects(comptime Msg: type) type {
         /// alongside the services so `update` can register fetched
         /// pixels synchronously (loop-thread only, not an effect).
         images: ?ImageRegistryBinding = null,
+        /// The runtime's media-surface texture channels, bound by
+        /// `UiApp` alongside the services so `loadVideo` can claim the
+        /// surface a video widget binds and hand its frame sink to the
+        /// platform decoder (loop-thread only). Null means no texture
+        /// channel host: real video loads fail loudly with one
+        /// `.failed` event.
+        media_surfaces: ?MediaSurfaceBinding = null,
         /// The runtime's window verbs (close/minimize by label), bound
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
@@ -3118,6 +3351,8 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        /// The single video playback channel (see `VideoChannel`).
+        video: VideoChannel = .{},
         /// Fixed external-source channel table (see
         /// `max_effect_channels`): long-lived keyed occupancies beside
         /// the effect slots. Loop-thread only — the thread-shared half
@@ -3267,6 +3502,13 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            // Stop the platform video player (best effort), release the
+            // media-surface claim, and clear the channel.
+            if (self.video.active and !self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
+            self.releaseVideoSink();
+            self.video = .{};
             // Close every external-source channel FIRST among the
             // loop-side teardowns: clearing `open` under each shared
             // mutex fences the app's posting threads off this struct
@@ -3828,6 +4070,13 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Point the drain's result reporting at a session recorder.
         /// Loop-thread only; the first bind sticks.
+        /// Bind the runtime's media-surface texture channels
+        /// (`Runtime.mediaSurfaceBinding()`), so `loadVideo` can claim
+        /// the surface a video widget binds. Loop-thread only.
+        pub fn bindMediaSurfaces(self: *Self, binding: MediaSurfaceBinding) void {
+            self.media_surfaces = binding;
+        }
+
         pub fn bindJournal(self: *Self, binding: EffectJournal) void {
             if (self.journal == null) self.journal = binding;
         }
@@ -5636,6 +5885,318 @@ pub fn Effects(comptime Msg: type) type {
             } });
         }
 
+        /// Load a video source into the app's single video player,
+        /// claim the media-surface texture channel its frames feed, and
+        /// (with `autoplay`) start playing — replacing whatever played
+        /// before, the audio channel's replace semantics extended to
+        /// the surface claim: the previous playback's platform player
+        /// stops and its claim is released before the new one lands.
+        /// Sources resolve in the audio cascade's fixed, honest order:
+        /// the LOCAL `path` first; when it is absent (or the file is
+        /// missing) the http(s) `url`, streaming progressively. TEA all
+        /// the way down for TRANSPORT: every report — the load
+        /// acknowledgment with real dimensions and duration, coarse
+        /// position ticks (carrying the stream's honest `buffering`
+        /// flag), the one completion at a non-looping natural end,
+        /// failures — arrives as an `on_event` Msg (payload
+        /// `EffectVideo`) through the ordinary update path. PIXELS
+        /// never enter this channel: decoded frames flow platform-side
+        /// through the claimed surface's frame sink into the
+        /// compositor, presentation-only by construction. Never fails
+        /// from the caller's view: an invalid request (no source,
+        /// oversized strings, a non-http(s) url, an invalid surface id)
+        /// delivers one `.rejected` event; a platform without video
+        /// playback, an unclaimable surface, an unreadable file with no
+        /// url fallback, or a network failure delivers one `.failed`
+        /// event — never a crash, never silence. The video key is its
+        /// own namespace (like audio keys) and identifies the playback
+        /// in every event; it consumes no `max_effects` slots.
+        pub fn loadVideo(self: *Self, options: LoadVideoOptions) void {
+            // The same surface ids `acquireMediaSurfaceProducer`
+            // refuses, refused before any claim: 0 is the no-surface
+            // sentinel, the high bit is the derived-texture namespace.
+            const surface_invalid = options.surface == 0 or
+                (options.surface & canvas.media_surface_image_id_bit) != 0;
+            var rejected = surface_invalid or
+                (options.path.len == 0 and options.url.len == 0) or
+                options.path.len > max_effect_video_path_bytes or
+                options.url.len > max_effect_video_path_bytes;
+            if (!rejected and options.url.len > 0) {
+                // The image loader's scheme check: http(s) only, before
+                // the platform is asked.
+                if (std.Uri.parse(options.url)) |uri| {
+                    const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+                        std.ascii.eqlIgnoreCase(uri.scheme, "https");
+                    if (!scheme_ok) rejected = true;
+                } else |_| {
+                    rejected = true;
+                }
+            }
+            if (rejected) {
+                self.deliverLoopVideo(.{ .key = options.key, .kind = .rejected }, options.on_event);
+                return;
+            }
+            // Replace semantics: end the previous playback whole —
+            // platform player stopped, surface claim released — before
+            // the new channel state lands.
+            if (self.video.active and !self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
+            self.releaseVideoSink();
+            const volume = self.video.volume;
+            self.video = .{
+                .active = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .surface_id = options.surface,
+                .on_event = options.on_event,
+                // Optimistic command mirror; the platform's events are
+                // the authority from the `.loaded` acknowledgment on.
+                .playing = options.autoplay,
+                // The fake executor cannot resolve the cascade, so it
+                // records the requested shape: URL-only requests read
+                // as streams, anything with a local path as local.
+                .source = if (options.path.len == 0) .stream else .local,
+                .looping = options.loop,
+                .muted = options.muted,
+                .volume = volume,
+            };
+            @memcpy(self.video.path_buffer[0..options.path.len], options.path);
+            self.video.path_len = options.path.len;
+            @memcpy(self.video.url_buffer[0..options.url.len], options.url);
+            self.video.url_len = options.url.len;
+            if (self.video.fake) return;
+            const services = self.services orelse return self.failVideoChannel();
+            // Claim the texture channel first: a surface another
+            // producer holds (or a host with no channels left) fails
+            // loudly before the platform decodes anything toward it.
+            const binding = self.media_surfaces orelse return self.failVideoChannel();
+            const sink = binding.acquire_fn(binding.context, options.surface) catch
+                return self.failVideoChannel();
+            self.video.sink = sink;
+            // The source cascade, the audio rule verbatim: a missing
+            // local file is the ONE local failure that falls through to
+            // the url — everything else is terminal, because retrying a
+            // different source would mask the real problem.
+            resolve: {
+                if (options.path.len > 0) {
+                    if (services.videoLoad(options.path, sink)) |_| {
+                        self.video.source = .local;
+                        break :resolve;
+                    } else |err| {
+                        if (err != error.VideoSourceNotFound or options.url.len == 0) {
+                            return self.failVideoChannel();
+                        }
+                    }
+                }
+                services.videoLoadUrl(options.url, sink) catch return self.failVideoChannel();
+                self.video.source = .stream;
+                // A fresh stream has no bytes yet: buffering starts
+                // true optimistically and the platform's `.loaded`
+                // acknowledgment is the authority from there.
+                self.video.buffering = true;
+            }
+            // Options that shape the fresh player (a load resets the
+            // platform side, so defaults need no call). Best effort,
+            // like the remembered audio volume.
+            if (options.loop) services.videoSetLoop(true) catch {};
+            if (options.muted) services.videoSetMuted(true) catch {};
+            if (volume != 1.0) services.videoSetVolume(volume) catch {};
+            if (options.autoplay) services.videoPlay() catch return self.failVideoChannel();
+        }
+
+        /// Start or resume the loaded playback (the poster-frame
+        /// counterpart of `autoplay = false`, and un-pause). Idle
+        /// channels no-op; a player the platform can no longer start
+        /// delivers one `.failed` event instead of silence.
+        pub fn playVideo(self: *Self) void {
+            if (!self.video.active) return;
+            self.video.playing = true;
+            if (self.video.fake) return;
+            const services = self.services orelse return self.failVideoChannel();
+            services.videoPlay() catch return self.failVideoChannel();
+        }
+
+        /// Pause the current playback in place; the surface keeps its
+        /// last adopted frame. Idle channels no-op; no event echoes —
+        /// the caller commanded it, so the caller knows.
+        pub fn pauseVideo(self: *Self) void {
+            if (!self.video.active) return;
+            self.video.playing = false;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoPause() catch {};
+        }
+
+        /// Stop playback, release the player AND the surface claim. No
+        /// event echoes; the channel goes idle, later platform
+        /// stragglers are swallowed, and the surface keeps its last
+        /// adopted frame until another producer claims it.
+        pub fn stopVideo(self: *Self) void {
+            if (!self.video.active) return;
+            const fake = self.video.fake;
+            self.releaseVideoSink();
+            const volume = self.video.volume;
+            self.video = .{ .volume = volume };
+            if (fake) return;
+            const services = self.services orelse return;
+            services.videoStop() catch {};
+        }
+
+        /// Jump the current playback to `position_ms` (the platform
+        /// clamps to the duration; a paused seek still pushes the
+        /// sought frame, so scrubbing is visible). Idle channels no-op;
+        /// no event echoes — the next position tick reports from the
+        /// new position.
+        pub fn seekVideo(self: *Self, position_ms: u64) void {
+            if (!self.video.active) return;
+            self.video.position_ms = if (self.video.duration_ms > 0)
+                @min(position_ms, self.video.duration_ms)
+            else
+                position_ms;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSeek(position_ms) catch {};
+        }
+
+        /// Set playback volume, clamped to 0.0—1.0 and remembered
+        /// across loads — the audio volume contract. Independent of
+        /// mute.
+        pub fn setVideoVolume(self: *Self, volume: f32) void {
+            const clamped = std.math.clamp(volume, 0.0, 1.0);
+            self.video.volume = clamped;
+            if (!self.video.active or self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetVolume(clamped) catch {};
+        }
+
+        /// Mute or unmute the playback's audio track without touching
+        /// the remembered volume. Idle channels no-op (a fresh load's
+        /// `muted` option is the way to start muted).
+        pub fn setVideoMuted(self: *Self, muted: bool) void {
+            if (!self.video.active) return;
+            self.video.muted = muted;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetMuted(muted) catch {};
+        }
+
+        /// Enable or disable looping on the current playback. Idle
+        /// channels no-op (a fresh load's `loop` option covers the
+        /// start-looping case). A looping playback never delivers
+        /// `.completed`.
+        pub fn setVideoLoop(self: *Self, loop: bool) void {
+            if (!self.video.active) return;
+            self.video.looping = loop;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetLoop(loop) catch {};
+        }
+
+        /// Route a platform video event back into an `on_event` Msg for
+        /// the active channel, updating the playback mirrors on the
+        /// way. Null when the channel is idle (a straggler after
+        /// `stopVideo`) or has no handler. Loop-thread only; called by
+        /// `UiApp.handleEvent` for `.video` platform events.
+        pub fn takeVideoMsg(self: *Self, platform_event: platform.VideoEvent) ?Msg {
+            // Under replay the journaled effect records are the ONLY
+            // Msg source (fed through `feedVideoEvent`); the replayed
+            // platform `.video` events would double-deliver.
+            if (self.replay) return null;
+            const kind: EffectVideoEventKind = switch (platform_event.kind) {
+                .loaded => .loaded,
+                .position => .position,
+                .completed => .completed,
+                .failed => .failed,
+            };
+            const video_fn = self.video.on_event;
+            const event = self.applyVideoEvent(.{
+                .key = 0,
+                .kind = kind,
+                .position_ms = platform_event.position_ms,
+                .duration_ms = platform_event.duration_ms,
+                .playing = platform_event.playing,
+                .buffering = platform_event.buffering,
+                .width = platform_event.width,
+                .height = platform_event.height,
+            }) orelse return null;
+            const event_fn = video_fn orelse return null;
+            self.journalNote(.{
+                .kind = .video,
+                .key = event.key,
+                .video_kind = event.kind,
+                .video_position_ms = event.position_ms,
+                .video_duration_ms = event.duration_ms,
+                .video_playing = event.playing,
+                .video_buffering = event.buffering,
+                .video_width = event.width,
+                .video_height = event.height,
+            });
+            return event_fn(event);
+        }
+
+        /// The video playback state mirrors, for the automation
+        /// snapshot.
+        pub fn videoSnapshot(self: *const Self) VideoSnapshot {
+            return .{
+                .active = self.video.active,
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .playing = self.video.playing,
+                .buffering = self.video.buffering,
+                .looping = self.video.looping,
+                .muted = self.video.muted,
+                .source = self.video.source,
+                .position_ms = self.video.position_ms,
+                .duration_ms = self.video.duration_ms,
+                .width = self.video.width,
+                .height = self.video.height,
+                .volume = self.video.volume,
+            };
+        }
+
+        /// Fake executor: the recorded playback request on the single
+        /// video channel, or null when nothing was asked to play.
+        pub fn pendingVideo(self: *const Self) ?VideoRequest {
+            if (!self.video.active) return null;
+            return .{
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .path = self.video.path(),
+                .url = self.video.url(),
+                .playing = self.video.playing,
+                .looping = self.video.looping,
+                .muted = self.video.muted,
+                .position_ms = self.video.position_ms,
+                .volume = self.video.volume,
+            };
+        }
+
+        /// Fake executor / replay: feed one video event as the platform
+        /// would deliver it — the whole journal shape in one signature
+        /// (dimensions ride only `.loaded` from real hosts; other kinds
+        /// pass 0). The event resolves against the live channel at
+        /// drain time (key and handler from the channel, mirrors
+        /// updated), mirroring `takeVideoMsg` exactly. Fails when no
+        /// playback is active to receive it.
+        pub fn feedVideoEvent(self: *Self, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
+            if (!self.video.active) return error.EffectNotFound;
+            self.deliverPending(.{ .video = .{
+                .event = .{
+                    .key = self.video.key,
+                    .kind = kind,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
+                    .playing = playing,
+                    .buffering = buffering,
+                    .width = width,
+                    .height = height,
+                },
+                .video_fn = null,
+                .resolve = true,
+            } });
+        }
+
         /// Number of effects currently in flight (running slots).
         pub fn activeCount(self: *Self) usize {
             self.reclaimSlots();
@@ -5848,6 +6409,32 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_playing = event.playing,
                                 .audio_buffering = event.buffering,
                                 .audio_bands = event.bands,
+                            });
+                            return event_fn(event);
+                        },
+                        .video => |entry| {
+                            var event = entry.event;
+                            var video_fn = entry.video_fn;
+                            if (entry.resolve) {
+                                // Fed events resolve against the live
+                                // channel exactly like a platform event
+                                // (the audio arm's contract). Capture
+                                // the handler first — a `.failed` apply
+                                // resets it.
+                                video_fn = self.video.on_event;
+                                event = self.applyVideoEvent(event) orelse continue;
+                            }
+                            const event_fn = video_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .video,
+                                .key = event.key,
+                                .video_kind = event.kind,
+                                .video_position_ms = event.position_ms,
+                                .video_duration_ms = event.duration_ms,
+                                .video_playing = event.playing,
+                                .video_buffering = event.buffering,
+                                .video_width = event.width,
+                                .video_height = event.height,
                             });
                             return event_fn(event);
                         },
@@ -7474,6 +8061,76 @@ pub fn Effects(comptime Msg: type) type {
         fn deliverLoopAudio(self: *Self, event: EffectAudio, audio_fn: ?AudioMsgFn) void {
             if (audio_fn == null) return;
             self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = audio_fn, .resolve = false } });
+        }
+
+        /// Update the video channel mirrors from one event and stamp
+        /// the channel's key into it — `applyAudioEvent` for the video
+        /// channel, plus the dimension mirrors the `.loaded`
+        /// acknowledgment carries. Null when the channel is idle (a
+        /// platform straggler after `stopVideo` is swallowed rather
+        /// than misattributed). `.completed` pins position to the
+        /// duration; `.failed`/`.rejected` release the surface claim
+        /// and reset the channel (nothing is left to resume).
+        fn applyVideoEvent(self: *Self, event: EffectVideo) ?EffectVideo {
+            if (!self.video.active) return null;
+            var resolved = event;
+            resolved.key = self.video.key;
+            switch (resolved.kind) {
+                .loaded, .position => {
+                    self.video.position_ms = resolved.position_ms;
+                    if (resolved.duration_ms > 0) self.video.duration_ms = resolved.duration_ms;
+                    if (resolved.width > 0) self.video.width = resolved.width;
+                    if (resolved.height > 0) self.video.height = resolved.height;
+                    self.video.playing = resolved.playing;
+                    self.video.buffering = resolved.buffering;
+                },
+                .completed => {
+                    if (resolved.duration_ms > 0) self.video.duration_ms = resolved.duration_ms;
+                    resolved.position_ms = self.video.duration_ms;
+                    resolved.playing = false;
+                    resolved.buffering = false;
+                    self.video.position_ms = self.video.duration_ms;
+                    self.video.playing = false;
+                    self.video.buffering = false;
+                },
+                .failed, .rejected => {
+                    resolved.playing = false;
+                    resolved.buffering = false;
+                    self.releaseVideoSink();
+                    self.video = .{ .volume = self.video.volume };
+                },
+            }
+            return resolved;
+        }
+
+        /// A synchronous refusal (the claim, load, or play errored, or
+        /// no services/binding are bound): release whatever was
+        /// claimed, reset the channel, and deliver one `.failed` event
+        /// on the next drain — the honest degrade for hosts without
+        /// video playback.
+        fn failVideoChannel(self: *Self) void {
+            const key = self.video.key;
+            const on_event = self.video.on_event;
+            self.releaseVideoSink();
+            self.video = .{ .volume = self.video.volume };
+            self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event);
+        }
+
+        /// Queue a video event Msg produced on the loop thread
+        /// (rejections and synchronous failures) for the next drain.
+        fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn) void {
+            if (video_fn == null) return;
+            self.deliverPending(.{ .video = .{ .event = event, .video_fn = video_fn, .resolve = false } });
+        }
+
+        /// Release the channel's media-surface claim, if one is held.
+        /// Idempotent; the runtime keeps the last adopted frame.
+        fn releaseVideoSink(self: *Self) void {
+            if (self.video.sink.push_fn == null) return;
+            const sink = self.video.sink;
+            self.video.sink = .{};
+            const binding = self.media_surfaces orelse return;
+            binding.release_fn(binding.context, sink);
         }
 
         fn effectTimerPlatformId(slot_index: usize) u64 {

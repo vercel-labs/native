@@ -1094,6 +1094,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
@@ -1176,6 +1177,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    // `.video` records feed the whole journaled shape —
+                    // dimensions included — so replay delivers the
+                    // identical Msg stream with NO producer and NO
+                    // platform player behind it.
+                    .video => try self.effects.feedVideoEvent(
+                        record.video_kind,
+                        record.video_position_ms,
+                        record.video_duration_ms,
+                        record.video_playing,
+                        record.video_buffering,
+                        record.video_width,
+                        record.video_height,
+                    ),
                     .timer => {},
                 },
             }
@@ -1264,6 +1278,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             runtime.audio_duration_ms = audio.duration_ms;
             runtime.audio_spectrum_bands = audio.spectrum_bands;
             runtime.audio_spectrum_events = audio.spectrum_events;
+            self.publishVideoState(runtime);
+        }
+
+        /// The video channel's mirror publication, riding every
+        /// `publishAudioState` call site — the same "wherever a
+        /// dispatch or drain may have moved playback" contract, one
+        /// seam instead of two at each site.
+        fn publishVideoState(self: *Self, runtime: *Runtime) void {
+            const video = self.effects.videoSnapshot();
+            runtime.video_active = video.active;
+            runtime.video_key = video.key;
+            runtime.video_surface_id = video.surface;
+            runtime.video_playing = video.playing;
+            runtime.video_buffering = video.buffering;
+            runtime.video_looping = video.looping;
+            runtime.video_muted = video.muted;
+            runtime.video_source = video.source;
+            runtime.video_position_ms = video.position_ms;
+            runtime.video_duration_ms = video.duration_ms;
+            runtime.video_width = video.width;
+            runtime.video_height = video.height;
         }
 
         /// The design tokens for the next rebuild: the model-derived
@@ -2901,6 +2936,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // channel into the app's `on_event` Msg (and journal on
                 // the way — the recorded boundary).
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                // Platform video reports route the same way: through
+                // the effects channel into the app's `on_event` Msg,
+                // journaled at the delivery boundary.
+                .video => |video_event| if (self.effects.takeVideoMsg(video_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
                 .effects_wake => try self.drainEffects(runtime),

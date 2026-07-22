@@ -66,6 +66,10 @@ pub const Error = error{
     AudioPathTooLarge,
     AudioSourceNotFound,
     AudioDecodeFailed,
+    InvalidVideoOptions,
+    VideoPathTooLarge,
+    VideoSourceNotFound,
+    VideoDecodeFailed,
     InvalidGpuSurfacePixels,
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
@@ -162,6 +166,19 @@ pub const PlatformFeature = enum {
     /// the policy with a teaching error instead. The null platform
     /// models full support.
     window_hide_on_close,
+    /// Single-player video playback into a media-surface texture channel
+    /// (macOS: AVFoundation — one AVPlayer whose AVPlayerItemVideoOutput
+    /// frames feed the surface's producer; the null platform: a
+    /// deterministic fake). The core never sees pixels: apps send
+    /// transport commands and receive `.video` events (load
+    /// acknowledgment with dimensions and duration, coarse position
+    /// ticks, one completion at natural end, failures), while decoded
+    /// frames flow platform-side through the `VideoFrameSink` handed to
+    /// the load verbs. Windows (Media Foundation) and Linux (GStreamer)
+    /// do not implement the decoder yet: their hosts answer the load
+    /// verbs with a teaching and `error.UnsupportedService` — named
+    /// unsupported, not half-implemented — and report false here.
+    video_playback,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1392,6 +1409,67 @@ pub const AudioLoadResolution = enum(u8) {
     stream,
 };
 
+/// Longest video source string (local path or URL) `videoLoad`/
+/// `videoLoadUrl` accepts; longer strings are rejected with
+/// `error.VideoPathTooLarge` before the platform is asked.
+pub const max_video_path_bytes: usize = 1024;
+
+/// How the platform's video player reports back — the audio vocabulary,
+/// verbatim. `loaded` answers a successful load with the stream's real
+/// pixel dimensions and the player's duration estimate; `position` ticks
+/// at the host's honest coarse cadence (about every 500ms) only while
+/// playing, carrying the stream's `buffering` flag; `completed` fires
+/// exactly once when a non-looping video reaches its natural end (a
+/// looping player wraps and keeps ticking — a video that never ends
+/// never completes); `failed` reports an asynchronous decode/device
+/// failure. Pause, stop, seek, volume, mute, and loop never echo events
+/// — the caller already knows. Pixels never ride events: decoded frames
+/// flow through the `VideoFrameSink` handed to the load verb.
+pub const VideoEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+};
+
+/// One report from the platform video player. Positions and durations
+/// are in milliseconds; `playing`/`buffering` carry the audio event's
+/// exact semantics (transport intent vs a stalled stream). `width` and
+/// `height` are the STREAM's decoded pixel dimensions, reported on
+/// `.loaded` (0 elsewhere) — the honest source geometry even when the
+/// host downscales frames to fit the texture channel's pixel budget.
+pub const VideoEvent = struct {
+    kind: VideoEventKind,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+    buffering: bool = false,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Where a platform video decoder delivers frames: a type-erased,
+/// copyable handle to one media-surface texture channel claim. The pair
+/// `context`/`generation` addresses process-lifetime slot memory fenced
+/// by a generation stamp (the media-surface thread contract), so the
+/// host may call `push_fn` from ANY thread — a decode callback, a frame
+/// timer — and a push after the claim was released lands in inert
+/// memory and reports `error.MediaSurfaceReleased` instead of touching
+/// freed state. `rgba8` is one tightly-packed straight-alpha RGBA8
+/// frame, copied before the call returns. A zeroed sink (`push_fn`
+/// null) is inert: hosts must tolerate it and simply decode nowhere.
+pub const VideoFrameSink = struct {
+    context: ?*anyopaque = null,
+    generation: u64 = 0,
+    push_fn: ?*const fn (context: ?*anyopaque, generation: u64, width: usize, height: usize, rgba8: []const u8) anyerror!void = null,
+
+    /// Push one frame through the sink; inert sinks drop it silently.
+    pub fn push(self: VideoFrameSink, width: usize, height: usize, rgba8: []const u8) anyerror!void {
+        const push_fn = self.push_fn orelse return;
+        return push_fn(self.context, self.generation, width, height, rgba8);
+    }
+};
+
 pub const FileDropEvent = struct {
     window_id: WindowId = 1,
     view_label: []const u8 = "",
@@ -2035,6 +2113,9 @@ pub const Event = union(enum) {
     /// Audio player reports: load acknowledgment, coarse position ticks
     /// while playing, one completion at natural end, async failures.
     audio: AudioEvent,
+    /// Video player reports — the same shape, plus the stream's decoded
+    /// dimensions on `.loaded`. Pixels never ride here.
+    video: VideoEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -2062,6 +2143,7 @@ pub const Event = union(enum) {
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
             .audio => "audio",
+            .video => "video",
         };
     }
 };
@@ -2236,6 +2318,49 @@ pub const PlatformServices = struct {
     audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
     /// Set the player volume, `0.0` (silent) through `1.0` (full).
     audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Load a local video file into THE app's single video player,
+    /// leaving it PAUSED at position zero (transport is a separate
+    /// verb, exactly like audio). Loading replaces whatever was loaded
+    /// before. Success is asynchronous: a `.video`/`.loaded` event
+    /// carries the stream's decoded dimensions and the player's
+    /// duration estimate; an unreadable path fails synchronously
+    /// (`error.VideoSourceNotFound` / `error.VideoDecodeFailed`).
+    /// Decoded frames flow through `sink` from whatever thread the
+    /// host's decode path runs on — the core never sees pixels. One
+    /// player is the whole surface, like the audio channel it mirrors.
+    video_load_fn: ?*const fn (context: ?*anyopaque, path: []const u8, sink: VideoFrameSink) anyerror!void = null,
+    /// Load an http(s) video source into the same single player,
+    /// streaming progressively (playable before the download finishes;
+    /// `buffering` flags on position ticks report stalls honestly).
+    /// Same acknowledgment, sink, and replace semantics as
+    /// `video_load_fn`.
+    video_load_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8, sink: VideoFrameSink) anyerror!void = null,
+    /// Start or resume the loaded player. While playing the platform
+    /// emits `.video`/`.position` events at the audio tier's coarse
+    /// honest cadence (about every 500ms — a readout, never the frame
+    /// clock; frames pace themselves through the sink) and one
+    /// `.video`/`.completed` when a non-looping video ends naturally.
+    video_play_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Pause in place; position holds, ticks and frame pushes stop, and
+    /// the surface keeps its last adopted frame. No event echoes.
+    video_pause_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Stop and unload the player entirely; a new load is required
+    /// before anything can play again.
+    video_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Jump the loaded player to `position_ms` (clamped to the
+    /// duration). Works while playing or paused; a paused seek still
+    /// pushes the sought frame so scrubbing is visible.
+    video_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
+    /// Set the player volume, `0.0` (silent) through `1.0` (full) —
+    /// independent of mute, which is a separate reversible switch.
+    video_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Mute or unmute the player's audio track without touching the
+    /// volume setting (the transport keeps playing either way).
+    video_set_muted_fn: ?*const fn (context: ?*anyopaque, muted: bool) anyerror!void = null,
+    /// Enable or disable looping: a looping player wraps from the
+    /// natural end back to zero and keeps playing — no `.completed`
+    /// event, because the playback never ends.
+    video_set_loop_fn: ?*const fn (context: ?*anyopaque, loop: bool) anyerror!void = null,
     /// Nudge the platform event loop from ANY thread: the platform must
     /// deliver a `.wake` event on its loop thread as soon as possible.
     /// One of exactly two `PlatformServices` entries that may be called
@@ -2796,6 +2921,64 @@ pub const PlatformServices = struct {
         return volume_fn(self.context, volume);
     }
 
+    /// Load a local video file into the app's single video player (see
+    /// `video_load_fn`). Platforms without video playback answer
+    /// `error.UnsupportedService`; bad arguments are rejected here
+    /// before the platform is asked.
+    pub fn videoLoad(self: PlatformServices, path: []const u8, sink: VideoFrameSink) anyerror!void {
+        if (path.len == 0) return error.InvalidVideoOptions;
+        if (path.len > max_video_path_bytes) return error.VideoPathTooLarge;
+        const load_fn = self.video_load_fn orelse return error.UnsupportedService;
+        return load_fn(self.context, path, sink);
+    }
+
+    /// Load an http(s) video source into the app's single video player,
+    /// streaming progressively (see `video_load_url_fn`). Platforms
+    /// without video playback answer `error.UnsupportedService`; bad
+    /// arguments are rejected here before the platform is asked.
+    pub fn videoLoadUrl(self: PlatformServices, url: []const u8, sink: VideoFrameSink) anyerror!void {
+        if (url.len == 0) return error.InvalidVideoOptions;
+        if (url.len > max_video_path_bytes) return error.VideoPathTooLarge;
+        const load_fn = self.video_load_url_fn orelse return error.UnsupportedService;
+        return load_fn(self.context, url, sink);
+    }
+
+    pub fn videoPlay(self: PlatformServices) anyerror!void {
+        const play_fn = self.video_play_fn orelse return error.UnsupportedService;
+        return play_fn(self.context);
+    }
+
+    pub fn videoPause(self: PlatformServices) anyerror!void {
+        const pause_fn = self.video_pause_fn orelse return error.UnsupportedService;
+        return pause_fn(self.context);
+    }
+
+    pub fn videoStop(self: PlatformServices) anyerror!void {
+        const stop_fn = self.video_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context);
+    }
+
+    pub fn videoSeek(self: PlatformServices, position_ms: u64) anyerror!void {
+        const seek_fn = self.video_seek_fn orelse return error.UnsupportedService;
+        return seek_fn(self.context, position_ms);
+    }
+
+    pub fn videoSetVolume(self: PlatformServices, volume: f32) anyerror!void {
+        if (!(volume >= 0.0 and volume <= 1.0)) return error.InvalidVideoOptions;
+        const volume_fn = self.video_set_volume_fn orelse return error.UnsupportedService;
+        return volume_fn(self.context, volume);
+    }
+
+    pub fn videoSetMuted(self: PlatformServices, muted: bool) anyerror!void {
+        const muted_fn = self.video_set_muted_fn orelse return error.UnsupportedService;
+        return muted_fn(self.context, muted);
+    }
+
+    pub fn videoSetLoop(self: PlatformServices, loop: bool) anyerror!void {
+        const loop_fn = self.video_set_loop_fn orelse return error.UnsupportedService;
+        return loop_fn(self.context, loop);
+    }
+
     /// Ask the platform loop to deliver a `.wake` event on its own thread.
     /// Safe to call from any thread; a missing implementation is an error
     /// so callers never assume a nudge happened when it did not.
@@ -2973,6 +3156,12 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // verb: hosts that implement it answer through their own
         // `supports_fn`. The generic floor is honest refusal.
         .window_hide_on_close => false,
+        // The load verb's presence alone is not proof of a decoder:
+        // staged hosts register a teaching load that always refuses, so
+        // they answer false through their own `supports_fn`. The
+        // generic floor still probes the verb for embedders that wire a
+        // real one.
+        .video_playback => services.video_load_fn != null,
     };
 }
 

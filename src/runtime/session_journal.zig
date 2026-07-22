@@ -169,6 +169,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
             "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
             // gpu_surface_frame journals a deliberate SUBSET of a
             // telemetry-heavy struct (the rest is host render telemetry,
@@ -444,6 +445,7 @@ const EventTag = enum(u8) {
     context_menu_action = 22,
     widget_accessibility_action = 23,
     audio = 24,
+    video = 25,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -596,6 +598,19 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
+        },
+        // Recorded for stream fidelity like `.audio`; inert on replay
+        // (the journaled video EFFECT records are the Msg source —
+        // `takeVideoMsg` ignores platform video events under replay).
+        .video => |video| {
+            try cursor.writeEnum(EventTag.video);
+            try cursor.writeEnum(video.kind);
+            try cursor.writeInt(u64, video.position_ms);
+            try cursor.writeInt(u64, video.duration_ms);
+            try cursor.writeBool(video.playing);
+            try cursor.writeBool(video.buffering);
+            try cursor.writeInt(u64, video.width);
+            try cursor.writeInt(u64, video.height);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -803,6 +818,18 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
         },
+        .video => blk: {
+            const kind = try cursor.readEnum(platform.VideoEventKind);
+            break :blk .{ .video = .{
+                .kind = kind,
+                .position_ms = try cursor.readInt(u64),
+                .duration_ms = try cursor.readInt(u64),
+                .playing = try cursor.readBool(),
+                .buffering = try cursor.readBool(),
+                .width = try cursor.readInt(u64),
+                .height = try cursor.readInt(u64),
+            } };
+        },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
             const view_label = try cursor.readStr();
@@ -983,6 +1010,15 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     // dropped_pending rides the shared `dropped` field).
     try cursor.writeEnum(record.channel_kind);
     try cursor.writeInt(u32, record.channel_dropped_total);
+    // Video terminals — the delivered event, verbatim (fingerprint
+    // era: these fields move the format identity through reflection).
+    try cursor.writeEnum(record.video_kind);
+    try cursor.writeInt(u64, record.video_position_ms);
+    try cursor.writeInt(u64, record.video_duration_ms);
+    try cursor.writeBool(record.video_playing);
+    try cursor.writeBool(record.video_buffering);
+    try cursor.writeInt(u64, record.video_width);
+    try cursor.writeInt(u64, record.video_height);
     return buffer[0..cursor.len];
 }
 
@@ -1024,6 +1060,14 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     // v8: channel events.
     record.channel_kind = try cursor.readEnum(runtime_effects.EffectChannelEventKind);
     record.channel_dropped_total = try cursor.readInt(u32);
+    // Video terminals.
+    record.video_kind = try cursor.readEnum(runtime_effects.EffectVideoEventKind);
+    record.video_position_ms = try cursor.readInt(u64);
+    record.video_duration_ms = try cursor.readInt(u64);
+    record.video_playing = try cursor.readBool();
+    record.video_buffering = try cursor.readBool();
+    record.video_width = try cursor.readInt(u64);
+    record.video_height = try cursor.readInt(u64);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }

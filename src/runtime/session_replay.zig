@@ -432,6 +432,12 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // position ticks, completions, platform failures — is an
         // external input and must be fed.
         .audio => record.audio_kind == .rejected,
+        // Video rejections are the same loop-side validation (source
+        // bounds, scheme, surface-id shape) and regenerate; failures —
+        // including a claim or platform load the recording host
+        // refused — are executor truth the replayed fake never
+        // reproduces, so they feed like every other kind.
+        .video => record.video_kind == .rejected,
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
