@@ -10124,8 +10124,12 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     self.videoSinkPush = pushFn;
     self.videoSinkContext = pushContext;
     self.videoSourceIsLocal = localSource;
-    /* A stream starts with no bytes; a local file never buffers. */
-    self.videoBuffering = localSource ? NO : YES;
+    /* Buffering follows timeControlStatus (videoTimeControlChanged):
+     * the moment an un-paused stream needs bytes, the player enters
+     * the waiting state and the observer flips this flag. Presetting
+     * it would make a PAUSED fresh stream read as buffering — a
+     * paused player is paused, not waiting. */
+    self.videoBuffering = NO;
     self.videoLoadedEmitted = NO;
     [item addObserver:self
            forKeyPath:@"status"
@@ -10311,6 +10315,13 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
     if (buffering == self.videoBuffering) return;
     self.videoBuffering = buffering;
+    /* A transition INTO paused is the caller's own pause landing (rate
+     * hit zero): pause emits no acknowledgment by contract — the
+     * engine's command mirror already cleared its buffering flag — and
+     * position reports are for playback in motion, so the flag update
+     * above stays silent. Waiting and playing transitions still emit:
+     * they are the stream's own news. */
+    if (player.timeControlStatus == AVPlayerTimeControlStatusPaused) return;
     [self emitVideoEventOfKind:NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION];
 }
 

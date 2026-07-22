@@ -1940,12 +1940,14 @@ pub const NullPlatform = struct {
     /// nothing is loaded or playing; position never advances on its own.
     pub fn advanceVideo(self: *NullPlatform, delta_ms: u64) ?Event {
         if (!self.video.loaded or !self.video.playing) return null;
-        // Saturating: a hostile or fuzzing advance past u64 completes
-        // (or wraps, for a looping player) instead of trapping.
-        const advanced = self.video.position_ms +| delta_ms;
+        // Widened, not saturated: a hostile or fuzzing advance past
+        // u64 completes (or wraps EXACTLY, for a looping player)
+        // instead of trapping — saturating before the loop modulo
+        // would land the wrapped position on the wrong residue.
+        const advanced = @as(u128, self.video.position_ms) + delta_ms;
         if (advanced >= self.video.duration_ms and self.video.duration_ms > 0) {
             if (self.video.looping) {
-                self.video.position_ms = advanced % self.video.duration_ms;
+                self.video.position_ms = @intCast(advanced % self.video.duration_ms);
                 return .{ .video = .{
                     .kind = .position,
                     .token = self.video.token,
@@ -1966,7 +1968,13 @@ pub const NullPlatform = struct {
                 .playing = false,
             } };
         }
-        self.video.position_ms = advanced;
+        // Below the duration, so it fits u64 again by construction —
+        // except under a zero duration (no end to reach), where the
+        // readout saturates like a real clock display would.
+        self.video.position_ms = if (advanced > std.math.maxInt(u64))
+            std.math.maxInt(u64)
+        else
+            @intCast(advanced);
         return .{ .video = .{
             .kind = .position,
             .token = self.video.token,

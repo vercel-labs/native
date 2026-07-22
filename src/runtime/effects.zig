@@ -6171,10 +6171,14 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 services.videoLoadUrl(options.url, self.video.token, sink) catch return self.failVideoChannel();
                 self.video.source = .stream;
-                // A fresh stream has no bytes yet: buffering starts
-                // true optimistically and the platform's `.loaded`
-                // acknowledgment is the authority from there.
-                self.video.buffering = true;
+                // A fresh stream has no bytes yet: when the load will
+                // PLAY, buffering starts true optimistically and the
+                // platform's events are the authority from there. A
+                // paused load (`autoplay = false`) is paused, not
+                // buffering — the flag means an un-paused stream
+                // waiting for bytes, and the wait only starts with
+                // play. `playing` holds the autoplay intent here.
+                self.video.buffering = self.video.playing;
             }
             // Journal the cascade's resolution for replay — Msg-less
             // engine truth, journaled handler or no handler (the
@@ -6215,6 +6219,11 @@ pub fn Effects(comptime Msg: type) type {
         pub fn pauseVideo(self: *Self) void {
             if (!self.video.active) return;
             self.video.playing = false;
+            // Buffering is an un-paused stream's wait for bytes; the
+            // pause ends the wait by definition. The command mirror
+            // clears it here because a conforming host emits no pause
+            // acknowledgment that could (pause's no-event contract).
+            self.video.buffering = false;
             if (self.video.fake) return;
             const services = self.services orelse return;
             services.videoPause() catch {};
@@ -6531,10 +6540,12 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 if (entry.token == self.video.token) {
                     self.video.source = entry.source;
-                    // The live cascade starts a fresh stream buffering
-                    // optimistically (`loadVideo`); the fake load could
-                    // not know it resolved to a stream.
-                    if (entry.source == .stream) self.video.buffering = true;
+                    // The live cascade starts an autoplaying fresh
+                    // stream buffering optimistically (`loadVideo`);
+                    // the fake load could not know it resolved to a
+                    // stream. `playing` holds the autoplay intent, as
+                    // it does live at this point.
+                    if (entry.source == .stream and self.video.playing) self.video.buffering = true;
                     self.replay_video_source_len -= 1;
                     self.replay_video_sources[index] = self.replay_video_sources[self.replay_video_source_len];
                     return;

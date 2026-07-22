@@ -72,6 +72,7 @@ const VideoMsg = union(enum) {
     load_reserved_surface,
     load_bad_scheme,
     load_paused,
+    load_url_paused,
     load_looping,
     load_then_stop,
     load_then_stream,
@@ -156,6 +157,13 @@ fn videoUpdate(model: *VideoModel, msg: VideoMsg, fx: *VideoEffects) void {
             .key = clip_key,
             .surface = clip_surface,
             .path = clip_path,
+            .autoplay = false,
+            .on_event = VideoEffects.videoMsg(.video_event),
+        }),
+        .load_url_paused => fx.loadVideo(.{
+            .key = clip_key,
+            .surface = clip_surface,
+            .url = clip_url,
             .autoplay = false,
             .on_event = VideoEffects.videoMsg(.video_event),
         }),
@@ -734,6 +742,56 @@ test "a replaced playback's queued terminal never resets the replacement" {
     try std.testing.expect(fx.videoSnapshot().active);
     try std.testing.expect(fx.videoSnapshot().playing);
     try std.testing.expectEqual(@as(u64, 92_500), fx.videoSnapshot().duration_ms);
+}
+
+test "a paused fresh stream is paused, not buffering; pause ends a stall's wait" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+
+    // A stream loaded with autoplay=false: buffering means an
+    // un-paused stream waiting for bytes, and a paused load is not
+    // waiting for anything — play() is what starts the wait.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load_url_paused);
+    try std.testing.expectEqual(effects_mod.EffectVideoSource.stream, fx.videoSnapshot().source);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try std.testing.expect(!fx.videoSnapshot().buffering);
+
+    // An autoplaying stream starts its wait immediately: buffering
+    // optimistic until the platform's events take over.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load_url_only);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try std.testing.expect(fx.videoSnapshot().buffering);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+
+    // Mid-stream stall, then pause: the pause ends the wait by
+    // definition, and no conforming host emits a pause acknowledgment
+    // to clear the flag - the command mirror does it.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.stallVideo().?);
+    try std.testing.expect(fx.videoSnapshot().buffering);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .pause);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try std.testing.expect(!fx.videoSnapshot().buffering);
+}
+
+test "a looping advance past u64 wraps to the exact residue" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    try np.setVideoMeta("orchard-flyover.mp4", 92_500, 1280, 720);
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .load_looping);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.advanceVideo(500).?);
+
+    // A hostile or fuzzing delta past u64 must wrap on the true sum,
+    // not on a saturated one - the modulo runs in wider arithmetic.
+    const huge = std.math.maxInt(u64);
+    const expected: u64 = @intCast((@as(u128, 500) + huge) % 92_500);
+    const wrapped = np.advanceVideo(huge).?;
+    try std.testing.expectEqual(expected, wrapped.video.position_ms);
+    try std.testing.expect(wrapped.video.playing);
 }
 
 test "quit while playing: the stop hook silences video and releases the claim through the live platform" {
