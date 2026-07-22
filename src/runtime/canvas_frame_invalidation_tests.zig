@@ -855,8 +855,24 @@ test "bleed-aligned dirty edges round-trip onto their device boundaries" {
             try std.testing.expect(@floor(min_product) == min_boundary);
             try std.testing.expect(max_product <= max_boundary);
             try std.testing.expect(@ceil(max_product) == max_boundary);
+            // Retained hosts reconstruct and scale the wire rect in
+            // DOUBLE precision — the same boundaries must hold there:
+            // an f32 product can round onto the boundary while the
+            // exact product sits past it, and the host would clear one
+            // pixel more than the engine culled for.
+            const min_product64 = @as(f64, aligned.minX()) * @as(f64, scale);
+            const max_product64 = (@as(f64, aligned.minX()) + @as(f64, aligned.width)) * @as(f64, scale);
+            try std.testing.expect(@floor(min_product64) == min_boundary);
+            try std.testing.expect(@ceil(max_product64) == max_boundary);
         }
     }
+
+    // The double-precision seam's known bad case: [x=1, width=64] at
+    // 1.75x — the f32 product of the snapped edge rounds onto 115
+    // while its exact product sits at 115.0000019.
+    const seam = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(1, 1, 64, 8), 1.75, 1).?;
+    const seam_product64 = (@as(f64, seam.minX()) + @as(f64, seam.width)) * 1.75;
+    try std.testing.expect(@ceil(seam_product64) <= 115);
 }
 
 test "bleed alignment stays finite for far off-screen damage" {
@@ -875,14 +891,23 @@ test "bleed alignment stays finite for far off-screen damage" {
     try std.testing.expect(std.math.isFinite(positive.maxX()));
     try std.testing.expect(positive.minX() >= 16_384);
 
-    // A SMALL far off-screen rect collapses both boundaries onto the
-    // clamp: the span derivation must settle immediately (an offset
-    // walk would crawl through denormals without ever moving the sum)
-    // and yield an empty rect surface clipping discards.
+    // A SMALL far off-screen rect: the derivation must settle
+    // immediately (an offset walk would crawl through denormals
+    // without ever moving the sum) into a finite rect on the correct
+    // side of the surface.
     const collapsed = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(-3.0e38, -3.0e38, 1, 1), 2, 1).?;
     try std.testing.expect(std.math.isFinite(collapsed.minX()));
     try std.testing.expect(std.math.isFinite(collapsed.maxX()));
     try std.testing.expect(collapsed.maxX() <= 0);
+
+    // Legitimate damage past the exact-walk range must survive as a
+    // NON-COLLAPSED superset: with no clipping surface (the public
+    // frame planner's default), an empty rect would report "nothing to
+    // repaint" for real content.
+    const far = canvas_frame.bleedAlignedCanvasDirtyBounds(geometry.RectF.init(20_000_000, 4, 10, 10), 1, 1).?;
+    try std.testing.expect(far.width > 0);
+    try std.testing.expect(far.minX() <= 20_000_000);
+    try std.testing.expect(far.maxX() >= 20_000_000);
 }
 
 test "reflow damage reaches a whole device pixel past changed bounds at fractional scales" {

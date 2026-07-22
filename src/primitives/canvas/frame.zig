@@ -665,44 +665,67 @@ fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f3
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = dirtyEdgeForFloorBoundary(clampedDirtyBoundary(@floor(normalized.minX() * device) - bleed_pixels), device);
-    const min_y = dirtyEdgeForFloorBoundary(clampedDirtyBoundary(@floor(normalized.minY() * device) - bleed_pixels), device);
-    const width = dirtySpanForCeilBoundary(min_x, clampedDirtyBoundary(@ceil(normalized.maxX() * device) + bleed_pixels), device);
-    const height = dirtySpanForCeilBoundary(min_y, clampedDirtyBoundary(@ceil(normalized.maxY() * device) + bleed_pixels), device);
-    return geometry.RectF.init(min_x, min_y, @max(0, width), @max(0, height));
+    const x_edges = dirtyAxisEdges(@floor(normalized.minX() * device) - bleed_pixels, @ceil(normalized.maxX() * device) + bleed_pixels, device);
+    const y_edges = dirtyAxisEdges(@floor(normalized.minY() * device) - bleed_pixels, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
 }
 
-/// Boundaries clamp into f32's exact-integer range (see the runtime
-/// twin): a far off-screen coordinate can floor/ceil to infinity, and
-/// the ulp walks below never terminate from there; surface clipping
-/// owns everything past the clamp.
-fn clampedDirtyBoundary(boundary: f32) f32 {
-    const limit: f32 = 16_777_216;
-    if (std.math.isNan(boundary)) return 0;
-    return std.math.clamp(boundary, -limit, limit);
+const DirtyAxisEdges = struct { min: f32, span: f32 };
+
+/// One axis of the bleed-aligned damage (see the runtime twin's doc
+/// comment): exact edge walks inside f32's exact-integer range, a
+/// finite non-collapsed superset beyond it.
+fn dirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) DirtyAxisEdges {
+    const walk_limit: f32 = 16_777_216;
+    const walkable = min_boundary >= -walk_limit and min_boundary <= walk_limit and
+        max_boundary >= -walk_limit and max_boundary <= walk_limit;
+    if (!walkable) {
+        const min_edge = nudgedFiniteDirtyEdge(min_boundary / device, -2);
+        const max_edge = nudgedFiniteDirtyEdge(max_boundary / device, 2);
+        return .{ .min = min_edge, .span = @max(0, nudgedFiniteDirtyEdge(max_edge - min_edge, 2)) };
+    }
+    const min_edge = dirtyEdgeForFloorBoundary(min_boundary, device);
+    return .{ .min = min_edge, .span = dirtySpanForCeilBoundary(min_edge, max_boundary, device) };
+}
+
+/// Finite superset value (see the runtime twin's doc comment).
+fn nudgedFiniteDirtyEdge(value: f32, ulps: i8) f32 {
+    var result = value;
+    if (std.math.isNan(result)) return 0;
+    result = std.math.clamp(result, -3.0e37, 3.0e37);
+    var remaining: i8 = if (ulps < 0) -ulps else ulps;
+    const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
+    while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
+    return result;
 }
 
 /// Smallest representable coordinate whose product with `device`
-/// reaches `boundary` (see the runtime twin's doc comment).
+/// reaches `boundary`, judged in f64 — exact for f32 operands and what
+/// retained hosts compute (see the runtime twin's doc comment).
 fn dirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
     var edge = boundary / device;
-    while (edge * device >= boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
-    while (edge * device < boundary) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
+    while (@as(f64, edge) * d >= b) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
+    while (@as(f64, edge) * d < b) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
     return edge;
 }
 
 /// Largest span whose reconstructed max edge (`min_edge + span`) keeps
-/// its product with `device` at or under `boundary` (see the runtime
-/// twin's doc comment); the walk steps the edge value, never the span.
+/// its product with `device` at or under `boundary`, judged in f64 (see
+/// the runtime twin's doc comment); the walk steps the edge value,
+/// never the span.
 fn dirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
     var target = boundary / device;
-    while (target * device <= boundary) target = std.math.nextAfter(f32, target, std.math.inf(f32));
-    while (target * device > boundary) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    while (@as(f64, target) * d <= b) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (@as(f64, target) * d > b) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
     if (target <= min_edge) return 0;
     var span = target - min_edge;
-    while (span > 0 and min_edge + span > target) {
+    while (span > 0 and @as(f64, min_edge) + @as(f64, span) > @as(f64, target)) {
         const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
-        if (min_edge + next == min_edge + span) return 0;
+        if (next == span) return 0;
         span = next;
     }
     return @max(0, span);

@@ -140,62 +140,95 @@ pub fn bleedAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_
     const dirty = bounds orelse return null;
     const normalized = dirty.normalized();
     const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
-    const min_x = canvasDirtyEdgeForFloorBoundary(clampedCanvasDirtyBoundary(@floor(normalized.minX() * device) - bleed_pixels), device);
-    const min_y = canvasDirtyEdgeForFloorBoundary(clampedCanvasDirtyBoundary(@floor(normalized.minY() * device) - bleed_pixels), device);
-    const width = canvasDirtySpanForCeilBoundary(min_x, clampedCanvasDirtyBoundary(@ceil(normalized.maxX() * device) + bleed_pixels), device);
-    const height = canvasDirtySpanForCeilBoundary(min_y, clampedCanvasDirtyBoundary(@ceil(normalized.maxY() * device) + bleed_pixels), device);
-    return geometry.RectF.init(min_x, min_y, @max(0, width), @max(0, height));
+    const x_edges = canvasDirtyAxisEdges(@floor(normalized.minX() * device) - bleed_pixels, @ceil(normalized.maxX() * device) + bleed_pixels, device);
+    const y_edges = canvasDirtyAxisEdges(@floor(normalized.minY() * device) - bleed_pixels, @ceil(normalized.maxY() * device) + bleed_pixels, device);
+    return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
 }
 
-/// Device boundaries beyond any presentable surface behave identically
-/// after surface clipping, so they clamp into f32's exact-integer range
-/// (2^24): a far off-screen coordinate can floor/ceil to infinity, and
-/// the ulp walks below would never terminate from there. NaN (a
-/// degenerate input rect) clamps to zero — surface clipping discards
-/// the empty result.
-fn clampedCanvasDirtyBoundary(boundary: f32) f32 {
-    const limit: f32 = 16_777_216;
-    if (std.math.isNan(boundary)) return 0;
-    return std.math.clamp(boundary, -limit, limit);
+const CanvasDirtyAxisEdges = struct { min: f32, span: f32 };
+
+/// Logical edges for one axis of the bleed-aligned damage. Boundaries
+/// within f32's exact-integer range (2^24 — presentable surfaces reach
+/// at most `max_canvas_surface_extent_pixels`, far below it) take the
+/// exact edge walks; anything beyond (a far off-screen change, an
+/// overflowed product) keeps a finite, NON-COLLAPSED superset instead:
+/// no host can ever clear a pixel out there, so cull/clear exactness is
+/// moot, but the damage must survive as a repaint region for callers
+/// with no clipping surface, and the walks must not start from
+/// infinity (they would never terminate).
+fn canvasDirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) CanvasDirtyAxisEdges {
+    const walk_limit: f32 = 16_777_216;
+    const walkable = min_boundary >= -walk_limit and min_boundary <= walk_limit and
+        max_boundary >= -walk_limit and max_boundary <= walk_limit;
+    if (!walkable) {
+        const min_edge = nudgedFiniteCanvasDirtyEdge(min_boundary / device, -2);
+        const max_edge = nudgedFiniteCanvasDirtyEdge(max_boundary / device, 2);
+        return .{ .min = min_edge, .span = @max(0, nudgedFiniteCanvasDirtyEdge(max_edge - min_edge, 2)) };
+    }
+    const min_edge = canvasDirtyEdgeForFloorBoundary(min_boundary, device);
+    return .{ .min = min_edge, .span = canvasDirtySpanForCeilBoundary(min_edge, max_boundary, device) };
 }
 
-/// Smallest representable logical coordinate whose f32 product with
+/// Finite value for the superset fallback: NaN degenerates to zero,
+/// infinities clamp inside f32's range, and `ulps` outward steps absorb
+/// the division/subtraction rounding so the fallback stays a superset.
+fn nudgedFiniteCanvasDirtyEdge(value: f32, ulps: i8) f32 {
+    var result = value;
+    if (std.math.isNan(result)) return 0;
+    result = std.math.clamp(result, -3.0e37, 3.0e37);
+    var remaining: i8 = if (ulps < 0) -ulps else ulps;
+    const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
+    while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
+    return result;
+}
+
+/// Smallest representable logical coordinate whose product with
 /// `device` reaches `boundary`. Consumers floor the product to pick the
 /// first cleared pixel — a product below the boundary clears one extra
 /// pixel culling excludes — and culling must admit every command
 /// painting into the cleared region, which the MINIMAL such edge
 /// guarantees: anything smaller has a product below the boundary and
-/// paints only uncleared pixels.
+/// paints only uncleared pixels. Products are judged in f64, which is
+/// EXACT for f32 operands: retained hosts recompute the wire rect in
+/// double precision, so an edge whose f32 product merely rounds onto
+/// the boundary while its exact product sits past it would still clear
+/// an extra pixel host-side. Exactness in f64 implies the f32 result
+/// too (the boundary is representable in both).
 fn canvasDirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
     var edge = boundary / device;
-    while (edge * device >= boundary) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
-    while (edge * device < boundary) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
+    while (@as(f64, edge) * d >= b) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
+    while (@as(f64, edge) * d < b) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
     return edge;
 }
 
 /// Largest span whose RECONSTRUCTED max edge (`min_edge + span`, the
 /// f32 a stored rect hands back) keeps its product with `device` at or
-/// under `boundary`. Consumers ceil that product to pick the last
-/// cleared pixel — one ulp past the maximum clears a pixel culling
-/// refuses to repaint — and the maximal such span admits every command
-/// painting into the cleared region: anything larger has a product past
-/// the boundary. The walk steps the EDGE value, never the span: an
-/// edge's ulp is proportional to its magnitude so the walk is a few
-/// steps, while span steps can crawl through denormals without moving
-/// the sum when the min edge dominates it.
+/// under `boundary` — judged in f64 like the floor edge, since retained
+/// hosts reconstruct `x + width` and scale it in double precision.
+/// Consumers ceil that product to pick the last cleared pixel — one ulp
+/// past the maximum clears a pixel culling refuses to repaint — and the
+/// maximal such span admits every command painting into the cleared
+/// region: anything larger has a product past the boundary. The walk
+/// steps the EDGE value, never the span: an edge's ulp is proportional
+/// to its magnitude so the walk is a few steps, while span steps can
+/// crawl through denormals without moving the sum when the min edge
+/// dominates it.
 fn canvasDirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
     var target = boundary / device;
-    while (target * device <= boundary) target = std.math.nextAfter(f32, target, std.math.inf(f32));
-    while (target * device > boundary) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    while (@as(f64, target) * d <= b) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (@as(f64, target) * d > b) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
     if (target <= min_edge) return 0;
-    // Re-encode as the stored span; shrink while the reconstruction
-    // overshoots the target, giving up the sub-ulp sliver when a step
-    // no longer moves the sum (both boundaries collapsed by the
-    // off-screen clamp — surface clipping discards the empty result).
+    // Re-encode as the stored span; shrink while the exact
+    // reconstruction overshoots the target, giving up the sub-ulp
+    // sliver when a step no longer moves the sum.
     var span = target - min_edge;
-    while (span > 0 and min_edge + span > target) {
+    while (span > 0 and @as(f64, min_edge) + @as(f64, span) > @as(f64, target)) {
         const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
-        if (min_edge + next == min_edge + span) return 0;
+        if (next == span) return 0;
         span = next;
     }
     return @max(0, span);
