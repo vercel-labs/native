@@ -134,6 +134,24 @@ pub fn inflatedCanvasDirtyBounds(bounds: ?geometry.RectF, bleed: f32) ?geometry.
     return dirty.normalized().inflate(geometry.InsetsF.all(bleed));
 }
 
+/// Snap an incremental dirty rect OUTWARD to the device-pixel grid at
+/// `scale`. Clears happen on whole pixels while command culling tests
+/// the float rect, so a fractional dirty edge erases the boundary
+/// pixel's antialiased coverage without redrawing the unchanged
+/// neighbor that painted it — a missing fringe. With the rect on the
+/// pixel grid, every command overlapping a cleared pixel overlaps the
+/// rect and repaints.
+pub fn deviceAlignedCanvasDirtyBounds(bounds: ?geometry.RectF, scale: f32) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    const normalized = dirty.normalized();
+    const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
+    const min_x = @floor(normalized.minX() * device) / device;
+    const min_y = @floor(normalized.minY() * device) / device;
+    const max_x = @ceil(normalized.maxX() * device) / device;
+    const max_y = @ceil(normalized.maxY() * device) / device;
+    return geometry.RectF.init(min_x, min_y, max_x - min_x, max_y - min_y);
+}
+
 fn canvasSurfaceRect(surface_size: geometry.SizeF) ?geometry.RectF {
     const rect = geometry.RectF.fromSize(surface_size).normalized();
     return if (rect.isEmpty()) null else rect;

@@ -569,6 +569,90 @@ fn expectIncrementalPixelPresentMatchesFullRender(
     try std.testing.expectEqualSlices(u8, full, incremental);
 }
 
+test "incremental repaint redraws unchanged neighbors sharing a boundary pixel" {
+    // A fractional dirty edge lands mid-pixel: the clear covers the
+    // whole boundary pixel, so an UNCHANGED antialiased neighbor that
+    // painted partial coverage into that pixel must be redrawn.
+    // Damage snapped to the device-pixel grid keeps the cull region
+    // identical to the cleared pixels; culled against the unaligned
+    // float rect, the neighbor's boundary coverage was erased into a
+    // missing fringe.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-boundary-pixel", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const surface = geometry.SizeF.init(32, 16);
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // The refined dirty path (retained key+fingerprint baseline) is
+    // the one that produces a TIGHT rect around the changed command;
+    // the summary fallback dirties every keyed command and would mask
+    // the boundary-pixel hazard.
+    harness.runtime.options.pixel_present_retained_baseline = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, surface.width, surface.height),
+    });
+
+    // The changing rect ends mid-pixel at x=10.2; the unchanged rounded
+    // neighbor begins at x=11.3, feathering antialiased coverage into
+    // pixel column 11 — the column the aligned clear wipes.
+    const neighbor = canvas.CanvasCommand{ .fill_rounded_rect = .{
+        .id = 2,
+        .rect = geometry.RectF.init(11.3, 2, 8, 8),
+        .radius = canvas.Radius.all(3),
+        .fill = .{ .color = canvas.Color.rgb8(148, 163, 184) },
+    } };
+    const changing = struct {
+        fn command(color: canvas.Color) canvas.CanvasCommand {
+            return .{ .fill_rect = .{
+                .id = 1,
+                .rect = geometry.RectF.init(2, 2, 8.2, 8),
+                .fill = .{ .color = color },
+            } };
+        }
+    }.command;
+
+    const byte_len: usize = 32 * 16 * 4;
+    var incremental: [byte_len]u8 = undefined;
+    var full: [byte_len]u8 = undefined;
+    var scratch: [byte_len]u8 = undefined;
+    const clear_color = canvas.Color.rgb8(15, 23, 42);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ changing(canvas.Color.rgb8(255, 0, 0)), neighbor } });
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 1,
+        .timestamp_ns = 16_000_000,
+        .surface_size = surface,
+    }, canvasFrameScratchStorage(&harness.runtime), &incremental, &scratch, clear_color);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &.{ changing(canvas.Color.rgb8(37, 99, 235)), neighbor } });
+    const swapped = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = 32_000_000,
+        .surface_size = surface,
+    }, canvasFrameScratchStorage(&harness.runtime), &incremental, &scratch, clear_color);
+    try std.testing.expect(!swapped.full_repaint);
+    try std.testing.expect(swapped.dirty_bounds != null);
+
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 3,
+        .timestamp_ns = 48_000_000,
+        .surface_size = surface,
+        .full_repaint = true,
+    }, canvasFrameScratchStorage(&harness.runtime), &full, &scratch, clear_color);
+
+    try std.testing.expectEqualSlices(u8, &full, &incremental);
+}
+
 test "keyed subtree swap leaves no stale pixels on the summary-dirty pixel path" {
     try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary", false, 1);
     try expectIncrementalPixelPresentMatchesFullRender("gpu-canvas-reflow-summary-2x", false, 2);

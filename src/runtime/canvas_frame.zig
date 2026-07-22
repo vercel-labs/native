@@ -18,6 +18,7 @@ pub const canvasColorToRgba8 = canvas_frame_helpers.canvasColorToRgba8;
 pub const clippedCanvasDirtyBounds = canvas_frame_helpers.clippedCanvasDirtyBounds;
 pub const canvasDirtyBleedInset = canvas_frame_helpers.canvasDirtyBleedInset;
 pub const inflatedCanvasDirtyBounds = canvas_frame_helpers.inflatedCanvasDirtyBounds;
+pub const deviceAlignedCanvasDirtyBounds = canvas_frame_helpers.deviceAlignedCanvasDirtyBounds;
 pub const unionRects = canvas_frame_helpers.unionRects;
 pub const canvasWidgetPointerEventFromGpuInput = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
 pub const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
@@ -1043,16 +1044,23 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
             else dirty: {
                 // Every incremental dirty rect leaves here inflated by
-                // one device pixel (`canvasDirtyBleedInset`): the damage
-                // region must cover the PAINTED extent of what changed —
+                // one device pixel (`canvasDirtyBleedInset`) and snapped
+                // OUTWARD to the device-pixel grid
+                // (`deviceAlignedCanvasDirtyBounds`). The inflation
+                // covers the PAINTED extent of what changed —
                 // antialiased edges and glyph overshoot ink up to a
                 // device pixel past a command's bounds on host
                 // rasterizers — or content that shrinks, moves, or
                 // disappears strands a stale fringe the repaint never
-                // clears. Inflation lands on the finalized rects (the
-                // refined union, each refined cluster, and the summary
-                // fallback), which covers every contribution: dilation
-                // distributes over union.
+                // clears. The snap keeps the CULL region identical to
+                // the CLEARED pixels: clears land on whole pixels while
+                // culling tests the float rect, so a fractional dirty
+                // edge would erase the boundary pixel's antialiased
+                // coverage without redrawing the unchanged neighbor
+                // that painted it. Both land on the finalized rects
+                // (the refined union, each refined cluster, and the
+                // summary fallback), which covers every contribution:
+                // dilation distributes over union.
                 const bleed = canvasDirtyBleedInset(frame_options.scale);
                 const overrides_dirty = unionRects(render_override_dirty_bounds, render_animation_dirty_bounds);
                 // Msg rebuilds: the presented summary records ids and
@@ -1089,12 +1097,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         if (canvasPacketPatchDirtyBounds(&self.views[index], current)) |patch_dirty| {
                             var refined = patch_dirty;
                             if (overrides_dirty) |overrides_rect| refined.add(overrides_rect);
-                            const clipped = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(refined.bounds, bleed), frame_options.surface_size);
+                            const clipped = clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(refined.bounds, bleed), frame_options.scale), frame_options.surface_size);
                             // A list of one rect adds nothing over the
                             // scissor; ship it only when it splits.
                             if (clipped != null and refined.rect_count > 1) {
                                 for (refined.rects[0..refined.rect_count]) |rect| {
-                                    const clipped_rect = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, bleed), frame_options.surface_size) orelse continue;
+                                    const clipped_rect = clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, bleed), frame_options.scale), frame_options.surface_size) orelse continue;
                                     dirty_rects[dirty_rect_count] = clipped_rect;
                                     dirty_rect_count += 1;
                                 }
@@ -1104,7 +1112,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         }
                     }
                 }
-                break :dirty clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), bleed), frame_options.surface_size);
+                break :dirty clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), bleed), frame_options.scale), frame_options.surface_size);
             };
 
             const canvas_frame = canvas.CanvasFrame{
@@ -1281,10 +1289,12 @@ fn widenCanvasFrameDirtyForPresentationScale(canvas_frame: *canvas.CanvasFrame, 
     if (canvas_frame.full_repaint) return;
     const extra = canvasDirtyBleedInset(presentation_scale) - canvasDirtyBleedInset(canvas_frame.scale);
     if (!(extra > 0)) return;
-    canvas_frame.dirty_bounds = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(canvas_frame.dirty_bounds, extra), canvas_frame.surface_size);
+    // Re-align on the COARSER presentation grid too: the plan's snap
+    // used its finer grid, whose edges can split a presented pixel.
+    canvas_frame.dirty_bounds = clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(canvas_frame.dirty_bounds, extra), presentation_scale), canvas_frame.surface_size);
     var kept: usize = 0;
     for (canvas_frame.dirty_rects[0..canvas_frame.dirty_rect_count]) |rect| {
-        const widened = clippedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, extra), canvas_frame.surface_size) orelse continue;
+        const widened = clippedCanvasDirtyBounds(deviceAlignedCanvasDirtyBounds(inflatedCanvasDirtyBounds(rect, extra), presentation_scale), canvas_frame.surface_size) orelse continue;
         canvas_frame.dirty_rects[kept] = widened;
         kept += 1;
     }
