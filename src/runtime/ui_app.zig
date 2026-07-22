@@ -690,6 +690,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             window_id: platform.WindowId = 0,
             on_close: ?MsgT = null,
             installed: bool = false,
+            /// The `<video src>` declaration the in-flight build pass
+            /// recorded (arena-borrowed; consumed by
+            /// `rebuildWindowSlot` immediately after the pass succeeds
+            /// and the tree installs — a failed layout's declaration
+            /// never reaches the reconciler).
+            pending_video_declaration: ?Ui.VideoDeclaration = null,
             canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
             /// The device scale of THIS window's surface, adopted from
             /// its own frame and resize events. Secondary windows can sit
@@ -952,6 +958,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         video_declared_src_len: usize = 0,
         video_declared_loop: bool = false,
         video_declared_muted: bool = false,
+        /// The last declared src the video loader REFUSED (see
+        /// `applyVideoDeclaration`): remembered so an unchanged bad
+        /// declaration is taught once, not re-attempted every rebuild —
+        /// and kept OUT of the applied-src tracking above, so the
+        /// playback the reconciler actually owns stays stoppable.
+        video_refused_src_buffer: [1024]u8 = undefined,
+        video_refused_src_len: usize = 0,
         /// The `<video src>` declarations SECONDARY windows' builds
         /// recorded, one retained entry per declaring window, copied
         /// out of the slot arenas (slot builds and the main build
@@ -2237,11 +2250,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
             }
-            // Reconcile the video declaration THIS build may have
-            // recorded or withdrawn (a no-op when nothing changed —
-            // the reconciler diffs the applied src). The main rebuild
-            // already ran it, but slot builds run after, so a
-            // slot-declared video must not wait a cycle to load.
+            // Reconcile the video declaration THIS build recorded or
+            // withdrew (a no-op when nothing changed — the reconciler
+            // diffs the applied src), captured only now that the tree
+            // really installed. The main rebuild already ran it, but
+            // slot builds run after, so a slot-declared video must not
+            // wait a cycle to load.
+            self.captureSlotVideoDeclaration(slot.window_id, slot.pending_video_declaration);
             self.applyVideoDeclaration(runtime);
         }
 
@@ -2325,7 +2340,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.armUiFragmentHost(&ui);
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
-            self.captureSlotVideoDeclaration(slot.window_id, ui.video_declaration);
+            // The declaration is captured by `rebuildWindowSlot` AFTER
+            // the pass (and its clearance retry) succeeds and the tree
+            // installs: a build whose layout errors never displays, so
+            // its declaration must not steer the playback either.
+            slot.pending_video_declaration = ui.video_declaration;
             const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
                 if (err == error.WidgetLayoutListFull) {
                     ui_app_log.warn(
@@ -3133,12 +3152,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             const applied = self.video_declared_src_buffer[0..self.video_declared_src_len];
             if (!self.video_declared or !std.mem.eql(u8, applied, src)) {
-                @memcpy(self.video_declared_src_buffer[0..src.len], src);
-                self.video_declared_src_len = src.len;
-                self.video_declared = true;
-                self.video_declared_loop = declaration.loop;
-                self.video_declared_muted = declaration.muted;
-                self.effects.loadVideo(.{
+                const options: Effects.LoadVideoOptions = .{
                     // Key from the src (nonzero by construction): the
                     // declaration IS the playback's identity.
                     .key = std.hash.Wyhash.hash(0x76696465, src) | 1,
@@ -3148,7 +3162,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .autoplay = declaration.autoplay,
                     .loop = declaration.loop,
                     .muted = declaration.muted,
-                });
+                };
+                // Validate BEFORE committing: a source the engine's own
+                // deterministic gates refuse (a malformed URL, say)
+                // must not take over the tracked ownership — the
+                // engine keeps the CURRENT playback on a rejected
+                // load, and tracking the refused src would make a
+                // later element removal hash the refused source
+                // instead of the playback still running, stranding it
+                // forever. The refused src is remembered separately so
+                // an unchanged bad declaration is not re-attempted
+                // (and re-taught) every rebuild.
+                if (Effects.videoLoadRejected(options)) {
+                    const refused = self.video_refused_src_buffer[0..self.video_refused_src_len];
+                    if (src.len <= self.video_refused_src_buffer.len and !std.mem.eql(u8, refused, src)) {
+                        @memcpy(self.video_refused_src_buffer[0..src.len], src);
+                        self.video_refused_src_len = src.len;
+                        ui_app_log.warn(
+                            "declared <video src> was refused by the video loader (empty or over-long source, or a non-http(s) URL): the declaration is ignored and the current playback, if any, keeps running",
+                            .{},
+                        );
+                    }
+                    return;
+                }
+                self.video_refused_src_len = 0;
+                @memcpy(self.video_declared_src_buffer[0..src.len], src);
+                self.video_declared_src_len = src.len;
+                self.video_declared = true;
+                self.video_declared_loop = declaration.loop;
+                self.video_declared_muted = declaration.muted;
+                self.effects.loadVideo(options);
                 self.publishAudioState(runtime);
                 return;
             }
