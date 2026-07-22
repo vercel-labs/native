@@ -207,6 +207,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        // CVPixelBuffer for the video frame path (the AppKit host's
+        // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
+        app_mod.linkFramework("CoreVideo", .{});
         // Spectrum analysis of the app's own playback: the MediaToolbox
         // audio tap hands the player's PCM to the host, and Accelerate
         // (vDSP) turns it into band magnitudes.

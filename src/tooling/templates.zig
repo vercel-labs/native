@@ -1726,6 +1726,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        }
         \\        app_mod.linkFramework("AppKit", .{});
         \\        app_mod.linkFramework("AVFoundation", .{});
+        \\        app_mod.linkFramework("CoreVideo", .{});
         \\        app_mod.linkFramework("MediaToolbox", .{});
         \\        app_mod.linkFramework("Accelerate", .{});
         \\        app_mod.linkFramework("Foundation", .{});
