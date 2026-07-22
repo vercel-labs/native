@@ -324,6 +324,8 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
     var result = try drainUntilExit(&fx, 5_000);
     defer result.output.deinit(testing.allocator);
     try testing.expectEqual(effects_mod.EffectExitReason.cancelled, result.exit.reason);
+    // A cancelled end carries the -1 sentinel, never a stale child code.
+    try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
 }
 
 test "live pty resize lands as the child's window size" {

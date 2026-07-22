@@ -1863,12 +1863,21 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     var local: [16 * 1024]u8 = undefined;
     read_loop: while (true) {
         shared.mutex.lock();
+        const shutdown = shared.shutdown;
         const staged = if (shared.staging) |staging| staging.len else max_effect_pty_staging_bytes;
         const room = max_effect_pty_staging_bytes - staged;
         const want_read = room > 0;
         if (!want_read) shared.reader_parked = true;
         const want_write = shared.out_len > 0;
         shared.mutex.unlock();
+
+        // Teardown (or a kill) asked the thread to wind down: stop
+        // reading and go reap. Checked here so a reader PARKED on a
+        // full staging ring — which polls only the nudge pipe, never
+        // the master, so it can never observe the post-kill hangup —
+        // still exits promptly on the teardown nudge instead of
+        // parking forever and forcing the abandon path.
+        if (shutdown) break :read_loop;
 
         const ready = pty_transport.wait(transport.master, nudge_fd, want_read, want_write);
         if (ready.nudged) pty_transport.drainNudges(nudge_fd);
@@ -1893,14 +1902,23 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     const exit = transport.reapBlocking();
     shared.mutex.lock();
     if (shared.open and shared.generation == generation) {
-        shared.exit_code = if (exit.signal != 0) effect_error_exit_code else exit.code;
+        // Outbound bytes still staged at exit never reached the child:
+        // count them so `dropped_writes == 0` keeps its promise.
+        if (shared.out_len > 0) {
+            shared.dropped_writes +|= 1;
+            shared.out_len = 0;
+        }
+        const cancelled = shared.kill_requested;
         shared.exit_signal = exit.signal;
-        shared.exit_reason = if (shared.kill_requested)
+        shared.exit_reason = if (cancelled)
             .cancelled
         else if (exit.signal != 0)
             .signaled
         else
             .exited;
+        // A cancelled or signaled end carries no meaningful child exit
+        // code (the doc's -1 sentinel); only a natural exit does.
+        shared.exit_code = if (cancelled or exit.signal != 0) effect_error_exit_code else exit.code;
         shared.exit_staged = true;
         if (shared.owner) |owner| {
             shared.exit_seq = owner.seq.fetchAdd(1, .seq_cst);
@@ -1961,7 +1979,20 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             chunk[index] = shared.out_data[(shared.out_head + index) % max_effect_pty_outbound_bytes];
         }
         shared.mutex.unlock();
-        const wrote = transport.write(chunk[0..take]) catch return;
+        const wrote = transport.write(chunk[0..take]) catch {
+            // The child closed its read end (or the write errored):
+            // the staged bytes can never reach it. Drop them and count
+            // it, so `dropped_writes == 0` keeps meaning "every write
+            // landed" — a write lost to a just-exited child is not
+            // silent.
+            shared.mutex.lock();
+            if (shared.out_len > 0) {
+                shared.dropped_writes +|= 1;
+                shared.out_len = 0;
+            }
+            shared.mutex.unlock();
+            return;
+        };
         if (wrote == 0) return;
         shared.mutex.lock();
         shared.out_head = (shared.out_head + wrote) % max_effect_pty_outbound_bytes;
@@ -6273,8 +6304,13 @@ pub fn Effects(comptime Msg: type) type {
             shared.kill_requested = true;
             // A kill racing the reap still keeps the contract: an exit
             // already staged but not yet delivered rewrites to
-            // `.cancelled` — after this verb the exit always says so.
-            if (shared.exit_staged) shared.exit_reason = .cancelled;
+            // `.cancelled` with the -1 sentinel code — after this verb
+            // the exit always says cancelled, never a stale child code.
+            if (shared.exit_staged) {
+                shared.exit_reason = .cancelled;
+                shared.exit_code = effect_error_exit_code;
+                shared.exit_signal = 0;
+            }
             shared.mutex.unlock();
             if (slot.transport) |transport| transport.kill(false);
             pty_transport.nudge(slot.wake_pipe[1]);
@@ -8972,13 +9008,28 @@ pub fn Effects(comptime Msg: type) type {
                 staging.head = (staging.head + take) % max_effect_pty_staging_bytes;
                 staging.len -= take;
                 const emptied = staging.len == 0;
-                if (emptied) shared.data_seq_valid = false;
+                var rewake = false;
+                if (emptied) {
+                    shared.data_seq_valid = false;
+                } else if (shared.owner) |owner| {
+                    // ONE output batch per pty per drain pass: re-stamp
+                    // the remaining backlog with a fresh seq (> this
+                    // pass's boundary snapshot, so `candidate >= before`
+                    // skips it here) and wake for the next pass. Without
+                    // this, a continuously writing child (`yes`) whose
+                    // io thread keeps appending to the same pre-boundary
+                    // stamp would let one pass deliver without bound and
+                    // starve every other platform event.
+                    shared.data_seq = owner.seq.fetchAdd(1, .seq_cst);
+                    rewake = true;
+                }
                 if (shared.reader_parked) {
                     shared.reader_parked = false;
                     resume_reader = true;
                 }
                 shared.mutex.unlock();
                 if (emptied) _ = self.pty_pending_count.fetchSub(1, .seq_cst);
+                if (rewake) ChannelHandle.requestHostWake(&shared.wake, slot.generation);
                 if (resume_reader and comptime pty_transport.supported) {
                     pty_transport.nudge(slot.wake_pipe[1]);
                 }

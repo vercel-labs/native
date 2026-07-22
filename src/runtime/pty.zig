@@ -181,6 +181,12 @@ pub const EnvVar = struct {
 pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     if (!supported) return error.PtyUnsupported;
     if (options.argv.len == 0 or options.argv.len > max_argv) return error.PtyArgvInvalid;
+    // An argv entry with an embedded NUL would be silently truncated at
+    // the C boundary (execve reads to the first NUL) — reject it rather
+    // than hand the child a cut argument.
+    for (options.argv) |arg| {
+        if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.PtyArgvInvalid;
+    }
 
     // Resolve argv[0] to an absolute path in the PARENT so the child's
     // only post-fork calls are login_tty/execve/_exit — execve needs a
@@ -208,22 +214,83 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     };
     if (c.openpty(&master, &slave, null, null, &ws) != 0) return error.PtyOpenFailed;
 
+    // The exec self-pipe: close-on-exec on the write end, so a
+    // successful `execve` closes it and the parent reads EOF (exec
+    // worked). A failed exec writes its errno and the parent reads it,
+    // distinguishing "the pty forked but the program could not start"
+    // (`error.PtyCommandNotFound`) from a program that ran and exited
+    // 127 on its own — a shebang naming a missing interpreter passes
+    // the X_OK check yet fails at exec, and must not masquerade as a
+    // normal exit.
+    var exec_pipe: [2]c_int = undefined;
+    if (c.pipe(&exec_pipe) != 0) {
+        _ = c.close(master);
+        _ = c.close(slave);
+        return error.PtyOpenFailed;
+    }
+    setCloexec(exec_pipe[1]);
+
     const pid = c.fork();
     if (pid < 0) {
         _ = c.close(master);
         _ = c.close(slave);
+        _ = c.close(exec_pipe[0]);
+        _ = c.close(exec_pipe[1]);
         return error.PtyForkFailed;
     }
     if (pid == 0) {
         // CHILD. Async-signal-safe only from here.
         _ = c.close(master);
-        if (c.login_tty(slave) != 0) c._exit(127);
+        _ = c.close(exec_pipe[0]);
+        if (c.login_tty(slave) != 0) reportExecFailure(exec_pipe[1]);
         _ = c.execve(resolved_z.ptr, argv_z.ptr, envp_z.ptr);
-        c._exit(127);
+        reportExecFailure(exec_pipe[1]);
     }
     // PARENT.
     _ = c.close(slave);
+    _ = c.close(exec_pipe[1]);
+    // Block until the write end closes: EOF means exec succeeded, any
+    // byte means it failed (the child wrote its errno then _exit'd).
+    var probe: [1]u8 = undefined;
+    const failed = readAll(exec_pipe[0], &probe) > 0;
+    _ = c.close(exec_pipe[0]);
+    if (failed) {
+        var status: c_int = 0;
+        while (c.waitpid(pid, &status, 0) < 0 and errnoValue() == eintr) {}
+        _ = c.close(master);
+        return error.PtyCommandNotFound;
+    }
     return .{ .master = master, .pid = pid };
+}
+
+/// CHILD-side exec-failure report: write the errno byte into the self-
+/// pipe and exit. Async-signal-safe — a single `write` and `_exit`.
+fn reportExecFailure(write_fd: c_int) noreturn {
+    const byte = [_]u8{1};
+    _ = c.write(write_fd, &byte, 1);
+    c._exit(127);
+}
+
+fn setCloexec(fd: c_int) void {
+    const flags = c.fcntl(fd, f_getfd, @as(c_int, 0));
+    if (flags >= 0) _ = c.fcntl(fd, f_setfd, flags | fd_cloexec);
+}
+
+/// Read into `buf` until EOF or full, retrying EINTR. Returns the byte
+/// count (0 = clean EOF).
+fn readAll(fd: c_int, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const r = c.read(fd, buf[total..].ptr, buf.len - total);
+        if (r > 0) {
+            total += @intCast(r);
+            continue;
+        }
+        if (r == 0) break;
+        if (errnoValue() == eintr) continue;
+        break;
+    }
+    return total;
 }
 
 fn decodeStatus(status: c_int) Exit {
@@ -320,6 +387,9 @@ const wnohang: c_int = 1;
 // F_GETFL/F_SETFL and O_NONBLOCK per platform (fcntl.h).
 const f_getfl: c_int = 3;
 const f_setfl: c_int = 4;
+const f_getfd: c_int = 1;
+const f_setfd: c_int = 2;
+const fd_cloexec: c_int = 1;
 const o_nonblock: c_int = switch (builtin.os.tag) {
     .linux => 0x800,
     .macos => 0x4,
@@ -518,4 +588,17 @@ test "the child environment is exactly env plus TERM" {
     const out = buf[0..total];
     // TERM injected, MARKER passed through, HOME absent (clean env).
     try std.testing.expect(std.mem.indexOf(u8, out, default_term ++ "|pty-proof|") != null);
+}
+
+test "an exec failure is reported, not masqueraded as a normal exit" {
+    if (comptime !supported) return;
+    // A directory passes the X_OK (searchable) check but execve refuses
+    // it — the exec self-pipe turns that into PtyCommandNotFound rather
+    // than a forked child that exits 127 on its own.
+    try std.testing.expectError(error.PtyCommandNotFound, spawn(std.testing.allocator, .{ .argv = &.{"/"} }));
+}
+
+test "embedded NUL in argv is rejected, never truncated" {
+    if (comptime !supported) return;
+    try std.testing.expectError(error.PtyArgvInvalid, spawn(std.testing.allocator, .{ .argv = &.{ "/bin/echo", "abc\x00def" } }));
 }
