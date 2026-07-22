@@ -2895,7 +2895,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
-                .canvas_widget_context_menu_shown => |shown_event| self.handleContextMenuShown(shown_event),
+                .canvas_widget_context_menu_shown => |shown_event| try self.handleContextMenuShown(runtime, shown_event),
                 .canvas_widget_context_menu_dismissed => |dismissed_event| try self.handleContextMenuDismissed(runtime, dismissed_event),
                 .canvas_widget_context_menu_request => |request_event| try self.handleContextMenuRequest(runtime, request_event),
                 .canvas_widget_dismiss => |dismiss_event| try self.handleDismiss(runtime, dismiss_event),
@@ -3634,7 +3634,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Selection resolves from this snapshot, so the user always
         /// gets the item they SAW even when the tree rebuilds under the
         /// open menu. A new presentation supersedes the previous pin.
-        fn handleContextMenuShown(self: *Self, shown_event: core.CanvasWidgetContextMenuShownEvent) void {
+        fn handleContextMenuShown(self: *Self, runtime: *Runtime, shown_event: core.CanvasWidgetContextMenuShownEvent) anyerror!void {
+            // A pinned rebuild failure may have dropped the live tree
+            // while the previous menu was open. This shown event
+            // PROMISES a snapshot for the replacement menu, so restore
+            // the tree first — silently arming nothing would leave the
+            // presented menu's selection to fall through a null tree
+            // and dispatch no message.
+            if (self.treeForViewLabel(shown_event.view_label) == null) try self.restoreMissingTree(runtime);
             const tree = self.treeForViewLabel(shown_event.view_label) orelse return;
             const count = @min(shown_event.item_count, self.context_menu_shown_msgs.len);
             for (0..count) |item_index| {
@@ -3761,6 +3768,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 try self.restoreMissingTree(runtime);
                 return;
             }
+            // Snapshot-less resolution (the automation verb, or a menu
+            // whose shown event could not arm — its restore attempt
+            // failed while the model was unbuildable): the model may
+            // have recovered since, so restore a dropped tree before
+            // resolving rather than silently dispatching nothing.
+            if (self.treeForViewLabel(menu_event.view_label) == null) try self.restoreMissingTree(runtime);
             const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
             if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
                 try self.dispatch(runtime, menu_event.window_id, msg);

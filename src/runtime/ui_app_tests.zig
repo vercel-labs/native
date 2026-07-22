@@ -4330,6 +4330,90 @@ test "a selection whose update breaks the build budget keeps the live tree and i
     try std.testing.expect(app_state.tree != null);
 }
 
+test "a menu presented while the tree is dropped still resolves once the model recovers" {
+    // The failing layout warns through std.log (the teaching diagnostic
+    // under test would otherwise fail the build runner's stderr check).
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 2000) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PinFailureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PinFailureApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-pin-shown-recovery",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = pinFailureUpdate,
+        .view = pinFailureView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 2000),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const row_id = findIn(app_state.tree.?.root, .list_item, "Ship the release").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const row_frame = layout.findById(row_id).?.frame;
+    const right_click: zero_platform.Event = .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .button = 1,
+        .x = row_frame.x + 4,
+        .y = row_frame.y + 4,
+        .timestamp_ns = 2_000_000,
+    } };
+
+    // Menu A is open when a rebuild routed into the live arena fails:
+    // the tree drops while the model stays unbuildable.
+    try harness.runtime.dispatchPlatformEvent(app, right_click);
+    try app_state.dispatch(&harness.runtime, 1, .{ .set_rows = 5 });
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        app_state.dispatch(&harness.runtime, 1, .{ .set_rows = core.max_canvas_widget_nodes_per_view + 40 }),
+    );
+    try std.testing.expect(app_state.tree == null);
+
+    // Superseding A with menu B: A's dismissal releases the snapshot
+    // and its restore attempt fails loudly (the model is still past the
+    // budget under the harness's `.propagate` policy). B commits
+    // runtime-side, but no snapshot could arm for it.
+    try std.testing.expectError(
+        error.WidgetLayoutListFull,
+        harness.runtime.dispatchPlatformEvent(app, right_click),
+    );
+    const b_token = harness.null_platform.context_menu_token;
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+
+    // The model recovers WITHOUT a rebuild (an effect result fixed it).
+    app_state.model.row_count = 4;
+
+    // Selecting from menu B resolves snapshot-less: the handler
+    // restores the dropped tree before resolving, so the selection
+    // dispatches its Msg instead of falling through a null tree.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .token = b_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-rows-0004", app_state.model.received_storage[0..app_state.model.received_len]);
+    try std.testing.expect(app_state.tree != null);
+}
+
 // ------------------------------------------------- press fall-through fixture
 
 const RowsModel = struct {

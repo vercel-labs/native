@@ -803,6 +803,46 @@ test "the automation menu verb refuses by name when the dismissal handler closes
     try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
 }
 
+test "a presentation whose view the dismissal handler closes is disarmed and never announced" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createCompactionHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    // Menu A is pending on alpha; right-clicking beta presents menu B,
+    // and A's dismissal notice closes BETA — the view B presented on.
+    // B's request can never resolve, so it disarms without announcing:
+    // a shown event would promise a snapshot for a menu whose action
+    // can never be delivered.
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+    try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+    app_state.close_view_on_dismissal = "beta";
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("beta", 50, 20));
+    const dead_token = harness.null_platform.context_menu_token;
+
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+    try std.testing.expectEqual(@as(usize, 2), harness.runtime.view_count);
+    try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+
+    // A late action carrying the dead request's token is inert...
+    try harness.runtime.dispatchPlatformEvent(app, menuAction(dead_token, 1));
+    try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+
+    // ...and a fresh presentation arms cleanly.
+    try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+    try std.testing.expectEqual(@as(u32, 2), app_state.shown_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+        .window_id = 1,
+        .view_label = "alpha",
+        .token = harness.null_platform.context_menu_token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+}
+
 test "a presentation superseded mid-notice by the dismissal handler's own menu announces nothing" {
     var app_state: MenuTestApp = .{};
     const app = app_state.app();

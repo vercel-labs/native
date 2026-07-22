@@ -161,12 +161,13 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                             return;
                         },
                         // The dismissal notice's app code presented a
-                        // successor that replaced this request: the
-                        // successor already announced itself, so announce
-                        // NOTHING here — and never the anchored fallback,
-                        // which would mount a second surface under the
-                        // successor's native menu.
-                        .superseded => return,
+                        // successor that replaced this request (the
+                        // successor already announced itself), or closed
+                        // the presenting view outright: announce NOTHING
+                        // here — and never the anchored fallback, which
+                        // would mount a surface under the successor's
+                        // native menu or on a view that no longer exists.
+                        .superseded, .view_closed => return,
                         .refused => {},
                     }
                 }
@@ -267,6 +268,13 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             /// stranding the successor on live-tree resolution and the
             /// stale pin unreleased.
             superseded,
+            /// The platform accepted, but the superseded menu's
+            /// dismissal notice CLOSED the presenting view. The request
+            /// can never resolve (its action would clear the token and
+            /// silently drop on the view lookup — or never arrive at
+            /// all if the window died with it), so it is disarmed here:
+            /// announce nothing, mount nothing.
+            view_closed,
         };
 
         /// Present `request` natively. Callers must describe the
@@ -301,6 +309,12 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             try notifySupersededPending(self, app, superseded);
             const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == pending.token else false;
             if (!still_armed) return .superseded;
+            // Still armed, but the notice may have closed the view the
+            // menu presented on: disarm the unresolvable request.
+            if (runtimeFindViewIndex(self, pending.window_id, pending.viewLabel()) == null) {
+                self.canvas_widget_context_menu_pending = null;
+                return .view_closed;
+            }
             return .{ .shown = pending };
         }
 
