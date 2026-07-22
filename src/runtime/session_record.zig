@@ -213,6 +213,22 @@ pub const SessionRecorder = struct {
             journaled.image_blob_len = record.payload.len;
             journaled.payload = "";
         }
+        // Pty output batches take the same road: bytes into the
+        // content-addressed store, address into the record — stream
+        // payloads stay out of the journal and identical batches
+        // (prompts, repeated screens) share one blob.
+        if (record.kind == .pty and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a pty output result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.pty_blob_hash = hash;
+            journaled.pty_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
         const payload = journal.encodeEffect(journaled, &self.effect_buffer) catch {
             return self.fail("an effect result exceeded max_session_record_bytes");
         };

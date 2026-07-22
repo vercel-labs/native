@@ -126,13 +126,15 @@ pub const Pty = struct {
     }
 
     /// Reap the child, blocking until it exits. Used at teardown after a
-    /// kill so no zombie is left behind.
+    /// kill so no zombie is left behind. EINTR retries — a signal must
+    /// not fabricate an exit and leave the real child a zombie.
     pub fn reapBlocking(self: Pty) Exit {
         if (!supported) return .{ .code = -1, .signal = 0 };
         var status: c_int = 0;
         while (true) {
             const r = c.waitpid(self.pid, &status, 0);
             if (r == self.pid) return decodeStatus(status);
+            if (r < 0 and errnoValue() == eintr) continue;
             if (r < 0) return .{ .code = -1, .signal = 0 };
         }
     }
@@ -315,6 +317,14 @@ const tiocswinsz: c_ulong = switch (builtin.os.tag) {
 
 // WNOHANG is 1 on both Linux and Darwin.
 const wnohang: c_int = 1;
+// F_GETFL/F_SETFL and O_NONBLOCK per platform (fcntl.h).
+const f_getfl: c_int = 3;
+const f_setfl: c_int = 4;
+const o_nonblock: c_int = switch (builtin.os.tag) {
+    .linux => 0x800,
+    .macos => 0x4,
+    else => 0,
+};
 const sigterm: c_int = 15;
 const sigkill: c_int = 9;
 const eintr: c_int = 4;
@@ -354,9 +364,97 @@ const c = struct {
     extern "c" fn kill(pid: c_int, sig: c_int) c_int;
     extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
     extern "c" fn ioctl(fd: c_int, request: c_ulong, arg: *const Winsize) c_int;
+    extern "c" fn pipe(fds: *[2]c_int) c_int;
+    extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+    extern "c" fn poll(fds: [*]Pollfd, nfds: c_uint, timeout: c_int) c_int;
     extern "c" fn __error() *c_int; // Darwin errno
     extern "c" fn __errno_location() *c_int; // Linux errno
 };
+
+/// A nudge pipe for the io thread: [read end, write end]. BOTH ends are
+/// non-blocking: the write side so a burst of loop-thread nudges against
+/// a full pipe can never block the UI loop (a full pipe already means
+/// wakes are pending — the nudge coalesced), and the read side so the
+/// eager drain never parks the io thread.
+pub fn pipePair() Error![2]c_int {
+    if (comptime !supported) return error.PtyUnsupported;
+    var fds: [2]c_int = undefined;
+    if (c.pipe(&fds) != 0) return error.PtyOpenFailed;
+    for (fds) |fd| {
+        const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
+        if (flags >= 0) _ = c.fcntl(fd, f_setfl, flags | o_nonblock);
+    }
+    return fds;
+}
+
+pub fn closeFd(fd: c_int) void {
+    if (comptime !supported) return;
+    if (fd >= 0) _ = c.close(fd);
+}
+
+/// Write one byte into the nudge pipe. EINTR retries — losing the only
+/// wake would strand staged outbound bytes; a full pipe (EAGAIN) is a
+/// nudge already coalesced and returns.
+pub fn nudge(fd: c_int) void {
+    if (comptime !supported) return;
+    const byte = [_]u8{1};
+    while (true) {
+        if (c.write(fd, &byte, 1) >= 0) return;
+        if (errnoValue() == eintr) continue;
+        return;
+    }
+}
+
+/// Drain whatever accumulated in the nudge pipe.
+pub fn drainNudges(fd: c_int) void {
+    if (comptime !supported) return;
+    var buf: [64]u8 = undefined;
+    _ = c.read(fd, &buf, buf.len);
+}
+
+/// What one poll round observed.
+pub const Ready = struct {
+    readable: bool = false,
+    writable: bool = false,
+    hangup: bool = false,
+    nudged: bool = false,
+};
+
+/// Block until the master is readable (`want_read`), writable
+/// (`want_write`), hung up, or the nudge pipe fires. A caller wanting
+/// NEITHER master direction (a parked reader with nothing to write)
+/// waits on the nudge pipe alone — POLLHUP is unmaskable, so keeping
+/// the master in the set would turn a hangup racing a full staging
+/// ring into a busy loop.
+pub fn wait(master: c_int, nudge_fd: c_int, want_read: bool, want_write: bool) Ready {
+    if (comptime !supported) return .{};
+    const master_events: c_short = (if (want_read) pollin else 0) | (if (want_write) pollout else 0);
+    var fds = [2]Pollfd{
+        .{ .fd = nudge_fd, .events = pollin, .revents = 0 },
+        .{ .fd = master, .events = master_events, .revents = 0 },
+    };
+    const nfds: c_uint = if (master_events == 0) 1 else 2;
+    const r = c.poll(&fds, nfds, -1);
+    if (r < 0) return .{};
+    return .{
+        .readable = nfds == 2 and fds[1].revents & pollin != 0,
+        .writable = nfds == 2 and fds[1].revents & pollout != 0,
+        .hangup = nfds == 2 and fds[1].revents & (pollhup | pollerr) != 0,
+        .nudged = fds[0].revents & pollin != 0,
+    };
+}
+
+const Pollfd = extern struct {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+};
+
+// POLLIN/POLLOUT/POLLERR/POLLHUP share values on Linux and Darwin.
+const pollin: c_short = 0x1;
+const pollout: c_short = 0x4;
+const pollerr: c_short = 0x8;
+const pollhup: c_short = 0x10;
 
 // ------------------------------------------------------------------ tests
 

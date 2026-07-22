@@ -281,6 +281,31 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Pty records obey the recorder the same way: output
+                // batches journal their bytes OUT OF LINE (an output
+                // record's payload is always empty on disk, its blob
+                // bounded by the chunk size), and exits carry neither
+                // payload nor blob. Refuse contradictions before the
+                // feed, like the channel gate above.
+                if (effect.kind == .pty and ptyRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: pty record for key {d} claims .{s} with {d} payload bytes and a {d}-byte blob - a recorded output batch rides the blob store bounded at {d} bytes and an exit carries neither, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.pty_kind), effect.payload.len, effect.pty_blob_len, runtime_effects.max_effect_pty_chunk_bytes },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                // Provenance, gated before the regeneration skip (the
+                // channel argument): the recorder stamps `.rejected`
+                // only on regenerating admission refusals, which are
+                // always `.exit` events; an output record wearing exit
+                // provenance would be silently omitted below.
+                if (effect.kind == .pty and ptyRecordProvenanceDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: pty record for key {d} claims a .{s} event stamped with .{s} provenance - only .exit records carry a non-.exited reason, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.pty_kind), @tagName(effect.exit_reason) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -294,8 +319,18 @@ pub fn replaySession(
                 // executor's slot buffer).
                 var blob_scratch: ?[]u8 = null;
                 defer if (blob_scratch) |scratch| std.heap.page_allocator.free(scratch);
+                if (effect.kind == .pty and effect.pty_blob_len > 0) {
+                    const bytes = resolveBlob(effect.pty_blob_hash, effect.pty_blob_len, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: pty record for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
+                            .{ report.events_replayed, effect.key, session_blobs.hexName(effect.pty_blob_hash), effect.pty_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
+                }
                 if (effect.kind == .image and effect.image_blob_len > 0) {
-                    const bytes = resolveBlob(effect, options.blobs, &blob_scratch) catch |err| {
+                    const bytes = resolveBlob(effect.image_blob_hash, effect.image_blob_len, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: image record for id {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, effect.key, session_blobs.hexName(effect.image_blob_hash), effect.image_blob_len, @errorName(err) },
@@ -400,18 +435,19 @@ pub fn replaySession(
 /// record: present, exact length, and hashing to its address — the
 /// same hostile-input honesty the journal reader keeps.
 fn resolveBlob(
-    record: journal.EffectResultRecord,
+    blob_hash: [runtime_effects.effect_image_blob_hash_len]u8,
+    blob_len_field: u64,
     blobs: ?session_blobs.SessionBlobSource,
     scratch_out: *?[]u8,
 ) anyerror![]const u8 {
     const blob_source = blobs orelse return error.BlobMissing;
-    if (record.image_blob_len > session_blobs.max_blob_bytes) return error.BlobOverBudget;
-    const blob_len: usize = @intCast(record.image_blob_len);
+    if (blob_len_field > session_blobs.max_blob_bytes) return error.BlobOverBudget;
+    const blob_len: usize = @intCast(blob_len_field);
     // One spare byte proves the stored blob is not LONGER than the
     // record claims (the source reads at most the buffer).
     const scratch = try std.heap.page_allocator.alloc(u8, blob_len + 1);
     scratch_out.* = scratch;
-    const bytes = try blob_source.read_fn(blob_source.context, record.image_blob_hash, scratch);
+    const bytes = try blob_source.read_fn(blob_source.context, blob_hash, scratch);
     if (bytes.len != blob_len) return error.BlobCorrupt;
     return bytes;
 }
@@ -426,6 +462,25 @@ fn resolveBlob(
 /// recorder can produce (see the gate in `replaySession`): `.data`
 /// payloads stay within the post bound; `.closed` and `.rejected`
 /// carry no bytes.
+/// Whether a pty record's journaled shape contradicts what the
+/// recorder can produce: output batches journal with an EMPTY payload
+/// (the bytes moved into the blob store, bounded by the chunk size);
+/// exits carry neither payload nor blob.
+fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len > 0) return true;
+    if (record.pty_blob_len > runtime_effects.max_effect_pty_chunk_bytes) return true;
+    return record.pty_kind == .exit and record.pty_blob_len > 0;
+}
+
+/// Recorder truth for pty provenance: output records always carry
+/// `.exited` (the live drain never touches the exit reason on an
+/// output); every reason is legal on an `.exit` record (`.rejected` =
+/// regenerating admission refusal, `.spawn_failed` = executor-truth
+/// start failure, the rest = real endings).
+fn ptyRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
+    return record.pty_kind == .output and record.exit_reason != .exited;
+}
+
 fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len > runtime_effects.max_effect_channel_bytes) return true;
     return record.channel_kind != .data and record.payload.len > 0;
@@ -530,6 +585,10 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
     return switch (record.kind) {
         .timer => true,
         .exit => record.exit_reason == .rejected,
+        // Pty admission refusals are loop-side validation that refuses
+        // again identically; executor-truth start failures, output,
+        // and real exits are external inputs and must be fed.
+        .pty => record.pty_kind == .exit and record.exit_reason == .rejected,
         .response => record.fetch_outcome == .rejected,
         .file => record.file_outcome == .rejected,
         .clipboard => record.clipboard_outcome == .rejected,

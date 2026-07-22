@@ -1340,6 +1340,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         record.dropped,
                         record.channel_dropped_total,
                     ),
+                    // `.pty` records deliver the RECORDED session:
+                    // output batches (resolved from the blob store
+                    // into `payload` by the replayer) feed the parked
+                    // spawn byte-identically — no shell ever runs —
+                    // and the exit retires it. Admission `.rejected`
+                    // records never reach here (they regenerate and
+                    // are skipped); executor-truth start failures feed
+                    // and retire the park at the spawn's dispatch
+                    // position.
+                    .pty => switch (record.pty_kind) {
+                        .output => try self.effects.feedPtyOutput(record.key, record.payload),
+                        .exit => try self.effects.feedPtyExit(
+                            record.key,
+                            record.code,
+                            record.pty_signal,
+                            record.exit_reason,
+                            record.pty_dropped_writes,
+                        ),
+                    },
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every
                     // other audio kind rides the plain shape.

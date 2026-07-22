@@ -1043,6 +1043,14 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeEnum(record.video_source);
     // `.video` records: whether the delivery dispatched a Msg.
     try cursor.writeBool(record.video_handled);
+    // Pty events — the event kind, the terminating signal and refused
+    // writes, and the blob store content address of a journaled output
+    // batch (exit code and reason ride the shared fields).
+    try cursor.writeEnum(record.pty_kind);
+    try cursor.writeInt(i32, record.pty_signal);
+    try cursor.writeInt(u32, record.pty_dropped_writes);
+    try cursor.writeBytes(&record.pty_blob_hash);
+    try cursor.writeInt(u64, record.pty_blob_len);
     return buffer[0..cursor.len];
 }
 
@@ -1095,6 +1103,12 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.video_token = try cursor.readInt(u64);
     record.video_source = try cursor.readEnum(runtime_effects.EffectVideoSource);
     record.video_handled = try cursor.readBool();
+    // Pty events.
+    record.pty_kind = try cursor.readEnum(runtime_effects.EffectPtyEventKind);
+    record.pty_signal = try cursor.readInt(i32);
+    record.pty_dropped_writes = try cursor.readInt(u32);
+    @memcpy(&record.pty_blob_hash, try cursor.readBytes(record.pty_blob_hash.len));
+    record.pty_blob_len = try cursor.readInt(u64);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
