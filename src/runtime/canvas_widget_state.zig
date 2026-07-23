@@ -148,6 +148,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
+            // ADOPTION: the retained tree is now the new layout; every
+            // step below can still fail, and hover currency must treat
+            // such a failure as a torn pair (see
+            // `canvas_widget_layout_adoptions`).
+            self.views[index].canvas_widget_layout_adoptions +%= 1;
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);
             self.views[index].copyCanvasWidgetSourceControls(layout);

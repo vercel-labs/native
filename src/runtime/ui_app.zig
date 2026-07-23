@@ -1723,8 +1723,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
-                _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
-                self.main_tree_current = false;
+                try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
                 if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
                     _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
                 }
@@ -1735,6 +1734,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             live_tree_reset = false;
             self.main_tree_current = true;
             self.build_generation +%= 1;
+            // Captures track EVERY tree transition (see
+            // refreshHoverLeaveCaptures) — failures are loud inside and
+            // retried; they never fail the rebuild that already
+            // committed.
+            _ = self.refreshHoverLeaveCaptures();
             // The build INSTALLED: its video declaration now speaks
             // for what the glass shows.
             self.commitStagedVideoDeclaration();
@@ -2471,8 +2475,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // matching handler tree lands below, wherever the rebuild
             // was driven from (the full pass or a direct resize/install
             // site).
-            _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
-            slot.tree_current = false;
+            try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
             }
@@ -2481,6 +2484,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             live_tree_reset = false;
             slot.tree_current = true;
             self.build_generation +%= 1;
+            // Same per-transition capture refresh as the main rebuild.
+            _ = self.refreshHoverLeaveCaptures();
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -2726,11 +2731,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (chrome_list.commands[chrome.prefix_commands..]) |command| try builder.append(command);
 
             _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
-            _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
-            // The runtime adopted the widget layout: the main install
-            // window opens here (see `rebuild`) and closes when the
-            // caller adopts the matching handler tree.
-            self.main_tree_current = false;
+            // The main install window opens at the layout's true
+            // adoption inside the tracked publication (see `rebuild`)
+            // and closes when the caller adopts the matching handler
+            // tree.
+            try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
             _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
                 .prefix_command_count = chrome.prefix_commands,
                 .suffix_command_count = chrome.suffix_commands,
@@ -3569,8 +3574,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// drains immediately.
         fn hoverDrainsAfterEvent(event_value: Event) bool {
             return switch (event_value) {
+                // Keyboard events usually ride an input cycle (their
+                // terminal dispatch drains); the standalone ones —
+                // accessibility selection edits, context-menu
+                // cut/paste/select-all — have no cycle and drain here.
+                .canvas_widget_keyboard => |keyboard_event| keyboard_event.standalone,
                 .canvas_widget_pointer,
-                .canvas_widget_keyboard,
                 .canvas_widget_drag,
                 .canvas_widget_file_drop,
                 .canvas_widget_context_press,
@@ -4214,6 +4223,77 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// delivers on the next event's drain.
         const hover_msg_drain_passes: usize = 64;
 
+        /// Refresh every standing capture from the mirror view's live
+        /// tree when the trees moved underneath: called at EVERY
+        /// rebuild commit — two dispatches in one cycle (payload A to
+        /// B, then unmount) must deliver B, so the refresh cannot wait
+        /// for drain time and see only the final tree — and again
+        /// defensively at drain time. UPSERT only (an unbound leave
+        /// keeps the last capture). Returns the first TRANSIENT failure
+        /// (allocation) after attempting every entry, leaving the
+        /// generation behind so the next commit or drain retries.
+        fn refreshHoverLeaveCaptures(self: *Self) ?anyerror {
+            if (self.hover_msg_chain_len == 0) return null;
+            if (self.hover_msg_captured_generation == self.build_generation) return null;
+            if (!self.hoverTreeCurrentFor(self.hoverMsgViewLabel())) return null;
+            const mirror_tree = self.treeForViewLabel(self.hoverMsgViewLabel()) orelse return null;
+            var first_error: ?anyerror = null;
+            var refreshed = true;
+            for (0..self.hover_msg_chain_len) |position| {
+                const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
+                // Copy-then-swap: the replacement lands in a FRESH slot
+                // (the spare guarantees one is free) and the old capture
+                // releases only after it succeeded — a failed allocation
+                // must never destroy the still-valid capture it was
+                // refreshing.
+                const fresh = self.claimHoverSlot();
+                self.captureHoverLeave(fresh, leave_msg) catch |err| {
+                    // Transient (allocation): keep the old capture,
+                    // retry at the next commit or drain — the
+                    // generation stays behind — and surface the
+                    // failure LOUD: if the element unmounts before a
+                    // retry lands, its refreshed leave is lost, and
+                    // that must never be silent.
+                    self.releaseHoverSlot(fresh);
+                    refreshed = false;
+                    ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
+                    if (first_error == null) first_error = err;
+                    continue;
+                };
+                self.releaseHoverSlot(self.hover_msg_slots[position]);
+                self.hover_msg_slots[position] = fresh;
+            }
+            if (refreshed) self.hover_msg_captured_generation = self.build_generation;
+            return first_error;
+        }
+
+        /// The mirror-view adoption count for the tracked publication
+        /// below (0 when the view is not found — then no adoption can
+        /// have happened either).
+        fn canvasWidgetLayoutAdoptions(runtime: *Runtime, window_id: platform.WindowId, label: []const u8) u64 {
+            for (runtime.views[0..runtime.view_count]) |*view| {
+                if (view.window_id == window_id and std.mem.eql(u8, view.label, label)) return view.canvas_widget_layout_adoptions;
+            }
+            return 0;
+        }
+
+        /// Publish a widget layout with the hover-currency stamp at the
+        /// TRUE adoption boundary: `setCanvasWidgetLayout` adopts the
+        /// layout partway through its pipeline (validated-then-atomic)
+        /// and runs more fallible work after — source-text copies, host
+        /// scroll/drag syncs, display refresh — so a failure THERE must
+        /// still mark the pair stale, while a pre-adoption rejection
+        /// must not. The view's adoption counter is the witness.
+        fn publishWidgetLayoutTracked(self: *Self, runtime: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree, current_flag: *bool) anyerror!void {
+            _ = self;
+            const adoptions_before = canvasWidgetLayoutAdoptions(runtime, window_id, label);
+            _ = runtime.setCanvasWidgetLayout(window_id, label, layout) catch |err| {
+                if (canvasWidgetLayoutAdoptions(runtime, window_id, label) != adoptions_before) current_flag.* = false;
+                return err;
+            };
+            current_flag.* = false;
+        }
+
         /// The currency flag governing hover-Msg resolution through the
         /// handler tree behind `view_label` (see `main_tree_current`):
         /// the main canvas keys on the main flag, every secondary
@@ -4436,40 +4516,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // unbinding never un-promises it). Runs before the settled
             // fast path below, which compares ids and would never see a
             // binding-only change.
-            var first_error: ?anyerror = null;
-            if (mirror_len > 0 and self.hoverTreeCurrentFor(self.hoverMsgViewLabel()) and self.hover_msg_captured_generation != self.build_generation) {
-                if (self.treeForViewLabel(self.hoverMsgViewLabel())) |mirror_tree| {
-                    var refreshed = true;
-                    for (0..mirror_len) |position| {
-                        const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
-                        // Copy-then-swap: the replacement lands in a
-                        // FRESH slot (the spare guarantees one is free)
-                        // and the old capture releases only after it
-                        // succeeded — a failed allocation must never
-                        // destroy the still-valid capture it was
-                        // refreshing.
-                        const fresh = self.claimHoverSlot();
-                        self.captureHoverLeave(fresh, leave_msg) catch |err| {
-                            // Transient (allocation): keep the old
-                            // capture, retry on the next drain — the
-                            // generation stays behind so this refresh
-                            // runs again — and surface the failure LOUD
-                            // through the dispatch-error machinery: if
-                            // the element unmounts before a retry
-                            // lands, its refreshed leave is lost, and
-                            // that must never be silent.
-                            self.releaseHoverSlot(fresh);
-                            refreshed = false;
-                            ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying on the next drain; an unmount before a successful retry loses the newly bound leave", .{err});
-                            if (first_error == null) first_error = err;
-                            continue;
-                        };
-                        self.releaseHoverSlot(self.hover_msg_slots[position]);
-                        self.hover_msg_slots[position] = fresh;
-                    }
-                    if (refreshed) self.hover_msg_captured_generation = self.build_generation;
-                }
-            }
+            var first_error: ?anyerror = self.refreshHoverLeaveCaptures();
 
             // The diff is a SET diff over listener ids, not a positional
             // one: containment is per listener, so an outer listener

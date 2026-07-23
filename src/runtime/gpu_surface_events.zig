@@ -205,6 +205,23 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         self.views[index].canvas_widget_hover_msg_chain_len = 0;
                         self.views[index].canvas_widget_hover_pointer_live = false;
                     }
+                    // A consumed secondary RELEASE outside the view is
+                    // the gesture ending with the pointer already gone —
+                    // the leave the frozen stream suppressed (hosts hold
+                    // an implicit grab through a right-drag, so no
+                    // motion-leave fired and none will until re-entry):
+                    // retire containment like the cancel above, matching
+                    // the primary path whose outside release re-hit-tests
+                    // to nothing. The freeze holds through the drag
+                    // itself.
+                    if (input_event.kind == .pointer_up and
+                        self.views[index].canvas_widget_hover_pointer_live and
+                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id and
+                        !gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y))
+                    {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
                 }
                 // The whole consumed stream still feeds the tooltip
                 // intent choke point: every pointer-carrying event
@@ -453,6 +470,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // input changed semantics but no pixels) publish now — there
             // is no present to protect.
             try CanvasWidgetDisplayMethods().settleDeferredCanvasWidgetAccessibility(self);
+        }
+
+        /// Whether a view-local point sits inside the view's surface
+        /// (the consumed-release retirement's outside test).
+        fn gpuViewContainsPoint(view: anytype, x: f32, y: f32) bool {
+            return x >= 0 and y >= 0 and x <= view.gpu_size.width and y <= view.gpu_size.height;
         }
 
         /// Drain the view's pending scroll-event set into

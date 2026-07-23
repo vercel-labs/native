@@ -481,6 +481,16 @@ pub const RuntimeView = struct {
     /// only by the proven pointer's own events; meaningful while
     /// `canvas_widget_hover_pointer_live` holds.
     canvas_widget_hover_pointer_position: geometry.PointF = .{},
+    /// Count of widget-layout ADOPTIONS: incremented the moment
+    /// `copyWidgetLayoutTree` replaces the retained tree inside
+    /// `setCanvasWidgetLayout`, BEFORE the pipeline's later fallible
+    /// steps (source-text copies, host scroll/drag syncs, display
+    /// refresh). The ui-app layer samples it around publication so its
+    /// hover-currency stamp tracks the true adoption boundary: a
+    /// pre-adoption rejection (validated-then-atomic) leaves the old
+    /// pair current, while a post-adoption failure inside the pipeline
+    /// still marks the pair stale.
+    canvas_widget_layout_adoptions: u64 = 0,
     /// Hover-intent state for ANCHORED tooltips — runtime-owned
     /// presentation chrome; the model never hears hover. `armed` is
     /// the tooltip whose trigger is hovered while its show delay runs;
