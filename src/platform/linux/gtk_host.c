@@ -3418,6 +3418,12 @@ void native_sdk_gtk_set_menus(native_sdk_gtk_host_t *host, const char *const *me
                 free(key);
                 continue;
             }
+            /* Canonicalize to lowercase, the shortcut-storage rule: key
+             * names validate case-insensitively, and the accelerator
+             * translation below matches the canonical spellings. */
+            for (char *p = key; *p; p++) {
+                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+            }
 
             native_sdk_gtk_menu_action_t *menu_action = &host->menu_actions[host->menu_action_count];
             memset(menu_action, 0, sizeof(*menu_action));

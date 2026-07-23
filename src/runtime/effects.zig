@@ -6815,6 +6815,19 @@ pub fn Effects(comptime Msg: type) type {
             // across it is fine. The nudge (outside the lock) still
             // wakes a read parked short of EOF through the
             // kill_requested break.
+            //
+            // `reaping == false` proves pid ownership ONLY under the
+            // toolkit's reaping contract (documented on
+            // `EffectPtyEvent.code`): the toolkit forks the pty child,
+            // is its SOLE reaper, and never touches SIGCHLD disposition
+            // — an embedder must not either. An embedder that ignores
+            // SIGCHLD (kernel auto-reap), installs `SA_NOCLDWAIT`, or
+            // wait()s on children it did not spawn frees the pid outside
+            // this fence, and no portable POSIX primitive can close that:
+            // kill-by-pid is inherently check-then-act against a reaper
+            // you do not control (a race-free handle needs Linux-only
+            // pidfd_send_signal). The contract is the boundary; inside
+            // it this fence is exact.
             if (shared.exit_staged) {
                 shared.exit_reason = .cancelled;
                 shared.exit_code = effect_error_exit_code;

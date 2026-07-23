@@ -133,6 +133,8 @@ Exactly one `.exit` event ends every spawn — accepted or refused:
 
 The exit also reports `dropped_writes` — `ptyWrite` payloads refused over the session's life (an over-bound single write, or a child that stopped reading and filled the outbound buffer). Zero means every keystroke reached the child.
 
+One contract rides the whole family: the toolkit forks each pty child, is its **sole reaper**, and never touches SIGCHLD disposition — an embedding process must not either. A host that ignores SIGCHLD (the kernel auto-reaps), sets `SA_NOCLDWAIT`, or `wait()`s on children it did not spawn frees pids outside the toolkit's kill/reap fence; POSIX offers no portable way to signal a pid safely once a third party can reap it first.
+
 ## Rendering the grid
 
 The emulator owns cell state and damage; the app paints the viewport as real text through the canvas primitives. The example maps the palette honestly:

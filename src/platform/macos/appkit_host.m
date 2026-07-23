@@ -11145,7 +11145,10 @@ static NSString *NativeSdkOriginForURL(NSURL *url) {
  * rather than a multi-character string AppKit would misread. */
 static NSString *NativeSdkMenuKeyEquivalent(NSString *key) {
     if (key.length == 0) return @"";
-    if (key.length == 1) return key;
+    // Lowercase single characters too (key names validate
+    // case-insensitively): an uppercase key equivalent implies Shift to
+    // AppKit, which the explicit modifier mask already expresses.
+    if (key.length == 1) return key.lowercaseString;
     static NSDictionary<NSString *, NSString *> *named = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
