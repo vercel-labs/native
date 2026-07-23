@@ -347,7 +347,7 @@ test "mobile C ABI forwards surface resize and touch input" {
     try std.testing.expectEqual(@as(f32, 844), self.mobile_surface_height);
     try std.testing.expectEqual(@as(f32, 3), self.mobile_surface_scale);
 
-    native_sdk_app_viewport(app, 390, 700, 3, &native_surface_token, 47, 0, 34, 0, 0, 0, 144, 0);
+    native_sdk_app_viewport(app, &.{ .width = 390, .height = 700, .scale = 3, .surface = &native_surface_token, .safe_top = 47, .safe_bottom = 34, .keyboard_bottom = 144 });
     try std.testing.expectEqual(@as(usize, 2), self.mobile_surface_resize_count);
     try std.testing.expectEqual(@as(f32, 390), self.embedded.runtime.surface.size.width);
     try std.testing.expectEqual(@as(f32, 700), self.embedded.runtime.surface.size.height);
@@ -1060,7 +1060,7 @@ test "mobile C ABI drives a user UiApp canvas scene end to end" {
 
     // Host-reported viewport: window and mobile-surface view take the size.
     var surface_token: u8 = 0;
-    MobileCounterApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     try expectNoUiHostError(app);
     var viewport: MobileViewportState = .{};
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_viewport_state(app, &viewport));
@@ -1180,7 +1180,7 @@ test "mobile UiApp host insets widget layout by safe-area and keyboard viewport 
     // the top inset and ends above the bottom one while the canvas itself
     // keeps the full surface size (chrome/clear paint edge to edge).
     var surface_token: u8 = 0;
-    MobileCounterApi.native_sdk_app_viewport(app, 390, 844, 3, &surface_token, 59, 0, 34, 0, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .scale = 3, .surface = &surface_token, .safe_top = 59, .safe_bottom = 34 });
     MobileCounterApi.native_sdk_app_frame(app);
     try expectNoUiHostError(app);
 
@@ -1207,7 +1207,7 @@ test "mobile UiApp host insets widget layout by safe-area and keyboard viewport 
 
     // Rotation: landscape swaps the size and moves the notch to the sides;
     // the viewport resize relayouts against the new insets.
-    MobileCounterApi.native_sdk_app_viewport(app, 844, 390, 3, &surface_token, 0, 59, 21, 59, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 844, .height = 390, .scale = 3, .surface = &surface_token, .safe_right = 59, .safe_bottom = 21, .safe_left = 59 });
     MobileCounterApi.native_sdk_app_frame(app);
     try expectNoUiHostError(app);
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_widget_semantics_at(app, 0, &root));
@@ -1218,7 +1218,7 @@ test "mobile UiApp host insets widget layout by safe-area and keyboard viewport 
 
     // System keyboard: its inset combines edge-wise with the safe areas so
     // content is laid out above it.
-    MobileCounterApi.native_sdk_app_viewport(app, 390, 844, 3, &surface_token, 59, 0, 34, 0, 0, 0, 336, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .scale = 3, .surface = &surface_token, .safe_top = 59, .safe_bottom = 34, .keyboard_bottom = 336 });
     MobileCounterApi.native_sdk_app_frame(app);
     try expectNoUiHostError(app);
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_widget_semantics_at(app, 0, &root));
@@ -1228,7 +1228,7 @@ test "mobile UiApp host insets widget layout by safe-area and keyboard viewport 
     // Removing the insets restores the desktop-identical full-bounds
     // layout (desktop surfaces report zero insets, so this is the layout
     // golden tests cover).
-    MobileCounterApi.native_sdk_app_viewport(app, 390, 844, 3, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .scale = 3, .surface = &surface_token });
     MobileCounterApi.native_sdk_app_frame(app);
     try expectNoUiHostError(app);
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_widget_semantics_at(app, 0, &root));
@@ -1309,7 +1309,7 @@ test "mobile UiApp host delivers safe areas through the window-chrome channel" {
     // and — because the app subscribed — widget layout keeps the FULL
     // surface bounds (the app's own padding is the inset now).
     var surface_token: u8 = 0;
-    MobileChromeApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 59, 0, 34, 0, 0, 0, 0, 0);
+    MobileChromeApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 59, .safe_bottom = 34 });
     MobileChromeApi.native_sdk_app_frame(app);
     try std.testing.expectEqualStrings("", std.mem.span(MobileChromeApi.native_sdk_app_last_error_name(app)));
     try std.testing.expectEqual(@as(f32, 59), self.ui.model.chrome.insets.top);
@@ -1332,14 +1332,14 @@ test "mobile UiApp host delivers safe areas through the window-chrome channel" {
 
     // An identical viewport re-report does not re-deliver (change-gated,
     // same dedupe the macOS fullscreen transitions rely on).
-    MobileChromeApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 59, 0, 34, 0, 0, 0, 0, 0);
+    MobileChromeApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 59, .safe_bottom = 34 });
     MobileChromeApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(deliveries_after_install, self.ui.model.chrome_deliveries);
 
     // The keyboard is not chrome: it must not change the report, and the
     // runtime keeps insetting layout by its residual overlap beyond the
     // app-owned safe area (336 keyboard - 34 home indicator = 302).
-    MobileChromeApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 59, 0, 34, 0, 0, 0, 336, 0);
+    MobileChromeApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 59, .safe_bottom = 34, .keyboard_bottom = 336 });
     MobileChromeApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(@as(f32, 34), self.ui.model.chrome.insets.bottom);
     try std.testing.expectEqual(deliveries_after_install, self.ui.model.chrome_deliveries);
@@ -1349,7 +1349,7 @@ test "mobile UiApp host delivers safe areas through the window-chrome channel" {
 
     // Rotation moves the notch to the sides: one new delivery with the
     // landscape insets.
-    MobileChromeApi.native_sdk_app_viewport(app, 844, 390, 1, &surface_token, 0, 59, 21, 59, 0, 0, 0, 0);
+    MobileChromeApi.native_sdk_app_viewport(app, &.{ .width = 844, .height = 390, .surface = &surface_token, .safe_right = 59, .safe_bottom = 21, .safe_left = 59 });
     MobileChromeApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(deliveries_after_install + 1, self.ui.model.chrome_deliveries);
     try std.testing.expectEqual(@as(f32, 0), self.ui.model.chrome.insets.top);
@@ -1373,14 +1373,14 @@ test "android-shaped insets ride the same viewport and chrome contracts" {
     const counter_app = MobileCounterApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
     defer MobileCounterApi.native_sdk_app_destroy(counter_app);
     MobileCounterApi.native_sdk_app_start(counter_app);
-    MobileCounterApi.native_sdk_app_viewport(counter_app, 412, 915, 2.625, &surface_token, 28, 0, 24, 0, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(counter_app, &.{ .width = 412, .height = 915, .scale = 2.625, .surface = &surface_token, .safe_top = 28, .safe_bottom = 24 });
     MobileCounterApi.native_sdk_app_frame(counter_app);
     try expectNoUiHostError(counter_app);
     var root: MobileWidgetSemantics = .{};
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_widget_semantics_at(counter_app, 0, &root));
     try std.testing.expectEqual(@as(f32, 28), root.y);
     try std.testing.expectEqual(@as(f32, 915 - 28 - 24), root.height);
-    MobileCounterApi.native_sdk_app_viewport(counter_app, 412, 915, 2.625, &surface_token, 28, 0, 24, 0, 0, 0, 322, 0);
+    MobileCounterApi.native_sdk_app_viewport(counter_app, &.{ .width = 412, .height = 915, .scale = 2.625, .surface = &surface_token, .safe_top = 28, .safe_bottom = 24, .keyboard_bottom = 322 });
     MobileCounterApi.native_sdk_app_frame(counter_app);
     try std.testing.expectEqual(@as(c_int, 1), MobileCounterApi.native_sdk_app_widget_semantics_at(counter_app, 0, &root));
     try std.testing.expectEqual(@as(f32, 915 - 28 - 322), root.height);
@@ -1393,7 +1393,7 @@ test "android-shaped insets ride the same viewport and chrome contracts" {
     defer MobileChromeApi.native_sdk_app_destroy(chrome_app);
     const chrome_self: *MobileChromeHost = @ptrCast(@alignCast(chrome_app));
     MobileChromeApi.native_sdk_app_start(chrome_app);
-    MobileChromeApi.native_sdk_app_viewport(chrome_app, 412, 915, 2.625, &surface_token, 28, 0, 24, 0, 0, 0, 322, 0);
+    MobileChromeApi.native_sdk_app_viewport(chrome_app, &.{ .width = 412, .height = 915, .scale = 2.625, .surface = &surface_token, .safe_top = 28, .safe_bottom = 24, .keyboard_bottom = 322 });
     MobileChromeApi.native_sdk_app_frame(chrome_app);
     try std.testing.expectEqual(@as(f32, 28), chrome_self.ui.model.chrome.insets.top);
     try std.testing.expectEqual(@as(f32, 24), chrome_self.ui.model.chrome.insets.bottom);
@@ -1403,7 +1403,7 @@ test "android-shaped insets ride the same viewport and chrome contracts" {
 
     // Rotation with a corner cutout: landscape moves the cutout band to
     // one side only (Android reports asymmetric cutout insets).
-    MobileChromeApi.native_sdk_app_viewport(chrome_app, 915, 412, 2.625, &surface_token, 0, 0, 24, 28, 0, 0, 0, 0);
+    MobileChromeApi.native_sdk_app_viewport(chrome_app, &.{ .width = 915, .height = 412, .scale = 2.625, .surface = &surface_token, .safe_bottom = 24, .safe_left = 28 });
     MobileChromeApi.native_sdk_app_frame(chrome_app);
     try std.testing.expectEqual(@as(f32, 28), chrome_self.ui.model.chrome.insets.left);
     try std.testing.expectEqual(@as(f32, 0), chrome_self.ui.model.chrome.insets.right);
@@ -1491,7 +1491,7 @@ test "mobile C ABI text measure provider changes embed text layout" {
     // Baseline: no provider, deterministic estimator metrics.
     const baseline_app = MobileMeasureApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
     MobileMeasureApi.native_sdk_app_start(baseline_app);
-    MobileMeasureApi.native_sdk_app_viewport(baseline_app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileMeasureApi.native_sdk_app_viewport(baseline_app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileMeasureApi.native_sdk_app_frame(baseline_app);
     const baseline_width = try measureTestTextWidth(baseline_app);
     try std.testing.expect(baseline_width > 0);
@@ -1506,7 +1506,7 @@ test "mobile C ABI text measure provider changes embed text layout" {
     try std.testing.expectEqual(@as(c_int, 1), MobileMeasureApi.native_sdk_app_set_text_measure(app, fakeMobileMeasureText, &measure_calls));
     try std.testing.expect(self.embedded.runtime.textMeasureProvider() != null);
     MobileMeasureApi.native_sdk_app_start(app);
-    MobileMeasureApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileMeasureApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileMeasureApi.native_sdk_app_frame(app);
     try std.testing.expect(measure_calls > 0);
     const measured_width = try measureTestTextWidth(app);
@@ -1522,7 +1522,7 @@ test "mobile C ABI text measure provider changes embed text layout" {
     // bridge reports no measurement, which is the estimator path.
     try std.testing.expectEqual(@as(c_int, 1), MobileMeasureApi.native_sdk_app_set_text_measure(app, null, null));
     try std.testing.expect(self.embedded.runtime.textMeasureProvider() != null);
-    MobileMeasureApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileMeasureApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileMeasureApi.native_sdk_app_frame(app);
     const restored_width = try measureTestTextWidth(app);
     try std.testing.expectEqual(baseline_width, restored_width);
@@ -1546,7 +1546,7 @@ test "mobile C ABI publishes automation snapshots into a host-set directory" {
     try std.testing.expect(self.embedded.runtime.options.automation != null);
 
     var surface_token: u8 = 0;
-    MobileCounterApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileCounterApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileCounterApi.native_sdk_app_frame(app);
     try expectNoUiHostError(app);
 
@@ -1774,7 +1774,7 @@ fn pressAudioButton(app: ?*anyopaque, label: []const u8) !void {
 fn startAudioHost(app: ?*anyopaque) !void {
     MobileAudioApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileAudioApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileAudioApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileAudioApi.native_sdk_app_frame(app);
     try std.testing.expectEqualStrings("", std.mem.span(MobileAudioApi.native_sdk_app_last_error_name(app)));
 }
@@ -2043,7 +2043,7 @@ fn recorderImageDecode(
 fn startImageHost(app: ?*anyopaque) !void {
     MobileImageApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileImageApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileImageApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileImageApi.native_sdk_app_frame(app);
     try std.testing.expectEqualStrings("", std.mem.span(MobileImageApi.native_sdk_app_last_error_name(app)));
 }
@@ -2330,7 +2330,7 @@ test "mobile C ABI exposes declared platform chrome and mirrors model selection"
 
     MobileTabsApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileTabsApi.native_sdk_app_frame(app);
     try std.testing.expect(self.ui.installed);
 
@@ -2368,7 +2368,7 @@ test "mobile host chrome reports ride the window-chrome channel" {
 
     MobileTabsApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 34, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 47, .safe_bottom = 34 });
     MobileTabsApi.native_sdk_app_frame(app);
     try std.testing.expect(self.ui.installed);
 
@@ -2379,7 +2379,7 @@ test "mobile host chrome reports ride the window-chrome channel" {
     try std.testing.expectEqual(@as(f32, 34), self.ui.model.chrome_bottom);
 
     // A viewport push never erases the standing reports.
-    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 40, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 47, .safe_bottom = 40 });
     MobileTabsApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(platform.FormFactor.compact, self.ui.model.chrome_form_factor);
     try std.testing.expect(self.ui.model.chrome_tabs_projected);
@@ -2388,7 +2388,7 @@ test "mobile host chrome reports ride the window-chrome channel" {
     // The size-class flip arrives as a fresh chrome Msg with the next
     // viewport-driven re-query (an iPad rotation's trait change).
     try std.testing.expectEqual(@as(c_int, 1), MobileTabsApi.native_sdk_app_set_form_factor(app, 2));
-    MobileTabsApi.native_sdk_app_viewport(app, 1024, 768, 1, &surface_token, 24, 0, 20, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 1024, .height = 768, .surface = &surface_token, .safe_top = 24, .safe_bottom = 20 });
     MobileTabsApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(platform.FormFactor.regular, self.ui.model.chrome_form_factor);
 }
@@ -2453,7 +2453,7 @@ test "mobile C ABI projects navigation depth and dispatches the back command" {
 
     MobileTabsApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileTabsApi.native_sdk_app_frame(app);
     try std.testing.expect(self.ui.installed);
 
@@ -2498,7 +2498,7 @@ test "apps without a navigation projection answer the honest zeros" {
 
     MobileDamageApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileDamageApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileDamageApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileDamageApi.native_sdk_app_frame(app);
     try std.testing.expectEqual(@as(isize, -1), MobileDamageApi.native_sdk_app_chrome_navigation_depth(app));
     try std.testing.expectEqual(@as(c_int, 0), MobileDamageApi.native_sdk_app_chrome_navigation_back_command(app, &back));
@@ -2528,7 +2528,7 @@ test "declared chrome projection replays deterministically" {
         _ = MobileTabsApi.native_sdk_app_set_chrome_tabs_projected(app, 1);
         MobileTabsApi.native_sdk_app_start(app);
         var surface_token: u8 = 0;
-        MobileTabsApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 47, 0, 34, 0, 0, 0, 0, 0);
+        MobileTabsApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token, .safe_top = 47, .safe_bottom = 34 });
         MobileTabsApi.native_sdk_app_frame(app);
         selected[0] = MobileTabsApi.native_sdk_app_chrome_selected_tab(app);
         depth[0] = MobileTabsApi.native_sdk_app_chrome_navigation_depth(app);
@@ -2642,7 +2642,7 @@ test "mobile damage render copies only changed regions from the presented captur
 
     MobileDamageApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileDamageApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileDamageApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     MobileDamageApi.native_sdk_app_frame(app);
     try std.testing.expectEqualStrings("", std.mem.span(MobileDamageApi.native_sdk_app_last_error_name(app)));
     try std.testing.expectEqual(@as(usize, 1), self.null_platform.gpu_surface_present_count);
@@ -2724,7 +2724,7 @@ test "mobile damage render falls back to a full render without a capture" {
 
     MobileDamageApi.native_sdk_app_start(app);
     var surface_token: u8 = 0;
-    MobileDamageApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileDamageApi.native_sdk_app_viewport(app, &.{ .width = 390, .height = 844, .surface = &surface_token });
     // No frame pumped: nothing has presented, so the damage entry takes
     // the full-render fallback with full damage — exactly the plain
     // render_pixels contract plus an honest damage report.

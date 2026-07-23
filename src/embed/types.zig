@@ -155,6 +155,25 @@ pub const MobileTextInputState = extern struct {
     height: f32 = 0,
 };
 
+/// Viewport push for `native_sdk_app_viewport`: surface geometry plus
+/// safe-area and keyboard insets. Passed by pointer — the positional form
+/// (11 f32 interleaved with a pointer) is the SysV C-ABI shape Zig 0.16.0's
+/// self-hosted x86_64 backend mis-lowers, spilling later floats a slot off.
+pub const MobileViewport = extern struct {
+    width: f32 = 0,
+    height: f32 = 0,
+    scale: f32 = 1,
+    surface: ?*anyopaque = null,
+    safe_top: f32 = 0,
+    safe_right: f32 = 0,
+    safe_bottom: f32 = 0,
+    safe_left: f32 = 0,
+    keyboard_top: f32 = 0,
+    keyboard_right: f32 = 0,
+    keyboard_bottom: f32 = 0,
+    keyboard_left: f32 = 0,
+};
+
 pub const MobileViewportState = extern struct {
     width: f32 = 0,
     height: f32 = 0,

@@ -151,13 +151,8 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .name = "native-sdk",
         .root_module = embed_exports_mod,
-        // The embed C ABI (`native_sdk_app_viewport`) is exactly the
-        // f32-heavy SysV signature Zig 0.16.0's self-hosted x86_64 backend
-        // miscompiles (see useLlvmWorkaround in build/app.zig): without
-        // this, Debug x86_64 libs (Android emulators, Intel simulators)
-        // hand clang hosts corrupted inset/keyboard floats. addMobileLib
-        // already forces LLVM there; the fixed-shell lib must match.
-        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        // Backend left to Zig's default (self-hosted Debug, LLVM Release).
+        // Mobile consumers select it through MobileLibOptions.use_llvm/lld.
     });
     b.installArtifact(embed_lib);
 
@@ -2976,11 +2971,8 @@ fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: [
 }
 
 fn filteredTestArtifact(b: *std.Build, mod: *std.Build.Module, name: []const u8, filters: []const []const u8) *std.Build.Step.Compile {
-    // use_llvm: Zig 0.16.0's self-hosted x86_64 backend miscompiles the
-    // SysV C ABI for f32-heavy signatures (native_sdk_app_viewport); see
-    // useLlvmWorkaround in build/app.zig for the full story and repro.
-    const use_llvm = if (mod.resolved_target) |target| @import("build/app.zig").useLlvmWorkaround(target) else null;
-    return b.addTest(.{ .name = name, .root_module = mod, .filters = filters, .use_llvm = use_llvm });
+    // Backend left to Zig's default (self-hosted Debug, LLVM Release).
+    return b.addTest(.{ .name = name, .root_module = mod, .filters = filters });
 }
 
 /// One slice of the framework test suite, selected by test-name filters.

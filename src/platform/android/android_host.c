@@ -193,7 +193,21 @@ JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeSurface
 JNIEXPORT void JNICALL Java_dev_native_1sdk_host_NativeSdkActivity_nativeViewport(JNIEnv *env, jobject self, jlong app, jfloat width, jfloat height, jfloat scale, jfloat safe_top, jfloat safe_right, jfloat safe_bottom, jfloat safe_left, jfloat keyboard_top, jfloat keyboard_right, jfloat keyboard_bottom, jfloat keyboard_left) {
     (void)env;
     (void)self;
-    native_sdk_app_viewport((void *)app, width, height, scale, host_state.window, safe_top, safe_right, safe_bottom, safe_left, keyboard_top, keyboard_right, keyboard_bottom, keyboard_left);
+    native_sdk_viewport_t viewport = {
+        .width = width,
+        .height = height,
+        .scale = scale,
+        .surface = host_state.window,
+        .safe_top = safe_top,
+        .safe_right = safe_right,
+        .safe_bottom = safe_bottom,
+        .safe_left = safe_left,
+        .keyboard_top = keyboard_top,
+        .keyboard_right = keyboard_right,
+        .keyboard_bottom = keyboard_bottom,
+        .keyboard_left = keyboard_left,
+    };
+    native_sdk_app_viewport((void *)app, &viewport);
     host_log_error((void *)app, "viewport");
 }
 

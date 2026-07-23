@@ -222,6 +222,40 @@ int native_sdk_gtk_close_window(native_sdk_gtk_host_t *host, uint64_t window_id)
 int native_sdk_gtk_minimize_window(native_sdk_gtk_host_t *host, uint64_t window_id);
 int native_sdk_gtk_create_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len);
 int native_sdk_gtk_update_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len);
+/* Struct-by-pointer entry points for view create/update. The wide positional
+ * signatures above are miscompiled by Zig 0.16.0's self-hosted x86_64 backend
+ * (the Debug default): its SysV lowering mis-places the stack-passed arguments,
+ * so the first shell-view creation faults — the reason the build graph forces
+ * the LLVM backend on x86_64. Passing one descriptor pointer keeps every field
+ * in a struct layout both backends agree on; these delegate to the wide
+ * functions (C->C calls, correctly compiled), so the Zig platform layer never
+ * crosses the miscompiled boundary. */
+typedef struct {
+    uint64_t window_id;
+    const char *label; size_t label_len;
+    int kind;
+    const char *parent; size_t parent_len;
+    double x, y, width, height;
+    int layer, visible, enabled;
+    const char *role; size_t role_len;
+    const char *accessibility_label; size_t accessibility_label_len;
+    const char *text; size_t text_len;
+    const char *command; size_t command_len;
+} native_sdk_gtk_view_desc_t;
+typedef struct {
+    uint64_t window_id;
+    const char *label; size_t label_len;
+    int has_frame; double x, y, width, height;
+    int has_layer; int layer;
+    int has_visible; int visible;
+    int has_enabled; int enabled;
+    int has_role; const char *role; size_t role_len;
+    int has_accessibility_label; const char *accessibility_label; size_t accessibility_label_len;
+    int has_text; const char *text; size_t text_len;
+    int has_command; const char *command; size_t command_len;
+} native_sdk_gtk_view_patch_t;
+int native_sdk_gtk_create_view_desc(native_sdk_gtk_host_t *host, const native_sdk_gtk_view_desc_t *desc);
+int native_sdk_gtk_update_view_patch(native_sdk_gtk_host_t *host, const native_sdk_gtk_view_patch_t *patch);
 int native_sdk_gtk_set_view_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
 int native_sdk_gtk_set_view_visible(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, int visible);
 int native_sdk_gtk_focus_view(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len);
@@ -236,6 +270,21 @@ int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64
  * is unknown or `count` is 0. */
 int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count);
 int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len);
+/* Descriptor-pointer twin of the present call above: the wide positional
+ * signature (interleaved size_t/double/int/pointer) is another shape Zig
+ * 0.16.0's self-hosted x86_64 backend mis-lowers — `rgba8_len` lands a stack
+ * slot off, so present is silently rejected. The Zig layer fills this struct
+ * and passes one pointer; the C wrapper unpacks it (C->C, correct). Same seam
+ * fix as native_sdk_gtk_create_view_desc. */
+typedef struct {
+    uint64_t window_id;
+    const char *label; size_t label_len;
+    size_t width; size_t height;
+    double scale;
+    int has_dirty_rect; double dirty_x, dirty_y, dirty_width, dirty_height;
+    const uint8_t *rgba8; size_t rgba8_len;
+} native_sdk_gtk_gpu_present_desc_t;
+int native_sdk_gtk_present_gpu_surface_pixels_desc(native_sdk_gtk_host_t *host, const native_sdk_gtk_gpu_present_desc_t *desc);
 int native_sdk_gtk_create_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled);
 int native_sdk_gtk_set_webview_frame(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
 int native_sdk_gtk_navigate_webview(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len);

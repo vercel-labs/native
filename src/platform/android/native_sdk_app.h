@@ -154,13 +154,28 @@ typedef struct native_sdk_gpu_frame_state {
   uintptr_t widget_semantics_count;
 } native_sdk_gpu_frame_state_t;
 
+typedef struct native_sdk_viewport {
+  float width;
+  float height;
+  float scale;
+  void *surface;
+  float safe_top;
+  float safe_right;
+  float safe_bottom;
+  float safe_left;
+  float keyboard_top;
+  float keyboard_right;
+  float keyboard_bottom;
+  float keyboard_left;
+} native_sdk_viewport_t;
+
 void *native_sdk_app_create(void);
 void native_sdk_app_destroy(void *app);
 void native_sdk_app_start(void *app);
 void native_sdk_app_activate(void *app);
 void native_sdk_app_deactivate(void *app);
 void native_sdk_app_stop(void *app);
-void native_sdk_app_viewport(void *app, float width, float height, float scale, void *surface, float safe_top, float safe_right, float safe_bottom, float safe_left, float keyboard_top, float keyboard_right, float keyboard_bottom, float keyboard_left);
+void native_sdk_app_viewport(void *app, const native_sdk_viewport_t *viewport);
 int native_sdk_app_gpu_frame_state(void *app, native_sdk_gpu_frame_state_t *out);
 void native_sdk_app_frame(void *app);
 const char *native_sdk_app_last_error_name(void *app);
