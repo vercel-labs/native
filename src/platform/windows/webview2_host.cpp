@@ -1488,7 +1488,7 @@ static void showTrayMenu(Host *host, HWND hwnd) {
 }
 
 static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wparam) {
-    if (!host || host->shortcuts.empty()) return false;
+    if (!host || (host->shortcuts.empty() && host->menus.empty())) return false;
     if (!window) return false;
     std::string key = shortcutKeyFromWParam(wparam);
     if (key.empty()) return false;
@@ -1510,6 +1510,26 @@ static bool emitShortcutForWindow(Host *host, const Window *window, WPARAM wpara
             event.shortcut_modifiers = shortcut.modifiers;
             host->callback(host->callback_context, &event);
             return true;
+        }
+        /* Menu accelerators dispatch from the same keydown path: a menu
+         * item's key+modifiers is a keyboard binding whose event is the
+         * item's menu command, exactly as if the item were clicked. The
+         * other platforms get this from their menu systems (AppKit key
+         * equivalents, GTK accels); here the message loop is that system. */
+        for (const Menu &menu : host->menus) {
+            for (const MenuItem &item : menu.items) {
+                if (item.separator || !item.enabled || item.key.empty()) continue;
+                if (item.key != key) continue;
+                if (!shortcutModifiersMatch(item.modifiers, allow_implicit_shift)) continue;
+                if (!host->callback) return true;
+                WindowsEvent event = {};
+                event.kind = kMenuCommand;
+                event.window_id = window->id;
+                event.command_name = item.command.c_str();
+                event.command_name_len = item.command.size();
+                host->callback(host->callback_context, &event);
+                return true;
+            }
         }
     }
     return false;

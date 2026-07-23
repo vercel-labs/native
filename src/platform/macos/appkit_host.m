@@ -50,6 +50,7 @@ static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeC
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
 static NSRect constrainFrame(NSRect frame);
 static NSString *NativeSdkAppKitBridgeScript(void);
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static void NativeSdkRegisterBundledFonts(void);
@@ -8888,7 +8889,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 }
 
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked {
-    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(menuCommandItemClicked:) keyEquivalent:key ?: @""];
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title ?: @"" action:@selector(menuCommandItemClicked:) keyEquivalent:NativeSdkMenuKeyEquivalent(key ?: @"")];
     item.target = self;
     item.enabled = enabled;
     item.representedObject = command ?: @"";
@@ -11135,6 +11136,51 @@ static NSString *NativeSdkOriginForURL(NSURL *url) {
     NSNumber *port = url.port;
     if (port) return [NSString stringWithFormat:@"%@://%@:%@", scheme, host, port];
     return [NSString stringWithFormat:@"%@://%@", scheme, host];
+}
+
+/* The canonical key name -> NSMenuItem key equivalent. Single characters
+ * pass through; named keys become the character AppKit expects (function
+ * keys and navigation keys are private-use unichars, editing keys their
+ * control characters). An unknown name degrades to no key equivalent
+ * rather than a multi-character string AppKit would misread. */
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key) {
+    if (key.length == 0) return @"";
+    if (key.length == 1) return key;
+    static NSDictionary<NSString *, NSString *> *named = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        named = @{
+            @"escape": [NSString stringWithFormat:@"%C", (unichar)0x1b],
+            @"enter": @"\r",
+            @"tab": @"\t",
+            @"space": @" ",
+            @"backspace": [NSString stringWithFormat:@"%C", (unichar)0x08],
+            @"arrowup": [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey],
+            @"arrowdown": [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey],
+            @"arrowleft": [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],
+            @"arrowright": [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey],
+            @"delete": [NSString stringWithFormat:@"%C", (unichar)NSDeleteFunctionKey],
+            @"home": [NSString stringWithFormat:@"%C", (unichar)NSHomeFunctionKey],
+            @"end": [NSString stringWithFormat:@"%C", (unichar)NSEndFunctionKey],
+            @"pageup": [NSString stringWithFormat:@"%C", (unichar)NSPageUpFunctionKey],
+            @"pagedown": [NSString stringWithFormat:@"%C", (unichar)NSPageDownFunctionKey],
+            @"insert": [NSString stringWithFormat:@"%C", (unichar)NSInsertFunctionKey],
+            @"f1": [NSString stringWithFormat:@"%C", (unichar)NSF1FunctionKey],
+            @"f2": [NSString stringWithFormat:@"%C", (unichar)NSF2FunctionKey],
+            @"f3": [NSString stringWithFormat:@"%C", (unichar)NSF3FunctionKey],
+            @"f4": [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey],
+            @"f5": [NSString stringWithFormat:@"%C", (unichar)NSF5FunctionKey],
+            @"f6": [NSString stringWithFormat:@"%C", (unichar)NSF6FunctionKey],
+            @"f7": [NSString stringWithFormat:@"%C", (unichar)NSF7FunctionKey],
+            @"f8": [NSString stringWithFormat:@"%C", (unichar)NSF8FunctionKey],
+            @"f9": [NSString stringWithFormat:@"%C", (unichar)NSF9FunctionKey],
+            @"f10": [NSString stringWithFormat:@"%C", (unichar)NSF10FunctionKey],
+            @"f11": [NSString stringWithFormat:@"%C", (unichar)NSF11FunctionKey],
+            @"f12": [NSString stringWithFormat:@"%C", (unichar)NSF12FunctionKey],
+        };
+    });
+    NSString *equivalent = named[key.lowercaseString];
+    return equivalent ?: @"";
 }
 
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {

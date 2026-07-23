@@ -2217,6 +2217,24 @@ static const char *native_sdk_accel_key_name(const char *key) {
     if (strcmp(key, "arrowright") == 0) return "Right";
     if (strcmp(key, "arrowup") == 0) return "Up";
     if (strcmp(key, "arrowdown") == 0) return "Down";
+    if (strcmp(key, "delete") == 0) return "Delete";
+    if (strcmp(key, "home") == 0) return "Home";
+    if (strcmp(key, "end") == 0) return "End";
+    if (strcmp(key, "pageup") == 0) return "Page_Up";
+    if (strcmp(key, "pagedown") == 0) return "Page_Down";
+    if (strcmp(key, "insert") == 0) return "Insert";
+    if (strcmp(key, "f1") == 0) return "F1";
+    if (strcmp(key, "f2") == 0) return "F2";
+    if (strcmp(key, "f3") == 0) return "F3";
+    if (strcmp(key, "f4") == 0) return "F4";
+    if (strcmp(key, "f5") == 0) return "F5";
+    if (strcmp(key, "f6") == 0) return "F6";
+    if (strcmp(key, "f7") == 0) return "F7";
+    if (strcmp(key, "f8") == 0) return "F8";
+    if (strcmp(key, "f9") == 0) return "F9";
+    if (strcmp(key, "f10") == 0) return "F10";
+    if (strcmp(key, "f11") == 0) return "F11";
+    if (strcmp(key, "f12") == 0) return "F12";
     return key;
 }
 
