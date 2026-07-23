@@ -1424,7 +1424,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source, record.video_kind == .failed),
                     .timer => {},
                 },
-                .finish => try self.effects.finishReplay(),
+                .finish => {
+                    try self.effects.finishReplay();
+                    try self.effects.settleReplayFeeds();
+                },
             }
         }
 

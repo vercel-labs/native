@@ -473,8 +473,15 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
         // The recorder journals output ONLY for a non-empty batch, so
         // its blob is always non-empty — a zero-length output blob is
         // damage that would otherwise replay a synthetic empty output
-        // event and diverge the fingerprint.
-        .output => if (record.pty_blob_len == 0) return true,
+        // event and diverge the fingerprint. The scalar fields are
+        // canonical (-1 code sentinel, no signal, no drops): replay
+        // delivers those exact defaults regardless, so a record claiming
+        // anything else would be silently rewritten — refuse it instead.
+        .output => {
+            if (record.pty_blob_len == 0) return true;
+            if (record.code != runtime_effects.effect_error_exit_code) return true;
+            if (record.pty_signal != 0 or record.pty_dropped_writes != 0) return true;
+        },
         // Exits carry neither payload nor blob, and their code/signal
         // must obey the delivered contract (`signal != 0` iff the reason
         // is `.signaled`; `code == -1` for every reason but `.exited`).

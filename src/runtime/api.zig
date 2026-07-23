@@ -380,10 +380,11 @@ pub const Event = union(enum) {
 /// journaled results as the only terminal source) before the first
 /// replayed event; `.feed` delivers one journaled effect result into
 /// the stub executor's pending request with the matching key; `.finish`
-/// runs the end-of-journal consistency checks — every queued record
-/// consumed by the load it named — so a structurally valid journal
-/// whose records the replayed timeline never claimed fails as
-/// divergence instead of reporting success.
+/// runs the end-of-journal consistency checks and must ERROR if any
+/// journaled feed went unconsumed, any replayed read outran the
+/// journal, or any queued record was never claimed by the load it
+/// named — divergence a fingerprint checkpoint cannot see because the
+/// optimistic answer changed no state.
 pub const ReplayControl = union(enum) {
     arm,
     feed: runtime_effects.EffectResultRecord,

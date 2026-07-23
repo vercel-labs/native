@@ -161,8 +161,11 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     // signaled death, so the live transport reports reason `.cancelled`
     // with no signal and the -1 code. Feeding a stray signal 9 proves
     // the feed boundary clamps the tuple to that contract rather than
-    // journaling an event replay's damage gate would later refuse.
-    try fx.feedPtyExit(11, 7, 9, .cancelled, 1);
+    // journaling an event replay's damage gate would later refuse. The
+    // delivered drop count is the fed count plus the refusal the fake
+    // itself counted for the oversized write above — the counted-refusal
+    // contract, without the script re-deriving the tally.
+    try fx.feedPtyExit(11, 7, 9, .cancelled, 0);
     const exit = try expectExit(&fx, 11, .cancelled);
     try testing.expectEqual(@as(i32, 0), exit.signal);
     try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
@@ -215,6 +218,41 @@ test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed gu
     try testing.expect(fx.ptyWrite(81, ""));
     try testing.expect(!fx.ptyWrite(81, "consumes the queued refusal"));
     try testing.expect(fx.ptyWrite(81, "past the recording"));
+}
+
+test "settle refuses replay write-count divergence in both directions" {
+    // Leftover verdicts: the replayed updates wrote FEWER times than
+    // the recording. No checkpoint necessarily moves (nothing consumed
+    // the verdict), so only the end-of-journal settle makes it loud.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        try fx.pushReplayPtyWriteVerdict(true);
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
+    // Underflow: the replayed updates wrote MORE times than the
+    // recording. The extra write answered optimistically (a
+    // fire-and-forget caller ignores it, changing no state), so again
+    // only settle catches it.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try testing.expect(fx.ptyWrite(82, "past the recording"));
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
+    // Exact consumption settles clean.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try fx.pushReplayPtyWriteVerdict(false);
+        try testing.expect(!fx.ptyWrite(83, "recorded"));
+        try fx.settleReplayFeeds();
+    }
 }
 
 test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {

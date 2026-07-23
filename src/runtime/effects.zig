@@ -5256,11 +5256,41 @@ pub fn Effects(comptime Msg: type) type {
             self.replay_pty_write_len += 1;
         }
 
+        /// Verify every journaled replay feed was consumed exactly:
+        /// called at the journal's end (the `.finish` replay
+        /// control). A leftover write verdict means the replayed updates
+        /// wrote FEWER times than the recording; a recorded underflow
+        /// means they wrote MORE. Neither necessarily moves a
+        /// fingerprint checkpoint (a fire-and-forget caller ignores the
+        /// optimistic answer and changes no state), so the settle check
+        /// is what makes write-count divergence loud.
+        pub fn settleReplayFeeds(self: *Self) error{ReplayDivergence}!void {
+            if (self.replay_pty_write_underflows > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} ptyWrite call(s) past the journaled verdicts - the replayed updates wrote more often than the recording did (nondeterminism outside the effect boundary?)\n",
+                        .{self.replay_pty_write_underflows},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
+            if (self.replay_pty_write_len > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} journaled ptyWrite verdict(s) were never consumed - the replayed updates wrote fewer times than the recording did (nondeterminism outside the effect boundary?)\n",
+                        .{self.replay_pty_write_len},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
+        }
+
         /// Pop the next journaled write verdict for a replay-mode
         /// `ptyWrite`. An empty queue is a divergence signal (the
         /// replayed update wrote more often than the recording did);
-        /// reported once, answered optimistically — the fingerprint
-        /// checkpoints catch the divergence either way.
+        /// reported once and answered optimistically so the dispatch can
+        /// finish — the end-of-journal settle check (`settleReplayFeeds`)
+        /// turns the count into a loud replay failure.
         fn takeReplayPtyWriteVerdict(self: *Self) bool {
             if (self.replay_pty_write_len == 0) {
                 self.replay_pty_write_underflows += 1;
@@ -6343,6 +6373,16 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDamagedRecord;
             }
+            // The delivered drop count is the fed (transport-reported)
+            // count PLUS the refusals the fake itself already counted
+            // (an oversized write against a fake increments
+            // `slot.dropped_writes` exactly like the live admission
+            // path) — the counted-refusal contract holds for scripted
+            // sessions too, without every test re-deriving the tally.
+            // Under session replay the slot count is always zero
+            // (replay-mode writes never reach the fake admission path),
+            // so a replayed exit delivers exactly the journaled count.
+            const total_dropped = dropped_writes +| slot.dropped_writes;
             const start_failure = reason == .rejected or reason == .spawn_failed;
             if (start_failure) {
                 // A start failure the recorded spawn produced at
@@ -6369,7 +6409,7 @@ pub fn Effects(comptime Msg: type) type {
                         .code = norm_code,
                         .reason = reason,
                         .signal = norm_signal,
-                        .dropped_writes = dropped_writes,
+                        .dropped_writes = total_dropped,
                     },
                     .pty_fn = slot.on_event,
                     .regenerates = false,
@@ -6387,7 +6427,7 @@ pub fn Effects(comptime Msg: type) type {
                 .code = norm_code,
                 .reason = reason,
                 .pty_signal = norm_signal,
-                .pty_dropped_writes = dropped_writes,
+                .pty_dropped_writes = total_dropped,
             };
             if (!self.enqueue(&entry)) return error.EffectQueueFull;
             // One terminal per spawn, on every fake — not just replay
@@ -9444,6 +9484,11 @@ pub fn Effects(comptime Msg: type) type {
                     .key = event.key,
                     .payload = event.bytes,
                     .pty_kind = .output,
+                    // Canonical output-record shape: the -1 code sentinel
+                    // every delivered non-exit event carries (and the fed
+                    // drain journals), zero signal/drops. The replay
+                    // damage gate holds records to exactly this.
+                    .code = effect_error_exit_code,
                 });
             }
             const deliver_fn = on_event orelse return null;
