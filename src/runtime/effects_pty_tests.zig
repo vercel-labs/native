@@ -190,6 +190,20 @@ test "a signaled exit carries its signal; a signaled feed with no signal is refu
     const exit = try expectExit(&fx, 51, .signaled);
     try testing.expectEqual(@as(i32, 9), exit.signal);
     try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
+
+    // Range gates, both axes: waitpid's status word carries exit codes
+    // 0..255 (plus the -1 externally-reaped sentinel) and signals
+    // 1..127 — a feed outside those could never come from the live
+    // transport and is refused before it can be journaled.
+    fx.ptySpawn(.{ .key = 52, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, 300, 0, .exited, 0));
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, -2, 0, .exited, 0));
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(52, -1, 128, .signaled, 0));
+    // The refusals left the slot intact: the edge of the legal range
+    // still delivers.
+    try fx.feedPtyExit(52, 255, 0, .exited, 0);
+    const edge = try expectExit(&fx, 52, .exited);
+    try testing.expectEqual(@as(i32, 255), edge.code);
 }
 
 test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed guess" {

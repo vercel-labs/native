@@ -6506,6 +6506,29 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDamagedRecord;
             }
+            // Range-gate the values to what waitpid's status word can
+            // produce: exit codes 0..255 (plus the documented -1 for a
+            // child reaped outside the toolkit), signals 1..127. Feeding
+            // anything else would journal an event replay's damage gate
+            // refuses — the signaled-zero rule, extended to the ranges.
+            if (reason == .signaled and (norm_signal < 1 or norm_signal > 127)) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay refused: pty record for key {d} feeds a .signaled exit with signal {d} - waitpid can only report signals 1..127, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ key, norm_signal },
+                    );
+                }
+                return error.ReplayDamagedRecord;
+            }
+            if (reason == .exited and norm_code != effect_error_exit_code and (norm_code < 0 or norm_code > 255)) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay refused: pty record for key {d} feeds an .exited end with code {d} - waitpid can only report exit codes 0..255 (or the -1 externally-reaped sentinel), so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ key, norm_code },
+                    );
+                }
+                return error.ReplayDamagedRecord;
+            }
             if (slot.park_state == .terminated) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(

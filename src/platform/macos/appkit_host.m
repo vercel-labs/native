@@ -11157,7 +11157,11 @@ static NSString *NativeSdkMenuKeyEquivalent(NSString *key) {
             @"enter": @"\r",
             @"tab": @"\t",
             @"space": @" ",
-            @"backspace": [NSString stringWithFormat:@"%C", (unichar)0x08],
+            /* The physical Mac Delete/backspace key emits 0x7f (what the
+             * key-event normalizer maps to "backspace"), not the nominal
+             * BS control 0x08 — key equivalents must match what the key
+             * actually produces or the accelerator never fires. */
+            @"backspace": [NSString stringWithFormat:@"%C", (unichar)0x7f],
             @"arrowup": [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey],
             @"arrowdown": [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey],
             @"arrowleft": [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],

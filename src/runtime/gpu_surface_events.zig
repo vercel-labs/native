@@ -1,5 +1,6 @@
 const std = @import("std");
 const canvas = @import("canvas");
+const runtime_view = @import("view.zig");
 const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const runtime_api = @import("api.zig");
@@ -397,7 +398,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // to the cancelled sequence; any other event disarms the
             // grace (a plain Escape cancel is chased by its own
             // key_down, so ordinary typing never inherits it).
-            const ime_grace: @import("view.zig").ImeCommitGrace = grace: {
+            const ime_grace: runtime_view.ImeCommitGrace = grace: {
                 const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :grace .none;
                 if (self.views[index].kind != .gpu_surface) break :grace .none;
                 const armed = self.views[index].canvas_widget_ime_commit_grace;
@@ -999,22 +1000,9 @@ fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8
         if (was_focused and !view.focused) {
             try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).resetCanvasTooltipIntentForViewBlur(self, view_index);
             // Focus loss also disarms the cancel-to-commit grace and
-            // releases its owner pin: hosts emit a standalone cancel
-            // when a composing view blurs, and after refocus an
-            // IM-consumed keystroke's text_input arrives BEFORE its
-            // key_down echo — the stale grace would route that fresh
-            // commit to the old editor (or swallow it) instead of the
-            // one focused now.
-            if (view.canvas_widget_ime_commit_grace != .none) {
-                view.canvas_widget_ime_commit_grace = .none;
-                view.canvas_widget_ime_owner_id = 0;
-            }
-            if (self.targetless_ime_commit_grace and
-                self.targetless_ime_preedit_window == view.window_id and
-                std.mem.eql(u8, self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len], view.label))
-            {
-                self.targetless_ime_commit_grace = false;
-            }
+            // releases its owner pin — the shared blur hygiene every
+            // focus-mutation path applies (see `clearImeGraceOnViewBlur`).
+            runtime_view.clearImeGraceOnViewBlur(self, view);
         }
     }
     for (self.webviews[0..self.webview_count]) |*webview| {

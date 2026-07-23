@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
@@ -110,6 +111,28 @@ pub fn canvasRenderAnimationStartNsForView(view: *const RuntimeView) u64 {
 /// The cancel-to-commit routing grace (see
 /// `RuntimeView.canvas_widget_ime_commit_grace`).
 pub const ImeCommitGrace = enum { none, route_to_owner, swallow };
+
+/// Blur-side IME hygiene, shared by EVERY focus-mutation entry point —
+/// the pointer-driven focus move, the programmatic `focusView`, and the
+/// window-level `clearFocusedView` blur all route here so the class is
+/// closed, not chased per path. Hosts emit a standalone cancel when a
+/// composing view blurs, and after refocus an IM-consumed keystroke's
+/// text_input arrives BEFORE its key_down echo — a stale grace would
+/// route that fresh commit to the old editor (or swallow it) instead of
+/// the one focused now, so the grace and its owner pin die at blur (the
+/// target-less twin too, when the blurred view owns it).
+pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
+    if (view.canvas_widget_ime_commit_grace != .none) {
+        view.canvas_widget_ime_commit_grace = .none;
+        view.canvas_widget_ime_owner_id = 0;
+    }
+    if (runtime.targetless_ime_commit_grace and
+        runtime.targetless_ime_preedit_window == view.window_id and
+        std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
+    {
+        runtime.targetless_ime_commit_grace = false;
+    }
+}
 
 pub const RuntimeView = struct {
     id: platform.ViewId = 0,

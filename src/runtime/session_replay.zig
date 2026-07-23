@@ -486,12 +486,21 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
         // must obey the delivered contract (`signal != 0` iff the reason
         // is `.signaled`; `code == -1` for every reason but `.exited`).
         // A hand-edited `.cancelled` with code 0 or signal 9 would
-        // otherwise dispatch an event violating that contract.
+        // otherwise dispatch an event violating that contract. The
+        // values are also RANGE-gated to what the transport can produce:
+        // `waitpid`'s status word yields exit codes 0..255 (plus the
+        // documented -1 for a child reaped outside the toolkit) and
+        // signals 1..127 — anything else is hand-editing, refused
+        // rather than replayed into an event no live run can emit.
         .exit => {
             if (record.pty_blob_len > 0) return true;
             const signaled = record.exit_reason == .signaled;
             if (signaled != (record.pty_signal != 0)) return true;
             if (record.exit_reason != .exited and record.code != runtime_effects.effect_error_exit_code) return true;
+            if (record.exit_reason == .exited and
+                record.code != runtime_effects.effect_error_exit_code and
+                (record.code < 0 or record.code > 255)) return true;
+            if (signaled and (record.pty_signal < 1 or record.pty_signal > 127)) return true;
         },
         // A write-admission verdict carries only the accepted bit in
         // `code` (1/0) — no blob, no signal, no drop count.
@@ -708,6 +717,46 @@ fn renderScreenshotHash(runtime: *core.Runtime, view_label: []const u8, scale: f
     try canvas.png.writeRgba8(&writer.writer, screenshot.width, screenshot.height, screenshot.rgba8);
     dumpReplayScreenshot(view_label, writer.written());
     return std.hash.Wyhash.hash(0, writer.written());
+}
+
+test "exit records outside the transport's producible ranges are damaged" {
+    // Every code waitpid can produce passes: 0..255, plus the
+    // documented -1 sentinel for a child reaped outside the toolkit.
+    var record: journal.EffectResultRecord = .{
+        .kind = .pty,
+        .key = 1,
+        .pty_kind = .exit,
+        .exit_reason = .exited,
+        .code = 0,
+    };
+    try std.testing.expect(!ptyRecordDamaged(record));
+    record.code = 255;
+    try std.testing.expect(!ptyRecordDamaged(record));
+    record.code = runtime_effects.effect_error_exit_code;
+    try std.testing.expect(!ptyRecordDamaged(record));
+
+    // Hand-edited codes no status word can carry are refused.
+    record.code = 256;
+    try std.testing.expect(ptyRecordDamaged(record));
+    record.code = -2;
+    try std.testing.expect(ptyRecordDamaged(record));
+
+    // Signals: waitpid's status word carries 1..127.
+    record = .{
+        .kind = .pty,
+        .key = 1,
+        .pty_kind = .exit,
+        .exit_reason = .signaled,
+        .code = runtime_effects.effect_error_exit_code,
+        .pty_signal = 9,
+    };
+    try std.testing.expect(!ptyRecordDamaged(record));
+    record.pty_signal = 127;
+    try std.testing.expect(!ptyRecordDamaged(record));
+    record.pty_signal = 128;
+    try std.testing.expect(ptyRecordDamaged(record));
+    record.pty_signal = -9;
+    try std.testing.expect(ptyRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

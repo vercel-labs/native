@@ -1402,6 +1402,95 @@ test "a recreated surface never inherits a stale target-less composition" {
     try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
 }
 
+test "a programmatic focus move disarms the cancel grace like a pointer one" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-ime-grace-focusview", .source = platform.WebViewSource.html("<h1>F</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-b",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 120, 240, 120),
+    });
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(10, 10, 160, 32), .text = "" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas-a", layout);
+    try harness.runtime.focusView(1, "canvas-a");
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    // A composition cancels (arming the grace), then the PROGRAMMATIC
+    // focus path — focusView, the third grace-lifecycle entry point —
+    // moves focus away and the canvas is rebuilt without the owner.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_set_composition,
+        .text = "ka",
+        .composition_cursor = 2,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.focusView(1, "canvas-b");
+    const replacement = [_]canvas.Widget{
+        .{ .id = 3, .kind = .text_field, .frame = geometry.RectF.init(10, 10, 160, 32), .text = "" },
+    };
+    var nodes_b: [3]canvas.WidgetLayoutNode = undefined;
+    const layout_b = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &replacement }, geometry.RectF.init(0, 0, 240, 120), &nodes_b);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas-a", layout_b);
+    try harness.runtime.focusView(1, "canvas-a");
+    harness.runtime.views[0].canvas_widget_focused_id = 3;
+
+    // The blur disarmed the grace: this fresh commit belongs to the
+    // NOW-focused editor — never swallowed with (or routed to) the
+    // stale sequence.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .text_input,
+        .text = "x",
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas-a");
+    try std.testing.expectEqualStrings("x", retained.findById(3).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+}
+
 test "a cancel grace dies with its view - the trailing text reaches the new surface's editor" {
     const TestApp = struct {
         committed_count: u32 = 0,
