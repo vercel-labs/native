@@ -522,6 +522,18 @@ const Mapper = struct {
     }
 
     fn mapTypeRef(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!TypeRef {
+        return self.mapTypeRefDepth(value, at, 0);
+    }
+
+    /// Structural nesting rides the recursion, so it is bounded: no
+    /// real contract wraps a slot 256 levels deep, and past the bound a
+    /// document is refused instead of exhausting the stack.
+    const max_typeref_nesting = 256;
+
+    fn mapTypeRefDepth(self: *Mapper, value: std.json.Value, at: []const u8, depth: usize) error{ Refused, OutOfMemory }!TypeRef {
+        if (depth > max_typeref_nesting) {
+            return self.diags.fail(at, "TypeRef nesting exceeds {d} levels — no real contract wraps a slot this deep; flatten the state in the core source", .{max_typeref_nesting});
+        }
         const map = try self.object(value, at);
         const kind_value = map.get("kind") orelse return self.diags.fail(self.path("{s}.kind", .{at}), "required field missing (every TypeRef carries a kind discriminator)", .{});
         const kind = try self.string(kind_value, self.path("{s}.kind", .{at}));
@@ -550,14 +562,14 @@ const Mapper = struct {
             const entry = try self.members(value, at, &.{ "kind", "inner" });
             entry.warnUnknown();
             const inner = try self.arena.create(TypeRef);
-            inner.* = try self.mapTypeRef(try entry.get("inner"), self.path("{s}.inner", .{at}));
+            inner.* = try self.mapTypeRefDepth(try entry.get("inner"), self.path("{s}.inner", .{at}), depth + 1);
             return .{ .optional = inner };
         }
         if (std.mem.eql(u8, kind, "slice")) {
             const entry = try self.members(value, at, &.{ "kind", "elem" });
             entry.warnUnknown();
             const elem = try self.arena.create(TypeRef);
-            elem.* = try self.mapTypeRef(try entry.get("elem"), self.path("{s}.elem", .{at}));
+            elem.* = try self.mapTypeRefDepth(try entry.get("elem"), self.path("{s}.elem", .{at}), depth + 1);
             return .{ .slice = elem };
         }
         if (std.mem.eql(u8, kind, "node") or std.mem.eql(u8, kind, "value") or
@@ -895,6 +907,17 @@ const Reach = struct {
     types: Types,
     diags: *Diagnostics,
     seen: NameSet = .empty,
+    /// The active visit's worklist, when a walk is in progress; a
+    /// checkRef outside a walk visits directly.
+    pending: ?*std.ArrayListUnmanaged([]const u8) = null,
+
+    fn enqueue(self: *Reach, name: []const u8) error{OutOfMemory}!void {
+        if (self.pending) |worklist| {
+            try worklist.append(self.arena, name);
+            return;
+        }
+        try self.visit(name);
+    }
 
     fn checkRef(self: *Reach, ref: TypeRef, at: []const u8) error{OutOfMemory}!void {
         switch (ref) {
@@ -906,21 +929,21 @@ const Reach = struct {
                     self.wrongKind(name, .@"struct", at);
                     return;
                 }
-                try self.visit(name);
+                try self.enqueue(name);
             },
             .enum_ref => |name| {
                 if (findEnum(self.types, name) == null) {
                     self.wrongKind(name, .@"enum", at);
                     return;
                 }
-                try self.visit(name);
+                try self.enqueue(name);
             },
             .union_ref => |name| {
                 if (findUnion(self.types, name) == null) {
                     self.wrongKind(name, .@"union", at);
                     return;
                 }
-                try self.visit(name);
+                try self.enqueue(name);
             },
         }
     }
@@ -935,22 +958,32 @@ const Reach = struct {
         }
     }
 
-    fn visit(self: *Reach, name: []const u8) error{OutOfMemory}!void {
-        const entry = try self.seen.getOrPut(self.arena, name);
-        if (entry.found_existing) return;
-        if (findStruct(self.types, name)) |record| {
-            for (record.fields, 0..) |field, index| {
-                try self.checkRef(field.type, pathOf(self.arena, "types.structs.{s}.fields[{d}].type", .{ name, index }));
+    /// Iterative: named-type chains can be as long as the document
+    /// allows, so the walk carries its own worklist instead of the
+    /// process stack (structural nesting within one reference stays
+    /// recursive under the reader's 256-level bound).
+    fn visit(self: *Reach, root: []const u8) error{OutOfMemory}!void {
+        var worklist: std.ArrayListUnmanaged([]const u8) = .empty;
+        try worklist.append(self.arena, root);
+        while (worklist.pop()) |name| {
+            const entry = try self.seen.getOrPut(self.arena, name);
+            if (entry.found_existing) continue;
+            self.pending = &worklist;
+            defer self.pending = null;
+            if (findStruct(self.types, name)) |record| {
+                for (record.fields, 0..) |field, index| {
+                    try self.checkRef(field.type, pathOf(self.arena, "types.structs.{s}.fields[{d}].type", .{ name, index }));
+                }
+                continue;
             }
-            return;
-        }
-        if (findUnion(self.types, name)) |tagged| {
-            for (tagged.arms, 0..) |arm, index| {
-                try self.checkRef(arm.payload, pathOf(self.arena, "types.unions.{s}.arms[{d}].payload", .{ name, index }));
+            if (findUnion(self.types, name)) |tagged| {
+                for (tagged.arms, 0..) |arm, index| {
+                    try self.checkRef(arm.payload, pathOf(self.arena, "types.unions.{s}.arms[{d}].payload", .{ name, index }));
+                }
+                continue;
             }
-            return;
+            // Enums carry no references.
         }
-        // Enums carry no references.
     }
 };
 
@@ -1026,55 +1059,97 @@ fn validateReferences(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagno
 }
 
 fn validateAcyclic(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    // Depth-first walk with an on-stack set: any back edge is a cycle.
-    // Recursive state types are refused at compile time by the emitter;
-    // a sidecar carrying one is malformed (and the mirror could neither
-    // declare nor decode it).
-    var walker = CycleWalk{ .arena = arena, .types = sidecar.types, .diags = diags };
-    for (sidecar.types.structs) |entry| try walker.visit(entry.name);
-    for (sidecar.types.unions) |entry| try walker.visit(entry.name);
+    // Iterative colored depth-first walk with an explicit frame stack:
+    // any back edge is a cycle, and named-type chains deeper than the
+    // reader's bound refuse instead of exhausting every downstream
+    // consumer's call stack (recursive state types are refused at
+    // compile time by the emitter; a sidecar carrying one is malformed,
+    // and nothing real chains hundreds of record types).
+    const max_chain_depth = 256;
+    const State = enum { unvisited, on_stack, done };
+    var states: std.StringArrayHashMapUnmanaged(State) = .empty;
+    var depths: std.StringArrayHashMapUnmanaged(usize) = .empty;
+
+    const Frame = struct {
+        name: []const u8,
+        edges: []const []const u8,
+        next_edge: usize,
+    };
+
+    var roots: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (sidecar.types.structs) |entry| try roots.append(arena, entry.name);
+    for (sidecar.types.unions) |entry| try roots.append(arena, entry.name);
+
+    var depth_refused = false;
+    for (roots.items) |root| {
+        if ((states.get(root) orelse .unvisited) != .unvisited) continue;
+        var stack: std.ArrayListUnmanaged(Frame) = .empty;
+        try states.put(arena, root, .on_stack);
+        try stack.append(arena, .{ .name = root, .edges = try namedEdges(arena, sidecar.types, root), .next_edge = 0 });
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            if (top.next_edge < top.edges.len) {
+                const child = top.edges[top.next_edge];
+                top.next_edge += 1;
+                switch (states.get(child) orelse .unvisited) {
+                    .on_stack => {
+                        var cycle: std.ArrayListUnmanaged(u8) = .empty;
+                        var started = false;
+                        for (stack.items) |frame| {
+                            if (!started and !std.mem.eql(u8, frame.name, child)) continue;
+                            started = true;
+                            try cycle.appendSlice(arena, frame.name);
+                            try cycle.appendSlice(arena, " -> ");
+                        }
+                        try cycle.appendSlice(arena, child);
+                        diags.flag("types", "the type reference graph has a cycle ({s}) — recursive state types are refused at compile time and can never be encoded (V5)", .{cycle.items});
+                        return;
+                    },
+                    .done => {},
+                    .unvisited => {
+                        try states.put(arena, child, .on_stack);
+                        try stack.append(arena, .{ .name = child, .edges = try namedEdges(arena, sidecar.types, child), .next_edge = 0 });
+                    },
+                }
+                continue;
+            }
+            // Post-order: the deepest chain below this entry.
+            var deepest: usize = 0;
+            for (top.edges) |child| {
+                deepest = @max(deepest, depths.get(child) orelse 0);
+            }
+            const depth = deepest + 1;
+            try depths.put(arena, top.name, depth);
+            try states.put(arena, top.name, .done);
+            if (depth > max_chain_depth and !depth_refused) {
+                depth_refused = true;
+                diags.flag("types", "the type reference graph chains more than {d} record levels — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source", .{max_chain_depth});
+            }
+            _ = stack.pop();
+        }
+    }
 }
 
-const CycleWalk = struct {
-    arena: std.mem.Allocator,
-    types: Types,
-    diags: *Diagnostics,
-    done: NameSet = .empty,
-    stack: std.ArrayListUnmanaged([]const u8) = .empty,
-
-    fn visit(self: *CycleWalk, name: []const u8) error{OutOfMemory}!void {
-        if (self.done.contains(name)) return;
-        for (self.stack.items, 0..) |on_stack, index| {
-            if (std.mem.eql(u8, on_stack, name)) {
-                var cycle: std.ArrayListUnmanaged(u8) = .empty;
-                for (self.stack.items[index..]) |part| {
-                    try cycle.appendSlice(self.arena, part);
-                    try cycle.appendSlice(self.arena, " -> ");
-                }
-                try cycle.appendSlice(self.arena, name);
-                self.diags.flag("types", "the type reference graph has a cycle ({s}) — recursive state types are refused at compile time and can never be encoded (V5)", .{cycle.items});
-                return;
-            }
-        }
-        try self.stack.append(self.arena, name);
-        defer _ = self.stack.pop();
-        if (findStruct(self.types, name)) |record| {
-            for (record.fields) |field| try self.visitRef(field.type);
-        } else if (findUnion(self.types, name)) |tagged| {
-            for (tagged.arms) |arm| try self.visitRef(arm.payload);
-        }
-        try self.done.put(self.arena, name, {});
+/// The named-type edges leaving one table entry (structural nesting
+/// within a reference is bounded by the reader).
+fn namedEdges(arena: std.mem.Allocator, types: Types, name: []const u8) error{OutOfMemory}![]const []const u8 {
+    var edges: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (findStruct(types, name)) |record| {
+        for (record.fields) |field| try appendNamedRefs(arena, &edges, field.type);
+    } else if (findUnion(types, name)) |tagged| {
+        for (tagged.arms) |arm| try appendNamedRefs(arena, &edges, arm.payload);
     }
+    return edges.items;
+}
 
-    fn visitRef(self: *CycleWalk, ref: TypeRef) error{OutOfMemory}!void {
-        switch (ref) {
-            .bool, .f64, .i64, .bytes, .void, .enum_ref => {},
-            .optional => |inner| try self.visitRef(inner.*),
-            .slice => |elem| try self.visitRef(elem.*),
-            .node, .value, .union_ref => |name| try self.visit(name),
-        }
+fn appendNamedRefs(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged([]const u8), ref: TypeRef) error{OutOfMemory}!void {
+    switch (ref) {
+        .bool, .f64, .i64, .bytes, .void, .enum_ref => {},
+        .optional => |inner| try appendNamedRefs(arena, edges, inner.*),
+        .slice => |elem| try appendNamedRefs(arena, edges, elem.*),
+        .node, .value, .union_ref => |edge| try edges.append(arena, edge),
     }
-};
+}
 
 fn validateMsg(sidecar: Sidecar, diags: *Diagnostics) void {
     // Tags are positional and dense by construction — there is no
@@ -1472,6 +1547,24 @@ fn expectRefusal(source: []const u8, expected_path: []const u8, expected_fragmen
     return error.TestExpectedRefusal;
 }
 
+fn expectRefusalContaining(source: []const u8, expected_fragment: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diags = Diagnostics{ .arena = arena };
+    const result = read(arena, source, &diags);
+    try testing.expectError(error.Refused, result);
+    for (diags.list.items) |item| {
+        if (item.severity != .@"error") continue;
+        if (std.mem.indexOf(u8, item.message, expected_fragment) != null) return;
+    }
+    std.debug.print("no refusal containing \"{s}\"; got:\n", .{expected_fragment});
+    for (diags.list.items) |item| {
+        std.debug.print("  [{s}] {s}: {s}\n", .{ @tagName(item.severity), item.path, item.message });
+    }
+    return error.TestExpectedRefusal;
+}
+
 fn readValid(arena: std.mem.Allocator, source: []const u8) !Sidecar {
     var diags = Diagnostics{ .arena = arena };
     return read(arena, source, &diags) catch |err| {
@@ -1801,4 +1894,52 @@ test "unknown fields warn and are ignored" {
         if (item.severity == .warning and std.mem.eql(u8, item.path, "novel_fact")) warned = true;
     }
     try testing.expect(warned);
+}
+
+test "structural nesting past the bound refuses instead of exhausting the stack" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var wrapped: std.ArrayListUnmanaged(u8) = .empty;
+    const wraps = 300;
+    var index: usize = 0;
+    while (index < wraps) : (index += 1) {
+        try wrapped.appendSlice(arena, "{\"kind\": \"optional\", \"inner\": ");
+    }
+    try wrapped.appendSlice(arena, "{\"kind\": \"bool\"}");
+    index = 0;
+    while (index < wraps) : (index += 1) {
+        try wrapped.append(arena, '}');
+    }
+    const source = try replaced(arena, minimal_valid_json, "{\"kind\": \"i64\"}", wrapped.items);
+    try expectRefusalContaining(source, "nesting exceeds 256 levels");
+}
+
+test "record chains past the depth bound refuse with a teaching" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Chain0 -> Chain1 -> ... : acyclic and small on disk, but deeper
+    // than any bounded consumer can walk.
+    var chain: std.ArrayListUnmanaged(u8) = .empty;
+    const links = 300;
+    var index: usize = 0;
+    while (index < links) : (index += 1) {
+        const entry = if (index + 1 < links)
+            try std.fmt.allocPrint(arena, "{{\"name\": \"Chain{d}\", \"fields\": [{{\"name\": \"next\", \"type\": {{\"kind\": \"value\", \"name\": \"Chain{d}\"}}}}]}},\n", .{ index, index + 1 })
+        else
+            try std.fmt.allocPrint(arena, "{{\"name\": \"Chain{d}\", \"fields\": [{{\"name\": \"leaf\", \"type\": {{\"kind\": \"i64\"}}}}]}},\n", .{index});
+        try chain.appendSlice(arena, entry);
+    }
+    var source = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"head\", \"type\": {\"kind\": \"value\", \"name\": \"Chain0\"}}",
+    );
+    const model_open = "{\"name\": \"Model\", \"fields\": [";
+    source = try replaced(arena, source, model_open, try std.fmt.allocPrint(arena, "{s}{s}", .{ chain.items, model_open }));
+    try expectRefusalContaining(source, "more than 256 record levels");
 }

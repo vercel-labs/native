@@ -318,14 +318,23 @@ fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
     const len_a = std.Io.Dir.cwd().realPathFile(io, a, &buffer_a) catch return false;
     const len_b = std.Io.Dir.cwd().realPathFile(io, b, &buffer_b) catch return false;
     if (std.mem.eql(u8, buffer_a[0..len_a], buffer_b[0..len_b])) return true;
-    // Distinct canonical paths can still be one file where a mount
-    // exposes a directory twice (bind mounts). The portable stat
-    // carries no device id, so full identity is unprovable — but a
-    // matching inode PLUS matching kind, size, and every timestamp is
-    // one file for any honest filesystem, and a coincidental match
-    // across volumes merely refuses a spelling nobody needs.
-    const stat_a = std.Io.Dir.cwd().statFile(io, a, .{}) catch return false;
-    const stat_b = std.Io.Dir.cwd().statFile(io, b, .{}) catch return false;
+    // Distinct canonical paths can still name one DIRECTORY ENTRY where
+    // a mount exposes a directory twice (bind mounts) — the case the
+    // rename landing cannot save, because replacing the entry through
+    // either spelling replaces it for both. A hard link is the
+    // opposite: two entries for one file, and the rename replaces only
+    // the named entry, so it must NOT trip this check. Same entry means
+    // same parent directory and same on-disk basename; the portable
+    // stat carries no device id, so parent identity is inferred from
+    // full metadata agreement (a coincidental match across volumes
+    // merely refuses a spelling nobody needs).
+    const canon_a = buffer_a[0..len_a];
+    const canon_b = buffer_b[0..len_b];
+    if (!std.mem.eql(u8, std.fs.path.basename(canon_a), std.fs.path.basename(canon_b))) return false;
+    const parent_a = std.fs.path.dirname(canon_a) orelse return false;
+    const parent_b = std.fs.path.dirname(canon_b) orelse return false;
+    const stat_a = std.Io.Dir.cwd().statFile(io, parent_a, .{}) catch return false;
+    const stat_b = std.Io.Dir.cwd().statFile(io, parent_b, .{}) catch return false;
     return stat_a.inode == stat_b.inode and stat_a.kind == stat_b.kind and
         stat_a.size == stat_b.size and stat_a.nlink == stat_b.nlink and
         stat_a.mtime.nanoseconds == stat_b.mtime.nanoseconds and

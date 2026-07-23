@@ -179,18 +179,30 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             "    \"unions\": [\n      " ++ unions ++ "\n    ]\n  }";
 
         // Deterministic synthesized identity: the fixture has no real
-        // compile behind it, so hash the entry path and the COMPLETE
-        // reflected surface — types, arms, helpers, unbound lists,
-        // channel wiring, entry-shape flags, and the export set — so
-        // any contract-visible fixture edit moves both values, and
-        // re-runs reproduce them exactly.
-        const surface = types_json ++ msg_arms ++ helpers ++
-            model_unbound ++ msg_unbound ++ env_msgs ++ appearance ++ chrome ++
-            abi_exports ++ boolJson(init_returns_cmd) ++ boolJson(update_returns_cmd) ++
+        // compile behind it, so hash the COMPLETE reflected surface —
+        // entry path, root names, types, arms, helpers, unbound lists,
+        // channel wiring, entry-shape flags, and the export set. Every
+        // section rides behind a label and a NUL separator (the
+        // sections are JSON text and can never contain one), so the
+        // serialization is injective: moving a fact between sections
+        // moves the identities, and re-runs reproduce them exactly.
+        const surface = "entry=" ++ entry ++
+            "\x00model=" ++ model_name ++
+            "\x00msg=" ++ msg_zig ++
+            "\x00types=" ++ types_json ++
+            "\x00arms=" ++ msg_arms ++
+            "\x00helpers=" ++ helpers ++
+            "\x00model_unbound=" ++ model_unbound ++
+            "\x00msg_unbound=" ++ msg_unbound ++
+            "\x00env=" ++ env_msgs ++
+            "\x00appearance=" ++ appearance ++
+            "\x00chrome=" ++ chrome ++
+            "\x00exports=" ++ abi_exports ++
+            "\x00flags=" ++ boolJson(init_returns_cmd) ++ boolJson(update_returns_cmd) ++
             boolJson(has_subscriptions) ++ boolJson(has_command) ++ boolJson(has_frame) ++
             boolJson(has_key) ++ boolJson(has_pinch);
-        const source_hash = std.hash.Wyhash.hash(0x5eed_c0de, entry ++ surface);
-        const build_id = std.hash.Wyhash.hash(0xb11d1d00, entry ++ surface);
+        const source_hash = std.hash.Wyhash.hash(0x5eed_c0de, surface);
+        const build_id = std.hash.Wyhash.hash(0xb11d1d00, surface);
 
         return "{\n" ++
             "  \"format\": 1,\n" ++
@@ -556,6 +568,42 @@ test "anonymous-name detection keys on the final compiler suffix" {
         std.debug.assert(!isAnonymousName("Foo__struct_Row__struct_17", "Msg"));
         std.debug.assert(isAnonymousName("Edit__union_4", "Edit"));
     }
+}
+
+test "synthesized identities cover root names and section framing" {
+    const CoreA = struct {
+        pub const Model = struct { hidden: i64 };
+        pub const Event = union(enum) { bump };
+        pub const Msg = Event;
+        pub fn initialModel() *const Model {
+            unreachable;
+        }
+        pub fn update(model: *const Model, msg: Msg) *const Model {
+            _ = msg;
+            return model;
+        }
+    };
+    const CoreB = struct {
+        pub const Model = struct { hidden: i64 };
+        pub const Action = union(enum) { bump };
+        pub const Msg = Action;
+        pub fn initialModel() *const Model {
+            unreachable;
+        }
+        pub fn update(model: *const Model, msg: Msg) *const Model {
+            _ = msg;
+            return model;
+        }
+    };
+    const json_a = comptime sidecarJson(CoreA, "src/core.ts");
+    const json_b = comptime sidecarJson(CoreB, "src/core.ts");
+    // Only the reflected union name differs; the pairing identities
+    // must differ with it.
+    try testing.expect(std.mem.indexOf(u8, json_a, "\"name\": \"Event\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_b, "\"name\": \"Action\"") != null);
+    const id_a = json_a[std.mem.indexOf(u8, json_a, "build_id").?..][0..32];
+    const id_b = json_b[std.mem.indexOf(u8, json_b, "build_id").?..][0..32];
+    try testing.expect(!std.mem.eql(u8, id_a, id_b));
 }
 
 test "aliased roots extract under their reflected type names" {
