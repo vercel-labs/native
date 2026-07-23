@@ -1708,21 +1708,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const layout = built.layout;
             launch_timing.lapOnce("first_view_built");
 
-            // The INSTALL WINDOW: between handing the runtime the new
-            // layout and adopting the matching handler tree,
-            // `self.tree` and the runtime's retained state can disagree
-            // — a failure in between is the one place the main tree
-            // goes stale (see `main_tree_current`). A failure BEFORE it
-            // leaves the old, still-matching pair current; a failure
-            // AFTER it — animation scheduling, web panes, the status
-            // item — leaves a genuinely current pair, so hover enters
-            // keep flowing even when an idle app performs no further
-            // rebuild.
-            self.main_tree_current = false;
+            // The INSTALL WINDOW: from the moment the runtime ADOPTS
+            // the new layout until the matching handler tree is adopted
+            // below, the pair disagrees — the one place the main tree
+            // goes stale (see `main_tree_current`; the stamp sits right
+            // AFTER each `setCanvasWidgetLayout`, whose rejection is
+            // validated-then-atomic — `validateWidgetLayoutPoolBudgets`
+            // keeps the previous tree applied — so every failure before
+            // adoption leaves the old, still-matching pair current). A
+            // failure AFTER the window — animation scheduling, web
+            // panes, the status item — leaves a genuinely current pair,
+            // so hover enters keep flowing even when an idle app
+            // performs no further rebuild.
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
                 _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+                self.main_tree_current = false;
                 if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
                     _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
                 }
@@ -2463,12 +2465,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const tree = built.tree;
             const layout = built.layout;
             // The slot's install window — the per-slot mirror of the
-            // main rebuild's stamp: stale only between publication and
-            // handler-tree adoption, current again the moment THIS
-            // window's rebuild lands, wherever it was driven from (the
-            // full pass or a direct resize/install site).
-            slot.tree_current = false;
+            // main rebuild's stamp: stale only from the runtime's
+            // ADOPTION of the new layout (whose rejection is atomic, so
+            // earlier failures keep the old pair current) until the
+            // matching handler tree lands below, wherever the rebuild
+            // was driven from (the full pass or a direct resize/install
+            // site).
             _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
+            slot.tree_current = false;
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
             }
@@ -2723,6 +2727,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
             _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+            // The runtime adopted the widget layout: the main install
+            // window opens here (see `rebuild`) and closes when the
+            // caller adopts the matching handler tree.
+            self.main_tree_current = false;
             _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
                 .prefix_command_count = chrome.prefix_commands,
                 .suffix_command_count = chrome.suffix_commands,
@@ -4240,7 +4248,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// live tree while the element stands.
         fn captureHoverLeave(self: *Self, slot: u8, msg: MsgT) error{OutOfMemory}!void {
             _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
-            self.hover_msg_leave_msgs[slot] = deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[slot].allocator()) catch |err| {
+            self.hover_msg_leave_msgs[slot] = deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[slot].allocator(), 0) catch |err| {
                 // A refused capture holds no bytes either: the partial
                 // copy is released with the arena before the verdict.
                 _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
@@ -4283,28 +4291,37 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// `allocator` (element-wise, so nested slices copy too), and
         /// payload shapes that cannot be owned (single-item pointers,
         /// untagged unions) refuse rather than alias.
-        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator) error{ OutOfMemory, HoverCapturePayloadUnsupported }!T {
+        /// Pointer-indirection bound for one captured Msg: a run of
+        /// nested slices deeper than this is either a cyclic value
+        /// graph (which no copy terminates) or data no Msg payload has
+        /// business carrying — both refuse as unsupported instead of
+        /// recursing toward exhaustion. Structs and arrays add no
+        /// depth; only slice hops count.
+        const hover_msg_capture_max_indirections: usize = 64;
+
+        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator, indirections: usize) error{ OutOfMemory, HoverCapturePayloadUnsupported }!T {
             return switch (@typeInfo(T)) {
                 .void, .int, .float, .bool, .@"enum", .vector, .error_set => value,
-                .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator) else null,
-                .error_union => |info| if (value) |payload| @as(T, try deepCopyMsgValue(info.payload, payload, allocator)) else |err| @as(T, err),
+                .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator, indirections) else null,
+                .error_union => |info| if (value) |payload| @as(T, try deepCopyMsgValue(info.payload, payload, allocator, indirections)) else |err| @as(T, err),
                 .array => |info| blk: {
                     var out: T = undefined;
-                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
+                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator, indirections);
                     break :blk out;
                 },
                 .@"struct" => |info| blk: {
                     var out = value;
                     inline for (info.fields) |field| {
-                        @field(out, field.name) = try deepCopyMsgValue(field.type, @field(value, field.name), allocator);
+                        @field(out, field.name) = try deepCopyMsgValue(field.type, @field(value, field.name), allocator, indirections);
                     }
                     break :blk out;
                 },
                 .@"union" => |info| if (comptime info.tag_type == null) error.HoverCapturePayloadUnsupported else switch (value) {
-                    inline else => |payload, tag| @unionInit(T, @tagName(tag), try deepCopyMsgValue(@TypeOf(payload), payload, allocator)),
+                    inline else => |payload, tag| @unionInit(T, @tagName(tag), try deepCopyMsgValue(@TypeOf(payload), payload, allocator, indirections)),
                 },
                 .pointer => |info| blk: {
                     if (info.size != .slice) return error.HoverCapturePayloadUnsupported;
+                    if (indirections >= hover_msg_capture_max_indirections) return error.HoverCapturePayloadUnsupported;
                     // The copy preserves the slice type's OWN alignment
                     // and sentinel, so over-aligned payloads
                     // (`[]align(64) const u8`) and sentinel slices
@@ -4315,7 +4332,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         break :align_blk std.mem.Alignment.fromByteUnits(declared);
                     };
                     const out = try allocator.allocWithOptions(info.child, value.len, alignment, comptime std.meta.sentinel(T));
-                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
+                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator, indirections + 1);
                     break :blk out;
                 },
                 else => error.HoverCapturePayloadUnsupported,
