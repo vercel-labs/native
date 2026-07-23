@@ -41,6 +41,10 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
 
         // ---------------------------------------- phase 1: reach set
         var reach = ReachSet{};
+        // Root names come from the REFLECTED types (an aliased root
+        // keeps its declared type's own name; the alias is the export's
+        // spelling, not the type's).
+        const model_name = lastComponent(@typeName(core.Model));
         const msg_zig = lastComponent(@typeName(core.Msg));
         reach.collect(core.Model, "", "", "");
         for (@typeInfo(core.Msg).@"union".fields) |arm| {
@@ -49,7 +53,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             // inline shape never needs a table entry — skip it here
             // exactly when payloadDescriptor classifies it that way.
             if (isNumberBytesShape(arm.type, msg_zig)) continue;
-            reach.collect(arm.type, msg_zig, "Msg", arm.name);
+            reach.collect(arm.type, msg_zig, msg_zig, arm.name);
         }
         for (@typeInfo(core.Model).@"struct".decls) |decl| {
             if (helperShape(core.Model, decl.name)) |helper| {
@@ -197,10 +201,10 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             "  \"source_hash\": \"" ++ std.fmt.comptimePrint("{x:0>16}", .{source_hash}) ++ "\",\n" ++
             "  \"build_id\": \"" ++ std.fmt.comptimePrint("{x:0>16}", .{build_id}) ++ "\",\n" ++
             "  \"types\": " ++ types_json ++ ",\n" ++
-            "  \"model\": \"Model\",\n" ++
+            "  \"model\": " ++ js(model_name) ++ ",\n" ++
             "  \"model_helpers\": [" ++ (if (helper_count > 0) "\n    " ++ helpers ++ "\n  " else "") ++ "],\n" ++
             "  \"model_unbound\": [" ++ model_unbound ++ "],\n" ++
-            "  \"msg\": {\n    \"name\": \"Msg\",\n    \"arms\": [\n      " ++ msg_arms ++ "\n    ],\n    \"unbound\": [" ++ msg_unbound ++ "]\n  },\n" ++
+            "  \"msg\": {\n    \"name\": " ++ js(msg_zig) ++ ",\n    \"arms\": [\n      " ++ msg_arms ++ "\n    ],\n    \"unbound\": [" ++ msg_unbound ++ "]\n  },\n" ++
             "  \"init_returns_cmd\": " ++ boolJson(init_returns_cmd) ++ ",\n" ++
             "  \"update_returns_cmd\": " ++ boolJson(update_returns_cmd) ++ ",\n" ++
             "  \"has_subscriptions\": " ++ boolJson(has_subscriptions) ++ ",\n" ++
@@ -398,8 +402,8 @@ fn payloadDescriptor(comptime T: type, comptime msg_zig: []const u8, comptime ar
     }
     if (T == bool) return "{\"kind\": \"scalar\", \"type\": {\"kind\": \"bool\"}}";
     switch (@typeInfo(T)) {
-        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}",
-        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}",
+        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, msg_zig, msg_zig, arm_name)) ++ "}",
+        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, msg_zig, msg_zig, arm_name)) ++ "}",
         .@"struct" => |info| {
             // The ubiquitous inline number-plus-bytes shape (fetch
             // {status, body}, collect-spawn {code, output}) rides the
@@ -414,7 +418,7 @@ fn payloadDescriptor(comptime T: type, comptime msg_zig: []const u8, comptime ar
                 return "{\"kind\": \"number_bytes\", \"number_field\": " ++ js(info.fields[0].name) ++
                     ", \"number_class\": \"" ++ class ++ "\", \"bytes_field\": " ++ js(info.fields[1].name) ++ "}";
             }
-            return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}";
+            return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, msg_zig, msg_zig, arm_name)) ++ "}";
         },
         .pointer => @compileError("Msg arm payloads held BY REFERENCE (" ++ @typeName(T) ++ ") have no schema form: the named-type payload family carries no storage kind, so a by-reference record arm cannot be described faithfully in sidecar format 1 — see SCHEMA-GAPS.md"),
         else => @compileError("no payload descriptor for Msg arm payload " ++ @typeName(T)),
@@ -552,6 +556,32 @@ test "anonymous-name detection keys on the final compiler suffix" {
         std.debug.assert(!isAnonymousName("Foo__struct_Row__struct_17", "Msg"));
         std.debug.assert(isAnonymousName("Edit__union_4", "Edit"));
     }
+}
+
+test "aliased roots extract under their reflected type names" {
+    const State = struct { count: i64 };
+    const Core = struct {
+        pub const Model = State;
+        pub const Msg = union(enum) { bump };
+        pub fn initialModel() *const Model {
+            unreachable;
+        }
+        pub fn update(model: *const Model, msg: Msg) *const Model {
+            _ = msg;
+            return model;
+        }
+    };
+    const json = comptime sidecarJson(Core, "src/core.ts");
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sidecar_mod = @import("sidecar.zig");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const sidecar = try sidecar_mod.read(arena, json, &diags);
+    // The export is an alias; the TYPE's own name is what the module
+    // reflects, so the table and the model field must agree on it.
+    try testing.expectEqualStrings("State", sidecar.model);
+    try testing.expect(sidecar_mod.findStruct(sidecar.types, "State") != null);
 }
 
 test "reflected strings are JSON-escaped" {

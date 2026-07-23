@@ -1277,45 +1277,59 @@ fn validateAbi(sidecar: Sidecar, diags: *Diagnostics) void {
     }
 }
 
+pub const SlotPath = struct {
+    path: []const u8,
+    /// Whether any joined component itself contains a dot (the grammar
+    /// cannot address such a slot unambiguously).
+    components_dotted: bool,
+};
+
+fn dotted(names: []const []const u8) bool {
+    for (names) |name| {
+        if (std.mem.indexOfScalar(u8, name, '.') != null) return true;
+    }
+    return false;
+}
+
 /// The slot spellings V10's bijection is checked against: every i64
 /// spelling in the sidecar, at its schema-defined slot path.
-pub fn collectIntegerSlotPaths(arena: std.mem.Allocator, sidecar: Sidecar) error{OutOfMemory}![]const []const u8 {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+pub fn collectIntegerSlotPaths(arena: std.mem.Allocator, sidecar: Sidecar) error{OutOfMemory}![]const SlotPath {
+    var paths: std.ArrayListUnmanaged(SlotPath) = .empty;
     for (sidecar.types.structs) |entry| {
         for (entry.fields) |field| {
             if (spellsInteger(field.type)) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, field.name }));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, field.name }), .components_dotted = dotted(&.{ entry.name, field.name }) });
             }
         }
     }
     for (sidecar.types.unions) |entry| {
         for (entry.arms) |arm| {
             if (spellsInteger(arm.payload)) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, arm.name }));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, arm.name }), .components_dotted = dotted(&.{ entry.name, arm.name }) });
             }
         }
     }
     for (sidecar.msg.arms) |arm| {
         switch (arm.payload) {
             .number => |class| if (class == .i64) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}), .components_dotted = dotted(&.{arm.name}) });
             },
             .number_bytes => |desc| if (desc.number_class == .i64) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "Msg.{s}.{s}", .{ arm.name, desc.number_field }));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}.{s}", .{ arm.name, desc.number_field }), .components_dotted = dotted(&.{ arm.name, desc.number_field }) });
             },
             .scalar => |ref| if (spellsInteger(ref)) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}), .components_dotted = dotted(&.{arm.name}) });
             },
             else => {},
         }
     }
     for (sidecar.model_helpers) |helper| {
         if (spellsInteger(helper.returns)) {
-            try paths.append(arena, try std.fmt.allocPrint(arena, "helpers.{s}.return", .{helper.name}));
+            try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "helpers.{s}.return", .{helper.name}), .components_dotted = dotted(&.{helper.name}) });
         }
         for (helper.params, 0..) |param, index| {
             if (spellsInteger(param)) {
-                try paths.append(arena, try std.fmt.allocPrint(arena, "helpers.{s}.params[{d}]", .{ helper.name, index }));
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "helpers.{s}.params[{d}]", .{ helper.name, index }), .components_dotted = dotted(&.{helper.name}) });
             }
         }
     }
@@ -1337,24 +1351,41 @@ fn spellsInteger(ref: TypeRef) bool {
 fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
     const expected = try collectIntegerSlotPaths(arena, sidecar);
 
-    outer: for (expected) |path| {
-        for (sidecar.integer_slots) |slot| {
-            if (std.mem.eql(u8, slot.slot, path)) continue :outer;
+    // The path grammar joins components with dots, so a component
+    // carrying its own dot would make two different slots spell one
+    // path — the bijection would silently thin. Refuse the ambiguity at
+    // its source.
+    for (expected) |path| {
+        if (path.components_dotted) {
+            diags.flag("integer_slots", "the i64 slot at \"{s}\" involves a name containing '.', which the slot path grammar cannot address unambiguously — rename it in the core source (V10)", .{path.path});
         }
-        diags.flag("integer_slots", "the sidecar spells \"{s}\" i64 but attests no integer_slots entry for it — every i64 spelling has exactly one entry (V10)", .{path});
     }
+    if (diags.hasErrors()) return;
 
-    var seen: NameSet = .empty;
-    outer: for (sidecar.integer_slots, 0..) |slot, index| {
-        const entry = try seen.getOrPut(arena, slot.slot);
-        if (entry.found_existing) {
+    // One-to-one both ways: every expected slot consumes exactly one
+    // entry, and no entry is left over or spent twice.
+    const consumed = try arena.alloc(bool, sidecar.integer_slots.len);
+    @memset(consumed, false);
+    outer: for (expected) |path| {
+        for (sidecar.integer_slots, 0..) |slot, index| {
+            if (!consumed[index] and std.mem.eql(u8, slot.slot, path.path)) {
+                consumed[index] = true;
+                continue :outer;
+            }
+        }
+        diags.flag("integer_slots", "the sidecar spells \"{s}\" i64 but attests no integer_slots entry for it — every i64 spelling has exactly one entry (V10)", .{path.path});
+    }
+    for (sidecar.integer_slots, 0..) |slot, index| {
+        if (consumed[index]) continue;
+        var duplicate = false;
+        for (sidecar.integer_slots[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.slot, slot.slot)) duplicate = true;
+        }
+        if (duplicate) {
             diags.flag(pathOfStatic(diags, "integer_slots[{d}].slot", .{index}), "duplicate entry for \"{s}\" — every i64 slot has exactly one entry (V10)", .{slot.slot});
-            continue :outer;
+        } else {
+            diags.flag(pathOfStatic(diags, "integer_slots[{d}].slot", .{index}), "\"{s}\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)", .{slot.slot});
         }
-        for (expected) |path| {
-            if (std.mem.eql(u8, path, slot.slot)) continue :outer;
-        }
-        diags.flag(pathOfStatic(diags, "integer_slots[{d}].slot", .{index}), "\"{s}\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)", .{slot.slot});
     }
 }
 
@@ -1685,6 +1716,17 @@ test "V9: a wired function channel missing from abi.exports refuses" {
     defer arena_state.deinit();
     const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"key_msg\": false", "\"key_msg\": true");
     try expectRefusal(source, "channels.key_msg", "missing from abi.exports");
+}
+
+test "V10: a dotted name in an i64 slot path refuses as unaddressable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // `A` with field `B.C` would spell the same path as `A.B` with
+    // field `C`; the grammar cannot tell them apart.
+    var source = try replaced(arena, minimal_valid_json, "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}}", "{\"name\": \"cou.nt\", \"type\": {\"kind\": \"i64\"}}");
+    source = try replaced(arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.cou.nt\", \"class\": \"i64\"}");
+    try expectRefusal(source, "integer_slots", "cannot address unambiguously");
 }
 
 test "V10: an i64 spelling without an integer_slots entry refuses" {
