@@ -325,7 +325,13 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     const text_ceiling: usize = if (text_store > row_text_reserve) text_store - row_text_reserve else 0;
     var text_bytes_emitted: usize = 0;
 
-    var text_scratch: [max_cols * 4]u8 = undefined;
+    // A run's staging buffer. Sized well past a full narrow row
+    // (`max_cols * 4`) so a cell carrying a heavy grapheme cluster
+    // (hundreds of combining marks) still stages whole — a legitimate
+    // cluster is at most a few hundred bytes, so 8 KiB is generous. The
+    // run-break flushes when the buffer nears full, so long runs simply
+    // split across draw commands rather than overflow.
+    var text_scratch: [8192]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
         // Row-wise budget stop: once the list is within one row's worst
@@ -460,6 +466,12 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
             text_len += std.unicode.utf8Encode(cp, text_scratch[text_len..]) catch 0;
             if (cell.raw.content_tag == .codepoint_grapheme) {
                 for (cell.grapheme) |extra| {
+                    // Stop before a partial code point: the break lands
+                    // BETWEEN combining marks, so the emitted run is
+                    // always valid UTF-8. Only a single cell carrying
+                    // more than the 8 KiB buffer of marks (a Zalgo
+                    // attack, never legitimate text) loses trailing
+                    // marks — bounded and codepoint-safe.
                     if (text_len + 8 > text_scratch.len) break;
                     text_len += std.unicode.utf8Encode(extra, text_scratch[text_len..]) catch 0;
                 }

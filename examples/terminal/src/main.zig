@@ -360,7 +360,13 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
     }
     // Chorded character keys (ctrl+c, alt+f, ...): the text channel is
     // silent for these, so the encoder builds the control sequence.
-    const chorded = event.modifiers.control or event.modifiers.alt or event.modifiers.super;
+    // Alt is a chord EXCEPT on macOS, where Option is a compose key —
+    // Option+F commits the composed `ƒ` through the text channel, so
+    // encoding an Alt-F escape here too would double the input (the
+    // child would see both). On macOS, Option composes; everywhere else
+    // Alt is Meta (ESC prefix, no composed text).
+    const alt_is_chord = event.modifiers.alt and builtin.os.tag != .macos;
+    const chorded = event.modifiers.control or event.modifiers.super or alt_is_chord;
     if (!chorded) return null;
     if (key.len == 1) {
         const ch = key[0];
