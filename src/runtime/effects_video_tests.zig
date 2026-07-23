@@ -1206,6 +1206,72 @@ test "keyboard activation of the house chrome toggle drives the channel like the
     try std.testing.expect(fx.videoSnapshot().playing);
 }
 
+test "keyboard steps on the house seek slider drive the channel" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+    try std.testing.expect(fx.videoSnapshot().duration_ms > 0);
+
+    // An arrow step on the focused seek slider is a set_value intent —
+    // no widget change event exists on this path — and must seek the
+    // channel like the pointer scrub, never move the thumb
+    // optimistically for the next tick to snap back.
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var target: ?canvas.WidgetFocusTarget = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (node.widget.video_control == .scrub) {
+            target = .{
+                .id = node.widget.id,
+                .kind = node.widget.kind,
+                .bounds = node.frame,
+                .index = index,
+                .state = node.widget.state,
+            };
+        }
+    }
+    try h.harness.runtime.dispatchEvent(h.app, .{ .canvas_widget_keyboard = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .keyboard = .{ .phase = .key_down, .focused_id = target.?.id, .key = "arrowright" },
+        .target = target,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), np.video_seek_count);
+    try std.testing.expect(np.video.position_ms > 0);
+    try std.testing.expect(fx.videoSnapshot().position_ms > 0);
+}
+
+test "a src change renders the replacement's transport state in the same build" {
+    var h = try DeclHarness.create();
+    defer h.destroy();
+    const np = &h.harness.null_platform;
+    const fx = &h.app_state.effects;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, np.takeVideoLoaded().?);
+
+    // Pause the declared playback: the chrome shows Play.
+    const toggle = try h.controlFrame(.toggle);
+    try h.clickAt(toggle.center().x, toggle.center().y);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+
+    // The declaration switches to an autoplaying replacement. The
+    // reconcile runs after the build installs, so without a repass the
+    // just-installed chrome would still advertise Play while its
+    // control would PAUSE the new playback — label and action must
+    // agree before any platform event arrives.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .use_second);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var saw_toggle = false;
+    for (layout.nodes) |node| {
+        if (node.widget.video_control == .toggle) {
+            saw_toggle = true;
+            try std.testing.expectEqualStrings("pause", node.widget.icon);
+        }
+    }
+    try std.testing.expect(saw_toggle);
+}
+
 test "the house chrome toggle restarts a finished playback from the start" {
     var h = try DeclHarness.create();
     defer h.destroy();

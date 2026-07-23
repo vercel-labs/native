@@ -959,6 +959,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// is not one — it is a pure function of the source string,
         /// and a manual load could carry the same key.
         video_declared_token: u64 = 0,
+        /// Recursion bound for the post-reconcile chrome repass in
+        /// `rebuild` (see the call site): the repass reconciles an
+        /// unchanged declaration, so the mirrors are already a fixed
+        /// point — this guard just makes one level a hard guarantee.
+        video_chrome_repass: bool = false,
         /// Backing bytes for `video_build_declaration.src`, copied out
         /// of the build arena at capture (the slot captures' rule): the
         /// declaration outlives the pass that recorded it — a later
@@ -1603,6 +1608,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
             self.applyVideoDeclaration(runtime);
+            // The reconcile can move the playback this very build
+            // rendered (a src change loading an autoplaying
+            // replacement): the just-installed chrome would advertise
+            // the OLD transport state until a platform event arrived,
+            // and its control would act on the new one — Play on the
+            // label, pause in effect. One repass renders the chrome
+            // from the moved mirrors; it reconciles the SAME
+            // declaration (unchanged src reloads nothing), so the
+            // mirrors are a fixed point and the repass ends the
+            // recursion — the guard makes that a hard bound.
+            if (!self.video_chrome_repass and
+                !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
+            {
+                self.video_chrome_repass = true;
+                defer self.video_chrome_repass = false;
+                try self.rebuild(runtime, window_id);
+                return;
+            }
             self.applyWindows(runtime);
             self.applyChromeSelection();
             self.applyChromeNavigation();
@@ -4091,12 +4114,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             // channel exactly like the pointer release
                             // — the control advertises Play/Pause to
                             // focus and accessibility, so Enter/Space
-                            // must act, not be consumed silently. (The
-                            // seek slider's keyboard steps already
-                            // arrive as widget change events and take
-                            // the scrub path.)
+                            // must act, not be consumed silently.
                             if (widget.video_control == .toggle and intent.kind == .press) {
                                 try self.toggleVideoControl(runtime);
+                            }
+                            // The seek slider's keyboard and assistive
+                            // steps land here as set_value intents —
+                            // no widget change event exists on these
+                            // paths — so the step maps its fraction
+                            // onto the duration and drives the channel,
+                            // the pointer scrub's exact rule; consuming
+                            // it silently would move the thumb
+                            // optimistically and let the next tick
+                            // snap it back.
+                            if (widget.video_control == .scrub and intent.kind == .set_value) {
+                                if (intent.value) |fraction| {
+                                    const snap = self.effects.videoSnapshot();
+                                    if (snap.duration_ms > 0) {
+                                        self.effects.seekVideo(@intFromFloat(std.math.clamp(@as(f64, fraction), 0, 1) * @as(f64, @floatFromInt(snap.duration_ms))));
+                                    }
+                                    try self.rebuildVideoChrome(runtime);
+                                }
                             }
                             return;
                         }
