@@ -461,17 +461,21 @@ fn relocateAboveStdio(fd: c_int) ?c_int {
     return high;
 }
 
-/// Resolve exec status from the self-pipe read end without ever
-/// blocking indefinitely: poll for a failure byte, EOF, or a timeout.
-/// A byte (the child's errno report) means exec FAILED. EOF (every
-/// writer closed via CLOEXEC on a successful exec) means it SUCCEEDED.
-/// The timeout also means success — it can only be reached when a
-/// concurrent fork's child inherited a copy of the write end in the
-/// CLOEXEC-setup window (delaying EOF), and no failure byte arrived, so
-/// our own exec succeeded. Bounded so that residual race can never hang
-/// the spawning thread.
+/// Resolve exec status from the self-pipe read end. A failure byte (the
+/// child's errno report) means exec FAILED; a clean EOF (every writer
+/// closed via CLOEXEC on a successful exec) means it SUCCEEDED. On Linux
+/// the pipe's CLOEXEC is atomic (`pipe2`), so no concurrent fork can
+/// inherit the write end and delay EOF — the read BLOCKS for a reliable
+/// verdict, so even a slow `execve` (an interpreter on a sluggish
+/// filesystem) is awaited and correctly reported. On Darwin there is no
+/// atomic-CLOEXEC pipe primitive, so a concurrent fork on another thread
+/// COULD inherit the write end in the pipe()->fcntl window and hold EOF
+/// open; there a bounded poll treats a timeout as success (no failure
+/// byte arrived, so our own exec succeeded) to guarantee the spawn
+/// thread never hangs — the documented Darwin residual, the same
+/// tradeoff every macOS terminal makes without atomic CLOEXEC.
 fn execFailed(fd: c_int) bool {
-    const timeout_ms: c_int = 5000;
+    const timeout_ms: c_int = if (builtin.os.tag == .linux) -1 else 5000;
     var fds = [1]Pollfd{.{ .fd = fd, .events = pollin, .revents = 0 }};
     while (true) {
         const r = c.poll(&fds, 1, timeout_ms);
@@ -479,7 +483,7 @@ fn execFailed(fd: c_int) bool {
             if (errnoValue() == eintr) continue;
             return false;
         }
-        if (r == 0) return false; // timeout: exec succeeded (see above)
+        if (r == 0) return false; // timeout (Darwin only): exec succeeded
         // Readable or hung up: a byte present is failure; a clean EOF
         // (readable, zero bytes) is success.
         if (fds[0].revents & pollin != 0) {

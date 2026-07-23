@@ -469,7 +469,15 @@ fn resolveBlob(
 fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len > 0) return true;
     if (record.pty_blob_len > runtime_effects.max_effect_pty_chunk_bytes) return true;
-    return record.pty_kind == .exit and record.pty_blob_len > 0;
+    return switch (record.pty_kind) {
+        // The recorder journals output ONLY for a non-empty batch, so
+        // its blob is always non-empty — a zero-length output blob is
+        // damage that would otherwise replay a synthetic empty output
+        // event and diverge the fingerprint.
+        .output => record.pty_blob_len == 0,
+        // Exits carry neither payload nor blob.
+        .exit => record.pty_blob_len > 0,
+    };
 }
 
 /// Recorder truth for pty provenance: output records always carry

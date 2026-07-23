@@ -35,11 +35,15 @@ pub const Session = struct {
     term: vt.Terminal,
     stream: vt.TerminalStream,
     render: vt.RenderState,
-    /// Terminal answers to queries (DSR, DA1) produced while feeding
-    /// output; the app drains this after every feed and writes it back
-    /// to the pty. Bounded: a feed can only ask so much, and overflow
-    /// drops the response whole (never cut) with a count.
-    response_buffer: [1024]u8 = undefined,
+    /// Terminal answers to queries (DSR, DA1, XTVERSION, ...) produced
+    /// while feeding output; the app drains this after every feed and
+    /// writes it back to the pty. Sized to hold a large pipelined burst
+    /// of query replies from one output batch (each reply is a handful
+    /// of bytes, so 16 KiB covers thousands); a response that would
+    /// overflow is dropped WHOLE (never cut, which would desync the
+    /// child's parser) and counted. The count is the honest record that
+    /// a reply was lost, checkable by the app.
+    response_buffer: [16 * 1024]u8 = undefined,
     response_len: usize = 0,
     responses_dropped: u32 = 0,
     /// Keyboard-selection state: the anchor stays put, the head moves.
@@ -315,14 +319,12 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         0;
     // The display-list TEXT store is a separate budget from the command
     // count: a screen of multi-codepoint graphemes (emoji) can exhaust
-    // its bytes long before the command budget. Stop by ROW at a text
-    // reserve too, so the grid degrades to fewer painted rows instead of
-    // silently blanking cells mid-frame when the store fills. Worst case
-    // per row is one full grapheme cluster per column; the emulator caps
-    // a cluster's rendered bytes, but reserve generously.
+    // its bytes long before the command budget. Each row is emitted
+    // ATOMICALLY — its exact text-byte need is measured up front and the
+    // row is skipped WHOLE if it would not fit the remaining store — so
+    // the grid degrades to fewer complete rows, never a row torn
+    // mid-way by an allocation failure.
     const text_store: usize = canvas.max_display_list_text_bytes;
-    const row_text_reserve: usize = max_cols * 16;
-    const text_ceiling: usize = if (text_store > row_text_reserve) text_store - row_text_reserve else 0;
     var text_bytes_emitted: usize = 0;
 
     // A run's staging buffer. Sized well past a full narrow row
@@ -334,12 +336,14 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     var text_scratch: [8192]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
-        // Row-wise budget stop: once the list is within one row's worst
-        // case of either the command or the text-byte ceiling, stop
-        // painting further rows (honest degradation, never a torn row).
+        // Command-count stop: once within one row's worst case of the
+        // command ceiling, stop painting further rows.
         if (options.command_budget > 0 and builder.displayList().commands.len >= row_ceiling) break;
-        if (text_bytes_emitted >= text_ceiling) break;
         const row = rs.row_data.get(row_index);
+        // Text-store stop, ATOMIC per row: measure this row's exact text
+        // bytes and stop BEFORE it if the store cannot hold them — never
+        // emit a row's first runs and then fail mid-row.
+        if (text_bytes_emitted + rowTextBytes(row) > text_store) break;
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         if (row_y + cell_h > options.frame.y + options.frame.height + cell_h) break;
         const row_id = grid_id_base + (@as(u64, @intCast(row_index)) << 16);
@@ -421,8 +425,14 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                     if (style.flags.invisible) cp = 0;
                 }
             }
+            // The current cell's full byte need (primary code point plus
+            // any grapheme marks): the run breaks BEFORE a cell that
+            // would not fit the remaining scratch, so the cell restarts
+            // in a fresh buffer and a large grapheme landing near the
+            // buffer's end keeps all its marks instead of being cut.
+            const cell_bytes: usize = if (x < row.cells.len and cp != 0) cellTextBytes(row.cells.get(x)) else 0;
             const breaks = x == row.cells.len or skip or cp == 0 or
-                !colorEql(fg, run_fg) or underline != run_underline or text_len + 8 > text_scratch.len;
+                !colorEql(fg, run_fg) or underline != run_underline or text_len + cell_bytes > text_scratch.len;
             if (breaks and run_len > 0 and text_len > 0) {
                 // The row-wise text ceiling reserves enough that this
                 // append fits; the catch is a defensive floor that stops
@@ -544,6 +554,30 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
             });
         }
     }
+}
+
+/// UTF-8 byte need of one cell's rendered text: its primary code point
+/// plus every grapheme combining mark. Used to break a run before a
+/// cell that would overflow the run scratch, and to measure a row's
+/// total for the atomic text-store stop.
+fn cellTextBytes(cell: anytype) usize {
+    const cp: u21 = switch (cell.raw.content_tag) {
+        .codepoint, .codepoint_grapheme => cell.raw.content.codepoint.data,
+        else => 0,
+    };
+    if (cp == 0) return 0;
+    var n: usize = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+    if (cell.raw.content_tag == .codepoint_grapheme) {
+        for (cell.grapheme) |extra| n += std.unicode.utf8CodepointSequenceLength(extra) catch 1;
+    }
+    return n;
+}
+
+fn rowTextBytes(row: anytype) usize {
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < row.cells.len) : (i += 1) total += cellTextBytes(row.cells.get(i));
+    return total;
 }
 
 fn cellBackground(cell: anytype, palette: *const Palette) ?canvas.Color {
