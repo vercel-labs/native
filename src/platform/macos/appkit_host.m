@@ -9271,13 +9271,18 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
      * narrow tones into invisibility). Bin 0 (DC) never contributes. */
     const double ratio = NATIVE_SDK_SPECTRUM_HIGH_HZ / NATIVE_SDK_SPECTRUM_LOW_HZ;
     const double hz_per_bin = sample_rate / (double)NATIVE_SDK_SPECTRUM_FFT_SIZE;
+    const int max_bin = NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1;
     for (int band = 0; band < NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS; band += 1) {
         const double low_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)band / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
         const double high_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)(band + 1) / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
         int low_bin = (int)(low_hz / hz_per_bin);
         int high_bin = (int)ceil(high_hz / hz_per_bin);
         if (low_bin < 1) low_bin = 1;
-        if (high_bin > NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1) high_bin = NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1;
+        if (low_bin > max_bin) {
+            bands[band] = 0;
+            continue;
+        }
+        if (high_bin > max_bin) high_bin = max_bin;
         if (high_bin < low_bin) high_bin = low_bin;
         float peak = 0.0f;
         for (int bin = low_bin; bin <= high_bin; bin += 1) {
