@@ -2004,14 +2004,22 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     // signals a pid that reaping is about to free for reuse — until the
     // reap returns the child is still alive, so declining to signal
     // loses nothing. `reapEnding` never blocks forever: the normal case
-    // (child already exited) returns at once with no signal, and a child
+    // (child already exited) returns at once with no signal; a child
     // that closed its terminal but kept running is hung up and escalated
-    // to SIGKILL within a bounded window, so the exit always arrives.
-    // This is the thread's LAST shared touch before the wake.
+    // to SIGKILL within a bounded window; and a child the kernel holds
+    // in uninterruptible I/O past a further bounded window has its kill
+    // reported as the ending (the surrendered reap's documented zombie)
+    // — the exit always arrives. This is the thread's LAST shared touch
+    // before the wake.
     shared.mutex.lock();
     shared.reaping = true;
     shared.mutex.unlock();
     const exit = transport.reapEnding();
+    // A spawn whose exec probe timed out unresolved carries its status
+    // pipe here: the failure byte (written before the child's _exit) is
+    // readable exactly now, so a late exec failure still reports
+    // `spawn_failed` instead of masquerading as a normal end.
+    const late_exec_failure = transport.lateExecFailure();
     shared.mutex.lock();
     if (shared.open and shared.generation == generation) {
         // Outbound bytes still staged at exit never reached the child:
@@ -2026,6 +2034,8 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         const cancelled = shared.kill_requested;
         shared.exit_reason = if (cancelled)
             .cancelled
+        else if (late_exec_failure)
+            .spawn_failed
         else if (exit.signal != 0)
             .signaled
         else
@@ -2035,9 +2045,9 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         // signal 0 even though the toolkit's own SIGKILL is what felled
         // it — the API contract is "signal != 0 iff reason == signaled".
         shared.exit_signal = if (shared.exit_reason == .signaled) exit.signal else 0;
-        // A cancelled or signaled end carries no meaningful child exit
-        // code (the doc's -1 sentinel); only a natural exit does.
-        shared.exit_code = if (cancelled or exit.signal != 0) effect_error_exit_code else exit.code;
+        // Only a natural exit carries a meaningful child code; every
+        // other reason reports the doc's -1 sentinel.
+        shared.exit_code = if (shared.exit_reason == .exited) exit.code else effect_error_exit_code;
         shared.exit_staged = true;
         if (shared.owner) |owner| {
             shared.exit_seq = owner.seq.fetchAdd(1, .seq_cst);
@@ -12239,7 +12249,13 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn runChild(self: *Self, ctx: *SpawnWorkerContext, slot_index: u16, generation: u32, io: std.Io) void {
-            var child = std.process.spawn(io, .{
+            // The process start runs under the toolkit's spawn-window
+            // lock: this fork must never land inside a pty spawn's (or
+            // wake pipe's) open-to-CLOEXEC gap, where its exec'd child
+            // would inherit that descriptor for its whole life. The lock
+            // covers only the bounded start — never a wait on the child.
+            pty_transport.lockProcessSpawnWindow();
+            const spawn_result = std.process.spawn(io, .{
                 .argv = ctx.argv(),
                 .stdin = if (ctx.stdin_len > 0) .pipe else .ignore,
                 .stdout = .pipe,
@@ -12257,7 +12273,9 @@ pub fn Effects(comptime Msg: type) type {
                 // there, as before (see `killPublishedChildCtx` for
                 // the descendant story on both platforms).
                 .pgid = if (builtin.os.tag == .windows) null else 0,
-            }) catch return;
+            });
+            pty_transport.unlockProcessSpawnWindow();
+            var child = spawn_result catch return;
 
             ctx.child_mutex.lock();
             ctx.child_id = child.id;

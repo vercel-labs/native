@@ -90,6 +90,14 @@ pub const Error = error{
 pub const Pty = struct {
     parent: c_int,
     pid: c_int,
+    /// The exec self-pipe's read end, kept ONLY when the spawn-time
+    /// probe timed out unresolved (an executable on a stalled mount can
+    /// block inside `execve` past any reasonable bound). The verdict
+    /// still arrives with the child's death — a failing exec writes its
+    /// byte before `_exit` — so `lateExecFailure` reads it at reap time
+    /// and the exit reports `spawn_failed` instead of masquerading as a
+    /// normal end. -1 when the probe resolved at spawn.
+    exec_status: c_int = -1,
 
     /// Read available output bytes into `buf`. Returns 0 at EOF — which the
     /// parent end reports as EIO on Linux once the child exits, normalized
@@ -195,10 +203,10 @@ pub const Pty = struct {
     /// child is still alive (it closed its terminal descriptors but kept
     /// running), it is hung up like a real terminal (SIGHUP to the job),
     /// then escalated to SIGKILL within a bounded window, so the exit
-    /// always arrives and no zombie is left — the fix for a `reapBlocking`
-    /// that would otherwise wait forever on such a child while a kill is
-    /// skipped. The caller publishes `reaping` before this so no
-    /// concurrent kill signals the (soon-freed) pid.
+    /// always arrives — the fix for a `reapBlocking` that would otherwise
+    /// wait forever on such a child while a kill is skipped. The caller
+    /// publishes `reaping` before this so no concurrent kill signals the
+    /// (soon-freed) pid.
     pub fn reapEnding(self: Pty) Exit {
         if (!supported) return .{ .code = -1, .signal = 0 };
         if (self.reap()) |exit| return exit;
@@ -214,14 +222,44 @@ pub const Pty = struct {
                 _ = c.kill(self.pid, sigkill);
             }
         }
-        // SIGKILL cannot be caught; this wait is bounded.
-        return self.reapBlocking();
+        // SIGKILL cannot be caught — but a child stuck in UNINTERRUPTIBLE
+        // kernel I/O (a stalled mount, a wedged device) does not die
+        // until the kernel releases it, a wait no signal can shorten.
+        // Poll a further bounded window, then surrender the reap: the
+        // exit event must reach the app (an io thread wedged here would
+        // strand the session with no exit forever), so past the deadline
+        // the kill is reported as the ending and the SIGKILL'd child is
+        // left for the kernel — it dies (and zombies, since this thread
+        // will not wait again) whenever its syscall returns. A bounded,
+        // loud-in-effect leak that beats an unbounded hang; nothing
+        // signals the pid after this (`reaping` stays published).
+        waited_us = 0;
+        while (waited_us < 5_000_000) : (waited_us += 20_000) {
+            if (self.reap()) |exit| return exit;
+            _ = c.usleep(20_000);
+        }
+        return .{ .code = -1, .signal = sigkill };
     }
 
-    /// Close the parent-end fd. The child is expected to be reaped separately.
+    /// Close the parent-end fd (and a still-held exec-status pipe). The
+    /// child is expected to be reaped separately.
     pub fn close(self: Pty) void {
         if (!supported) return;
         _ = c.close(self.parent);
+        if (self.exec_status >= 0) _ = c.close(self.exec_status);
+    }
+
+    /// Whether a LATE exec failure landed on the carried status pipe —
+    /// checked at reap time, when the child is dead: a failing exec
+    /// wrote its byte before `_exit`, so the byte is either in the pipe
+    /// buffer now or the exec succeeded. The read is non-blocking (a
+    /// leaked writer in an embedder-forked child can therefore never
+    /// wedge the reap), and an empty pipe reads as success.
+    pub fn lateExecFailure(self: Pty) bool {
+        if (!supported) return false;
+        if (self.exec_status < 0) return false;
+        var probe: [1]u8 = undefined;
+        return c.read(self.exec_status, &probe, 1) > 0;
     }
 };
 
@@ -290,27 +328,44 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         .ypixel = 0,
     };
     const pair = try spawnPair(resolved_z, argv_z, envp_z, ws);
-    // A failure byte, EOF, or the timeout resolves exec status. A real
+    // A failure byte, EOF, or the timeout resolves the probe. A real
     // exec failure writes its byte into the pipe buffer INSTANTLY (the
     // child's write lands before its _exit), so a byte always means
     // failure regardless of who else holds a writer. EOF (every writer
-    // closed) is the fast success signal. The timeout is the safety net
-    // for the residual CLOEXEC window: if an EMBEDDER fork on a thread
-    // the toolkit does not own landed inside the pipe's flag window and
-    // its exec'd child inherited a copy of the write end, EOF is delayed
-    // until THAT process exits — but no failure byte arrived, so exec
-    // succeeded, and we proceed rather than hang. Bounded at a few
-    // seconds, orders of magnitude past a real exec — and polled OUTSIDE
+    // closed) is the fast success signal. The timeout resolves NOTHING:
+    // an exec can genuinely block past any bound (an executable or
+    // shebang interpreter on a stalled mount) and an embedder-forked
+    // child holding a leaked writer delays EOF — so an unresolved probe
+    // CARRIES the pipe on the transport, where `lateExecFailure` reads
+    // the verdict at reap time and a late failure still delivers
+    // `spawn_failed`, never a masqueraded normal exit. Polled OUTSIDE
     // the spawn lock, which covers only bounded syscalls.
-    const failed = execFailed(pair.exec_read);
-    _ = c.close(pair.exec_read);
-    if (failed) {
-        var status: c_int = 0;
-        while (c.waitpid(pair.pid, &status, 0) < 0 and errnoValue() == eintr) {}
-        _ = c.close(pair.parent);
-        return error.PtyCommandNotFound;
+    switch (execStatus(pair.exec_read)) {
+        .failed => {
+            _ = c.close(pair.exec_read);
+            var status: c_int = 0;
+            while (c.waitpid(pair.pid, &status, 0) < 0 and errnoValue() == eintr) {}
+            _ = c.close(pair.parent);
+            return error.PtyCommandNotFound;
+        },
+        .succeeded => {
+            _ = c.close(pair.exec_read);
+            return .{ .parent = pair.parent, .pid = pair.pid };
+        },
+        .unresolved => {
+            // Non-blocking so the reap-time check can never wait on a
+            // leaked writer. If the flag cannot be set, the carried
+            // check is unsafe — fall back to the probe's old
+            // timed-out-means-started answer rather than risk a wedged
+            // reap.
+            const flags = c.fcntl(pair.exec_read, f_getfl, @as(c_int, 0));
+            if (flags < 0 or c.fcntl(pair.exec_read, f_setfl, flags | o_nonblock) < 0) {
+                _ = c.close(pair.exec_read);
+                return .{ .parent = pair.parent, .pid = pair.pid };
+            }
+            return .{ .parent = pair.parent, .pid = pair.pid, .exec_status = pair.exec_read };
+        },
     }
-    return .{ .parent = pair.parent, .pid = pair.pid };
 }
 
 const SpawnedPair = struct {
@@ -508,6 +563,8 @@ fn relocateAboveStdio(fd: c_int) ?c_int {
     return high;
 }
 
+const ExecProbe = enum { succeeded, failed, unresolved };
+
 /// Resolve exec status from the self-pipe read end. A failure byte (the
 /// child's errno report) means exec FAILED; a clean EOF (every writer
 /// closed) means it SUCCEEDED.
@@ -515,23 +572,16 @@ fn relocateAboveStdio(fd: c_int) ?c_int {
 /// The read BLOCKS — up to a generous bound — so a slow `execve` (an
 /// interpreter on a sluggish filesystem or automount) is awaited and its
 /// eventual failure byte correctly reported, rather than assumed
-/// successful. The bound exists because CLOEXEC does NOT keep a
-/// concurrent `fork` on another thread from TRANSIENTLY inheriting the
-/// write end: `O_CLOEXEC` closes the inherited copy on that child's
-/// `exec`, not its `fork`, so EOF is delayed until every concurrent
-/// forker has exec'd. In this toolkit those forkers (the spawn/fetch
-/// workers, other pty spawns) all exec promptly, so EOF normally arrives
-/// at once; the bound is the safety net for a forker that is descheduled
-/// or slow to exec, capping a pathological wait instead of hanging the
-/// spawn thread forever. A timeout therefore means "no failure reported"
-/// — our own child exec'd (an inherited writer merely delayed EOF) — and
-/// is treated as success. The only misclassification is an `execve` that
-/// both blocks AND fails past the bound (an extreme filesystem
-/// pathology); the alternative (an unbounded block, or a timeout so
-/// short it races a slow failure) is worse. The bound is uniform across
-/// platforms — a self-pipe cannot distinguish "success, EOF delayed" from
-/// "exec still pending" without it.
-fn execFailed(fd: c_int) bool {
+/// successful. The bound exists because CLOEXEC does NOT keep an
+/// EMBEDDER `fork` on a thread the toolkit does not own from TRANSIENTLY
+/// inheriting the write end (`O_CLOEXEC` closes the inherited copy on
+/// that child's `exec`, not its `fork`; the toolkit's OWN forks are
+/// serialized out by the spawn lock), so EOF can be delayed until such a
+/// forker execs. A timeout therefore resolves NOTHING — the exec may
+/// still be pending — and reports `unresolved`: the caller carries the
+/// pipe on the transport, where the reap-time check converts a late
+/// failure byte into the exit's `spawn_failed` instead of guessing.
+fn execStatus(fd: c_int) ExecProbe {
     const timeout_ns: u64 = 10 * std.time.ns_per_s;
     // The bound is a DEADLINE, not a per-poll timeout: `poll` restarts
     // with a fresh timeout on every EINTR, so a fixed per-call timeout
@@ -539,18 +589,18 @@ fn execFailed(fd: c_int) bool {
     // timeout forever, blocking the spawn thread indefinitely. Recompute
     // the remaining time against a monotonic start so the total wait
     // stays capped no matter how many signals interrupt it. A missing
-    // monotonic clock (not expected on macOS/Linux) resolves to "no
-    // failure reported" rather than risk an unbounded wait.
+    // monotonic clock (not expected on macOS/Linux) reports unresolved
+    // rather than risk an unbounded wait.
     const start = clock.monotonicNanoseconds();
     var fds = [1]Pollfd{.{ .fd = fd, .events = pollin, .revents = 0 }};
     while (true) {
         const now = clock.monotonicNanoseconds();
-        // A zero read is the clock's unavailable sentinel (not expected on
-        // macOS/Linux); resolve to "no failure reported" rather than risk
-        // an unbounded EINTR-retry loop. `-%` keeps a clock that appears
+        // A zero read is the clock's unavailable sentinel (not expected
+        // on macOS/Linux); report unresolved rather than risk an
+        // unbounded EINTR-retry loop. `-%` keeps a clock that appears
         // to move backwards bounded too (it maps to a huge elapsed).
         const elapsed = now -% start;
-        if (now == 0 or elapsed >= timeout_ns) return false; // deadline: success
+        if (now == 0 or elapsed >= timeout_ns) return .unresolved;
         const remaining_ms: c_int = @intCast(@min(
             @as(u64, @intCast(std.math.maxInt(c_int))),
             (timeout_ns - elapsed) / std.time.ns_per_ms,
@@ -558,20 +608,20 @@ fn execFailed(fd: c_int) bool {
         const r = c.poll(&fds, 1, remaining_ms);
         if (r < 0) {
             if (errnoValue() == eintr) continue;
-            return false;
+            return .unresolved;
         }
-        if (r == 0) return false; // timeout: no failure reported => success
+        if (r == 0) return .unresolved; // deadline: verdict still pending
         // Readable or hung up: a byte present is failure; a clean EOF
         // (readable, zero bytes) is success.
         if (fds[0].revents & pollin != 0) {
             var probe: [1]u8 = undefined;
             const n = c.read(fd, &probe, 1);
-            if (n > 0) return true;
+            if (n > 0) return .failed;
             if (n < 0 and errnoValue() == eintr) continue;
-            return false;
+            return .succeeded;
         }
         // POLLHUP/POLLERR with no data: the writer closed on exec.
-        return false;
+        return .succeeded;
     }
 }
 
@@ -771,7 +821,29 @@ const c = struct {
 /// runtime closing its copies. The child needs neither end.
 pub fn pipePair() Error![2]c_int {
     if (comptime !supported) return error.PtyUnsupported;
+    // Under the spawn lock: Darwin's pipe-then-fcntl flag gap is a
+    // descriptor-inheritance window exactly like the spawn's own, and
+    // every toolkit fork holds the same lock — so no toolkit child can
+    // inherit a not-yet-CLOEXEC wake pipe across its exec.
+    pty_spawn_mutex.lock();
+    defer pty_spawn_mutex.unlock();
     return makePipe(true);
+}
+
+/// Serialize any toolkit process start against every descriptor-flag
+/// window (`pty_spawn_mutex`): hold across the fork/exec primitive —
+/// bounded, never across a wait on the child — so its fork cannot land
+/// inside another spawn's open-to-CLOEXEC gap, and its own descriptor
+/// setup is covered against pty forks in turn. No-ops on targets
+/// without the pty transport (nothing forks through here there).
+pub fn lockProcessSpawnWindow() void {
+    if (comptime !supported) return;
+    pty_spawn_mutex.lock();
+}
+
+pub fn unlockProcessSpawnWindow() void {
+    if (comptime !supported) return;
+    pty_spawn_mutex.unlock();
 }
 
 /// Create a pipe with both ends close-on-exec (and, when `nonblock`,
@@ -952,6 +1024,31 @@ test "the child environment is exactly env plus TERM" {
     const out = buf[0..total];
     // TERM injected, MARKER passed through, HOME absent (clean env).
     try std.testing.expect(std.mem.indexOf(u8, out, default_term ++ "|pty-proof|") != null);
+}
+
+test "a late exec-failure byte on the carried status pipe converts at reap time" {
+    if (comptime !supported) return;
+    // The unresolved-probe carry: a failure byte written after the
+    // probe's deadline is read — non-blocking — at reap time.
+    const with_byte = try makePipe(true);
+    const byte = [_]u8{1};
+    _ = c.write(with_byte[1], &byte, 1);
+    const failed_pty: Pty = .{ .parent = -1, .pid = -1, .exec_status = with_byte[0] };
+    try std.testing.expect(failed_pty.lateExecFailure());
+    _ = c.close(with_byte[0]);
+    _ = c.close(with_byte[1]);
+
+    // No byte before the child died means the exec succeeded: an empty
+    // (or closed) pipe reads as success and never blocks.
+    const without_byte = try makePipe(true);
+    _ = c.close(without_byte[1]);
+    const started_pty: Pty = .{ .parent = -1, .pid = -1, .exec_status = without_byte[0] };
+    try std.testing.expect(!started_pty.lateExecFailure());
+    _ = c.close(without_byte[0]);
+
+    // A spawn whose probe resolved carries no pipe: never a late report.
+    const resolved_pty: Pty = .{ .parent = -1, .pid = -1 };
+    try std.testing.expect(!resolved_pty.lateExecFailure());
 }
 
 test "an exec failure is reported, not masqueraded as a normal exit" {
