@@ -515,7 +515,7 @@ fn reflowUpdate(model: *ReflowModel, msg: ReflowMsg) void {
     }
 }
 
-// The master-detail detail pane shape: a keyed subtree per selection
+// The list-detail detail pane shape: a keyed subtree per selection
 // wrapping conditional badges plus trailing text, so switching the
 // selection removes pills, shrinks the row, and moves what remains.
 const reflow_markup =

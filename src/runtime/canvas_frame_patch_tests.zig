@@ -635,7 +635,7 @@ fn expectDirtyRectsCover(rects: []const geometry.RectF, painted: geometry.RectF)
 }
 
 test "reflow damage covers vacated pixels plus the anti-aliasing bleed" {
-    // The master-detail regression shape: a selection change reflows a
+    // The list-detail regression shape: a selection change reflows a
     // row of rounded pills at fractional coordinates — pills get
     // removed, shrunk, moved, and replaced under new keys. Each
     // incremental present's damage must cover the OLD painted extent
