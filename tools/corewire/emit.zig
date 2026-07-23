@@ -91,6 +91,7 @@ const Emitter = struct {
     fn run(self: *Emitter) Error!void {
         try self.validateEmissionNames();
         self.validateChannelShapes();
+        try self.validateArmStorage();
         if (self.diags.hasErrors()) return;
         self.inlined = try self.inlinedNames();
         try self.header();
@@ -315,6 +316,53 @@ const Emitter = struct {
             return false;
         }
         return true;
+    }
+
+    /// Records reachable from the MODEL graph are committed-heap node
+    /// types, and the emitted lane stores such a record BY REFERENCE
+    /// when it doubles as a message arm payload (`picked: *const Item`,
+    /// verified against the shipped emitter) — a storage fact the
+    /// record payload family cannot carry, so mirroring the arm by
+    /// value would silently change the reflected layout. Refuse the
+    /// shape until the schema says storage (SCHEMA-GAPS.md); message-
+    /// only records (the corpus's synthesized inline records and event
+    /// shapes) stay by value, matching the emission.
+    fn validateArmStorage(self: *Emitter) Error!void {
+        var model_reach: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectModelReach(&model_reach, .{ .value = self.sidecar.model });
+        for (self.sidecar.msg.arms) |arm| {
+            switch (arm.payload) {
+                .record => |name| {
+                    if (nameListed(model_reach.items, name)) {
+                        self.diags.flag("msg.arms", "arm \"{s}\": record \"{s}\" is part of the model graph, which the compiled core stores by reference in message arms — a storage fact the record payload family cannot carry; keep the arm's payload a message-only record", .{ arm.name, name });
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn collectModelReach(self: *Emitter, reach: *std.ArrayListUnmanaged([]const u8), ref: TypeRef) Error!void {
+        switch (ref) {
+            .optional => |inner| try self.collectModelReach(reach, inner.*),
+            .slice => |elem| try self.collectModelReach(reach, elem.*),
+            .node, .value => |name| {
+                if (nameListed(reach.items, name)) return;
+                try reach.append(self.arena, name);
+                const entry = sidecar_mod.findStruct(self.sidecar.types, name) orelse return;
+                for (entry.fields) |field| try self.collectModelReach(reach, field.type);
+            },
+            .union_ref => |name| {
+                if (nameListed(reach.items, name)) return;
+                try reach.append(self.arena, name);
+                const entry = sidecar_mod.findUnion(self.sidecar.types, name) orelse return;
+                for (entry.arms) |arm| {
+                    if (arm.payload == .void) continue;
+                    try self.collectModelReach(reach, arm.payload);
+                }
+            },
+            else => {},
+        }
     }
 
     fn allTableNames(self: *Emitter) Error![]const []const u8 {
@@ -1432,6 +1480,38 @@ test "UpdateResult reserves only when the cmd-returning update emits it" {
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const UpdateResult = enum(u8) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+}
+
+test "a model-reachable record as a message arm payload refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Item lives in the model graph AND doubles as an arm payload: the
+    // compiled core stores that arm by reference, which the record
+    // family cannot say — mirroring by value would skew the layout.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Item\", \"fields\": [{\"name\": \"id\", \"type\": {\"kind\": \"f64\"}}]},");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"node\", \"name\": \"Item\"}}",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"picked\", \"payload\": {\"kind\": \"record\", \"name\": \"Item\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "stores by reference in message arms") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "a type named after the tag-table capture refuses" {
