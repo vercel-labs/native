@@ -2279,7 +2279,9 @@ fn promoWindowView(ui: *PromoApp.Ui, model: *const PromoModel, window_label: []c
     _ = model;
     const src = if (std.mem.eql(u8, window_label, "win-a")) "assets/clips/a.mp4" else "assets/clips/b.mp4";
     return ui.column(.{ .gap = 4, .padding = 8 }, .{
-        ui.video(.{ .src = src, .width = 128, .height = 72 }),
+        // win-a carries the house chrome so the slot repass has
+        // transport controls to keep honest.
+        ui.video(.{ .src = src, .controls = std.mem.eql(u8, window_label, "win-a"), .width = 128, .height = 72 }),
     });
 }
 
@@ -2335,6 +2337,24 @@ test "a closed window's declared video promotes the next window's declaration at
 
     // The first declaring window owns the single player.
     try std.testing.expect(std.mem.endsWith(u8, np.video.path(), "a.mp4"));
+
+    // The slot's FIRST installed build already shows the activated
+    // transport: the reconcile runs after the slot tree installs, and
+    // without the repass its chrome would advertise the pre-activation
+    // snapshot — a disabled Play over a playing video — until some
+    // later platform event.
+    {
+        const slot_layout = try harness.runtime.canvasWidgetLayout(window_a, "win-a-canvas");
+        var saw_toggle = false;
+        for (slot_layout.nodes) |node| {
+            if (node.widget.video_control == .toggle) {
+                saw_toggle = true;
+                try std.testing.expect(!node.widget.state.disabled);
+                try std.testing.expectEqualStrings("pause", node.widget.icon);
+            }
+        }
+        try std.testing.expect(saw_toggle);
+    }
 
     // The user closes window A: no on_close Msg, no rebuild — the
     // retained declaration from window B must promote on the spot,

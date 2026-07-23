@@ -2341,7 +2341,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // slot builds run after, so a slot-declared video must not
             // wait a cycle to load.
             self.captureSlotVideoDeclaration(slot.window_id, slot.pending_video_declaration);
+            const rendered = self.effects.videoSnapshot();
             self.applyVideoDeclaration(runtime);
+            // The reconcile can activate (or move) the playback this
+            // slot's build rendered — a first mount of an autoplaying
+            // declaration builds its chrome from the still-inactive
+            // snapshot — so one guarded repass renders it from the
+            // moved mirrors, the main rebuild's rule: the repass
+            // reconciles an unchanged declaration, so the mirrors are
+            // a fixed point and the guard makes one level a hard
+            // bound.
+            if (!self.video_chrome_repass and !std.meta.eql(rendered, self.effects.videoSnapshot())) {
+                self.video_chrome_repass = true;
+                defer self.video_chrome_repass = false;
+                try self.rebuildWindowSlot(runtime, slot);
+            }
         }
 
         /// One retained secondary-window `<video src>` declaration
