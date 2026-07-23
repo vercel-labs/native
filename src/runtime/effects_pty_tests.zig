@@ -30,6 +30,7 @@ const testing = std.testing;
 
 const DirectMsg = union(enum) {
     pty: effects_mod.EffectPtyEvent,
+    host: effects_mod.EffectHostResult,
 };
 
 const DirectFx = effects_mod.Effects(DirectMsg);
@@ -502,6 +503,27 @@ test "pty keys share the keyed families' space" {
     // one key space across every keyed family).
     const handle = fx.openChannel(.{ .key = 31, .on_event = undefined });
     try testing.expect(handle.shared == null);
+
+    // A host request under the live pty's key is rejected the same way
+    // (`hostRequest` enumerates the families inline for its
+    // replace-in-flight rule, so the pty window must be there too)...
+    fx.hostRequest(.{ .key = 31, .name = "probe", .on_result = DirectFx.hostMsg(.host) });
+    const rejected = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expect(rejected == .host);
+    try testing.expectEqual(@as(u64, 31), rejected.host.key);
+    try testing.expect(!rejected.host.ok);
+
+    // ...and the key frees with the exit's delivery: the same request
+    // then reaches the (fake) executor, parks, and answers when fed.
+    try fx.feedPtyExit(31, 0, 0, .exited, 0);
+    const exit = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expect(exit == .pty);
+    fx.hostRequest(.{ .key = 31, .name = "probe", .on_result = DirectFx.hostMsg(.host) });
+    try testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
+    try fx.feedHostResult(31, true, "answered");
+    const answered = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expect(answered == .host);
+    try testing.expect(answered.host.ok);
 }
 
 test "replay never spawns: an armed channel parks the spawn and feeds deliver the session" {

@@ -1714,6 +1714,90 @@ test "a target-less composition owns its surface's keys - and its resolution rel
     try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
 }
 
+test "an input-method-owned key never activates a freshly focused widget" {
+    const TestApp = struct {
+        activations: u32 = 0,
+        committed_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-ime-widget-activation", .source = platform.WebViewSource.html("<h1>A</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.target != null and keyboard_event.keyboard.phase == .key_down) {
+                        self.activations += 1;
+                    }
+                    if (keyboard_event.target == null and keyboard_event.keyboard.phase == .text_input) {
+                        self.committed_count += 1;
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    harness.runtime.views[0].focused = true;
+
+    // The composition starts target-less (nothing focused)...
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b",
+    } });
+    // ...then a button takes focus while it is still open. The
+    // confirming Enter — surfaced BEFORE the commit on some hosts —
+    // belongs to the input method: it must not press the button.
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 10, 96, 32), .text = "Run" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.activations);
+
+    // The commit resolves target-less (the composition's owner), and
+    // only a GENUINE Enter afterwards presses the button.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.activations);
+}
+
 test "a target-less composition dies at its surface's blur - the next composition belongs to the focused editor" {
     const TestApp = struct {
         committed_count: u32 = 0,

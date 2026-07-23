@@ -193,6 +193,7 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // scrollback, palette override, or partial escape sequence from the
     // session that just ended. (A no-op on the first spawn.)
     model.session.reset();
+    model.session.refreshScreenText();
     fx.ptySpawn(.{
         .key = shell_key,
         .argv = &.{ default_shell, "-i" },
@@ -210,6 +211,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.output_batches += 1;
                 model.output_bytes += event.bytes.len;
                 feedOutput(model, fx, event.bytes);
+                // Cells changed: refresh the grid's accessibility text
+                // (which also carries real cell state into the session
+                // fingerprint — byte counters alone would verify a
+                // wrong screen).
+                model.session.refreshScreenText();
                 // The child produced output, so it is reading: its stdin
                 // FIFO likely has room now — push any pending outbound,
                 // then let a reply the full ring retained take the room
@@ -255,6 +261,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (!model.session.resize(size.cols, size.rows)) return;
             model.cols = size.cols;
             model.rows = size.rows;
+            model.session.refreshScreenText();
             fx.ptyResize(shell_key, size.cols, size.rows);
             flushOutbound(model, fx);
         },
@@ -644,11 +651,17 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
 const TerminalUi = TerminalApp.Ui;
 
 pub fn view(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
+    // The grid panel's accessibility surface IS the viewport text: a
+    // terminal's semantic content is its cells, so screen readers hear
+    // the real screen — and the session fingerprint (the a11y-tree
+    // hash) covers cell state, not just byte counters: two runs with
+    // identical counters but different screens never verify alike.
+    const screen = model.session.screenText();
     return ui.column(.{}, .{
         headerView(ui, model),
         // The grid region: layout space the chrome-painted terminal
         // fills beneath the widget tree.
-        ui.panel(.{ .grow = 1, .semantics = .{ .label = "Terminal grid" } }, .{}),
+        ui.panel(.{ .grow = 1, .semantics = .{ .label = if (screen.len > 0) screen else "Terminal grid" } }, .{}),
         statusView(ui, model),
     });
 }

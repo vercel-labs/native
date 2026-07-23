@@ -58,6 +58,13 @@ pub const Session = struct {
     response_buffer: []u8 = &.{},
     response_len: usize = 0,
     responses_dropped: u32 = 0,
+    /// Cached viewport plain text (see `refreshScreenText`): the grid's
+    /// accessibility surface and the fingerprint's cell-state coverage.
+    /// Sized for the clamped cell budget at worst-case UTF-8 plus row
+    /// separators; a longer render (never produced by the clamp) keeps
+    /// its prefix.
+    screen_text: [32 * 1024]u8 = undefined,
+    screen_text_len: usize = 0,
     /// Keyboard-selection state: the anchor stays put, the head moves.
     select_anchor: ?CellPos = null,
     select_head: CellPos = .{},
@@ -324,9 +331,22 @@ pub const Session = struct {
     fn applySelection(session: *Session) void {
         const anchor = session.select_anchor orelse return;
         const screen = session.term.screens.active;
-        const tl = screen.pages.pin(.{ .viewport = .{ .x = anchor.x, .y = anchor.y } }) orelse return;
-        const br = screen.pages.pin(.{ .viewport = .{ .x = session.select_head.x, .y = session.select_head.y } }) orelse return;
-        screen.select(vt.Selection.init(tl, br, session.select_block)) catch {};
+        // Any failure below CLEARS the emulator selection rather than
+        // leaving the previous range live: the model caret has already
+        // moved, so a copy against the stale range would return text
+        // the painted outline no longer describes. No-selection is the
+        // honest degraded state — the caret keeps painting from
+        // `select_head`, and the next successful move re-establishes
+        // the highlight.
+        const tl = screen.pages.pin(.{ .viewport = .{ .x = anchor.x, .y = anchor.y } }) orelse {
+            screen.clearSelection();
+            return;
+        };
+        const br = screen.pages.pin(.{ .viewport = .{ .x = session.select_head.x, .y = session.select_head.y } }) orelse {
+            screen.clearSelection();
+            return;
+        };
+        screen.select(vt.Selection.init(tl, br, session.select_block)) catch screen.clearSelection();
     }
 
     /// The selected text, caller-owned (freed with the sentinel).
@@ -341,6 +361,25 @@ pub const Session = struct {
     /// grid (real cell state, no pixels).
     pub fn plainText(session: *Session, gpa: std.mem.Allocator) ![]const u8 {
         return session.term.plainString(gpa);
+    }
+
+    /// Refresh the cached viewport text — the grid's ACCESSIBILITY
+    /// surface (a terminal's semantic content IS its text) and, through
+    /// the a11y tree, the session-fingerprint coverage of real cell
+    /// state: two screens with identical byte counters but different
+    /// cells must never fingerprint alike. Called wherever cells change
+    /// (output feeds, resizes, the restart reset).
+    pub fn refreshScreenText(session: *Session) void {
+        const text = session.term.plainString(session.gpa) catch return;
+        defer session.gpa.free(text);
+        const take = @min(text.len, session.screen_text.len);
+        @memcpy(session.screen_text[0..take], text[0..take]);
+        session.screen_text_len = take;
+    }
+
+    /// The cached viewport text (see `refreshScreenText`).
+    pub fn screenText(session: *const Session) []const u8 {
+        return session.screen_text[0..session.screen_text_len];
     }
 };
 

@@ -7254,6 +7254,16 @@ pub fn Effects(comptime Msg: type) type {
             if (self.channelOccupiesKey(options.key) or self.stagedChannelOccupiesKey(options.key)) {
                 return self.rejectHost(options.key, options.on_result);
             }
+            // Pty occupancies too: from spawn until the `.exit`
+            // terminal delivers, plus the staged executor-truth
+            // start-failure window — the same shared-namespace rule
+            // every other keyed issuer applies through
+            // `keyOccupiedUntilDelivery` (this pre-flight enumerates
+            // the families inline only because a same-key HOST
+            // occupancy is replaced, never rejected).
+            if (self.ptyOccupiesKey(options.key) or self.stagedPtyOccupiesKey(options.key)) {
+                return self.rejectHost(options.key, options.on_result);
+            }
             const slot_index = blk: {
                 // In flight = running (no answer yet) OR draining with
                 // an undelivered answer: both are replaced, dropping

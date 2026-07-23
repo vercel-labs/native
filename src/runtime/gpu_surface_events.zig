@@ -327,14 +327,36 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 => null,
                 else => return err,
             };
-            const keyboard_dismissed_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
+            // A live target-less composition owns its surface's
+            // UNCHORDED keys wholesale, and it owns them BEFORE any
+            // widget pass runs: on hosts that surface the key ahead of
+            // the input method's result, the confirming Enter (or a
+            // candidate-navigation arrow, or the cancelling Escape)
+            // would otherwise dismiss a popup, move widget focus, or
+            // activate a freshly focused button while the composition
+            // it belongs to is still open. Chorded keys stay live —
+            // input methods never consume command chords, so those are
+            // genuine shortcuts even mid-composition.
+            const targetless_composition_owns_keys = (input_event.kind == .key_down or input_event.kind == .key_up) and
+                !canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event) and
+                self.targetless_ime_preedit_len > 0 and
+                self.targetless_ime_preedit_window == input_event.window_id and
+                std.mem.eql(
+                    u8,
+                    self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                    input_event.label,
+                );
+            const keyboard_dismissed_id = if (targetless_composition_owns_keys)
+                0
+            else
+                try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
             if (keyboard_dismissed_id != 0) dismissed_surface_id = keyboard_dismissed_id;
             const widget_surface_dismissed = keyboard_dismissed_id != 0;
-            const widget_focus_moved = if (widget_surface_dismissed)
+            const widget_focus_moved = if (widget_surface_dismissed or targetless_composition_owns_keys)
                 false
             else
                 try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromKeyboardInput(self, input_event);
-            var widget_keyboard_event = if (widget_surface_dismissed)
+            var widget_keyboard_event = if (widget_surface_dismissed or targetless_composition_owns_keys)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetKeyboardInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -535,6 +557,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // held, on hosts that emit input-method text before its
                 // key_down) must flow, not feed a stale latch.
                 if (input_event.kind == .text_input and split_claim.coversText(input_event.text)) break :blk true;
+                // An input-method-owned key claims nothing (it reached
+                // no widget above) and must not arm the carry either.
+                if (targetless_composition_owns_keys) break :blk false;
                 const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
                 // Arm the carry when this claimed key_down brought no
                 // text of its own — its committed character may follow
@@ -597,26 +622,20 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // dismissed a surface was consumed by the dismissal and
                 // never falls through.
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    // A live composition owns its surface's keyboard:
-                    // while this surface holds a target-less preedit,
-                    // every key_down is input-method machinery —
-                    // candidate-navigation arrows and Backspace, and the
-                    // confirming Enter on hosts that surface the key
-                    // before the commit — never an app-level key (a
-                    // terminal mapping Enter to CR would submit the
-                    // half-composed command). Hosts that run the
-                    // input-method filter BEFORE surfacing the key (GTK)
-                    // suppress consumed composition keys at the source,
-                    // so a key_down arriving after the resolution is a
-                    // genuine keystroke on every host and always flows.
-                    const composition_owns_key = self.targetless_ime_preedit_len > 0 and
-                        self.targetless_ime_preedit_window == input_event.window_id and
-                        std.mem.eql(
-                            u8,
-                            self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
-                            input_event.label,
-                        );
-                    if (self.views[index].kind == .gpu_surface and self.views[index].focused and !composition_owns_key) {
+                    // The composition-ownership gate again (see
+                    // `targetless_composition_owns_keys` above): while
+                    // this surface holds a target-less preedit, an
+                    // unchorded key_down is input-method machinery —
+                    // candidate navigation, the confirming Enter on
+                    // hosts that surface the key before the commit —
+                    // never an app-level key (a terminal mapping Enter
+                    // to CR would submit the half-composed command).
+                    // Hosts that run the input-method filter BEFORE
+                    // surfacing the key (GTK) suppress consumed
+                    // composition keys at the source, so a key_down
+                    // arriving after the resolution is a genuine
+                    // keystroke on every host and always flows.
+                    if (self.views[index].kind == .gpu_surface and self.views[index].focused and !targetless_composition_owns_keys) {
                         try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                             .window_id = input_event.window_id,
                             .view_label = self.views[index].label,

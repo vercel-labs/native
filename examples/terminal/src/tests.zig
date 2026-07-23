@@ -1057,6 +1057,32 @@ test "a restarted shell starts its refused-write tally at zero" {
     try testing.expectEqual(@as(u32, 0), app_state.model.dropped_writes);
 }
 
+test "the session fingerprint covers real cells, not just byte counters" {
+    const gpa = testing.allocator;
+    // Two sessions fed the SAME number of output bytes with different
+    // contents: identical counters, different screens. The grid's
+    // accessibility surface carries the viewport text, so the state
+    // fingerprint (the a11y-tree hash) must differ — a VT regression
+    // that garbles cells while preserving lengths can never verify.
+    var fingerprints: [2]u64 = undefined;
+    const outputs = [2][]const u8{ "demo$ AB", "demo$ BA" };
+    for (outputs, 0..) |output, index| {
+        const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+        defer harness.destroy(gpa);
+        const app_state = try startFocusedTerminal(gpa, harness);
+        defer gpa.destroy(app_state);
+        defer app_state.model.session.destroy();
+        defer app_state.deinit();
+        const app_iface = app_state.app();
+        try app_state.effects.feedPtyOutput(1, output);
+        try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+        try harness.runtime.dispatchPlatformEvent(app_iface, .frame_requested);
+        fingerprints[index] = harness.runtime.sessionStateFingerprint();
+        try testing.expect(fingerprints[index] != 0);
+    }
+    try testing.expect(fingerprints[0] != fingerprints[1]);
+}
+
 test "a recorded terminal session replays byte-identical offline - no shell present" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
