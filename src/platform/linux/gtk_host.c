@@ -1433,13 +1433,26 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return FALSE;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+    const int had_preedit = view->gpu_im_context && native_sdk_gpu_surface_has_preedit(view);
     if (view->gpu_im_context && event && gtk_im_context_filter_keypress(view->gpu_im_context, event)) {
-        /* The IM context consumed the key: committed text and preedit updates
-         * already flowed through the commit / preedit-changed handlers as
-         * text_input / ime_* events. Still surface a key_down with an empty
-         * text payload so activation keys (space, enter) and canvas key
-         * handlers keep firing; the runtime only inserts text from key_down
-         * events that carry text, so nothing is inserted twice. */
+        /* The IM context consumed the key. A key consumed WHILE a composition
+         * is active (before the filter ran, or opened by it) is composition
+         * machinery — candidate navigation, the confirming Enter, a
+         * cancelling Escape — and belongs wholly to the input method:
+         * surface nothing, or an app-level key consumer (a terminal) would
+         * double the confirm into its own key handling. This covers both
+         * synchronous IMs (the commit/cancel handlers ran inside the filter
+         * call, clearing the preedit had_preedit captured) and asynchronous
+         * ones (the preedit is still visible while the key is consumed). */
+        if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) return TRUE;
+        /* Consumed with no composition anywhere in sight (the everyday
+         * GtkIMContextSimple commit of a plain printable): committed text
+         * and preedit updates already flowed through the commit /
+         * preedit-changed handlers as text_input / ime_* events. Still
+         * surface a key_down with an empty text payload so activation keys
+         * (space, enter) and canvas key handlers keep firing; the runtime
+         * only inserts text from key_down events that carry text, so nothing
+         * is inserted twice. */
         (void)native_sdk_gpu_key_event(view, keyval, state, NATIVE_SDK_GTK_GPU_INPUT_KEY_DOWN, 0);
         return TRUE;
     }

@@ -160,8 +160,7 @@ pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
     // first unrelated commit.
     view.canvas_widget_claimed_key_grace = .none;
     if ((runtime.targetless_ime_preedit_len > 0 or
-        runtime.targetless_ime_commit_grace or
-        runtime.targetless_ime_resolved_key_grace) and
+        runtime.targetless_ime_commit_grace) and
         runtime.targetless_ime_preedit_window == view.window_id and
         std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
     {
@@ -172,7 +171,6 @@ pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
         // takes focus, routing that editor's commit target-less.
         runtime.targetless_ime_preedit_len = 0;
         runtime.targetless_ime_commit_grace = false;
-        runtime.targetless_ime_resolved_key_grace = false;
     }
 }
 

@@ -51,6 +51,15 @@ const grid_command_budget: usize = 1700;
 /// the grid far more than its clamped cell count can fill.
 const grid_text_reserve: usize = 4096;
 
+/// Distinct-code-point allowance for the grid, a proxy for the
+/// runtime's per-view glyph-atlas entries: the view's capacity minus
+/// headroom for the header/status chrome, whose labels and counters are
+/// a few dozen distinct ASCII glyphs (256 is generous). Without it, a
+/// screen of thousands of distinct scalars plus distinct combining
+/// marks overflows the atlas and fails the whole frame instead of
+/// degrading row-wise.
+const grid_glyph_budget: usize = native_sdk.runtime.max_canvas_glyphs_per_view - 256;
+
 /// The pending-outbound ring size. Generous headroom (4x the pty's
 /// 64 KiB stdin FIFO) so only a paste or reply burst far larger than
 /// this, into a child that never reads, reaches the drop path — and even
@@ -721,6 +730,7 @@ fn buildChrome(model: *const Model, builder: *canvas.Builder, size: geometry.Siz
         .selecting = model.selecting,
         .command_budget = grid_command_budget,
         .text_reserve = grid_text_reserve,
+        .glyph_budget = grid_glyph_budget,
     });
 }
 

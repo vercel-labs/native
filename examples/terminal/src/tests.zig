@@ -131,6 +131,112 @@ test "the grid paints real text runs with theme-derived ANSI and exact truecolor
     try testing.expect(saw_exact);
 }
 
+test "a styled wide character's background covers both of its cells" {
+    const session = try createSession(30, 4);
+    defer session.destroy();
+    // Red background behind a double-width glyph: ghostty styles only
+    // the PRIMARY cell, so the spacer tail must extend the same run or
+    // the right half renders on the default background.
+    session.feed("\x1b[41m\xe7\x95\x8c\x1b[0m\r\n");
+
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const tokens: canvas.DesignTokens = .{};
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = tokens,
+        .running = true,
+        .selecting = false,
+    });
+    const cell_w = session.cell_width;
+    var saw_two_cell_bg = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rect => |fill| {
+                // The ANSI-41 run: destructive-derived red, starting at
+                // the row origin — its width must span BOTH cells.
+                if (std.math.approxEqAbs(f32, fill.fill.color.r, tokens.colors.destructive.r, 0.01) and
+                    fill.rect.x == 0 and fill.rect.width > cell_w * 1.5)
+                {
+                    saw_two_cell_bg = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_two_cell_bg);
+}
+
+test "the glyph budget degrades row-wise before the atlas can overflow" {
+    const session = try createSession(30, 4);
+    defer session.destroy();
+    // Two rows of eight distinct CJK scalars each: sixteen distinct
+    // code points total.
+    session.feed("\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89\xe5\x9b\x9b\xe4\xba\x94\xe5\x85\xad\xe4\xb8\x83\xe5\x85\xab\r\n");
+    session.feed("\xe4\xb9\x9d\xe5\x8d\x81\xe7\x99\xbe\xe5\x8d\x83\xe4\xb8\x87\xe5\x84\x84\xe5\x85\x86\xe4\xba\xac\r\n");
+
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // Ten distinct code points allowed: the first row's eight fit, the
+    // second row's eight would cross — painting stops BEFORE it instead
+    // of failing the whole frame at the atlas.
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .running = true,
+        .selecting = false,
+        .glyph_budget = 10,
+    });
+    var saw_first = false;
+    var saw_second = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (std.mem.indexOf(u8, text.text, "\xe4\xb8\x80") != null) saw_first = true;
+                if (std.mem.indexOf(u8, text.text, "\xe4\xb9\x9d") != null) saw_second = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_first);
+    try testing.expect(!saw_second);
+}
+
+test "a grapheme cluster the emulator holds paints whole - down to the last mark" {
+    const session = try createSession(30, 4);
+    defer session.destroy();
+    // One cell: base + 200 combining acutes + a final enclosing mark.
+    // The paint scratch is sized to the WHOLE display-list text store,
+    // so any cluster the emulator can hold emits complete — the paint
+    // tier is never the binding constraint. (The pinned emulator's own
+    // grapheme storage bounds a cluster at roughly 256 scalars; the
+    // scratch stays store-sized so larger clusters keep painting whole
+    // as that bound moves.)
+    const cluster = "a" ++ ("\u{0301}" ** 200) ++ "\u{20DD}";
+    session.feed(cluster);
+
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .running = true,
+        .selecting = false,
+    });
+    var saw_full_cluster = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (text.text.len >= cluster.len and std.mem.indexOf(u8, text.text, cluster) != null) {
+                    saw_full_cluster = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_full_cluster);
+}
+
 test "a concealed row never blanks the rows painted after it" {
     const session = try createSession(80, 6);
     defer session.destroy();
@@ -491,7 +597,7 @@ test "IME: a preedit is provisional; only the commit reaches the pty" {
     try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
 }
 
-test "IME: composition keys never encode into the pty - navigation, the confirming enter, then fresh keys" {
+test "IME: composition keys never encode into the pty - and the commit releases them" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
     defer harness.destroy(gpa);
@@ -501,8 +607,11 @@ test "IME: composition keys never encode into the pty - navigation, the confirmi
     defer app_state.deinit();
     const app_iface = app_state.app();
 
-    // Candidate navigation DURING the composition: the arrow belongs to
-    // the input method, never the emulator's encoder.
+    // DURING the composition, keys belong to the input method: the
+    // candidate-navigation arrow and the confirming Enter (which hosts
+    // that surface the key before the commit deliver mid-composition)
+    // must not reach the emulator's encoder — a CR here would submit
+    // the half-composed command.
     try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "terminal-canvas",
@@ -515,27 +624,25 @@ test "IME: composition keys never encode into the pty - navigation, the confirmi
         .kind = .key_down,
         .key = "arrowdown",
     } });
-    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
-
-    // The confirming Enter's own key_down trails the commit on hosts
-    // that run the input-method filter first: the child must see the
-    // composed bytes and NOT a CR that would submit the command early.
-    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "terminal-canvas",
-        .kind = .ime_commit_composition,
-        .text = "",
-    } });
     try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "terminal-canvas",
         .kind = .key_down,
         .key = "enter",
     } });
-    try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
 
-    // A genuinely fresh Enter afterwards encodes CR — the swallow is
-    // one keystroke, never a mode.
+    // The commit inserts the composed bytes and RELEASES the keys: a
+    // candidate can be committed by mouse in the OS popup with no
+    // trailing key at all, so the next Enter is genuine typing and
+    // encodes CR.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
     try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "terminal-canvas",

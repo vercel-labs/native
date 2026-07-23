@@ -643,8 +643,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             // surface — cancellation zeroes the preedit length before
             // arming the grace, so both states gate the clear). The
             // buffer stays allocated; only the ownership state clears.
-            if ((self.targetless_ime_preedit_len > 0 or self.targetless_ime_commit_grace or
-                self.targetless_ime_resolved_key_grace) and
+            if ((self.targetless_ime_preedit_len > 0 or self.targetless_ime_commit_grace) and
                 self.targetless_ime_preedit_window == self.views[index].window_id and
                 std.mem.eql(
                     u8,
@@ -654,7 +653,6 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             {
                 self.targetless_ime_preedit_len = 0;
                 self.targetless_ime_commit_grace = false;
-                self.targetless_ime_resolved_key_grace = false;
             }
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {

@@ -28,7 +28,13 @@ const grid_id_base: u64 = 0x7e21_0000_0000_0000;
 
 /// One text run's staging capacity — shared by the paint loop's scratch
 /// and the preflight's per-cell cap so measure and emission agree.
-const text_scratch_bytes: usize = 8192;
+/// Sized to the WHOLE display-list text store, so the paint tier is
+/// never the binding constraint on a grapheme cluster: any cluster the
+/// emulator hands over paints complete, and only a cluster the store
+/// itself cannot hold skips — row-atomically, the preflight rule. (The
+/// emulator's own grapheme storage bounds clusters well below this
+/// today; the store-sized scratch keeps that true as its bound moves.)
+const text_scratch_bytes: usize = canvas.max_display_list_text_bytes;
 
 /// One live emulator session. Heap-owned by the app (the model holds a
 /// pointer): the emulator allocates internally and its state is derived
@@ -369,7 +375,65 @@ pub const PaintOptions = struct {
     /// always fit. 0 means the grid may use the whole store (tests that
     /// paint no widgets).
     text_reserve: usize = 0,
+    /// Ceiling on DISTINCT code points the grid may put on screen in one
+    /// paint — a proxy bound for the runtime's per-view glyph-atlas
+    /// entries, which an adversarial screen (thousands of distinct
+    /// scalars plus distinct combining marks) can exhaust long before
+    /// the command or text budgets bind, failing the whole frame
+    /// instead of a row. Painting stops row-atomically BEFORE the row
+    /// whose new code points would cross it. 0 means unbounded (tests
+    /// that size their own builder).
+    glyph_budget: usize = 0,
 };
+
+/// Distinct-code-point probe set backing `PaintOptions.glyph_budget`:
+/// open-addressed, power-of-two slots, zero meaning empty (a stored
+/// value is `cp + 1` so U+0000 never aliases an empty slot). Sized at
+/// twice the runtime's per-view atlas capacity so any honest budget
+/// stays under half load and lookups stay O(1); budgets are clamped to
+/// half the slots so the probe loop can never run against a full table.
+const glyph_probe_slots: usize = 16384;
+
+fn glyphProbeInsert(slots: *[glyph_probe_slots]u32, cp: u21) bool {
+    const stored: u32 = @as(u32, cp) + 1;
+    var index: usize = (stored *% 0x9E37_79B1) >> (32 - 14);
+    while (true) {
+        const entry = slots[index];
+        if (entry == stored) return false;
+        if (entry == 0) {
+            slots[index] = stored;
+            return true;
+        }
+        index = (index + 1) & (glyph_probe_slots - 1);
+    }
+}
+
+/// Count the row's code points NOT yet in `seen`, inserting them —
+/// mirroring the paint loop's emissions exactly (spacer cells and
+/// invisible-styled cells contribute nothing). Entries inserted by a
+/// row the budget then rejects stay in the set harmlessly: painting
+/// stops at that row, so the set is never consulted again.
+fn rowNewGlyphs(row: anytype, seen: *[glyph_probe_slots]u32) usize {
+    var new_count: usize = 0;
+    var i: usize = 0;
+    while (i < row.cells.len) : (i += 1) {
+        const cell = row.cells.get(i);
+        if (cell.raw.wide == .spacer_tail or cell.raw.wide == .spacer_head) continue;
+        const cp: u21 = switch (cell.raw.content_tag) {
+            .codepoint, .codepoint_grapheme => cell.raw.content.codepoint.data,
+            else => 0,
+        };
+        if (cp == 0) continue;
+        if (cell.raw.style_id != 0 and cell.style.flags.invisible) continue;
+        if (glyphProbeInsert(seen, cp)) new_count += 1;
+        if (cell.raw.content_tag == .codepoint_grapheme) {
+            for (cell.grapheme) |extra| {
+                if (glyphProbeInsert(seen, extra)) new_count += 1;
+            }
+        }
+    }
+    return new_count;
+}
 
 /// Paint the session's viewport into the display list: per-row
 /// background runs, the selection wash, per-run text, decorations, the
@@ -445,12 +509,18 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         0;
     var text_bytes_emitted: usize = 0;
 
-    // A run's staging buffer. Sized well past a full narrow row
-    // (`max_cols * 4`) so a cell carrying a heavy grapheme cluster
-    // (hundreds of combining marks) still stages whole — a legitimate
-    // cluster is at most a few hundred bytes, so 8 KiB is generous. The
-    // run-break flushes when the buffer nears full, so long runs simply
-    // split across draw commands rather than overflow.
+    // The glyph-atlas proxy budget (see `PaintOptions.glyph_budget`):
+    // clamped under half the probe table so insertion can never scan a
+    // full ring; the set costs one 64 KiB clear per bounded paint.
+    const glyph_budget = @min(options.glyph_budget, glyph_probe_slots / 2);
+    var glyph_seen: [glyph_probe_slots]u32 = undefined;
+    if (glyph_budget > 0) @memset(&glyph_seen, 0);
+    var glyphs_counted: usize = 0;
+
+    // A run's staging buffer, sized to the whole text store (see
+    // `text_scratch_bytes`): any cluster the store can hold stages
+    // whole. The run-break flushes when the buffer nears full, so long
+    // runs simply split across draw commands rather than overflow.
     var text_scratch: [text_scratch_bytes]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
@@ -462,6 +532,14 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         // bytes and stop BEFORE it if the store cannot hold them — never
         // emit a row's first runs and then fail mid-row.
         if (text_bytes_emitted + rowTextBytes(row) > text_store) break;
+        // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
+        // whose new DISTINCT code points would cross the atlas proxy —
+        // the frame degrades to fewer rows instead of failing whole on
+        // `GlyphAtlasListFull`.
+        if (glyph_budget > 0) {
+            glyphs_counted += rowNewGlyphs(row, &glyph_seen);
+            if (glyphs_counted > glyph_budget) break;
+        }
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         // Rows STARTING at or past the frame's bottom paint nothing
         // visible; a row straddling the edge still paints and the clip
@@ -472,9 +550,19 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         // Background runs: contiguous cells sharing a non-default bg.
         var run_start: usize = 0;
         var run_color: ?canvas.Color = null;
+        var prev_bg: ?canvas.Color = null;
         var x: usize = 0;
         while (x <= row.cells.len) : (x += 1) {
-            const bg: ?canvas.Color = if (x < row.cells.len) cellBackground(row.cells.get(x), &palette) else null;
+            const bg: ?canvas.Color = if (x < row.cells.len) blk: {
+                const cell = row.cells.get(x);
+                // A wide glyph's style lives on its PRIMARY cell only:
+                // the spacer tail extends the primary's background, or a
+                // styled wide character (red-on-`界`, inverse video)
+                // would paint over half its width.
+                if (cell.raw.wide == .spacer_tail) break :blk prev_bg;
+                break :blk cellBackground(cell, &palette);
+            } else null;
+            prev_bg = bg;
             if (run_color) |color| {
                 const same = if (bg) |next| colorEql(color, next) else false;
                 if (!same) {
@@ -599,10 +687,10 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                 for (cell.grapheme) |extra| {
                     // Stop before a partial code point: the break lands
                     // BETWEEN combining marks, so the emitted run is
-                    // always valid UTF-8. Only a single cell carrying
-                    // more than the 8 KiB buffer of marks (a Zalgo
-                    // attack, never legitimate text) loses trailing
-                    // marks — bounded and codepoint-safe.
+                    // always valid UTF-8. The buffer is the whole text
+                    // store, and the row preflight already skipped any
+                    // row whose cluster bytes exceed it — this floor is
+                    // defensive, never the working bound.
                     if (text_len + 8 > text_scratch.len) break;
                     text_len += std.unicode.utf8Encode(extra, text_scratch[text_len..]) catch 0;
                 }
@@ -686,8 +774,9 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
 /// (`rowTextBytes`) sums these against the text store, so this must
 /// mirror the paint loop's suppressions exactly: an invisible-styled
 /// cell paints nothing, and a cluster's marks stop at the run scratch's
-/// capacity (the Zalgo cap). Counting suppressed bytes would measure a
-/// paintable row past the budget and silently blank every row after it.
+/// capacity (the store itself). Counting suppressed bytes would measure
+/// a paintable row past the budget and silently blank every row after
+/// it.
 fn cellTextBytes(cell: anytype) usize {
     const cp: u21 = switch (cell.raw.content_tag) {
         .codepoint, .codepoint_grapheme => cell.raw.content.codepoint.data,

@@ -794,10 +794,14 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     // A long-lived, NON-READING child spawned BEFORE the bind — the one
     // shape where a running pty can meet a failed publication — with a
     // write in flight, so the io thread's outbound machinery is live
-    // across the abandon.
+    // across the abandon. The child IGNORES SIGHUP so the wind-down's
+    // graceful kill cannot end it: the io thread is provably inside its
+    // bounded reap escalation (hundreds of milliseconds) when the
+    // synthetic exit delivers, making the leak assertion below
+    // deterministic rather than a race against a fast reap.
     fx.ptySpawn(.{
         .key = 56,
-        .argv = &.{ "/bin/sh", "-c", "exec sleep 30" },
+        .argv = &.{ "/bin/sh", "-c", "trap '' HUP; exec sleep 30" },
         .on_event = DirectFx.ptyMsg(.pty),
     });
     try testing.expect(fx.ptyWrite(56, "in-flight bytes\r"));

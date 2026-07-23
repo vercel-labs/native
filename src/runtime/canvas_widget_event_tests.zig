@@ -1602,7 +1602,7 @@ test "a programmatic focus move disarms the cancel grace like a pointer one" {
     try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
 }
 
-test "a target-less composition owns its surface's keys - navigation and the trailing resolver stop, fresh keys flow" {
+test "a target-less composition owns its surface's keys - and its resolution releases them" {
     const TestApp = struct {
         keydown_count: u32 = 0,
         committed_count: u32 = 0,
@@ -1641,8 +1641,10 @@ test "a target-less composition owns its surface's keys - navigation and the tra
     harness.runtime.views[0].focused = true;
 
     // DURING the composition, key_downs are input-method machinery
-    // (candidate navigation): never app-level keys — a terminal mapping
-    // ArrowDown would scroll while the user is picking a candidate.
+    // (candidate navigation, the confirming Enter on hosts that surface
+    // the key before the commit): never app-level keys — a terminal
+    // mapping ArrowDown would scroll while the user is picking a
+    // candidate.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
@@ -1655,12 +1657,20 @@ test "a target-less composition owns its surface's keys - navigation and the tra
         .kind = .key_down,
         .key = "arrowdown",
     } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
     try std.testing.expectEqual(@as(u32, 0), app_state.keydown_count);
 
-    // The commit delivers the composed text; the confirming key's own
-    // key_down TRAILS it on hosts that run the input-method filter
-    // before surfacing the key — swallowed, or Enter would also send a
-    // key the app maps (CR submitting a half-typed shell command).
+    // The commit delivers the composed text and ENDS the ownership: a
+    // key_down arriving after the resolution is a genuine keystroke on
+    // every host (hosts whose input method consumes the resolving key
+    // suppress it at the source), so a candidate committed by MOUSE in
+    // the OS popup — no trailing key at all — never costs the next
+    // Enter, arrow, or Backspace.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
@@ -1674,18 +1684,9 @@ test "a target-less composition owns its surface's keys - navigation and the tra
         .kind = .key_down,
         .key = "enter",
     } });
-    try std.testing.expectEqual(@as(u32, 0), app_state.keydown_count);
-    // One-shot: a genuinely fresh Enter afterwards is an app key.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
-        .kind = .key_down,
-        .key = "enter",
-    } });
     try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
 
-    // The cancel shape: Escape's own key_down trails the cancel it
-    // produced — swallowed once, and the next Escape flows.
+    // A cancel releases the keys the same way.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
@@ -1695,59 +1696,22 @@ test "a target-less composition owns its surface's keys - navigation and the tra
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
-        .kind = .ime_cancel_composition,
-    } });
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
         .kind = .key_down,
-        .key = "escape",
+        .key = "backspace",
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
-        .kind = .key_down,
-        .key = "escape",
-    } });
-    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
-
-    // The converted-commit shape: cancel, the trailing text_input (the
-    // conversion's result, delivered target-less), THEN the resolving
-    // key's key_down — still swallowed, the grace re-arms across the
-    // conversion.
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
-        .kind = .ime_set_composition,
-        .text = "\xe3\x81\x8d",
-    } });
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
         .kind = .ime_cancel_composition,
     } });
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
-        .kind = .text_input,
-        .text = "ki",
-    } });
-    try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
         .kind = .key_down,
-        .key = "enter",
+        .key = "escape",
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-        .window_id = 1,
-        .label = "canvas",
-        .kind = .key_down,
-        .key = "enter",
-    } });
-    try std.testing.expectEqual(@as(u32, 3), app_state.keydown_count);
 }
 
 test "a target-less composition dies at its surface's blur - the next composition belongs to the focused editor" {
