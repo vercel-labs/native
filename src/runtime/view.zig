@@ -424,6 +424,16 @@ pub const RuntimeView = struct {
     scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]geometry.OffsetF = undefined,
     scroll_driver_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
+    /// The text-entry widget whose editor OWNS the in-flight IME
+    /// composition — set when a `set_composition` routes to it, cleared
+    /// when its commit/cancel (or a direct text insertion) resolves the
+    /// sequence. A composition belongs to the editor it STARTED in:
+    /// commit and cancel route here even when focus has since moved, so
+    /// the starting editor resolves its own marked text instead of the
+    /// sequence leaking to the newly focused widget or the target-less
+    /// fallback (`canvas_widget_focused_id` is where NEW input goes;
+    /// this is where the open sequence finishes).
+    canvas_widget_ime_owner_id: canvas.ObjectId = 0,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     /// True when `canvas_widget_focus_visible_id` was written by the
     /// KEYBOARD focus contract (`setCanvasWidgetFocusFromKeyboard`) —

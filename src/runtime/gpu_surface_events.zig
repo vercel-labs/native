@@ -403,6 +403,20 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 };
             if (widget_text_input_event) |*text_input_event| {
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, text_input_event);
+                // Composition ownership follows the ROUTED editor: a
+                // set_composition opens (or continues) the sequence in
+                // its target, and the sequence's commit/cancel — or a
+                // direct insertion — closes it, releasing the routing
+                // pin that kept continuations with the starting editor
+                // across focus moves.
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    switch (input_event.kind) {
+                        .ime_set_composition => self.views[index].canvas_widget_ime_owner_id =
+                            text_input_event.keyboard.focused_id orelse 0,
+                        .ime_commit_composition, .ime_cancel_composition, .text_input => self.views[index].canvas_widget_ime_owner_id = 0,
+                        else => {},
+                    }
+                }
             }
             // The refresh batch stays open across the app dispatches
             // below: a click's pointer-up used to emit once for the

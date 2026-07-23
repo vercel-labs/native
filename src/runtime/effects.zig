@@ -4524,6 +4524,10 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             self.pty_pending_count.store(0, .release);
+            // Settle any surrendered reap whose child has since died —
+            // teardown is the last cheap moment before the process
+            // would otherwise carry the zombie.
+            if (comptime pty_transport.supported) pty_transport.reapSurrendered();
             // Close every external-source channel FIRST among the
             // loop-side teardowns: clearing `open` under each shared
             // mutex fences the app's posting threads off this struct
@@ -10757,6 +10761,17 @@ pub fn Effects(comptime Msg: type) type {
         /// real reason and FED under replay, where the re-run spawn
         /// parks a slot this terminal retires (the channel
         /// classification, applied to transports).
+        ///
+        /// Runs SYNCHRONOUSLY on the loop thread by design: the
+        /// spawn-position start verdict is part of the record/replay
+        /// contract (a start failure delivers at the spawn's dispatch
+        /// position, retiring the replay park). The cost is bounded —
+        /// a handful of syscalls plus the half-second exec probe, whose
+        /// unresolved case carries to the reap instead of waiting — with
+        /// one residual: the PATH walk's `access()` probes have no
+        /// timeout, so an executable searched through a stalled
+        /// NFS/autofs PATH entry stalls the loop like any synchronous
+        /// filesystem touch of that mount would.
         fn startRealPty(self: *Self, slot: *PtySlot, options: PtySpawnOptions) void {
             if (comptime !pty_transport.supported) {
                 // ptySpawn already refused unsupported builds.

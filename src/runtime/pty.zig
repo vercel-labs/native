@@ -52,6 +52,48 @@ const SpinLock = struct {
 };
 var pty_spawn_mutex: SpinLock = .{};
 
+/// Pids whose reap was SURRENDERED (a SIGKILL'd child the kernel held in
+/// uninterruptible I/O past the bounded window). They are polled again —
+/// WNOHANG, never blocking — at every later spawn and at teardown, so a
+/// child that dies after its device or mount recovers is reaped then
+/// instead of lingering as a zombie for the process's life. A full table
+/// drops the oldest entry (that one keeps the documented zombie); more
+/// than a handful of simultaneously wedged children means the machine
+/// has bigger problems than process-table slots.
+const max_surrendered_pids = 16;
+var surrendered_pids: [max_surrendered_pids]c_int = @splat(-1);
+var surrendered_lock: SpinLock = .{};
+
+fn recordSurrenderedPid(pid: c_int) void {
+    surrendered_lock.lock();
+    defer surrendered_lock.unlock();
+    for (&surrendered_pids) |*slot| {
+        if (slot.* < 0) {
+            slot.* = pid;
+            return;
+        }
+    }
+    // Full: overwrite the oldest (slot 0) — its zombie stands, the
+    // newer surrender gets the retry chance.
+    surrendered_pids[0] = pid;
+}
+
+/// Opportunistically reap previously surrendered children (WNOHANG,
+/// bounded). Called at spawn entry and teardown; safe from any thread.
+pub fn reapSurrendered() void {
+    if (comptime !supported) return;
+    surrendered_lock.lock();
+    defer surrendered_lock.unlock();
+    for (&surrendered_pids) |*slot| {
+        if (slot.* < 0) continue;
+        var status: c_int = 0;
+        const r = c.waitpid(slot.*, &status, wnohang);
+        // Reaped, or already gone (ECHILD from an embedder reaper):
+        // either way the entry is settled. 0 = still wedged, keep it.
+        if (r != 0) slot.* = -1;
+    }
+}
+
 /// pty support is a POSIX story: openpty + a controlling terminal.
 /// Windows (ConPTY) is staged separately; every non-posix target reports
 /// the effect as unsupported rather than pretending. macOS always links
@@ -232,16 +274,18 @@ pub const Pty = struct {
         // Poll a further bounded window, then surrender the reap: the
         // exit event must reach the app (an io thread wedged here would
         // strand the session with no exit forever), so past the deadline
-        // the kill is reported as the ending and the SIGKILL'd child is
-        // left for the kernel — it dies (and zombies, since this thread
-        // will not wait again) whenever its syscall returns. A bounded,
-        // loud-in-effect leak that beats an unbounded hang; nothing
-        // signals the pid after this (`reaping` stays published).
+        // the kill is reported as the ending and the pid parks on the
+        // surrendered list — later spawns and teardown re-poll it
+        // (WNOHANG), so a child that dies when its mount recovers is
+        // reaped then rather than zombieing for the process's life.
+        // Nothing signals the pid after this (`reaping` stays
+        // published).
         waited_us = 0;
         while (waited_us < 5_000_000) : (waited_us += 20_000) {
             if (self.reap()) |exit| return exit;
             _ = c.usleep(20_000);
         }
+        recordSurrenderedPid(self.pid);
         return .{ .code = -1, .signal = sigkill };
     }
 
@@ -301,6 +345,9 @@ pub const EnvVar = struct {
 /// the spawn effect's `bindEnviron` draws.
 pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     if (!supported) return error.PtyUnsupported;
+    // A cheap moment to settle any surrendered reap whose child has
+    // since died (its stalled device recovered).
+    reapSurrendered();
     if (options.argv.len == 0 or options.argv.len > max_argv) return error.PtyArgvInvalid;
     // An argv entry with an embedded NUL would be silently truncated at
     // the C boundary (execve reads to the first NUL) — reject it rather
@@ -586,7 +633,14 @@ const ExecProbe = enum { succeeded, failed, unresolved };
 /// pipe on the transport, where the reap-time check converts a late
 /// failure byte into the exit's `spawn_failed` instead of guessing.
 fn execStatus(fd: c_int) ExecProbe {
-    const timeout_ns: u64 = 10 * std.time.ns_per_s;
+    // Half a second, not seconds: the probe runs on the caller's (loop)
+    // thread, and since an unresolved verdict is CARRIED to the reap —
+    // where a late failure still reports `spawn_failed` exactly — the
+    // deadline buys only the nicety of a synchronous rejection for the
+    // common instant failure (a missing shebang interpreter reports
+    // within milliseconds). Anything slower resolves through the exit
+    // event instead of holding the loop.
+    const timeout_ns: u64 = 500 * std.time.ns_per_ms;
     // The bound is a DEADLINE, not a per-poll timeout: `poll` restarts
     // with a fresh timeout on every EINTR, so a fixed per-call timeout
     // would let signals arriving less than the bound apart defer the

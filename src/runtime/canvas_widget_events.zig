@@ -186,19 +186,35 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!self.views[index].focused) return null;
-            const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return null;
-            // Text and IME only belong to an EDITABLE focused widget. A
-            // focused non-text widget (a button, a list row) cannot
-            // consume a composition, so returning null here lets the
-            // committed text fall through to the app's target-less
-            // `on_text` seam instead of being routed to a widget that
-            // drops it — the terminal-with-a-focused-button case.
             const tree = self.views[index].widgetLayoutTree();
-            if (tree.findById(focused_id)) |node| {
+            // An open IME sequence belongs to the editor it STARTED in:
+            // its set/commit/cancel continue to route to the owning
+            // text entry even when keyboard focus has since moved, so
+            // the starting editor resolves its own marked text — never
+            // the newly focused widget, never the target-less fallback.
+            const ime_owner = self.views[index].canvas_widget_ime_owner_id;
+            const target_id = switch (input_event.kind) {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => id: {
+                    if (ime_owner != 0) {
+                        if (tree.findById(ime_owner)) |node| {
+                            if (canvas.isWidgetTextEntry(node.widget)) break :id ime_owner;
+                        }
+                    }
+                    break :id self.views[index].canvas_widget_focused_id;
+                },
+                else => self.views[index].canvas_widget_focused_id,
+            };
+            if (target_id == 0) return null;
+            // Text and IME only belong to an EDITABLE widget. A focused
+            // non-text widget (a button, a list row) cannot consume a
+            // composition, so returning null here lets the committed
+            // text fall through to the app's target-less `on_text` seam
+            // instead of being routed to a widget that drops it — the
+            // terminal-with-a-focused-button case.
+            if (tree.findById(target_id)) |node| {
                 if (!canvas.isWidgetTextEntry(node.widget)) return null;
             }
-            const keyboard = canvasWidgetTextInputEventFromGpuInput(input_event, focused_id) orelse return null;
+            const keyboard = canvasWidgetTextInputEventFromGpuInput(input_event, target_id) orelse return null;
 
             const route = try tree.routeKeyboardEvent(keyboard, output);
             if (route.target == null) return null;
