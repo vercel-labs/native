@@ -129,11 +129,11 @@
   },
   "abi": {
     "prefix": "nsc_core_",
-    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "boot_cmd",
-      "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes",
-      "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input",
-      "dispatch_scroll_state", "subscriptions", "frame_reset", "model_snapshot",
-      "helper_call", "collect", "frame_msg", "key_msg", "pinch_msg"],
+    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "collect",
+      "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
+      "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
+      "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
+      "helper_call", "frame_msg", "key_msg", "pinch_msg"],
     "snapshot_format": 1
   },
   "integer_slots": [

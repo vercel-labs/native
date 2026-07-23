@@ -178,15 +178,20 @@ pub const Sidecar = struct {
 
 // ----------------------------------------------------- ABI vocabulary
 
-/// The unconditional export suffixes of ABI version 1, in the canonical
-/// order the sidecar's `abi.exports` must list them (core_abi.zig binds
-/// the matching extern signatures). The four conditional channel-entry
-/// suffixes follow, present exactly when the matching channel is wired.
+/// The unconditional export suffixes of ABI version 1, in the NORMATIVE
+/// canonical order the sidecar's `abi.exports` must list them: the two
+/// identity getters, then the mode-provided entries (sink registration,
+/// init, collect, result reset), then the program's entry-point map
+/// (core_abi.zig binds the matching extern signatures). The four
+/// conditional channel-entry suffixes follow, present exactly when the
+/// matching channel is wired.
 pub const unconditional_exports = [_][]const u8{
     "abi_version",
     "build_id",
     "set_panic_sink",
     "init",
+    "collect",
+    "frame_reset",
     "boot_cmd",
     "dispatch_void",
     "dispatch_bytes",
@@ -198,10 +203,8 @@ pub const unconditional_exports = [_][]const u8{
     "dispatch_text_input",
     "dispatch_scroll_state",
     "subscriptions",
-    "frame_reset",
     "model_snapshot",
     "helper_call",
-    "collect",
 };
 
 pub const conditional_exports = [_][]const u8{
@@ -1364,15 +1367,17 @@ fn validateChannels(sidecar: Sidecar, diags: *Diagnostics) void {
 
 fn validateAbi(sidecar: Sidecar, diags: *Diagnostics) void {
     // The list must be exactly: every unconditional suffix, then the
-    // wired conditional suffixes, in the profile's canonical order. The
-    // "and the object exports nothing else" half needs the object and
-    // runs at link time.
+    // wired conditional suffixes, in the normative canonical order —
+    // identity getters, mode-provided entries (set_panic_sink, init,
+    // collect, frame_reset), then the entry-point map. The "and the
+    // object exports nothing else" half needs the object and runs at
+    // link time.
     var cursor: usize = 0;
     for (unconditional_exports) |suffix| {
         if (cursor < sidecar.abi.exports.len and std.mem.eql(u8, sidecar.abi.exports[cursor], suffix)) {
             cursor += 1;
         } else {
-            diags.flag(pathOfStatic(diags, "abi.exports[{d}]", .{cursor}), "expected the unconditional export \"{s}\" here — abi.exports lists every unconditional suffix, then the wired channel entries, in the profile's canonical order (V11)", .{suffix});
+            diags.flag(pathOfStatic(diags, "abi.exports[{d}]", .{cursor}), "expected the unconditional export \"{s}\" here — abi.exports lists every unconditional suffix, then the wired channel entries, in the canonical order: identity getters (abi_version, build_id), the mode-provided entries (set_panic_sink, init, collect, frame_reset), then the entry-point map (V11)", .{suffix});
             return;
         }
     }
@@ -1548,11 +1553,11 @@ pub const minimal_valid_json =
     \\  },
     \\  "abi": {
     \\    "prefix": "nsc_core_",
-    \\    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "boot_cmd",
-    \\      "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes",
-    \\      "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input",
-    \\      "dispatch_scroll_state", "subscriptions", "frame_reset", "model_snapshot",
-    \\      "helper_call", "collect"],
+    \\    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "collect",
+    \\      "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
+    \\      "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
+    \\      "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
+    \\      "helper_call"],
     \\    "snapshot_format": 1
     \\  },
     \\  "integer_slots": [
@@ -1878,15 +1883,15 @@ test "V10: an integer_slots entry naming no i64 slot refuses" {
 test "V11: an unknown export suffix refuses" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"collect\"]", "\"collect\", \"mystery_entry\"]");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"mystery_entry\"]");
     try expectRefusal(source, "abi.exports[19]", "not an export suffix of ABI version 1");
 }
 
 test "V11: a missing unconditional export refuses with the expected suffix" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"init\", \"boot_cmd\",", "\"init\",");
-    try expectRefusal(source, "abi.exports[4]", "expected the unconditional export \"boot_cmd\"");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"init\", \"collect\",", "\"init\",");
+    try expectRefusal(source, "abi.exports[4]", "expected the unconditional export \"collect\"");
 }
 
 test "unknown TypeRef kinds refuse as reader-too-old" {

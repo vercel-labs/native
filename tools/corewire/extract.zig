@@ -163,11 +163,11 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
         const has_subscriptions = @hasDecl(core, "subscriptions");
 
         var abi_exports: []const u8 =
-            "\"abi_version\", \"build_id\", \"set_panic_sink\", \"init\", \"boot_cmd\", " ++
-            "\"dispatch_void\", \"dispatch_bytes\", \"dispatch_number\", \"dispatch_number_bytes\", " ++
-            "\"dispatch_bool\", \"dispatch_enum\", \"dispatch_record\", \"dispatch_text_input\", " ++
-            "\"dispatch_scroll_state\", \"subscriptions\", \"frame_reset\", \"model_snapshot\", " ++
-            "\"helper_call\", \"collect\"";
+            "\"abi_version\", \"build_id\", \"set_panic_sink\", \"init\", \"collect\", " ++
+            "\"frame_reset\", \"boot_cmd\", \"dispatch_void\", \"dispatch_bytes\", " ++
+            "\"dispatch_number\", \"dispatch_number_bytes\", \"dispatch_bool\", \"dispatch_enum\", " ++
+            "\"dispatch_record\", \"dispatch_text_input\", \"dispatch_scroll_state\", " ++
+            "\"subscriptions\", \"model_snapshot\", \"helper_call\"";
         if (has_command) abi_exports = abi_exports ++ ", \"command_msg\"";
         if (has_frame) abi_exports = abi_exports ++ ", \"frame_msg\"";
         if (has_key) abi_exports = abi_exports ++ ", \"key_msg\"";
