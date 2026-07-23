@@ -252,19 +252,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
 /// Append outbound bytes (typed keys, pastes, or query replies) to the
 /// pending ring in stream order, then flush what the pty's stdin FIFO
 /// will take. A large payload is not submitted all at once: `flushOutbound`
-/// paces it as the child reads, so the tail is never dropped. Bytes that
-/// overrun the (large) ring are counted, not silently lost.
+/// paces it as the child reads, so the tail is never dropped. Admission
+/// is ALL-OR-NOTHING: a payload the ring cannot hold whole is dropped
+/// whole and counted — a query reply or encoded key cut mid-sequence
+/// would feed the child a malformed control sequence, which is worse
+/// than a counted loss. Reaching the drop at all means the child ignored
+/// 256 KiB of pending input; the count is surfaced, never silent.
 fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) void {
     const cap = model.outbound_buffer.len;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        if (model.outbound_len == cap) {
-            model.outbound_dropped += bytes.len - i;
-            break;
-        }
-        model.outbound_buffer[(model.outbound_head + model.outbound_len) % cap] = bytes[i];
-        model.outbound_len += 1;
+    if (bytes.len > cap - model.outbound_len) {
+        model.outbound_dropped += bytes.len;
+        return;
     }
+    for (bytes, 0..) |byte, i| {
+        model.outbound_buffer[(model.outbound_head + model.outbound_len + i) % cap] = byte;
+    }
+    model.outbound_len += bytes.len;
     flushOutbound(model, fx);
 }
 
@@ -319,8 +322,9 @@ fn feedOutput(model: *Model, fx: *Fx, bytes: []const u8) void {
 /// makes them lossless: a reply refused by a full FIFO stays queued and
 /// retries, never cleared before it lands (which would hang a child
 /// blocking on it). The sub-sliced feed keeps each move well under the
-/// emulator's reply buffer, so it rarely overflows; a genuine overflow
-/// counts into `responses_dropped` rather than tearing a reply.
+/// emulator's reply buffer; a pending ring too full to take the batch
+/// whole drops it whole into `outbound_dropped` (all-or-nothing
+/// admission) — counted, never a torn escape sequence.
 fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
     const pending = model.session.pendingResponses();
     if (pending.len > 0) enqueueOutbound(model, fx, pending);

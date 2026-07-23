@@ -559,6 +559,42 @@ test "chorded punctuation and function keys encode their control sequences" {
     try testing.expectEqualStrings("\x1c\x1b[91;5u\x1bOP", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "a payload the outbound ring cannot hold whole is dropped whole, never torn" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // One committed payload larger than the whole pending ring: a
+    // prefix cut at the ring edge could tear an escape sequence, so
+    // admission is all-or-nothing — dropped whole and counted, nothing
+    // queued, nothing written.
+    const oversized = try gpa.alloc(u8, app_state.model.outbound_buffer.len + 1);
+    defer gpa.free(oversized);
+    @memset(oversized, 'z');
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = oversized,
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+    try testing.expectEqual(@as(u64, oversized.len), app_state.model.outbound_dropped);
+
+    // The stream is intact past the drop: the next keystroke flows.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "ok",
+    } });
+    try testing.expectEqualStrings("ok", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "reset clears the previous session's palette and dynamic color overrides" {
     const session = try createSession(80, 24);
     defer session.destroy();
