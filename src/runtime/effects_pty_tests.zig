@@ -205,8 +205,8 @@ test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed gu
     // fake has no child, so recomputing admission locally would answer
     // `true` for the first write and diverge any model that retained
     // the refused bytes.
-    try fx.pushReplayPtyWriteVerdict(false);
-    try fx.pushReplayPtyWriteVerdict(true);
+    try fx.pushReplayPtyWriteVerdict(81, false);
+    try fx.pushReplayPtyWriteVerdict(81, true);
     try testing.expect(!fx.ptyWrite(81, "retained bytes"));
     try testing.expect(fx.ptyWrite(81, "delivered bytes"));
 
@@ -214,10 +214,31 @@ test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed gu
     // sides return true before the admission decision), and a write
     // past the recorded count answers optimistically with a divergence
     // warning rather than trapping.
-    try fx.pushReplayPtyWriteVerdict(false);
-    try testing.expect(fx.ptyWrite(81, ""));
+    try fx.pushReplayPtyWriteVerdict(81, false);
+    try testing.expect(fx.ptyWrite(81, "")); // no verdict consumed
     try testing.expect(!fx.ptyWrite(81, "consumes the queued refusal"));
     try testing.expect(fx.ptyWrite(81, "past the recording"));
+}
+
+test "the replay verdict queue grows past its inline window and stays keyed" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    fx.ptySpawn(.{ .key = 84, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+
+    // Every verdict a dispatch recorded feeds BEFORE that dispatch
+    // replays, so one update that wrote thousands of chunks (a giant
+    // paste) queues them all at once: the queue must grow, not refuse
+    // its own recording. Alternate the bits so a popped verdict proves
+    // order survived the spill copies.
+    const count = effects_mod.max_effect_replay_pty_write_inline * 4 + 3;
+    for (0..count) |i| {
+        try fx.pushReplayPtyWriteVerdict(84, i % 2 == 0);
+    }
+    for (0..count) |i| {
+        try testing.expectEqual(i % 2 == 0, fx.ptyWrite(84, "chunk"));
+    }
+    try fx.settleReplayFeeds();
 }
 
 test "settle refuses replay write-count divergence in both directions" {
@@ -228,7 +249,7 @@ test "settle refuses replay write-count divergence in both directions" {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
-        try fx.pushReplayPtyWriteVerdict(true);
+        try fx.pushReplayPtyWriteVerdict(82, true);
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
     }
     // Underflow: the replayed updates wrote MORE times than the
@@ -243,13 +264,26 @@ test "settle refuses replay write-count divergence in both directions" {
         try testing.expect(fx.ptyWrite(82, "past the recording"));
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
     }
+    // A write against a DIFFERENT pty than the verdict was recorded
+    // for: same count, same result, still divergent input — the keyed
+    // comparison catches what a global boolean sequence would pass.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try fx.pushReplayPtyWriteVerdict(82, true);
+        try testing.expect(fx.ptyWrite(83, "wrong session"));
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
     // Exact consumption settles clean.
     {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
-        try fx.pushReplayPtyWriteVerdict(false);
+        try fx.pushReplayPtyWriteVerdict(83, false);
         try testing.expect(!fx.ptyWrite(83, "recorded"));
         try fx.settleReplayFeeds();
     }

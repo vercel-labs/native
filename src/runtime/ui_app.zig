@@ -1383,11 +1383,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         ),
                         // Write-admission verdicts are executor truth
                         // (whether the FIFO had room depends on how fast
-                        // the child was reading): queue each for the
+                        // the child was reading): queue each — WITH the
+                        // pty key it was recorded against — for the
                         // replayed dispatch's own `ptyWrite` calls, which
-                        // consume them in call order — the clock feed's
-                        // shape.
-                        .write => try self.effects.pushReplayPtyWriteVerdict(record.code == 1),
+                        // consume them in call order against the same
+                        // key (the clock feed's shape, keyed: the same
+                        // count and results against a different session
+                        // is still divergent input).
+                        .write => try self.effects.pushReplayPtyWriteVerdict(record.key, record.code == 1),
                     },
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every

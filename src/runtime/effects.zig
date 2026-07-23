@@ -1731,11 +1731,24 @@ pub const EffectResultKind = enum(u8) {
 /// Bounded like everything else: more reads per drain window than this
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
-/// Replay-queued `ptyWrite` verdicts held between drains. One dispatch
-/// can legitimately issue hundreds of writes (a large paste drained in
+/// Inline capacity of the replay `ptyWrite` verdict queue. One dispatch
+/// can legitimately issue ANY number of writes (a large paste drained in
 /// per-write-bound chunks, refused chunks retried within the same
-/// update), so the bound is generous; a bitset keeps it one bit each.
-pub const max_effect_replay_pty_write_entries: usize = 4096;
+/// update), and every verdict for a dispatch feeds before the dispatch
+/// replays — so the queue must hold a whole dispatch's worth and spills
+/// to the heap past this inline window (the pending-stage growth story:
+/// a fixed bound would reject a valid recording).
+pub const max_effect_replay_pty_write_inline: usize = 64;
+
+/// One journaled `ptyWrite` admission verdict awaiting its replayed
+/// write: the pty KEY it was recorded against and the accepted bit.
+/// Keyed on purpose — a replayed run that wrote to a DIFFERENT pty with
+/// the same call count and results is still divergent input, and only
+/// the key comparison can see it.
+pub const ReplayPtyWriteVerdict = struct {
+    key: u64,
+    accepted: bool,
+};
 
 /// Inline capacity of the replayed video cascade-resolution queue
 /// (`Effects.pushReplayVideoSource`). Records precede the event whose
@@ -3957,20 +3970,26 @@ pub fn Effects(comptime Msg: type) type {
         /// often than the recorded one). Reported loudly once.
         replay_clock_underflows: u64 = 0,
         /// Journaled `ptyWrite` admission verdicts queued for replay-mode
-        /// writes (FIFO; fed from `.pty`/`.write` records before the
-        /// consuming event dispatches — the `replay_clock` shape). The
-        /// verdict is executor truth: live it depends on how fast the
-        /// child drained the outbound FIFO, so a replayed write must take
-        /// the RECORDED path — retaining or removing the app's pending
-        /// bytes exactly as the live run did — never an optimistic
-        /// recomputation against a fake with no child.
-        replay_pty_write_verdicts: std.StaticBitSet(max_effect_replay_pty_write_entries) = .initEmpty(),
+        /// writes (keyed FIFO; fed from `.pty`/`.write` records before
+        /// the consuming event dispatches — the `replay_clock` shape,
+        /// with the pending-stage inline+spill growth so a dispatch that
+        /// wrote any number of times replays whole). The verdict is
+        /// executor truth: live it depends on how fast the child drained
+        /// the outbound FIFO, so a replayed write must take the RECORDED
+        /// path — retaining or removing the app's pending bytes exactly
+        /// as the live run did — never an optimistic recomputation
+        /// against a fake with no child.
+        replay_pty_write_verdicts: [max_effect_replay_pty_write_inline]ReplayPtyWriteVerdict = undefined,
+        replay_pty_write_spill: []ReplayPtyWriteVerdict = &.{},
         replay_pty_write_head: usize = 0,
         replay_pty_write_len: usize = 0,
-        /// Replay writes that found no journaled verdict: a divergence
-        /// signal (the replayed update wrote more often than the recorded
-        /// one). Reported loudly once.
-        replay_pty_write_underflows: u64 = 0,
+        /// Replay writes that diverged from the journaled verdict stream:
+        /// a write past the recorded count, or a write against a
+        /// DIFFERENT pty key than the verdict at the queue's head (same
+        /// count and results against another session is still divergent
+        /// input). Reported loudly once; the end-of-journal settle turns
+        /// any nonzero count into a replay failure.
+        replay_pty_write_divergences: u64 = 0,
         /// Journaled launch-env deliveries queued for the replay-mode
         /// envMsgs dispatch (FIFO; fed from `.env` records before the
         /// installing event dispatches). Empty under replay means the
@@ -4845,6 +4864,13 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(self.staged_keys);
                 self.staged_keys = &.{};
             }
+            // And an undrained replay write-verdict spill.
+            if (self.replay_pty_write_spill.len > 0) {
+                self.allocator.free(self.replay_pty_write_spill);
+                self.replay_pty_write_spill = &.{};
+            }
+            self.replay_pty_write_head = 0;
+            self.replay_pty_write_len = 0;
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -5246,13 +5272,36 @@ pub fn Effects(comptime Msg: type) type {
             self.replay_clock_len += 1;
         }
 
+        /// The verdict queue's current backing storage —
+        /// `pendingStagedStorage`'s twin.
+        fn replayPtyWriteStorage(self: *Self) []ReplayPtyWriteVerdict {
+            if (self.replay_pty_write_spill.len > 0) return self.replay_pty_write_spill;
+            return &self.replay_pty_write_verdicts;
+        }
+
         /// Queue one journaled `ptyWrite` admission verdict for a
         /// replay-mode write (the `.pty`/`.write` record feed — the
-        /// clock queue's shape).
-        pub fn pushReplayPtyWriteVerdict(self: *Self, accepted: bool) error{EffectNotFound}!void {
-            if (self.replay_pty_write_len >= max_effect_replay_pty_write_entries) return error.EffectNotFound;
-            const index = (self.replay_pty_write_head + self.replay_pty_write_len) % max_effect_replay_pty_write_entries;
-            self.replay_pty_write_verdicts.setValue(index, accepted);
+        /// clock queue's shape, growable past the inline window because
+        /// every verdict a dispatch recorded feeds BEFORE that dispatch
+        /// replays: a fixed bound would reject a valid recording whose
+        /// one update wrote more times than the bound).
+        pub fn pushReplayPtyWriteVerdict(self: *Self, key: u64, accepted: bool) error{EffectNotFound}!void {
+            const storage = self.replayPtyWriteStorage();
+            if (self.replay_pty_write_len == storage.len) {
+                const new_cap = storage.len * 2;
+                const grown = self.allocator.alloc(ReplayPtyWriteVerdict, new_cap) catch return error.EffectNotFound;
+                for (grown[0..self.replay_pty_write_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.replay_pty_write_head + index) % storage.len];
+                }
+                if (self.replay_pty_write_spill.len > 0) self.allocator.free(self.replay_pty_write_spill);
+                self.replay_pty_write_spill = grown;
+                self.replay_pty_write_head = 0;
+            }
+            const active = self.replayPtyWriteStorage();
+            active[(self.replay_pty_write_head + self.replay_pty_write_len) % active.len] = .{
+                .key = key,
+                .accepted = accepted,
+            };
             self.replay_pty_write_len += 1;
         }
 
@@ -5265,11 +5314,11 @@ pub fn Effects(comptime Msg: type) type {
         /// optimistic answer and changes no state), so the settle check
         /// is what makes write-count divergence loud.
         pub fn settleReplayFeeds(self: *Self) error{ReplayDivergence}!void {
-            if (self.replay_pty_write_underflows > 0) {
+            if (self.replay_pty_write_divergences > 0) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(
-                        "replay diverged: {d} ptyWrite call(s) past the journaled verdicts - the replayed updates wrote more often than the recording did (nondeterminism outside the effect boundary?)\n",
-                        .{self.replay_pty_write_underflows},
+                        "replay diverged: {d} ptyWrite call(s) ran past the journaled verdicts or wrote to a different pty than the recording did (nondeterminism outside the effect boundary?)\n",
+                        .{self.replay_pty_write_divergences},
                     );
                 }
                 return error.ReplayDivergence;
@@ -5286,15 +5335,18 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Pop the next journaled write verdict for a replay-mode
-        /// `ptyWrite`. An empty queue is a divergence signal (the
-        /// replayed update wrote more often than the recording did);
-        /// reported once and answered optimistically so the dispatch can
-        /// finish — the end-of-journal settle check (`settleReplayFeeds`)
-        /// turns the count into a loud replay failure.
-        fn takeReplayPtyWriteVerdict(self: *Self) bool {
+        /// `ptyWrite` against `key`. An empty queue, or a head verdict
+        /// recorded against a DIFFERENT pty, is a divergence signal (the
+        /// replayed update wrote more, or wrote elsewhere, than the
+        /// recording did); reported once and answered optimistically so
+        /// the dispatch can finish — the end-of-journal settle check
+        /// (`settleReplayFeeds`) turns the count into a loud replay
+        /// failure either way (a key mismatch also strands its verdict,
+        /// so the leftover check backstops it too).
+        fn takeReplayPtyWriteVerdict(self: *Self, key: u64) bool {
             if (self.replay_pty_write_len == 0) {
-                self.replay_pty_write_underflows += 1;
-                if (self.replay_pty_write_underflows == 1 and comptime builtin.os.tag != .freestanding) {
+                self.replay_pty_write_divergences += 1;
+                if (self.replay_pty_write_divergences == 1 and comptime builtin.os.tag != .freestanding) {
                     std.debug.print(
                         "session replay: a ptyWrite found no journaled verdict - the replayed update writes more often than the recording did (nondeterministic control flow); answering accepted\n",
                         .{},
@@ -5302,10 +5354,28 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return true;
             }
-            const accepted = self.replay_pty_write_verdicts.isSet(self.replay_pty_write_head);
-            self.replay_pty_write_head = (self.replay_pty_write_head + 1) % max_effect_replay_pty_write_entries;
+            const storage = self.replayPtyWriteStorage();
+            const head = storage[self.replay_pty_write_head];
+            if (head.key != key) {
+                self.replay_pty_write_divergences += 1;
+                if (self.replay_pty_write_divergences == 1 and comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "session replay: a ptyWrite against key {d} found a verdict recorded against key {d} - the replayed update writes to a different pty than the recording did (nondeterministic control flow); answering accepted\n",
+                        .{ key, head.key },
+                    );
+                }
+                return true;
+            }
+            self.replay_pty_write_head = (self.replay_pty_write_head + 1) % storage.len;
             self.replay_pty_write_len -= 1;
-            return accepted;
+            if (self.replay_pty_write_len == 0) {
+                self.replay_pty_write_head = 0;
+                if (self.replay_pty_write_spill.len > 0) {
+                    self.allocator.free(self.replay_pty_write_spill);
+                    self.replay_pty_write_spill = &.{};
+                }
+            }
+            return head.accepted;
         }
 
         /// Journal one launch-env delivery (an `.env` record): the TS
@@ -6617,7 +6687,7 @@ pub fn Effects(comptime Msg: type) type {
         pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) bool {
             const slot = self.findPtySlot(key) orelse return false;
             if (bytes.len == 0) return true;
-            if (self.replay) return self.takeReplayPtyWriteVerdict();
+            if (self.replay) return self.takeReplayPtyWriteVerdict(key);
             const accepted = ptyWriteAdmit(slot, bytes);
             self.journalNote(.{
                 .kind = .pty,
