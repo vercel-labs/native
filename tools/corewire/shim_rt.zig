@@ -249,6 +249,7 @@ pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T
             }
             @panic("a core buffer carries a union arm index past the declared arms — the compiled core and the generated shim disagree about the contract; rebuild the app");
         },
+        .void => return {},
         else => @compileError("the canonical value encoding has no form for " ++ @typeName(T)),
     }
 }

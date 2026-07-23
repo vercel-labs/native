@@ -59,7 +59,8 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(2);
     };
-    if (out_path == null and !check_only) {
+    // Exactly one mode: validate-only or generate.
+    if ((out_path == null) == !check_only) {
         try stderr.print("{s}", .{usage});
         try stderr.flush();
         std.process.exit(2);

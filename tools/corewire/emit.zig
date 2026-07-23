@@ -117,9 +117,14 @@ const Emitter = struct {
             "std",                 "shim_rt",       "core_abi",        "abi",
             "rt",                  "msg_tags",      "boot",            "initialModel",
             "update",              "UpdateResult",  "commitModelRoot", "sidecar_build_id",
-            "sidecar_abi_version", "deterministic", "async_free",      "callHelper",
-            "snapshotModel",       "msgFromWire",
+            "sidecar_abi_version", "deterministic", "async_free",      "snapshotModel",
         });
+        // Optional glue reserves its name only when it is emitted.
+        if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
+        const chan = self.sidecar.channels;
+        if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg) {
+            try reserved.append(self.arena, "msgFromWire");
+        }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
         if (self.sidecar.has_subscriptions) try reserved.append(self.arena, "subscriptions");
         if (self.sidecar.channels.command_msg) try reserved.append(self.arena, "commandMsg");
@@ -713,17 +718,17 @@ const Emitter = struct {
         const any_fn_channel = chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg;
 
         if (chan.command_msg) {
-            try self.raw(
+            try self.print(
                 \\
                 \\/// Menus, shortcuts, and chrome tabs dispatch through the core's
                 \\/// exported command mapper.
-                \\pub fn commandMsg(name: []const u8) ?Msg {
+                \\pub fn commandMsg(name: []const u8) ?{f} {{
                 \\    var out: core_abi.CoreMsg = undefined;
                 \\    if (abi.command_msg(name.ptr, name.len, &out) == 0) return null;
                 \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
-                \\}
+                \\}}
                 \\
-            );
+            , .{ident(self.sidecar.msg.name)});
         }
         if (chan.frame_msg) {
             try self.print(
@@ -738,59 +743,59 @@ const Emitter = struct {
                 \\    intervalMs: f64,
                 \\}};
                 \\
-                \\pub fn frameMsg(model: *const {f}, frame: FrameEvent) ?Msg {{
+                \\pub fn frameMsg(model: *const {f}, frame: FrameEvent) ?{f} {{
                 \\    _ = model;
                 \\    var out: core_abi.CoreMsg = undefined;
                 \\    if (abi.frame_msg(frame.width, frame.height, frame.timestampMs, frame.intervalMs, &out) == 0) return null;
                 \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
                 \\}}
                 \\
-            , .{ident(self.sidecar.model)});
+            , .{ ident(self.sidecar.model), ident(self.sidecar.msg.name) });
         }
         if (chan.key_msg) {
-            try self.raw(
+            try self.print(
                 \\
                 \\/// The key-fallback channel's record: the lowercased key name
                 \\/// plus the four modifier booleans.
-                \\pub const KeyEvent = struct {
+                \\pub const KeyEvent = struct {{
                 \\    key: []const u8,
                 \\    shift: bool,
                 \\    control: bool,
                 \\    alt: bool,
                 \\    super: bool,
-                \\};
+                \\}};
                 \\
-                \\pub fn keyMsg(key: KeyEvent) ?Msg {
+                \\pub fn keyMsg(key: KeyEvent) ?{f} {{
                 \\    var out: core_abi.CoreMsg = undefined;
                 \\    if (abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out) == 0) return null;
                 \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
-                \\}
+                \\}}
                 \\
-            );
+            , .{ident(self.sidecar.msg.name)});
         }
         if (chan.pinch_msg) {
-            try self.raw(
+            try self.print(
                 \\
-                \\pub const PinchPhase = enum(u8) { begin = 0, change = 1, end = 2 };
+                \\pub const PinchPhase = enum(u8) {{ begin = 0, change = 1, end = 2 }};
                 \\
                 \\/// The pinch channel's record: window/view source identity, the
                 \\/// multiplicative magnification delta, and the view-local anchor.
-                \\pub const PinchEvent = struct {
+                \\pub const PinchEvent = struct {{
                 \\    windowId: f64,
                 \\    label: []const u8,
                 \\    phase: PinchPhase,
                 \\    scale: f64,
                 \\    x: f64,
                 \\    y: f64,
-                \\};
+                \\}};
                 \\
-                \\pub fn pinchMsg(pinch: PinchEvent) ?Msg {
+                \\pub fn pinchMsg(pinch: PinchEvent) ?{f} {{
                 \\    var out: core_abi.CoreMsg = undefined;
                 \\    if (abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out) == 0) return null;
                 \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
-                \\}
+                \\}}
                 \\
-            );
+            , .{ident(self.sidecar.msg.name)});
         }
 
         if (chan.appearance_msg) |arm_name| {
@@ -816,20 +821,20 @@ const Emitter = struct {
         }
 
         if (any_fn_channel) {
-            try self.raw(
+            try self.print(
                 \\
                 \\/// Decode a channel entry's encoded message: the wire tag picks
                 \\/// the arm, the payload rides the canonical value encoding of
                 \\/// that arm's mirror payload type.
-                \\fn msgFromWire(tag: u8, payload: []const u8) Msg {
-                \\    switch (tag) {
+                \\fn msgFromWire(tag: u8, payload: []const u8) {f} {{
+                \\    switch (tag) {{
                 \\
-            );
+            , .{ident(self.sidecar.msg.name)});
             for (self.sidecar.msg.arms, 0..) |arm, tag| {
                 if (arm.payload == .void) {
                     try self.print("        {d} => return .{f},\n", .{ tag, ident(arm.name) });
                 } else {
-                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType(Msg, \"{f}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), std.zig.fmtString(arm.name) });
+                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
                 }
             }
             try self.raw(
@@ -1066,6 +1071,42 @@ test "exotic strings in names and env entries emit as valid Zig" {
     const tree = try std.zig.Ast.parse(arena, source_z, .zig);
     try testing.expectEqual(@as(usize, 0), tree.errors.len);
     try testing.expect(std.mem.indexOf(u8, generated, "APP\\\"MODE\\\\X") != null);
+}
+
+test "channel glue speaks the sidecar's message union name" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Rename the union to "Event" and wire the key channel.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"name\": \"Msg\"", "\"name\": \"Event\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"key_msg\": false", "\"key_msg\": true");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"collect\"]", "\"collect\", \"key_msg\"]");
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const Event = union(enum) {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub fn keyMsg(key: KeyEvent) ?Event {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "fn msgFromWire(tag: u8, payload: []const u8) Event {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "@FieldType(Event, \"label_set\")") != null);
+    const source_z = try arena.dupeZ(u8, generated);
+    const tree = try std.zig.Ast.parse(arena, source_z, .zig);
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "optional glue names are reserved only when the glue is emitted" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // No helpers and no function channels: a reachable type named
+    // "callHelper" collides with nothing the shim declares.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"callHelper\", \"members\": [\"on\", \"off\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"callHelper\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const callHelper = enum(u8) {") != null);
 }
 
 test "the shim restates the module-graph attestations" {

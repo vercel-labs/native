@@ -790,6 +790,7 @@ fn validate(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) err
     if (diags.hasErrors()) return;
     try validateAcyclic(arena, sidecar, diags);
     validateMsg(sidecar, diags);
+    validateVoidPositions(sidecar, diags);
     validateUnbound(sidecar, diags);
     validateChannels(sidecar, diags);
     validateAbi(sidecar, diags);
@@ -1115,13 +1116,62 @@ fn pathOfStatic(diags: *Diagnostics, comptime fmt: []const u8, args: anytype) []
     return std.fmt.allocPrint(diags.arena, fmt, args) catch "";
 }
 
+/// The void TypeRef means "no value" and exists for bare union arms
+/// only (the schema's stated scope); anywhere else the mirror would
+/// declare a valueless slot the snapshot encoding cannot carry.
+fn validateVoidPositions(sidecar: Sidecar, diags: *Diagnostics) void {
+    for (sidecar.types.structs, 0..) |entry, index| {
+        for (entry.fields, 0..) |field, field_index| {
+            flagVoid(field.type, pathOfStatic(diags, "types.structs[{d}].fields[{d}].type", .{ index, field_index }), diags);
+        }
+    }
+    for (sidecar.types.unions, 0..) |entry, index| {
+        for (entry.arms, 0..) |arm, arm_index| {
+            // A bare void arm is the one sanctioned use; void NESTED
+            // inside an arm's payload is not.
+            if (arm.payload == .void) continue;
+            flagVoid(arm.payload, pathOfStatic(diags, "types.unions[{d}].arms[{d}].payload", .{ index, arm_index }), diags);
+        }
+    }
+    for (sidecar.model_helpers, 0..) |helper, index| {
+        flagVoid(helper.returns, pathOfStatic(diags, "model_helpers[{d}].returns", .{index}), diags);
+        for (helper.params, 0..) |param, param_index| {
+            flagVoid(param, pathOfStatic(diags, "model_helpers[{d}].params[{d}]", .{ index, param_index }), diags);
+        }
+    }
+    for (sidecar.msg.arms, 0..) |arm, index| {
+        switch (arm.payload) {
+            .scalar => |ref| flagVoid(ref, pathOfStatic(diags, "msg.arms[{d}].payload.type", .{index}), diags),
+            else => {},
+        }
+    }
+}
+
+fn flagVoid(ref: TypeRef, at: []const u8, diags: *Diagnostics) void {
+    switch (ref) {
+        .void => diags.flag(at, "the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type", .{}),
+        .optional => |inner| flagVoid(inner.*, at, diags),
+        .slice => |elem| flagVoid(elem.*, at, diags),
+        else => {},
+    }
+}
+
 fn validateUnbound(sidecar: Sidecar, diags: *Diagnostics) void {
     const model = findStruct(sidecar.types, sidecar.model) orelse return;
+    // The opt-out vocabulary spans everything a view could bind on the
+    // model: its fields AND its exported helpers (helpers surface as
+    // bindable model methods, so an author can declare one
+    // intentionally unbound). The schema's V8 wording says "field";
+    // the reader accepts the helper case the dead-state lint actually
+    // covers — see SCHEMA-GAPS.md.
     outer: for (sidecar.model_unbound, 0..) |name, index| {
         for (model.fields) |field| {
             if (std.mem.eql(u8, field.name, name)) continue :outer;
         }
-        diags.flag(pathOfStatic(diags, "model_unbound[{d}]", .{index}), "\"{s}\" is not a field of the model struct \"{s}\" (V8)", .{ name, sidecar.model });
+        for (sidecar.model_helpers) |helper| {
+            if (std.mem.eql(u8, helper.name, name)) continue :outer;
+        }
+        diags.flag(pathOfStatic(diags, "model_unbound[{d}]", .{index}), "\"{s}\" is neither a field of the model struct \"{s}\" nor an exported helper (V8)", .{ name, sidecar.model });
     }
     outer: for (sidecar.msg.unbound, 0..) |name, index| {
         for (sidecar.msg.arms) |arm| {
@@ -1547,11 +1597,40 @@ test "V7: an unknown number class refuses as reader-too-old" {
     try expectRefusal(source, "msg.arms[0].payload.class", "unknown number class \"i128\"");
 }
 
+test "the void TypeRef outside a bare union arm refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const source = try replaced(
+        arena_state.allocator(),
+        minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"void\"}}",
+    );
+    try expectRefusal(source, "types.structs[0].fields[1].type", "legal only as a bare union arm payload");
+}
+
+test "V8: model_unbound accepts exported helper names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A helper the author declared intentionally unbound: the opt-out
+    // vocabulary spans everything a view could bind, methods included.
+    const with_helper = try replaced(
+        arena,
+        minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"summary\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
+    );
+    const source = try replaced(arena, with_helper, "\"model_unbound\": []", "\"model_unbound\": [\"summary\", \"count\"]");
+    const sidecar = try readValid(arena, source);
+    try testing.expectEqual(@as(usize, 2), sidecar.model_unbound.len);
+}
+
 test "V8: an unbound name that resolves nowhere refuses" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"model_unbound\": []", "\"model_unbound\": [\"ghost\"]");
-    try expectRefusal(source, "model_unbound[0]", "\"ghost\" is not a field of the model struct");
+    try expectRefusal(source, "model_unbound[0]", "\"ghost\" is neither a field of the model struct");
 }
 
 test "V9: an env channel targeting a non-bytes arm refuses" {
