@@ -24,10 +24,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const clock = @import("clock.zig");
 
-/// Serializes `ptsname`'s shared static buffer across every pty spawn in
-/// the process (spawns can originate from independent runtime instances
-/// on different threads). A tiny spinlock — the guarded section is a
-/// bounded name copy, microseconds at worst.
+/// Serializes the descriptor-opening half of every pty spawn in the
+/// process (spawns can originate from independent runtime instances on
+/// different threads): the section from `posix_openpt` through `fork`.
+/// Darwin ignores O_CLOEXEC on `posix_openpt` (and its pipes need a
+/// second syscall for the flag), so a CONCURRENT TOOLKIT FORK landing
+/// between an open and its fcntl would gift its exec'd child a copy of
+/// another spawn's parent-end or pipe descriptor for that child's whole
+/// life. One process-wide lock over the window means our own forks can
+/// never land inside it; an embedder forking on threads the toolkit
+/// does not own keeps the documented residual sub-syscall window, which
+/// the exec probe's timeout nets. `ptsname`'s libc-shared static buffer
+/// rides the same lock. A tiny spinlock — the guarded section is a
+/// handful of bounded syscalls, never the exec-status poll.
 const SpinLock = struct {
     locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     fn lock(self: *SpinLock) void {
@@ -37,7 +46,7 @@ const SpinLock = struct {
         self.locked.store(false, .release);
     }
 };
-var ptsname_mutex: SpinLock = .{};
+var pty_spawn_mutex: SpinLock = .{};
 
 /// pty support is a POSIX story: openpty + a controlling terminal.
 /// Windows (ConPTY) is staged separately; every non-posix target reports
@@ -133,8 +142,16 @@ pub const Pty = struct {
 
     /// Signal the child's process group. `graceful` sends SIGTERM (let the
     /// shell clean up); otherwise SIGKILL. The child was placed in its own
-    /// session by `login_tty`, so signalling the negated pid reaches the
-    /// whole job, not just the direct child.
+    /// session by `login_tty`, so signalling the negated pid reaches its
+    /// FOREGROUND process group — the direct child and everything it kept
+    /// in its group. A descendant that moved itself into another process
+    /// group (a shell's background job, a daemonizing setsid) is outside
+    /// the signal's reach: POSIX has no kill-whole-session primitive, so
+    /// such an escapee runs on detached — the spawn family's documented
+    /// limit, shared with `reapEnding`'s escalation and the io loop's
+    /// kill-then-reap path (which is why a kill never waits for the pty
+    /// to reach EOF: an escapee holding the child end open would strand
+    /// it forever).
     pub fn kill(self: Pty, graceful: bool) void {
         if (!supported) return;
         const sig: c_int = if (graceful) sigterm else sigkill;
@@ -272,21 +289,67 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         .xpixel = 0,
         .ypixel = 0,
     };
+    const pair = try spawnPair(resolved_z, argv_z, envp_z, ws);
+    // A failure byte, EOF, or the timeout resolves exec status. A real
+    // exec failure writes its byte into the pipe buffer INSTANTLY (the
+    // child's write lands before its _exit), so a byte always means
+    // failure regardless of who else holds a writer. EOF (every writer
+    // closed) is the fast success signal. The timeout is the safety net
+    // for the residual CLOEXEC window: if an EMBEDDER fork on a thread
+    // the toolkit does not own landed inside the pipe's flag window and
+    // its exec'd child inherited a copy of the write end, EOF is delayed
+    // until THAT process exits — but no failure byte arrived, so exec
+    // succeeded, and we proceed rather than hang. Bounded at a few
+    // seconds, orders of magnitude past a real exec — and polled OUTSIDE
+    // the spawn lock, which covers only bounded syscalls.
+    const failed = execFailed(pair.exec_read);
+    _ = c.close(pair.exec_read);
+    if (failed) {
+        var status: c_int = 0;
+        while (c.waitpid(pair.pid, &status, 0) < 0 and errnoValue() == eintr) {}
+        _ = c.close(pair.parent);
+        return error.PtyCommandNotFound;
+    }
+    return .{ .parent = pair.parent, .pid = pair.pid };
+}
+
+const SpawnedPair = struct {
+    parent: c_int,
+    pid: c_int,
+    exec_read: c_int,
+};
+
+/// Open the pty pair, arm the exec self-pipe, and fork — the whole
+/// descriptor-opening window — under the process-wide spawn lock (see
+/// `pty_spawn_mutex`): with every toolkit fork serialized against every
+/// toolkit open-to-CLOEXEC gap, no toolkit child can inherit another
+/// spawn's parent end or pipe ends across its exec.
+fn spawnPair(
+    resolved_z: [:0]const u8,
+    argv_z: [:null]const ?[*:0]const u8,
+    envp_z: [:null]const ?[*:0]const u8,
+    ws: Winsize,
+) Error!SpawnedPair {
+    pty_spawn_mutex.lock();
+    defer pty_spawn_mutex.unlock();
+
     // Open the pty pair by hand rather than `openpty`, so the CHILD end is
     // opened close-on-exec ATOMICALLY (`open` with O_CLOEXEC). The child
-    // end is the descriptor that matters for the inheritance race: if a
-    // concurrent fork on another thread inherited a non-CLOEXEC child end
-    // across its exec, it would hold THIS pty open after our child exits,
-    // so no EOF and no `.exit` event ever arrives. `posix_openpt` +
-    // `grantpt` + `unlockpt` is the portable primitive underneath
-    // `openpty`; the parent end's CLOEXEC is applied immediately after
-    // (Linux honors O_CLOEXEC on `posix_openpt` directly; Darwin ignores
-    // it, leaving only the parent end a sub-syscall window — benign, since
-    // an inherited parent end does not hold the pty open). pty spawns run
-    // on the loop thread, so `ptsname`'s static buffer is not raced.
+    // end is the descriptor that matters most for the inheritance race:
+    // if a concurrent fork on another thread inherited a non-CLOEXEC
+    // child end across its exec, it would hold THIS pty open after our
+    // child exits, so no EOF and no `.exit` event ever arrives.
+    // `posix_openpt` + `grantpt` + `unlockpt` is the portable primitive
+    // underneath `openpty`; the parent end's CLOEXEC is applied — and
+    // VERIFIED — immediately after (Linux honors O_CLOEXEC on
+    // `posix_openpt` directly; Darwin ignores it, which is one of the
+    // windows the spawn lock closes against our own forks).
     const parent = c.posix_openpt(o_rdwr | o_noctty | o_cloexec_open);
     if (parent < 0) return error.PtyOpenFailed;
-    _ = setCloexec(parent);
+    if (!setCloexec(parent)) {
+        _ = c.close(parent);
+        return error.PtyOpenFailed;
+    }
     // Non-blocking parent end: the sole io thread must never block inside a
     // write when the child stops reading its stdin (a full pty input
     // buffer), which would stall stdout draining and deadlock both
@@ -305,14 +368,12 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // `ptsname` returns libc-managed SHARED storage (not thread-safe):
     // two runtimes spawning ptys on different threads could otherwise
     // race, the second call overwriting the first's child-end name before
-    // it opens. A process-wide mutex serializes the resolve-and-copy so
-    // each spawn opens its own child end. (`ptsname_r` is not portably
+    // it opens. The spawn lock serializes the resolve-and-copy so each
+    // spawn opens its own child end. (`ptsname_r` is not portably
     // available — macOS lacks it on older SDKs — so a copy under the
     // lock is the portable answer.)
     var name_buf: [128]u8 = undefined;
     const child_name = blk: {
-        ptsname_mutex.lock();
-        defer ptsname_mutex.unlock();
         const shared_name = c.ptsname(parent) orelse {
             _ = c.close(parent);
             return error.PtyOpenFailed;
@@ -409,26 +470,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // PARENT.
     _ = c.close(child_fd);
     _ = c.close(exec_pipe[1]);
-    // A failure byte, EOF, or the timeout resolves exec status. A real
-    // exec failure writes its byte into the pipe buffer INSTANTLY (the
-    // child's write lands before its _exit), so a byte always means
-    // failure regardless of who else holds a writer. EOF (every writer
-    // closed) is the fast success signal. The timeout is the safety net
-    // for the residual CLOEXEC window: if a process spawn on another
-    // thread forked in the instant between this pipe's creation and its
-    // fcntl and its exec'd child inherited a copy of the write end, EOF
-    // is delayed until THAT process exits — but no failure byte arrived,
-    // so exec succeeded, and we proceed rather than hang. Bounded at a
-    // few seconds, orders of magnitude past a real exec.
-    const failed = execFailed(exec_pipe[0]);
-    _ = c.close(exec_pipe[0]);
-    if (failed) {
-        var status: c_int = 0;
-        while (c.waitpid(pid, &status, 0) < 0 and errnoValue() == eintr) {}
-        _ = c.close(parent);
-        return error.PtyCommandNotFound;
-    }
-    return .{ .parent = parent, .pid = pid };
+    return .{ .parent = parent, .pid = pid, .exec_read = exec_pipe[0] };
 }
 
 /// CHILD-side exec-failure report: write the errno byte into the self-

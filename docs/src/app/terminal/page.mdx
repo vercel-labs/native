@@ -110,7 +110,7 @@ The full app lives in [`examples/terminal`](https://github.com/native-sdk/native
     </tr>
     <tr>
       <td><code>ptyKill</code></td>
-      <td>Terminate the child's job (SIGKILL to the whole session). The exit then reports <code>cancelled</code>.</td>
+      <td>Terminate the child's job (SIGKILL to its process group — the whole foreground job; a descendant that re-grouped itself escapes, POSIX offering no kill-whole-session primitive). The exit then reports <code>cancelled</code>.</td>
     </tr>
   </tbody>
 </table>

@@ -5355,6 +5355,42 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDivergence;
             }
+            // Fed pty results still awaiting delivery: the recorder
+            // journals every result at its live DELIVERY — inside a
+            // dispatched event that follows it in the stream — so a
+            // journal that ends with a fed result still queued was
+            // truncated past its consuming event. Succeeding here would
+            // silently omit a recorded delivery. Regenerating staged
+            // rejections are exempt: the live run could also end with
+            // one staged (it journals nothing until delivery), and the
+            // replayed dispatch restaged it identically.
+            var undelivered_pty: usize = 0;
+            {
+                self.queue_mutex.lock();
+                defer self.queue_mutex.unlock();
+                var index: usize = 0;
+                while (index < self.queue_len) : (index += 1) {
+                    const entry = &self.queue[(self.queue_head + index) % max_effect_queue_entries];
+                    if (entry.kind == .pty) undelivered_pty += 1;
+                }
+            }
+            {
+                const storage = self.pendingPtyStorage();
+                var index: usize = 0;
+                while (index < self.pending_pty_len) : (index += 1) {
+                    const entry = &storage[(self.pending_pty_head + index) % storage.len];
+                    if (!entry.regenerates) undelivered_pty += 1;
+                }
+            }
+            if (undelivered_pty > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} fed pty result(s) were never delivered - the journal ends before the event that consumed them live (truncated or hand-edited?)\n",
+                        .{undelivered_pty},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
         }
 
         /// Pop the next journaled write verdict for a replay-mode
@@ -6836,13 +6872,16 @@ pub fn Effects(comptime Msg: type) type {
             if (slot.transport) |transport| transport.resize(slot.cols, slot.rows);
         }
 
-        /// Terminate the pty child: SIGKILL to its whole job (the
-        /// child owns its session, so the signal reaches descendants),
-        /// after which the io thread reaps and the exit delivers with
-        /// reason `.cancelled` — after this verb the exit always
-        /// reports `.cancelled`, the spawn cancel convention. Unknown
-        /// keys are a no-op; on a fake pty the kill is recorded
-        /// (`ptyKillRequested`) and the test feeds the exit.
+        /// Terminate the pty child: SIGKILL to its process group (the
+        /// child owns its session, so the signal reaches the whole
+        /// foreground job — a descendant that re-grouped itself escapes,
+        /// the spawn family's documented limit; POSIX has no
+        /// kill-whole-session primitive), after which the io thread
+        /// reaps and the exit delivers with reason `.cancelled` — after
+        /// this verb the exit always reports `.cancelled`, the spawn
+        /// cancel convention. Unknown keys are a no-op; on a fake pty
+        /// the kill is recorded (`ptyKillRequested`) and the test feeds
+        /// the exit.
         pub fn ptyKill(self: *Self, key: u64) void {
             const slot = self.findPtySlot(key) orelse return;
             slot.kill_requested = true;

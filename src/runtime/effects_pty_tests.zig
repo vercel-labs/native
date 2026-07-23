@@ -359,6 +359,20 @@ test "settle refuses replay write-count divergence in both directions" {
         try testing.expectEqual(@as(i64, 0), fx.wallMs());
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
     }
+    // A fed result still awaiting delivery: the journal ended before
+    // the event that consumed it live — truncation, not success.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.ptySpawn(.{ .key = 85, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try fx.feedPtyOutput(85, "undelivered");
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+        // Delivered, the same feeds settle clean.
+        const msg = fx.takeMsg() orelse return error.TestExpectedMsg;
+        try testing.expectEqualStrings("undelivered", msg.pty.bytes);
+        try fx.settleReplayFeeds();
+    }
     // Exact consumption settles clean.
     {
         var fx = DirectFx.init(testing.allocator);
