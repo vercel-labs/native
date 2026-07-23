@@ -1005,7 +1005,10 @@ export const Cmd = {
   /// `Cmd.videoStop(key)` closes the stream. Pixels never ride the
   /// events: decoded frames flow platform-side into the bound surface.
   /// Failure is never silent: an unplayable source arrives as a "failed"
-  /// event, a refused command as "rejected".
+  /// event, a refused command as "rejected". Replacing is not stopping:
+  /// a replaced load still delivers the terminal it owes (its failure is
+  /// never silent either), routed to ITS OWN event arm — only
+  /// `Cmd.videoStop` cancels a stream's undelivered answers.
   videoLoad<M extends Msgish>(key: string, source: VideoSource, route: VideoRoute<M>): Cmd<M> {
     return {
       op: "video_load",
