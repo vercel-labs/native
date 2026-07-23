@@ -6562,3 +6562,114 @@ test "a secondary drag released outside the view retires the entered chain" {
     try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
 }
+
+test "repeated re-entry with rebuilding edge handlers never exhausts capture slots" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Every edge Msg rebuilds, and each rebuild's capture refresh can
+    // fill a mid-transition slot the enter loop then replaces: cycling
+    // far past the slot budget proves replacement always releases —
+    // a leaked claim per cycle would exhaust the slots and trap.
+    for (0..40) |_| {
+        try hoverMove(harness, app, 50, 60);
+        try hoverMove(harness, app, 50, 220);
+    }
+    var used: usize = 0;
+    for (app_state.hover_msg_slot_used) |slot_used| used += @intFromBool(slot_used);
+    try std.testing.expectEqual(@as(usize, 0), used);
+}
+
+// ---------------------------------------------- unownable payload probe
+
+const PtrModel = struct {
+    entered: u32 = 0,
+    anchor: u32 = 7,
+};
+
+const PtrMsg = union(enum) {
+    entered,
+    left_ptr: *const u32,
+};
+
+/// Markup-free like the aligned probe: a single-item-pointer payload is
+/// builder-only territory.
+const PtrApp = ui_app_model.UiAppWithFeatures(PtrModel, PtrMsg, .{ .runtime_markup = false });
+
+fn ptrUpdate(model: *PtrModel, msg: PtrMsg) void {
+    switch (msg) {
+        .entered => model.entered += 1,
+        .left_ptr => {},
+    }
+}
+
+fn ptrView(ui: *PtrApp.Ui, model: *const PtrModel) PtrApp.Ui.Node {
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left_ptr = &model.anchor },
+        }, .{ui.text(.{}, "Pointer row")}),
+    });
+}
+
+fn ptrOptions() PtrApp.Options {
+    return .{
+        .name = "ui-app-hover-ptr",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = ptrUpdate,
+        .view = ptrView,
+    };
+}
+
+test "an unownable leave payload disables the pair: no enter, no dangling leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The leave payload is a single-item pointer no copy can own: the
+    // PAIR is refused — the enter never dispatches (no enter without a
+    // deliverable leave), the exit owes nothing, and the refusal
+    // settles instead of retrying every event.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+
+    // Re-entry retries the refusal (a rebind could have made the
+    // payload ownable); with the same binding it refuses identically.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+}

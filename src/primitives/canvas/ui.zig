@@ -751,9 +751,10 @@ pub fn Ui(comptime Msg: type) type {
             /// so an element removed (or unbound) mid-hover still
             /// delivers its pair. The one uncapturable payload shape is
             /// a single-item pointer, which no markup can construct — a
-            /// Zig view binding one gets live-tree resolution instead,
-            /// and an unmount-driven leave for it degrades with a debug
-            /// note.
+            /// Zig view binding one DISABLES the pair for that element
+            /// with a warning (no enter dispatches, because its paired
+            /// leave could dangle); bind a slice or scalar payload
+            /// instead.
             on_hover_leave: ?Msg = null,
             /// Message constructor for text edits: called with each
             /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.

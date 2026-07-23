@@ -1208,7 +1208,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         /// app: record it in the bounded ring (queryable through
         /// `Runtime.dispatchErrors` and the automation snapshot), trace
         /// it at `.err`, and republish observable state.
-        fn recordDispatchError(self: *Runtime, event_name: []const u8, err: anyerror) void {
+        pub fn recordDispatchError(self: *Runtime, event_name: []const u8, err: anyerror) void {
             recordDispatchErrorDetail(self, event_name, err, "");
         }
 
