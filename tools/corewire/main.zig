@@ -183,8 +183,10 @@ pub fn main(init: std.process.Init) !void {
 /// the filesystem for canonical paths: the alias net behind the lexical
 /// checks (Unicode case folding, symlinks — a canonical path is unique
 /// per volume, so distinct files can never compare equal). Nonexistent
-/// paths are distinct; hard links carry distinct canonical paths and
-/// stay the caller's responsibility.
+/// paths are distinct. Hard links carry distinct canonical paths and
+/// pass this check — harmless by construction, because outputs land by
+/// rename (writeOutput), which replaces a directory entry and never
+/// writes through one.
 fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
     var buffer_a: [std.fs.max_path_bytes]u8 = undefined;
     var buffer_b: [std.fs.max_path_bytes]u8 = undefined;
@@ -197,7 +199,20 @@ fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, 
     if (std.fs.path.dirname(out)) |dir| {
         std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
     }
-    std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = data }) catch |err| {
+    // Write-then-rename: the rename replaces the destination's
+    // DIRECTORY ENTRY and never writes through it, so even an alias the
+    // preflight cannot see (a hard link to the sidecar carries the same
+    // canonical path only for the entry itself) can never have shared
+    // content truncated — the other names keep the old file.
+    const arena = init.arena.allocator();
+    const temp_path = try std.fmt.allocPrint(arena, "{s}.corewire-tmp", .{out});
+    std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = temp_path, .data = data }) catch |err| {
+        try stderr.print("corewire: cannot write {s}: {t}\n", .{ temp_path, err });
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), out, init.io) catch |err| {
+        std.Io.Dir.cwd().deleteFile(init.io, temp_path) catch {};
         try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
         try stderr.flush();
         std.process.exit(1);
