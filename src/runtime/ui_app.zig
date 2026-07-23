@@ -2426,22 +2426,31 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn rebuildWindowSlots(self: *Self, runtime: *Runtime) anyerror!void {
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
-                self.rebuildWindowSlot(runtime, slot) catch |err| {
-                    // Same staleness contract as `rebuild`: a slot tree
-                    // that failed to build or publish defers hover
-                    // enters into it (see `slot_trees_current`).
-                    self.slot_trees_current = false;
-                    return err;
-                };
+                try self.rebuildWindowSlot(runtime, slot);
             }
             // A clean pass over EVERY installed slot is what restores
             // the slot family's currency; the main flag stays whatever
             // the main rebuild left it.
             self.slot_trees_current = true;
+        }
+
+        /// Every slot rebuild — the full pass above AND the direct
+        /// resize/install call sites — carries the currency and
+        /// generation bookkeeping: a failure marks the slot family
+        /// stale (hover enters into it defer; see `slot_trees_current`),
+        /// and a success ticks `build_generation` so standing hover
+        /// captures refresh against the moved bindings. Success here
+        /// never RESTORES the family's currency — only the clean full
+        /// pass does.
+        fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
+            self.rebuildWindowSlotTree(runtime, slot) catch |err| {
+                self.slot_trees_current = false;
+                return err;
+            };
             self.build_generation +%= 1;
         }
 
-        fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
+        fn rebuildWindowSlotTree(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);

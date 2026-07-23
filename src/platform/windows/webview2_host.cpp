@@ -2791,17 +2791,31 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             emitGpuSurfaceInput(host, *view, kind, x, y, 0, 0, 0, "", "", gpuModifierFlags());
             return 0;
         }
-        case WM_MOUSELEAVE:
+        case WM_MOUSELEAVE: {
             view->gpu_mouse_tracking = 0;
             /* The pointer left the client area without a press in
              * flight: the window-leave edge, reported as the same
              * pointer cancel a capture loss emits. A captured drag
              * keeps receiving moves outside the window and settles
-             * through its own up/capture-change instead. */
+             * through its own up/capture-change instead. One
+             * exception: in-canvas window-drag regions answer
+             * WM_NCHITTEST with HTTRANSPARENT (the parent drags), so
+             * the OS reports a "leave" the moment the cursor enters
+             * one while it still sits over this canvas - a cursor
+             * still inside the client rect is that case, not a real
+             * departure, and hover state freezes there (the OS owns
+             * the pointer) until moves resume. */
             if (!view->gpu_pointer_down) {
-                emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
+                POINT cursor = {};
+                RECT client = {};
+                const bool placed = GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor) && GetClientRect(hwnd, &client);
+                const bool still_inside = placed && PtInRect(&client, cursor);
+                if (!still_inside) {
+                    emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
+                }
             }
             return 0;
+        }
         case WM_CAPTURECHANGED:
             if (view->gpu_pointer_down) {
                 view->gpu_pointer_down = 0;
