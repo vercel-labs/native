@@ -1594,6 +1594,51 @@ test "the shim restates the module-graph attestations" {
     try testing.expect(std.mem.indexOf(u8, generated, "pub const async_free: bool = true;") != null);
 }
 
+test "number_bytes mirrors number-first; other orders ride the record family" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Family 4 carries no order fact, so the mirror emits the one
+    // order every producer of this shape declares (SCHEMA-GAPS.md
+    // records the missing fact and its closure). A bytes-first record
+    // is still fully expressible: the record family's table entry
+    // carries order explicitly — the documented route, pinned here.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Msg_loaded\", \"fields\": [{\"name\": \"body\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"status\", \"type\": {\"kind\": \"f64\"}}]},");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"loaded\", \"payload\": {\"kind\": \"record\", \"name\": \"Msg_loaded\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    // Declared order preserved exactly: bytes first, number second.
+    try testing.expect(std.mem.indexOf(u8, generated, "loaded: struct { body: []const u8, status: f64 },") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_record(0,") != null);
+}
+
+test "a single-use pattern-named record inlines to mirror the emitted module" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The sidecar carries no synthesized-vs-authored marker
+    // (SCHEMA-GAPS.md records the missing fact), so a unique-reference
+    // pattern match MUST inline: this is the shape every real
+    // anonymous record in the conformance corpus takes, and a named
+    // declaration here would fail every fixture's artifact comparison.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Msg_loaded\", \"fields\": [{\"name\": \"status\", \"type\": {\"kind\": \"f64\"}}, {\"name\": \"ok\", \"type\": {\"kind\": \"bool\"}}]},");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"loaded\", \"payload\": {\"kind\": \"record\", \"name\": \"Msg_loaded\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "loaded: struct { status: f64, ok: bool },") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const Msg_loaded") == null);
+}
+
 test "keywords and exotic names are quoted" {
     try testing.expect(!isPlainIdentifier("error"));
     try testing.expect(!isPlainIdentifier("test"));
