@@ -134,6 +134,15 @@ pub const Session = struct {
     /// output as a continuation of the old stream.
     pub fn reset(session: *Session) void {
         session.term.fullReset();
+        // `fullReset` (a RIS) leaves the OSC color state alone, so clear
+        // it here: a shell that overrode palette entries (OSC 4) or the
+        // foreground/background/cursor colors (OSC 10/11/12) and exited
+        // must not tint the next session. Overrides drop; the theme
+        // defaults stay (paint refreshes them every frame anyway).
+        session.term.colors.foreground.override = null;
+        session.term.colors.background.override = null;
+        session.term.colors.cursor.override = null;
+        session.term.colors.palette.resetAll();
         session.stream.deinit();
         session.stream = .initAlloc(session.gpa, .init(&session.term));
         session.installStreamEffects();

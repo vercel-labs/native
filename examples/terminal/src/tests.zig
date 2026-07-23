@@ -559,6 +559,30 @@ test "chorded punctuation and function keys encode their control sequences" {
     try testing.expectEqualStrings("\x1c\x1b[91;5u\x1bOP", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "reset clears the previous session's palette and dynamic color overrides" {
+    const session = try createSession(80, 24);
+    defer session.destroy();
+
+    // A shell overrides a palette slot (OSC 4) and the dynamic colors
+    // (OSC 10/11/12), then exits.
+    session.feed("\x1b]4;1;rgb:ff/00/00\x07");
+    session.feed("\x1b]10;rgb:12/34/56\x07");
+    session.feed("\x1b]11;rgb:65/43/21\x07");
+    session.feed("\x1b]12;rgb:ab/cd/ef\x07");
+    try testing.expect(session.term.colors.palette.mask.count() > 0);
+    try testing.expect(session.term.colors.foreground.override != null);
+    try testing.expect(session.term.colors.background.override != null);
+    try testing.expect(session.term.colors.cursor.override != null);
+
+    // The restart reset drops every override — the next shell starts on
+    // the theme's colors, never tinted by the session that ended.
+    session.reset();
+    try testing.expectEqual(@as(usize, 0), session.term.colors.palette.mask.count());
+    try testing.expect(session.term.colors.foreground.override == null);
+    try testing.expect(session.term.colors.background.override == null);
+    try testing.expect(session.term.colors.cursor.override == null);
+}
+
 test "restart during starting is a no-op - the original session is not duplicated" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

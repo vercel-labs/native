@@ -866,6 +866,105 @@ test "runtime applies GPU text and IME input to focused canvas text fields" {
     try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 }
 
+test "a focused widget's claimed key never doubles into target-less committed text" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+        last_committed: [16]u8 = undefined,
+        last_committed_len: usize = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-targetless-precedence", .source = platform.WebViewSource.html("<h1>P</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                    const text = keyboard_event.keyboard.text;
+                    const len = @min(text.len, self.last_committed.len);
+                    @memcpy(self.last_committed[0..len], text[0..len]);
+                    self.last_committed_len = len;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 96, 32),
+            .text = "Run",
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    // Space activates the focused button (widget precedence, step 2):
+    // the SAME keystroke must not also type a literal space through the
+    // target-less committed fallback — on either committed-text carrier.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+        .text = " ",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = " ",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // A key the button does NOT claim still flows — typing into a
+    // terminal while a button happens to hold focus.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "j",
+        .text = "j",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try std.testing.expectEqualStrings("j", app_state.last_committed[0..app_state.last_committed_len]);
+
+    // With focus off the button, space typing flows again.
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+        .text = " ",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
+    try std.testing.expectEqualStrings(" ", app_state.last_committed[0..app_state.last_committed_len]);
+}
+
 test "target-less IME preedit is per-surface and command chords never commit text" {
     const TestApp = struct {
         committed_count: u32 = 0,

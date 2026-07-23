@@ -550,7 +550,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 };
                 if (committed) |text| {
                     if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                        if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
+                        if (self.views[index].kind == .gpu_surface and self.views[index].focused and
+                            !targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event))
+                        {
                             try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                                 .window_id = input_event.window_id,
                                 .view_label = self.views[index].label,
@@ -601,6 +603,34 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // release at exactly the right or bottom edge counts as
             // outside the way every hit test already treats it.
             return geometry.RectF.fromSize(view.gpu_size).containsPoint(geometry.PointF.init(x, y));
+        }
+
+        /// Whether the view's focused widget structurally claims this
+        /// input's key as a control intent (Space/Enter activation and
+        /// kin) — the widget-precedence contract's step 2, applied to
+        /// the target-less committed-text fallback: a focused button
+        /// consumes Space to press, so the same keystroke must not ALSO
+        /// type a literal space through `on_text`. Characters the widget
+        /// does not claim still flow (typing into a terminal while a
+        /// button happens to hold focus). Text events that carry no key
+        /// name (a host's insertText path) probe by the one activation
+        /// key that produces text — a space payload probes as "space".
+        fn targetlessCommittedTextClaimedByFocusedWidget(self: *Runtime, index: usize, input_event: platform.GpuSurfaceInputEvent) bool {
+            const focused_id = self.views[index].canvas_widget_focused_id;
+            if (focused_id == 0) return false;
+            const node = self.views[index].widgetLayoutTree().findById(focused_id) orelse return false;
+            const probe_key = if (input_event.key.len > 0)
+                input_event.key
+            else if (std.mem.eql(u8, input_event.text, " "))
+                "space"
+            else
+                return false;
+            return canvas.widgetKeyboardControlIntent(node.widget, .{
+                .phase = .key_down,
+                .focused_id = focused_id,
+                .key = probe_key,
+                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+            }) != null;
         }
 
         /// Drain the view's pending scroll-event set into
