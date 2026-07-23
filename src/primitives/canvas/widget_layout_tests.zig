@@ -1490,6 +1490,49 @@ test "horizontal scroll views draw the bottom-edge scrollbar and two-axis region
     try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 5)) != null);
 }
 
+test "a both-axes region whose content only overflows sideways reports horizontal scroll semantics" {
+    // 500-wide content in a 200 x 100 both-axes viewport: no vertical
+    // range, real horizontal range. The assistive node must read the
+    // LIVE axis — scrollable, with the horizontal offset/extents — not
+    // a permanently unscrollable vertical axis.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value_x = 60,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 100) }},
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 200, 100), &nodes);
+
+    var semantics_buffer: [3]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expect(semantics[0].scroll.present);
+    try std.testing.expectEqual(@as(f32, 60), semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 200), semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 500), semantics[0].scroll.content_extent);
+    try std.testing.expectApproxEqAbs(@as(f32, 60.0 / 300.0), semantics[0].value.?, 0.001);
+    try std.testing.expect(semantics[0].actions.increment);
+    try std.testing.expect(semantics[0].actions.decrement);
+
+    // With VERTICAL range present the vertical axis stays primary — the
+    // pre-axis behavior for every region that scrolls down.
+    const tall = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value = 30,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 400) }},
+    };
+    var tall_nodes: [3]WidgetLayoutNode = undefined;
+    const tall_layout = try layoutWidgetTree(tall, geometry.RectF.init(0, 0, 200, 100), &tall_nodes);
+    var tall_buffer: [3]WidgetSemanticsNode = undefined;
+    const tall_semantics = try tall_layout.collectSemantics(&tall_buffer);
+    try std.testing.expectEqual(@as(f32, 30), tall_semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 100), tall_semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 400), tall_semantics[0].scroll.content_extent);
+}
+
 test "widget focus traversal skips scroll clipped children" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },

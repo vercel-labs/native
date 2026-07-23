@@ -896,6 +896,11 @@ test "axis and value-x validate as scroll-scoped with the axis grant dependency"
         "<column>\n  <scroll axis=\"both\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
         "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
         "<column>\n  <scroll axis=\"both\" value-x=\"{shelf_x}\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        // A literal VERTICAL axis is legal beside virtualization (it
+        // grants nothing virtualization ignores), and a horizontal
+        // grant is legal beside a literal virtualized="false".
+        "<column>\n  <scroll axis=\"vertical\" virtualized=\"true\" virtual-item-extent=\"24\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\" virtualized=\"false\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
     };
     for (valid_sources) |source| {
         var parser = markup.Parser.init(arena, source);

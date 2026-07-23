@@ -34,17 +34,18 @@ pub const ScrollbarGeometry = struct {
 /// plus the inset — the standard scroller corner gap, so the thumbs
 /// never overlap.
 pub fn emitScrollViewScrollbars(builder: *Builder, frame: geometry.RectF, vertical: WidgetScrollMetrics, horizontal: WidgetScrollMetrics, tokens: DesignTokens, id: ObjectId) Error!void {
-    const corner = scrollbarCornerReserve(frame, vertical, horizontal, tokens);
-    try emitScrollViewScrollbarAxis(builder, frame, vertical, tokens, id, .vertical, corner, 2);
-    try emitScrollViewScrollbarAxis(builder, frame, horizontal, tokens, id, .horizontal, corner, 4);
+    try emitScrollViewScrollbarAxis(builder, frame, vertical, tokens, id, .vertical, scrollbarCornerReserve(frame, vertical, horizontal, tokens, .vertical), 2);
+    try emitScrollViewScrollbarAxis(builder, frame, horizontal, tokens, id, .horizontal, scrollbarCornerReserve(frame, vertical, horizontal, tokens, .horizontal), 4);
 }
 
 /// The corner gap each track reserves when both bars are visible: the
-/// bar thickness plus the edge inset, 0 when either bar is absent.
-fn scrollbarCornerReserve(frame: geometry.RectF, vertical: WidgetScrollMetrics, horizontal: WidgetScrollMetrics, tokens: DesignTokens) f32 {
+/// OTHER bar's thickness plus the edge inset, 0 when either bar is
+/// absent.
+fn scrollbarCornerReserve(frame: geometry.RectF, vertical: WidgetScrollMetrics, horizontal: WidgetScrollMetrics, tokens: DesignTokens, axis: token_model.ScrollAxis) f32 {
     if (!scrollbarAxisVisible(vertical) or !scrollbarAxisVisible(horizontal)) return 0;
     const inset = densityValue(tokens, 3);
-    return scrollbarThickness(frame, tokens) + inset;
+    const other: token_model.ScrollAxis = if (axis == .vertical) .horizontal else .vertical;
+    return scrollbarThickness(frame, tokens, other) + inset;
 }
 
 fn scrollbarAxisVisible(metrics: WidgetScrollMetrics) bool {
@@ -53,11 +54,12 @@ fn scrollbarAxisVisible(metrics: WidgetScrollMetrics) bool {
     return metrics.present and viewport > 0 and content > viewport;
 }
 
-/// One thickness for both bars, derived from the region's smaller
-/// dimension so a wide flat shelf and a tall narrow list wear the same
-/// visual weight.
-fn scrollbarThickness(frame: geometry.RectF, tokens: DesignTokens) f32 {
-    const reference = @min(frame.width, frame.height);
+/// Each bar's thickness derives from the dimension it spans ACROSS —
+/// the vertical bar from the region's width (exactly the pre-axis
+/// formula, so every existing vertical scrollbar renders byte-identical
+/// pixels), the horizontal bar from its height (the mirror).
+fn scrollbarThickness(frame: geometry.RectF, tokens: DesignTokens, axis: token_model.ScrollAxis) f32 {
+    const reference = if (axis == .vertical) frame.width else frame.height;
     return @min(@max(densityValue(tokens, 3), reference * 0.0125), densityValue(tokens, 6));
 }
 
@@ -96,7 +98,7 @@ pub fn scrollViewScrollbarGeometryForAxis(frame: geometry.RectF, metrics: Widget
     if (frame.isEmpty() or viewport <= 0 or content <= viewport or max_offset <= 0) return null;
 
     const inset = densityValue(tokens, 3);
-    const thickness = scrollbarThickness(frame, tokens);
+    const thickness = scrollbarThickness(frame, tokens, axis);
     const track_extent = @max(0, (if (axis == .vertical) frame.height else frame.width) - inset * 2 - nonNegative(reserved_end));
     if (track_extent <= 0 or thickness <= 0) return null;
 

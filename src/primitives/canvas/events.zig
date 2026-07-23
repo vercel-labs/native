@@ -763,19 +763,20 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     };
 }
 
-/// Assistive scroll steps page the same axis the keyboard would: the
-/// vertical axis everywhere it is granted, the horizontal one on a
-/// horizontal-only region.
+/// Assistive scroll steps page EVERY axis the region grants: vertical
+/// regions page vertically exactly as before, a horizontal-only region
+/// pages its one axis (width-derived step), and a `both` region carries
+/// a page step on each axis — the per-axis clamp then moves only the
+/// axes with scrollable range, so a `both` viewport whose content only
+/// overflows sideways still answers increment/decrement.
 fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) geometry.OffsetF {
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
-    if (widgetScrollKeymapHorizontalOnly(widget)) {
-        const line_step = @max(24, viewport.width * 0.35);
-        const page_step = @max(line_step, viewport.width * 0.85);
-        return geometry.OffsetF.init(if (direction == .increment) page_step else -page_step, 0);
-    }
-    const line_step = @max(24, viewport.height * 0.35);
-    const page_step = @max(line_step, viewport.height * 0.85);
-    return geometry.OffsetF.init(0, if (direction == .increment) page_step else -page_step);
+    const sign: f32 = if (direction == .increment) 1 else -1;
+    const horizontal = widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes.scrollsHorizontally();
+    const vertical = !horizontal or widget.scroll_axes.scrollsVertically();
+    const page_step_x: f32 = if (horizontal) @max(@max(24, viewport.width * 0.35), viewport.width * 0.85) else 0;
+    const page_step_y: f32 = if (vertical) @max(@max(24, viewport.height * 0.35), viewport.height * 0.85) else 0;
+    return geometry.OffsetF.init(sign * page_step_x, sign * page_step_y);
 }
 
 pub fn semanticActions(widget: Widget) WidgetActions {

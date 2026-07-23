@@ -547,11 +547,21 @@ pub fn canvasWidgetScrollStateForLayoutNode(
     var state = canvas.ScrollState{ .offset_y = node.widget.value, .offset_x = node.widget.value_x };
     if (node.widget.kind != .scroll_view or node.widget.id == 0) return state;
     for (previous) |entry| {
-        if (entry.id == node.widget.id) {
+        if (entry.id != node.widget.id) continue;
+        // In-flight fling velocity survives a rebuild PER AXIS, and only
+        // while that axis's offset of record survived too: a
+        // source-side (programmatic) jump means the model took the
+        // wheel — resuming the old fling would immediately drag the
+        // region away from where it was just placed. An axis the region
+        // no longer grants carries no velocity either, so a revoked and
+        // later restored grant can never resume an obsolete fling.
+        if (canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value == entry.state.offset_y) {
             state.velocity_y = entry.state.velocity_y;
-            state.velocity_x = entry.state.velocity_x;
-            return state;
         }
+        if (canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x == entry.state.offset_x) {
+            state.velocity_x = entry.state.velocity_x;
+        }
+        return state;
     }
     return state;
 }
@@ -1033,26 +1043,39 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
 /// The horizontal counterpart of `canvasWidgetLayoutScrollContentExtent`:
 /// how far the region's descendants reach rightward, rebased to offset 0.
 /// Virtualized regions never scroll horizontally, so their horizontal
-/// content pins to the viewport width. Closed disclosure subtrees are
-/// skipped — concealed content lays out at full size and must not
-/// inflate the clamp range or the native driver's content size into
-/// blank space the user can scroll to (the semantics walker applies
-/// the same exclusion).
+/// content pins to the viewport width. Three subtree exclusions keep the
+/// range honest — each names blank space the user could otherwise scroll
+/// to (or live content they otherwise could not reach):
+///   - ANCHORED floating subtrees are out of flow and window-clipped;
+///     an open dropdown to the right of the viewport is not content;
+///   - a NESTED CLIP SCOPE (scroll view, `clip_content` surface,
+///     virtualized container) bounds its own children — its frame is
+///     how far it reaches, whatever overflows inside it;
+///   - a disclosure subtree counts only while SETTLED OPEN: concealed
+///     content lays out at full size but cannot be revealed sideways,
+///     while an open item's wide child is live and reachable.
 pub fn canvasWidgetLayoutScrollContentExtentX(nodes: []const canvas.WidgetLayoutNode, scroll_index: usize, viewport: geometry.RectF) f32 {
     if (scroll_index >= nodes.len) return 0;
     const scroll_node = nodes[scroll_index];
     if (scroll_node.widget.layout.virtualized) return viewport.width;
+    const layout = canvas.WidgetLayoutTree{ .nodes = nodes };
     const scroll_depth = scroll_node.depth;
     const offset = scroll_node.widget.value_x;
     var right = viewport.maxX();
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) {
         const node = nodes[index];
+        if (node.widget.layout.anchor != null) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         right = @max(right, node.frame.maxX() + offset);
-        if (canvas.widgetKindDisclosureAnimated(node.widget.kind)) {
-            const subtree_depth = node.depth;
-            index += 1;
-            while (index < nodes.len and nodes[index].depth > subtree_depth) : (index += 1) {}
+        if (canvasWidgetClipsContent(node.widget) or node.widget.layout.virtualized) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        if (canvas.widgetKindDisclosureAnimated(node.widget.kind) and !canvas.disclosureSettledOpen(layout, index)) {
+            index = skipCanvasWidgetSubtree(nodes, index);
             continue;
         }
         index += 1;
@@ -1060,13 +1083,32 @@ pub fn canvasWidgetLayoutScrollContentExtentX(nodes: []const canvas.WidgetLayout
     return @max(0, right - viewport.x);
 }
 
+/// The index just past `index`'s whole subtree.
+fn skipCanvasWidgetSubtree(nodes: []const canvas.WidgetLayoutNode, index: usize) usize {
+    const subtree_depth = nodes[index].depth;
+    var next = index + 1;
+    while (next < nodes.len and nodes[next].depth > subtree_depth) : (next += 1) {}
+    return next;
+}
+
+/// Scrolled content carries its descendants — including floating
+/// surfaces anchored to widgets INSIDE it — but a surface anchored to
+/// the SCROLL REGION ITSELF stays put: its anchor base is the region's
+/// own frame, which never moves when the content under it does (the
+/// live-scroll translate applies the same rule).
 pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, offset: geometry.OffsetF) void {
     if (scroll_index >= nodes.len) return;
     const scroll_depth = nodes[scroll_index].depth;
     var index = scroll_index + 1;
-    while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        const node = nodes[index];
+        if (node.widget.layout.anchor != null and node.parent_index == scroll_index) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         nodes[index].frame = nodes[index].frame.translate(offset);
         nodes[index].widget.frame = nodes[index].frame;
+        index += 1;
     }
 }
 

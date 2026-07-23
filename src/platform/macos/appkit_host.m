@@ -577,6 +577,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableArray<NativeSdkScrollDriverView *> *scrollDrivers;
 @property(nonatomic, weak) NativeSdkScrollDriverView *activeWheelDriver;
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
+@property(nonatomic, assign) BOOL wheelDriverResolved;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
 @property(nonatomic, assign) double pendingScrollDriverOffsetX;
@@ -6343,32 +6344,84 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     [driver.contentView setBoundsOrigin:NSMakePoint(offsetX, offsetY)];
     [driver reflectScrolledClipView:driver.contentView];
     self.applyingScrollDriverOffset = NO;
+    // A queued (frame-coalesced) report for THIS driver predates the
+    // programmatic write: rewrite it to the offsets the clip view
+    // actually settled on, so the stale pair can never re-land and
+    // yank the region back after the runtime moved it.
+    if (self.scrollDriverEventPending && self.pendingScrollDriverId == driver.driverId) {
+        self.pendingScrollDriverOffsetX = driver.contentView.bounds.origin.x;
+        self.pendingScrollDriverOffsetY = driver.contentView.bounds.origin.y;
+    }
 }
 
-- (NativeSdkScrollDriverView *)scrollDriverForPoint:(NSPoint)viewPoint {
+// Whether the driver's native scroller has travel along each axis: the
+// runtime pins content to the frame on axes the region does not grant,
+// so range IS the grant.
+static BOOL NativeSdkScrollDriverScrollsVertically(NativeSdkScrollDriverView *driver) {
+    return driver.documentView.frame.size.height > driver.contentView.bounds.size.height + 0.5;
+}
+
+static BOOL NativeSdkScrollDriverScrollsHorizontally(NativeSdkScrollDriverView *driver) {
+    return driver.documentView.frame.size.width > driver.contentView.bounds.size.width + 0.5;
+}
+
+- (NativeSdkScrollDriverView *)scrollDriverForPoint:(NSPoint)viewPoint event:(NSEvent *)event {
     // Driver specs arrive in layout pre-order, so the LAST hit is the
-    // deepest scroll region under the pointer.
-    NativeSdkScrollDriverView *result = nil;
+    // deepest scroll region under the pointer. The gesture routes to
+    // the deepest region under the pointer that can travel along its
+    // DOMINANT axis — how nested native scrollers resolve a gesture, so
+    // a vertical swipe over a horizontal shelf scrolls the page behind
+    // it — falling back to the deepest region that can travel the
+    // gesture's other axis, and to nil (the engine wire) when nothing
+    // under the pointer can take it: the runtime's per-axis routing
+    // then applies the deltas and pushes the resulting offsets back
+    // into the native scrollers.
+    const double dx = fabs(event.scrollingDeltaX);
+    const double dy = fabs(event.scrollingDeltaY);
+    const BOOL dominantVertical = dy >= dx;
+    NativeSdkScrollDriverView *dominant = nil;
+    NativeSdkScrollDriverView *secondary = nil;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
-        if (NSPointInRect(viewPoint, driver.frame)) result = driver;
+        if (!NSPointInRect(viewPoint, driver.frame)) continue;
+        const BOOL vertical = NativeSdkScrollDriverScrollsVertically(driver);
+        const BOOL horizontal = NativeSdkScrollDriverScrollsHorizontally(driver);
+        if (dominantVertical ? vertical : horizontal) dominant = driver;
+        if (dominantVertical ? horizontal : vertical) secondary = driver;
     }
-    return result;
+    if (dominant) return dominant;
+    // Route to the secondary-axis region only when the gesture actually
+    // has that component; a single-axis gesture with no taker goes to
+    // the wire.
+    const double secondaryComponent = dominantVertical ? dx : dy;
+    if (secondary && secondaryComponent > 0) return secondary;
+    return nil;
 }
 
 - (NativeSdkScrollDriverView *)scrollDriverForWheelEvent:(NSEvent *)event {
     if (self.scrollDrivers.count == 0) return nil;
     const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
     if (legacy) {
-        return [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+        return [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil] event:event];
     }
     if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
-        // Lock the gesture to the region under the pointer so momentum
-        // keeps scrolling it after the pointer wanders.
-        self.activeWheelDriver = [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+        // A fresh gesture: forget the previous lock. The new lock is
+        // resolved on the first event carrying real deltas — began /
+        // may-begin events often carry none, and the dominant axis is
+        // not knowable from a zero pair.
+        self.activeWheelDriver = nil;
+        self.wheelDriverResolved = NO;
+    }
+    if (!self.wheelDriverResolved && (fabs(event.scrollingDeltaX) > 0 || fabs(event.scrollingDeltaY) > 0)) {
+        // Lock the gesture to the region resolved from its first real
+        // deltas so momentum keeps scrolling it after the pointer
+        // wanders.
+        self.activeWheelDriver = [self scrollDriverForPoint:[self convertPoint:event.locationInWindow fromView:nil] event:event];
+        self.wheelDriverResolved = YES;
     }
     NativeSdkScrollDriverView *driver = self.activeWheelDriver;
     if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
         self.activeWheelDriver = nil;
+        self.wheelDriverResolved = NO;
     }
     return driver;
 }

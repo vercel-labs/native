@@ -454,13 +454,15 @@ pub fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, virtual_conte
 }
 
 /// Scroll semantics report the region's PRIMARY axis: the vertical one
-/// everywhere it is granted (the pre-axis behavior, byte-identical),
-/// and the horizontal one for a horizontal-only scroll view — so an
-/// assistive query on a sideways shelf reads a live position instead
-/// of a permanently unscrollable vertical axis. The one-axis metrics
-/// shape is deliberate: it rides the embed ABI and automation
-/// snapshots, and the assistive scroll ACTIONS resolve their axis
-/// through the same primary-axis rule (`widgetSemanticScrollDelta`).
+/// wherever it is granted AND has scrollable range (the pre-axis
+/// behavior for every vertical-only region, byte-identical), otherwise
+/// the horizontal one — so an assistive query on a sideways shelf, or
+/// on a `both` region whose content only overflows sideways, reads a
+/// live position instead of a permanently unscrollable axis. The
+/// one-axis metrics shape is deliberate: it rides the embed ABI and
+/// automation snapshots, and the assistive scroll ACTIONS resolve
+/// their axis through the same primary-axis rule
+/// (`widgetSemanticScrollDelta`).
 pub fn widgetScrollSemantics(layout: anytype, node_index: usize, virtual_content_extent_fn: anytype) WidgetScrollSemantics {
     if (node_index >= layout.nodes.len) return .{};
     const node = layout.nodes[node_index];
@@ -470,10 +472,15 @@ pub fn widgetScrollSemantics(layout: anytype, node_index: usize, virtual_content
     if (viewport.isEmpty()) return .{};
 
     const vertical = widgetScrollAxisMetrics(layout, node_index, virtual_content_extent_fn, .vertical, viewport);
-    const metrics = if (vertical.present)
+    const horizontal = widgetScrollAxisMetrics(layout, node_index, virtual_content_extent_fn, .horizontal, viewport);
+    const vertical_range = vertical.present and vertical.content_extent > vertical.viewport_extent;
+    const horizontal_range = horizontal.present and horizontal.content_extent > horizontal.viewport_extent;
+    const metrics = if (vertical_range or (vertical.present and !horizontal_range))
         vertical
+    else if (horizontal.present)
+        horizontal
     else
-        widgetScrollAxisMetrics(layout, node_index, virtual_content_extent_fn, .horizontal, viewport);
+        vertical;
     if (!metrics.present) return .{};
     const max_offset = @max(0, metrics.content_extent - metrics.viewport_extent);
     return .{
@@ -522,10 +529,12 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
     return @max(0, bottom - viewport.y);
 }
 
-/// The horizontal content reach for a horizontal-only scroll view's
-/// semantics — the sideways mirror of `widgetScrollContentExtent`,
-/// including the disclosure-subtree skip (concealed content must not
-/// inflate the extent on either axis).
+/// The horizontal content reach for a horizontal scroll view's
+/// semantics — the sideways mirror of `widgetScrollContentExtent`, with
+/// the honest-range exclusions the engine's clamp/driver walker applies
+/// (`canvasWidgetLayoutScrollContentExtentX`): anchored floating
+/// subtrees are out of flow, a nested clip scope bounds its own
+/// children, and disclosure content counts only while settled open.
 fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: geometry.RectF) f32 {
     const scroll_node = layout.nodes[scroll_index];
     const scroll_depth = scroll_node.depth;
@@ -534,16 +543,30 @@ fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: ge
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
+        if (node.widget.layout.anchor != null) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
         right = @max(right, node.frame.maxX() + offset);
-        if (widget_tree.widgetKindDisclosureAnimated(node.widget.kind)) {
-            const subtree_depth = node.depth;
-            index += 1;
-            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+        if (widget_tree.widgetClipsContent(node.widget) or node.widget.layout.virtualized) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
+        if (widget_tree.widgetKindDisclosureAnimated(node.widget.kind) and !widget_tree.disclosureSettledOpen(layout, index)) {
+            index = skipSubtree(layout, index);
             continue;
         }
         index += 1;
     }
     return @max(0, right - viewport.x);
+}
+
+/// The index just past `index`'s whole subtree.
+fn skipSubtree(layout: anytype, index: usize) usize {
+    const subtree_depth = layout.nodes[index].depth;
+    var next = index + 1;
+    while (next < layout.nodes.len and layout.nodes[next].depth > subtree_depth) : (next += 1) {}
+    return next;
 }
 
 fn nonNegative(value: f32) f32 {

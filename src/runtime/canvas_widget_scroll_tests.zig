@@ -1813,3 +1813,102 @@ test "horizontal-only scroll views take the whole keymap on their one axis" {
     try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value_x);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 140, 60), retained.findById(2).?.frame);
 }
+
+test "horizontal content extent counts only honestly reachable descendants" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-horizontal-extent", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // Hand-built pre-order layout under a horizontal region (id 1):
+    //   - a NESTED CLIP SCOPE (scroll view, id 2) whose clipped child
+    //     (id 3) reaches x = 500: the scope's own 120-wide frame is how
+    //     far it reaches;
+    //   - an ANCHORED floating surface (id 4) at x = 500..800: out of
+    //     flow, window-clipped, never scrollable range;
+    //   - a CLOSED accordion (id 5) whose concealed child (id 6)
+    //     reaches x = 600: unreachable sideways;
+    //   - an OPEN (settled) accordion (id 7) whose live child (id 8)
+    //     reaches x = 460: the honest rightmost reach.
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
+        .{ .widget = .{ .id = 2, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 120, 60) }, .frame = geometry.RectF.init(0, 0, 120, 60), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 40) }, .frame = geometry.RectF.init(0, 0, 500, 40), .depth = 2, .parent_index = 1 },
+        .{ .widget = .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(500, 0, 300, 40), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(500, 0, 300, 40), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 5, .kind = .accordion, .frame = geometry.RectF.init(0, 0, 160, 40), .state = .{ .selected = false } }, .frame = geometry.RectF.init(0, 0, 160, 40), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(8, 44, 600, 20) }, .frame = geometry.RectF.init(8, 44, 600, 20), .depth = 2, .parent_index = 4 },
+        .{ .widget = .{ .id = 7, .kind = .accordion, .frame = geometry.RectF.init(0, 0, 200, 72), .state = .{ .selected = true } }, .frame = geometry.RectF.init(0, 0, 200, 72), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 8, .kind = .panel, .frame = geometry.RectF.init(8, 40, 452, 20) }, .frame = geometry.RectF.init(8, 40, 452, 20), .depth = 2, .parent_index = 6 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    const state = harness.runtime.views[0].canvasWidgetScrollStateById(1).?;
+    try std.testing.expectEqual(@as(f32, 460), state.content_extent_x);
+    try std.testing.expectEqual(@as(f32, 180), state.viewport_extent_x);
+}
+
+test "a surface anchored to the scroll region itself never rides its content" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-anchored-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A vertical region with tall content (id 2), a surface anchored to
+    // the REGION ITSELF (id 3 — its anchor base never moves when the
+    // content does), and a surface anchored to a widget INSIDE the
+    // content (id 4 — its anchor base scrolls, so it rides along).
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
+        .{ .widget = .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 160, 200) }, .frame = geometry.RectF.init(0, 0, 160, 200), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 4, .kind = .popover, .frame = geometry.RectF.init(20, 40, 100, 30), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(20, 40, 100, 30), .depth = 2, .parent_index = 1 },
+        .{ .widget = .{ .id = 3, .kind = .popover, .frame = geometry.RectF.init(10, 72, 100, 30), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(10, 72, 100, 30), .depth = 1, .parent_index = 0 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = 1_000_000_000,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_y = 24,
+    } });
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), retained.findById(1).?.widget.value);
+    // Content and the content-anchored surface moved up together...
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -24, 160, 200), retained.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(20, 16, 100, 30), retained.findById(4).?.frame);
+    // ...while the region-anchored surface stayed put.
+    try std.testing.expectEqualDeep(geometry.RectF.init(10, 72, 100, 30), retained.findById(3).?.frame);
+}

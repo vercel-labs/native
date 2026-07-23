@@ -1235,7 +1235,7 @@ pub const axis_value_names = [_][]const u8{ "vertical", "horizontal", "both" };
 
 pub const axis_value_message = "unknown axis value - scroll takes vertical (the default), horizontal, or both";
 
-pub const axis_virtualized_message = "axis is not supported on a virtualized scroll - windowed virtualization prices rows, not columns, so a virtual list always scrolls vertically";
+pub const axis_virtualized_message = "a horizontal axis grant is not supported on a virtualized scroll - windowed virtualization prices rows, not columns, so a virtual list always scrolls vertically (axis=\"vertical\" stays legal beside virtualized)";
 
 pub const value_x_element_message = "value-x is only supported on scroll - it is the horizontal scroll offset (the sideways counterpart of value); anywhere else it would be silently inert";
 
@@ -3274,12 +3274,6 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (!std.mem.eql(u8, node.name, "scroll")) {
                         return attrError(node, attribute, axis_element_message);
                     }
-                    // Windowed virtualization is vertical machinery: a
-                    // horizontal grant on a virtualized scroll would be
-                    // silently ignored, so it is a teaching error.
-                    if (node.attr("virtualized") != null) {
-                        return attrError(node, attribute, axis_virtualized_message);
-                    }
                     // The closed value vocabulary, checked on literals
                     // here so the teaching error lands at validation
                     // (bindings resolve at build, where the engines
@@ -3287,6 +3281,24 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (parseAttrExpression(attribute.value)) |expression| {
                         if (expression == .literal and !nameInList(expression.literal, &axis_value_names)) {
                             return attrError(node, attribute, axis_value_message);
+                        }
+                        // Windowed virtualization is vertical machinery:
+                        // a horizontal GRANT on a virtualized scroll
+                        // would be silently ignored, so exactly that
+                        // pairing is a teaching error. A literal vertical
+                        // axis stays legal beside virtualized, as does a
+                        // grant beside a literal virtualized="false";
+                        // binding-valued sides resolve at build.
+                        if (expression == .literal and !std.mem.eql(u8, expression.literal, "vertical")) {
+                            if (node.attr("virtualized")) |virtualized_raw| {
+                                const virtualized_off = if (parseAttrExpression(virtualized_raw)) |virtualized_expression|
+                                    virtualized_expression != .literal or std.mem.eql(u8, virtualized_expression.literal, "false")
+                                else
+                                    false;
+                                if (!virtualized_off) {
+                                    return attrError(node, attribute, axis_virtualized_message);
+                                }
+                            }
                         }
                     }
                 }
