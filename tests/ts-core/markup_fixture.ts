@@ -59,6 +59,10 @@ export interface Model {
   /// The media surface's producer rendezvous: the u64 surface id a
   /// Zig-tier producer targets (model data, bound by the markup).
   readonly previewSurface: number;
+  /// The hover pair's containment mirror: the id of the task row the
+  /// pointer stands in (0 = none) — enter sets it, the paired leave
+  /// clears it, so previews/prefetch can key off it.
+  readonly hoveredId: number;
 }
 
 export type Msg =
@@ -69,6 +73,8 @@ export type Msg =
   | { readonly kind: "clear" }
   | { readonly kind: "stamp" }
   | { readonly kind: "stamped"; readonly at: number }
+  | { readonly kind: "hover_row"; readonly id: number }
+  | { readonly kind: "hover_off"; readonly id: number }
   | { readonly kind: "draft_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "canvas_resized"; readonly width: number }
   | { readonly kind: "zoomed"; readonly factor: number; readonly windowId: number; readonly fromBoard: boolean }
@@ -131,6 +137,7 @@ export function initialModel(): Model {
     dark: false,
     chromeTop: 0,
     previewSurface: 5,
+    hoveredId: 0,
   };
 }
 
@@ -181,6 +188,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
     case "pick":
       return { ...model, selected: msg.id };
+    case "hover_row":
+      return { ...model, hoveredId: msg.id };
+    case "hover_off":
+      return model.hoveredId === msg.id ? { ...model, hoveredId: 0 } : model;
     case "cycle":
       return { ...model, filter: model.filter === "all" ? "open" : model.filter === "open" ? "done" : "all" };
     case "clear":

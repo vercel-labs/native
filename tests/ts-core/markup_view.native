@@ -1,6 +1,6 @@
 <column gap="6" padding="10">
   <text>{banner} filter {filter} next {nextId}</text>
-  <text>done {doneCount}</text>
+  <text>done {doneCount} hover {hoveredId}</text>
   <if test="{selected}">
     <text>picked {selected}</text>
   </if>
@@ -18,7 +18,7 @@
     <button on-press="clear">Clear</button>
   </row>
   <for each="tasks" as="t" key="id">
-    <row key="{t.id}" gap="4" cross="center">
+    <row key="{t.id}" gap="4" cross="center" on-hover-enter="hover_row:{t.id}" on-hover-leave="hover_off:{t.id}">
       <text grow="1">{t.title} #{t.id}</text>
       <if test="{t.done}">
         <badge>done</badge>
