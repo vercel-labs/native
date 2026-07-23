@@ -518,6 +518,17 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 83, .name = "autoplay", .class = .flag, .group = .composite },
     .{ .code = 84, .name = "loop", .class = .flag, .group = .composite },
     .{ .code = 85, .name = "muted", .class = .flag, .group = .composite },
+    // Scroll axis declaration (scroll only; the validator scopes it):
+    // vertical (the default — every pre-axis document keeps its exact
+    // behavior), horizontal, or both. A closed vocabulary mirroring
+    // `canvas.ScrollAxes`, the overscroll pattern.
+    .{ .code = 86, .name = "axis", .class = .option, .group = .option, .field = "axis" },
+    // The horizontal scroll offset (scroll only, and only beside a
+    // horizontal-capable axis; the validator scopes both): the sideways
+    // counterpart of `value`, following the same source-wins reconcile
+    // rule — echo `on-scroll`'s offset_x back here and user scrolling
+    // survives rebuilds; move it model-side to scroll programmatically.
+    .{ .code = 87, .name = "value-x", .class = .number, .group = .option, .field = "value_x" },
 };
 
 // ----------------------------------------------------------------- events

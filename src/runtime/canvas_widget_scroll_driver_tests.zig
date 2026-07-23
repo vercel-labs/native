@@ -169,7 +169,7 @@ test "driver offsets scroll retained scroll views and pass through overscroll" {
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     // The driver owns physics: no engine velocity was introduced.
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
 
     // Rubber-band overscroll passes through so the bounce is visible;
     // the engine performs no kinetic recovery of its own.
@@ -251,9 +251,9 @@ test "driver offsets deliver canvas_widget_scroll observation events" {
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.scroll_event_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 1), app_state.last_id);
-    try std.testing.expectEqual(@as(f32, 24), app_state.last_scroll.offset);
-    try std.testing.expectEqual(@as(f32, 72), app_state.last_scroll.viewport_extent);
-    try std.testing.expectEqual(@as(f32, 120), app_state.last_scroll.content_extent);
+    try std.testing.expectEqual(@as(f32, 24), app_state.last_scroll.offset_y);
+    try std.testing.expectEqual(@as(f32, 72), app_state.last_scroll.viewport_extent_y);
+    try std.testing.expectEqual(@as(f32, 120), app_state.last_scroll.content_extent_y);
 
     // An echo of the applied offset changes nothing and observes nothing.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{

@@ -159,11 +159,21 @@ pub const CanvasWidgetTextReconcileEntry = struct {
 pub const CanvasWidgetSourceScrollEntry = struct {
     id: canvas.ObjectId = 0,
     value: f32 = 0,
+    /// The horizontal scroll offset channel (`Widget.value_x`) — 0 for
+    /// splits, which share this entry shape but carry one fraction.
+    value_x: f32 = 0,
 };
 
 pub fn canvasWidgetSourceScrollById(entries: []const CanvasWidgetSourceScrollEntry, id: canvas.ObjectId) ?f32 {
     for (entries) |entry| {
         if (entry.id == id) return entry.value;
+    }
+    return null;
+}
+
+pub fn canvasWidgetSourceScrollEntryById(entries: []const CanvasWidgetSourceScrollEntry, id: canvas.ObjectId) ?CanvasWidgetSourceScrollEntry {
+    for (entries) |entry| {
+        if (entry.id == id) return entry;
     }
     return null;
 }
@@ -183,7 +193,7 @@ pub fn collectCanvasWidgetScrollOffsetEntries(
     for (nodes) |node| {
         if (!canvasWidgetSourceValueKind(node.widget.kind) or node.widget.id == 0) continue;
         if (len >= output.len) break;
-        output[len] = .{ .id = node.widget.id, .value = node.widget.value };
+        output[len] = .{ .id = node.widget.id, .value = node.widget.value, .value_x = node.widget.value_x };
         len += 1;
     }
     return output[0..len];
@@ -204,13 +214,30 @@ pub fn restoreCanvasWidgetLayoutScrollOffsets(
 ) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
-        const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse continue;
-        const previous_source = canvasWidgetSourceScrollById(previous_source_offsets, node.widget.id) orelse continue;
-        if (node.widget.value != previous_source) continue;
-        if (node.widget.value == previous_runtime) continue;
-        const laid_out = node.widget.value;
-        nodes[index].widget.value = previous_runtime;
-        translateCanvasWidgetLayoutScrollDescendants(nodes, index, -(previous_runtime - laid_out));
+        const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id) orelse continue;
+        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id) orelse continue;
+        // Each axis reconciles on its own: a programmatic vertical
+        // scroll (source-side `value` change) must not snap a
+        // user-scrolled horizontal offset back, and vice versa. Only
+        // granted axes restore — the layout pass never displaced
+        // children along an ungranted axis, so restoring its offset
+        // would translate content that never moved (the clamp pass
+        // pins the stale value home instead).
+        var restore = geometry.OffsetF{};
+        if (canvas.widgetScrollsAxis(node.widget, .vertical) and
+            node.widget.value == previous_source.value and node.widget.value != previous_runtime.value)
+        {
+            restore.dy = previous_runtime.value - node.widget.value;
+            nodes[index].widget.value = previous_runtime.value;
+        }
+        if (canvas.widgetScrollsAxis(node.widget, .horizontal) and
+            node.widget.value_x == previous_source.value_x and node.widget.value_x != previous_runtime.value_x)
+        {
+            restore.dx = previous_runtime.value_x - node.widget.value_x;
+            nodes[index].widget.value_x = previous_runtime.value_x;
+        }
+        if (restore.dx == 0 and restore.dy == 0) continue;
+        translateCanvasWidgetLayoutScrollDescendants(nodes, index, .{ .dx = -restore.dx, .dy = -restore.dy });
     }
 }
 
@@ -517,11 +544,12 @@ pub fn canvasWidgetScrollStateForLayoutNode(
     node: canvas.WidgetLayoutNode,
     previous: []const CanvasWidgetScrollReconcileEntry,
 ) canvas.ScrollState {
-    var state = canvas.ScrollState{ .offset = node.widget.value };
+    var state = canvas.ScrollState{ .offset_y = node.widget.value, .offset_x = node.widget.value_x };
     if (node.widget.kind != .scroll_view or node.widget.id == 0) return state;
     for (previous) |entry| {
         if (entry.id == node.widget.id) {
-            state.velocity = entry.state.velocity;
+            state.velocity_y = entry.state.velocity_y;
+            state.velocity_x = entry.state.velocity_x;
             return state;
         }
     }
@@ -924,18 +952,42 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
         const content_extent = canvasWidgetLayoutScrollContentExtent(nodes, index, viewport);
         const max_offset = @max(0, content_extent - viewport.height);
         const current_offset = node.widget.value;
-        const next_offset = std.math.clamp(@max(0, current_offset), 0, max_offset);
-        if (next_offset == current_offset) continue;
+        // An offset on an axis the region does not grant pins home: a
+        // rebuild that flips the axis (or virtualizes the region) must
+        // not leave content displaced along the revoked axis.
+        const next_offset = if (canvas.widgetScrollsAxis(node.widget, .vertical))
+            std.math.clamp(@max(0, current_offset), 0, max_offset)
+        else
+            0;
 
-        const offset_delta = next_offset - current_offset;
+        const content_extent_x = canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport);
+        const max_offset_x = @max(0, content_extent_x - viewport.width);
+        const current_offset_x = node.widget.value_x;
+        const next_offset_x = if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+            std.math.clamp(@max(0, current_offset_x), 0, max_offset_x)
+        else
+            0;
+        if (next_offset == current_offset and next_offset_x == current_offset_x) continue;
+
         nodes[index].widget.value = next_offset;
-        translateCanvasWidgetLayoutScrollDescendants(nodes, index, -offset_delta);
+        nodes[index].widget.value_x = next_offset_x;
+        // Only granted axes translate: the layout pass never displaced
+        // children along an ungranted axis (`scrollLayoutOffset` gates
+        // it), so pinning that value home is bookkeeping, not motion.
+        translateCanvasWidgetLayoutScrollDescendants(nodes, index, .{
+            .dx = if (canvas.widgetScrollsAxis(node.widget, .horizontal)) -(next_offset_x - current_offset_x) else 0,
+            .dy = if (canvas.widgetScrollsAxis(node.widget, .vertical)) -(next_offset - current_offset) else 0,
+        });
         if (states) |scroll_states| {
             if (index < scroll_states.len) {
-                scroll_states[index].offset = next_offset;
-                scroll_states[index].velocity = 0;
-                scroll_states[index].viewport_extent = viewport.height;
-                scroll_states[index].content_extent = content_extent;
+                scroll_states[index].offset_y = next_offset;
+                scroll_states[index].velocity_y = 0;
+                scroll_states[index].viewport_extent_y = viewport.height;
+                scroll_states[index].content_extent_y = content_extent;
+                scroll_states[index].offset_x = next_offset_x;
+                scroll_states[index].velocity_x = 0;
+                scroll_states[index].viewport_extent_x = viewport.width;
+                scroll_states[index].content_extent_x = content_extent_x;
             }
         }
     }
@@ -978,12 +1030,42 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
     return @max(0, bottom - viewport.y);
 }
 
-pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, dy: f32) void {
+/// The horizontal counterpart of `canvasWidgetLayoutScrollContentExtent`:
+/// how far the region's descendants reach rightward, rebased to offset 0.
+/// Virtualized regions never scroll horizontally, so their horizontal
+/// content pins to the viewport width. Closed disclosure subtrees are
+/// skipped — concealed content lays out at full size and must not
+/// inflate the clamp range or the native driver's content size into
+/// blank space the user can scroll to (the semantics walker applies
+/// the same exclusion).
+pub fn canvasWidgetLayoutScrollContentExtentX(nodes: []const canvas.WidgetLayoutNode, scroll_index: usize, viewport: geometry.RectF) f32 {
+    if (scroll_index >= nodes.len) return 0;
+    const scroll_node = nodes[scroll_index];
+    if (scroll_node.widget.layout.virtualized) return viewport.width;
+    const scroll_depth = scroll_node.depth;
+    const offset = scroll_node.widget.value_x;
+    var right = viewport.maxX();
+    var index = scroll_index + 1;
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        const node = nodes[index];
+        right = @max(right, node.frame.maxX() + offset);
+        if (canvas.widgetKindDisclosureAnimated(node.widget.kind)) {
+            const subtree_depth = node.depth;
+            index += 1;
+            while (index < nodes.len and nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
+        index += 1;
+    }
+    return @max(0, right - viewport.x);
+}
+
+pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, offset: geometry.OffsetF) void {
     if (scroll_index >= nodes.len) return;
     const scroll_depth = nodes[scroll_index].depth;
     var index = scroll_index + 1;
     while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
-        nodes[index].frame = nodes[index].frame.translate(geometry.OffsetF.init(0, dy));
+        nodes[index].frame = nodes[index].frame.translate(offset);
         nodes[index].widget.frame = nodes[index].frame;
     }
 }

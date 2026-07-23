@@ -16,6 +16,7 @@ const WidgetLayoutNode = event_model.WidgetLayoutNode;
 const WidgetSemanticsNode = event_model.WidgetSemanticsNode;
 const WidgetListMetrics = event_model.WidgetListMetrics;
 const WidgetScrollMetrics = event_model.WidgetScrollMetrics;
+const ScrollAxis = token_model.ScrollAxis;
 const VirtualListRange = token_model.VirtualListRange;
 const virtualListRange = token_model.virtualListRange;
 const semanticActions = event_model.semanticActions;
@@ -418,6 +419,48 @@ pub const WidgetScrollSemantics = struct {
     scrollable: bool = false,
 };
 
+/// One axis of a scroll region as the one-axis metrics record, or
+/// `present = false` when the region does not grant that axis (a
+/// horizontal-only shelf has no vertical metrics, a vertical list no
+/// horizontal ones). The engine scrollbar renders each axis from this;
+/// `widgetScrollSemantics` picks the primary axis for the assistive
+/// node.
+pub fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, virtual_content_extent_fn: anytype, comptime axis: ScrollAxis, viewport: geometry.RectF) WidgetScrollMetrics {
+    const node = layout.nodes[node_index];
+    switch (axis) {
+        .vertical => {
+            if (node.widget.kind == .scroll_view and !node.widget.layout.virtualized and !node.widget.scroll_axes.scrollsVertically()) return .{};
+            const content_extent = widgetScrollContentExtent(layout, node_index, viewport, virtual_content_extent_fn);
+            const max_offset = @max(0, content_extent - viewport.height);
+            return .{
+                .present = true,
+                .offset = std.math.clamp(nonNegative(node.widget.value), 0, max_offset),
+                .viewport_extent = viewport.height,
+                .content_extent = content_extent,
+            };
+        },
+        .horizontal => {
+            if (node.widget.kind != .scroll_view or node.widget.layout.virtualized or !node.widget.scroll_axes.scrollsHorizontally()) return .{};
+            const content_extent = widgetScrollContentExtentX(layout, node_index, viewport);
+            const max_offset = @max(0, content_extent - viewport.width);
+            return .{
+                .present = true,
+                .offset = std.math.clamp(nonNegative(node.widget.value_x), 0, max_offset),
+                .viewport_extent = viewport.width,
+                .content_extent = content_extent,
+            };
+        },
+    }
+}
+
+/// Scroll semantics report the region's PRIMARY axis: the vertical one
+/// everywhere it is granted (the pre-axis behavior, byte-identical),
+/// and the horizontal one for a horizontal-only scroll view — so an
+/// assistive query on a sideways shelf reads a live position instead
+/// of a permanently unscrollable vertical axis. The one-axis metrics
+/// shape is deliberate: it rides the embed ABI and automation
+/// snapshots, and the assistive scroll ACTIONS resolve their axis
+/// through the same primary-axis rule (`widgetSemanticScrollDelta`).
 pub fn widgetScrollSemantics(layout: anytype, node_index: usize, virtual_content_extent_fn: anytype) WidgetScrollSemantics {
     if (node_index >= layout.nodes.len) return .{};
     const node = layout.nodes[node_index];
@@ -426,17 +469,16 @@ pub fn widgetScrollSemantics(layout: anytype, node_index: usize, virtual_content
     const viewport = node.frame.inset(node.widget.layout.padding).normalized();
     if (viewport.isEmpty()) return .{};
 
-    const content_extent = widgetScrollContentExtent(layout, node_index, viewport, virtual_content_extent_fn);
-    const max_offset = @max(0, content_extent - viewport.height);
-    const offset = std.math.clamp(nonNegative(node.widget.value), 0, max_offset);
+    const vertical = widgetScrollAxisMetrics(layout, node_index, virtual_content_extent_fn, .vertical, viewport);
+    const metrics = if (vertical.present)
+        vertical
+    else
+        widgetScrollAxisMetrics(layout, node_index, virtual_content_extent_fn, .horizontal, viewport);
+    if (!metrics.present) return .{};
+    const max_offset = @max(0, metrics.content_extent - metrics.viewport_extent);
     return .{
-        .metrics = .{
-            .present = true,
-            .offset = offset,
-            .viewport_extent = viewport.height,
-            .content_extent = content_extent,
-        },
-        .value = if (max_offset > 0) offset / max_offset else 0,
+        .metrics = metrics,
+        .value = if (max_offset > 0) metrics.offset / max_offset else 0,
         .scrollable = max_offset > 0,
     };
 }
@@ -478,6 +520,30 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
         index += 1;
     }
     return @max(0, bottom - viewport.y);
+}
+
+/// The horizontal content reach for a horizontal-only scroll view's
+/// semantics — the sideways mirror of `widgetScrollContentExtent`,
+/// including the disclosure-subtree skip (concealed content must not
+/// inflate the extent on either axis).
+fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: geometry.RectF) f32 {
+    const scroll_node = layout.nodes[scroll_index];
+    const scroll_depth = scroll_node.depth;
+    const offset = scroll_node.widget.value_x;
+    var right = viewport.maxX();
+    var index = scroll_index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
+        const node = layout.nodes[index];
+        right = @max(right, node.frame.maxX() + offset);
+        if (widget_tree.widgetKindDisclosureAnimated(node.widget.kind)) {
+            const subtree_depth = node.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
+        index += 1;
+    }
+    return @max(0, right - viewport.x);
 }
 
 fn nonNegative(value: f32) f32 {

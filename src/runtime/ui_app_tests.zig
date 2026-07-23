@@ -345,9 +345,9 @@ const FeedApp = ui_app_model.UiApp(FeedModel, FeedMsg);
 fn feedUpdate(model: *FeedModel, msg: FeedMsg) void {
     switch (msg) {
         .feed_scrolled => |scroll_state| {
-            model.offset = scroll_state.offset;
-            model.viewport_extent = scroll_state.viewport_extent;
-            model.content_extent = scroll_state.content_extent;
+            model.offset = scroll_state.offset_y;
+            model.viewport_extent = scroll_state.viewport_extent_y;
+            model.content_extent = scroll_state.content_extent_y;
             model.scroll_events += 1;
         },
     }
@@ -5226,7 +5226,7 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     const final_layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try std.testing.expect(final_layout.nodes.len < 40);
     const scroll_state = harness.runtime.views[0].canvasWidgetScrollStateById(list_id).?;
-    try std.testing.expectEqual(@as(f32, 600 * virtual_row_extent), scroll_state.content_extent);
+    try std.testing.expectEqual(@as(f32, 600 * virtual_row_extent), scroll_state.content_extent_y);
 
     // A window-growing resize converges within ONE rebuild: the first
     // build pass reads the stale 300pt viewport, the coverage check sees

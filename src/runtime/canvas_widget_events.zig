@@ -1863,7 +1863,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
-            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta.dy, .wheel) orelse return;
+            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, .wheel) orelse return;
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, pointer_event.pointer.point);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);

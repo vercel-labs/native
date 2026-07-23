@@ -501,15 +501,41 @@ test "widget keyboard control intents map slider and scroll keys" {
     const line_down = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "arrowdown" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, line_down.kind);
     try std.testing.expect(line_down.actions.increment);
-    try std.testing.expectApproxEqAbs(@as(f32, 35), line_down.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 35), line_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), line_down.delta.dx);
 
     const page_up = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "pageup" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_up.kind);
     try std.testing.expect(page_up.actions.decrement);
-    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta.dy, 0.001);
 
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_start, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "home" }).?.kind);
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_to_end, widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "end" }).?.kind);
+
+    // A vertical-only region maps Left/Right to the vertical axis (the
+    // legacy keymap, byte-identical); a horizontal-only region mirrors
+    // the whole map onto its one axis, steps measured from the WIDTH;
+    // a both-axes region gives Left/Right to the horizontal axis.
+    const vertical_left = widgetKeyboardControlIntent(scroll, .{ .phase = .key_down, .key = "arrowleft" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -35), vertical_left.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), vertical_left.delta.dx);
+
+    const shelf = Widget{ .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const shelf_right = widgetKeyboardControlIntent(shelf, .{ .phase = .key_down, .key = "arrowright" }).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, shelf_right.kind);
+    try std.testing.expect(shelf_right.actions.increment);
+    try std.testing.expectApproxEqAbs(@as(f32, 42), shelf_right.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), shelf_right.delta.dy);
+    const shelf_page = widgetKeyboardControlIntent(shelf, .{ .phase = .key_down, .key = "pagedown" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 102), shelf_page.delta.dx, 0.001);
+
+    const dual = Widget{ .kind = .scroll_view, .scroll_axes = .both, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const dual_left = widgetKeyboardControlIntent(dual, .{ .phase = .key_down, .key = "arrowleft" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -42), dual_left.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), dual_left.delta.dy);
+    const dual_down = widgetKeyboardControlIntent(dual, .{ .phase = .key_down, .key = "arrowdown" }).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 35), dual_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), dual_down.delta.dx);
 }
 
 test "widget semantic control intents map built-in actions" {
@@ -577,12 +603,21 @@ test "widget semantic control intents map slider and scroll actions" {
     const page_down = widgetSemanticControlIntentWithActions(scroll, .increment, scroll_actions).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_down.kind);
     try std.testing.expect(page_down.actions.increment);
-    try std.testing.expectApproxEqAbs(@as(f32, 85), page_down.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 85), page_down.delta.dy, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), page_down.delta.dx);
 
     const page_up = widgetSemanticControlIntentWithActions(scroll, .decrement, scroll_actions).?;
     try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, page_up.kind);
     try std.testing.expect(page_up.actions.decrement);
-    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -85), page_up.delta.dy, 0.001);
+
+    // A horizontal-only region's assistive steps page its one axis,
+    // measured from the viewport WIDTH.
+    const shelf = Widget{ .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 120, 100) };
+    const shelf_page = widgetSemanticControlIntentWithActions(shelf, .increment, scroll_actions).?;
+    try std.testing.expectEqual(WidgetControlIntentKind.scroll_by, shelf_page.kind);
+    try std.testing.expectApproxEqAbs(@as(f32, 102), shelf_page.delta.dx, 0.001);
+    try std.testing.expectEqual(@as(f32, 0), shelf_page.delta.dy);
 }
 
 test "widget keyboard events map to text edit events" {

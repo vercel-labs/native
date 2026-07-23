@@ -479,6 +479,25 @@ pub fn Ui(comptime Msg: type) type {
             text: []const u8 = "",
             placeholder: []const u8 = "",
             value: f32 = 0,
+            /// HORIZONTAL scroll offset for a horizontal-capable
+            /// `scroll` container (markup `value-x`) — the sideways
+            /// counterpart of `value`. Follows the same source-wins
+            /// reconcile rule: echo the `on_scroll` state's `offset_x`
+            /// back here and the runtime-owned offset survives
+            /// rebuilds; change it model-side to scroll
+            /// programmatically. Meaningless on every other element.
+            value_x: f32 = 0,
+            /// Which axes a `scroll` container scrolls (markup `axis`):
+            /// `.vertical` (the default — every scroll region before
+            /// axis declarations existed), `.horizontal`, or `.both`.
+            /// Horizontal grants opt the region into wheel/trackpad
+            /// `delta_x`, the bottom-edge scrollbar, and the horizontal
+            /// keymap (Left/Right lines, and on horizontal-only regions
+            /// Home/End/PageUp/PageDown too). Virtualized containers
+            /// ignore a horizontal grant — windowed virtualization
+            /// prices rows, not columns. Meaningless on non-scroll
+            /// elements.
+            axis: canvas.ScrollAxes = .vertical,
             checked: bool = false,
             selected: bool = false,
             /// Disclosure state for tree rows (`role = .treeitem`): null
@@ -3015,6 +3034,8 @@ pub fn Ui(comptime Msg: type) type {
                 .autofocus = options.autofocus,
                 .image_id = options.image,
                 .value = options.value,
+                .value_x = options.value_x,
+                .scroll_axes = options.axis,
                 .variant = options.variant,
                 .size = options.size,
                 .state = .{

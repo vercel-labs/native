@@ -261,7 +261,12 @@ pub const WidgetControlIntent = struct {
     kind: WidgetControlIntentKind,
     actions: WidgetActions = .{},
     value: ?f32 = null,
-    delta: f32 = 0,
+    /// Scroll step for `scroll_by` intents, in canvas points on each
+    /// axis. Keyboard and semantic scroll steps set exactly one axis;
+    /// which one follows the widget's scroll-axes grant (vertical
+    /// keymap on vertical-capable regions, horizontal on
+    /// horizontal-only ones).
+    delta: geometry.OffsetF = .{},
 };
 
 pub const WidgetSemanticAction = enum {
@@ -664,29 +669,68 @@ pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent)
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .{ .kind = .scroll_to_start, .actions = .{ .decrement = true } };
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .{ .kind = .scroll_to_end, .actions = .{ .increment = true } };
     const delta = widgetScrollKeyboardDelta(widget, keyboard) orelse return null;
+    const step = if (delta.dy != 0) delta.dy else delta.dx;
     return .{
         .kind = .scroll_by,
         .actions = .{
-            .increment = delta > 0,
-            .decrement = delta < 0,
+            .increment = step > 0,
+            .decrement = step < 0,
         },
         .delta = delta,
     };
 }
 
-pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
+/// True when a scroll-intent widget takes the HORIZONTAL keymap: a
+/// horizontal-only `.scroll_view`. Vertical-capable regions (including
+/// `both`, whose left/right arrows step sideways below) and every other
+/// scrollable kind keep the vertical keymap they always had.
+fn widgetScrollKeymapHorizontalOnly(widget: Widget) bool {
+    return widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .horizontal;
+}
+
+/// The keyboard scroll step, axis-aware:
+/// - vertical regions keep the exact legacy map (both arrow pairs step
+///   the vertical axis — Left/Up a line up, Right/Down a line down —
+///   and PageUp/PageDown page it);
+/// - a horizontal-only region mirrors that whole map onto its one axis,
+///   with line/page steps measured from the viewport WIDTH;
+/// - a `both` region keeps the vertical map and gives Left/Right to the
+///   horizontal axis — the two-axis convention native scroll views use.
+pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?geometry.OffsetF {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    if (widgetScrollKeymapHorizontalOnly(widget)) {
+        const line_step = @max(24, viewport.width * 0.35);
+        const page_step = @max(line_step, viewport.width * 0.85);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+            return geometry.OffsetF.init(-line_step, 0);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+            return geometry.OffsetF.init(line_step, 0);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return geometry.OffsetF.init(-page_step, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return geometry.OffsetF.init(page_step, 0);
+        return null;
+    }
+    const dual = widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both;
     const line_step = @max(24, viewport.height * 0.35);
     const page_step = @max(line_step, viewport.height * 0.85);
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
-        return -line_step;
+    if (dual) {
+        const line_step_x = @max(24, viewport.width * 0.35);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return geometry.OffsetF.init(-line_step_x, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return geometry.OffsetF.init(line_step_x, 0);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return geometry.OffsetF.init(0, -line_step);
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return geometry.OffsetF.init(0, line_step);
+    } else {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) {
+            return geometry.OffsetF.init(0, -line_step);
+        }
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
+            return geometry.OffsetF.init(0, line_step);
+        }
     }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) {
-        return line_step;
-    }
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return -page_step;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return page_step;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) return geometry.OffsetF.init(0, -page_step);
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) return geometry.OffsetF.init(0, page_step);
     return null;
 }
 
@@ -719,11 +763,19 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     };
 }
 
-fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) f32 {
+/// Assistive scroll steps page the same axis the keyboard would: the
+/// vertical axis everywhere it is granted, the horizontal one on a
+/// horizontal-only region.
+fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) geometry.OffsetF {
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    if (widgetScrollKeymapHorizontalOnly(widget)) {
+        const line_step = @max(24, viewport.width * 0.35);
+        const page_step = @max(line_step, viewport.width * 0.85);
+        return geometry.OffsetF.init(if (direction == .increment) page_step else -page_step, 0);
+    }
     const line_step = @max(24, viewport.height * 0.35);
     const page_step = @max(line_step, viewport.height * 0.85);
-    return if (direction == .increment) page_step else -page_step;
+    return geometry.OffsetF.init(0, if (direction == .increment) page_step else -page_step);
 }
 
 pub fn semanticActions(widget: Widget) WidgetActions {

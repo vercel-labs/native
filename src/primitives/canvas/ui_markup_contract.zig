@@ -129,8 +129,10 @@ pub const Iterable = struct {
 /// Payload classes a markup dispatch can (or cannot) construct. The
 /// special classes match the engines exactly: text_input/scroll_state
 /// tags bind through on-input/on-scroll only, and `unsupported` payloads
-/// cannot be built from markup at all.
-pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, unsupported };
+/// cannot be built from markup at all. `legacy_scroll_state` is the
+/// RETIRED one-axis scroll record, recognized only so `on-scroll` can
+/// teach the two-axis migration by field name.
+pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, unsupported };
 
 pub const MsgTag = struct {
     name: []const u8,
@@ -329,6 +331,10 @@ fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     // through on-scroll exactly like the canvas type — same resolution as
     // both engines' scrollConstructor.
     if (reflect.declaredScrollStateRecord(T)) return .scroll_state;
+    // The retired ONE-AXIS record classifies separately so on-scroll can
+    // teach the two-axis migration by field name instead of rejecting
+    // the payload generically.
+    if (reflect.declaredLegacyScrollStateRecord(T)) return .legacy_scroll_state;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -856,6 +862,10 @@ const Checker = struct {
         }
         if (std.mem.eql(u8, event, "scroll")) {
             const found = tag orelse return self.failAttr(node, attribute, markup.on_scroll_payload_message);
+            // The retired one-axis record gets the migration teaching —
+            // it names the new per-axis fields — instead of the generic
+            // payload rejection.
+            if (found.payload == .legacy_scroll_state) return self.failAttr(node, attribute, markup.on_scroll_legacy_payload_message);
             if (found.payload != .scroll_state) return self.failAttr(node, attribute, markup.on_scroll_payload_message);
             return;
         }
@@ -898,7 +908,7 @@ const Checker = struct {
             .boolean => {},
             // These payloads cannot be constructed from a markup binding
             // (input/scroll payloads bind through their own events).
-            .text_input, .scroll_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
+            .text_input, .scroll_state, .legacy_scroll_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
             .none => unreachable,
         }
     }

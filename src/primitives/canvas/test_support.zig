@@ -199,6 +199,7 @@ pub const SpringToken = canvas.SpringToken;
 pub const BlurTokenRef = canvas.BlurTokenRef;
 pub const ScrollPhysics = canvas.ScrollPhysics;
 pub const ScrollState = canvas.ScrollState;
+pub const ScrollAxisState = canvas.ScrollAxisState;
 pub const VirtualListOptions = canvas.VirtualListOptions;
 pub const VirtualListRange = canvas.VirtualListRange;
 pub const virtualListRange = canvas.virtualListRange;

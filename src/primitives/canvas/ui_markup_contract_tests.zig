@@ -49,6 +49,19 @@ const Profile = struct {
 /// The transpiled-core mirror of `canvas.ScrollState` (field names pinned
 /// by the reflect drift test below; classes per field).
 const MirrorScroll = struct {
+    offset_x: f64,
+    offset_y: f64,
+    velocity_x: f64,
+    velocity_y: f64,
+    viewport_extent_x: f64,
+    viewport_extent_y: f64,
+    content_extent_x: f64,
+    content_extent_y: f64,
+};
+
+/// The RETIRED one-axis mirror: classifies as `legacy_scroll_state` so
+/// the on-scroll checker teaches the per-axis migration by name.
+const LegacyMirrorScroll = struct {
     offset: f64,
     velocity: f64,
     viewport_extent: f64,
@@ -64,6 +77,7 @@ const Msg = union(enum) {
     draft: canvas.TextInputEvent,
     scrolled: canvas.ScrollState,
     mirror_scrolled: MirrorScroll,
+    legacy_scrolled: LegacyMirrorScroll,
     pane: f32,
     pane_wide: f64,
     tick,
@@ -398,6 +412,17 @@ const fixtures = [_]Fixture{
         \\</scroll>
         ,
         .expect = markup.on_scroll_payload_message,
+    },
+    .{
+        // The RETIRED one-axis record gets the migration teaching that
+        // names the new per-axis fields, not the generic rejection.
+        .name = "an on-scroll tag carrying the retired one-axis record teaches the two-axis migration",
+        .source =
+        \\<scroll on-scroll="legacy_scrolled">
+        \\  <column><text>body</text></column>
+        \\</scroll>
+        ,
+        .expect = markup.on_scroll_legacy_payload_message,
     },
     .{
         // The transpiled one-number float arm carries the split fraction.
@@ -1224,11 +1249,16 @@ test "the reflect field vocabulary never drifts from canvas.ScrollState" {
 
 test "a declared scroll-state mirror classifies as a scroll_state payload" {
     var saw_mirror = false;
+    var saw_legacy = false;
     var saw_wide_pane = false;
     for (model_contract.msgs) |tag| {
         if (std.mem.eql(u8, tag.name, "mirror_scrolled")) {
             saw_mirror = true;
             try testing.expectEqual(contract.PayloadClass.scroll_state, tag.payload);
+        }
+        if (std.mem.eql(u8, tag.name, "legacy_scrolled")) {
+            saw_legacy = true;
+            try testing.expectEqual(contract.PayloadClass.legacy_scroll_state, tag.payload);
         }
         if (std.mem.eql(u8, tag.name, "pane_wide")) {
             saw_wide_pane = true;
@@ -1237,6 +1267,7 @@ test "a declared scroll-state mirror classifies as a scroll_state payload" {
         }
     }
     try testing.expect(saw_mirror);
+    try testing.expect(saw_legacy);
     try testing.expect(saw_wide_pane);
 }
 

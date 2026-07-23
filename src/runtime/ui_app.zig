@@ -2157,6 +2157,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return false;
         }
 
+        /// The axis reach-end/reach-start measure: the vertical axis
+        /// wherever it has scrollable range (every pre-axis region, so
+        /// existing apps see identical behavior), otherwise the
+        /// horizontal one — a horizontal timeline's `on-reach-end` is
+        /// its right edge. One rule for both signals so "the end" and
+        /// "the start" always name the same axis.
+        fn reachAxisState(scroll_state: canvas.ScrollState) canvas.ScrollAxisState {
+            const vertical = scroll_state.axis(.vertical);
+            if (vertical.maxOffset() > 0) return vertical;
+            const horizontal = scroll_state.axis(.horizontal);
+            if (horizontal.maxOffset() > 0) return horizontal;
+            return vertical;
+        }
+
         /// Approach-end hysteresis (`on_reach_end`): fire when a scroll
         /// lands within `reach_end_fire_ratio` viewports of the content
         /// end and the region is armed; re-arm once the offset sits more
@@ -2165,13 +2179,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// under the unchanged offset. One Msg per approach, never a
         /// fetch storm from a user riding the end of the list.
         fn reachEndShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
-            const remaining = scroll_state.content_extent - scroll_state.viewport_extent - scroll_state.offset;
-            if (remaining > scroll_state.viewport_extent * reach_end_rearm_ratio) {
+            const axis_state = reachAxisState(scroll_state);
+            if (id == 0 or axis_state.viewport_extent <= 0) return false;
+            const remaining = axis_state.content_extent - axis_state.viewport_extent - axis_state.offset;
+            if (remaining > axis_state.viewport_extent * reach_end_rearm_ratio) {
                 self.clearReachEndFired(id);
                 return false;
             }
-            if (remaining > scroll_state.viewport_extent * reach_end_fire_ratio) return false;
+            if (remaining > axis_state.viewport_extent * reach_end_fire_ratio) return false;
             if (self.reachEndFired(id)) return false;
             self.markReachEndFired(id);
             return true;
@@ -2210,13 +2225,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// only moves on scroll OBSERVATIONS, so a programmatic jump out
         /// of the band re-arms on the next user scroll, not instantly.
         fn reachStartShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
-            const remaining = scroll_state.offset;
-            if (remaining > scroll_state.viewport_extent * reach_start_rearm_ratio) {
+            const axis_state = reachAxisState(scroll_state);
+            if (id == 0 or axis_state.viewport_extent <= 0) return false;
+            const remaining = axis_state.offset;
+            if (remaining > axis_state.viewport_extent * reach_start_rearm_ratio) {
                 self.clearReachStartFired(id);
                 return false;
             }
-            if (remaining > scroll_state.viewport_extent * reach_start_fire_ratio) return false;
+            if (remaining > axis_state.viewport_extent * reach_start_fire_ratio) return false;
             if (self.reachStartFired(id)) return false;
             self.markReachStartFired(id);
             return true;
@@ -5422,4 +5438,3 @@ const ContextMenuPin = struct {
     window_id: ?platform.WindowId,
     arena_index: usize,
 };
-

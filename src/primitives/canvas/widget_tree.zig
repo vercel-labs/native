@@ -114,6 +114,23 @@ pub fn widgetVirtualRuntimeScrolled(widget: Widget) bool {
     return widget.kind == .scroll_view and widget.layout.virtualized and widget.layout.virtual_item_count > 0;
 }
 
+/// Whether one widget scrolls on the named axis. This is THE axis
+/// capability predicate: wheel/trackpad routing resolves each axis
+/// against it independently, keyboard and semantic scroll intents pick
+/// their axis through it, and the scrollbar/driver emit only the axes
+/// it grants. Vertical: every scrollable kind (scroll views unless
+/// declared `horizontal`, textareas, the virtualized containers).
+/// Horizontal: only a non-virtualized `.scroll_view` declared
+/// `horizontal` or `both` — virtualization is vertical machinery
+/// (windowed ranges price rows, not columns), so a virtualized region
+/// never grants the horizontal axis.
+pub fn widgetScrollsAxis(widget: Widget, axis: token_model.ScrollAxis) bool {
+    return switch (axis) {
+        .vertical => widget.kind != .scroll_view or widget.scroll_axes.scrollsVertically() or widget.layout.virtualized,
+        .horizontal => widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized,
+    };
+}
+
 /// The effective scroll physics for one scroll region: the shared
 /// `ScrollPhysics` token with the region's `Widget.overscroll` override
 /// resolved onto `physics.overscroll` (`.default` keeps the token's

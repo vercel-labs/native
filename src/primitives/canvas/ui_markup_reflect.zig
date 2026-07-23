@@ -106,9 +106,9 @@ pub fn isZeroArgFn(comptime T: type, comptime DeclType: type) bool {
 /// declared-shape predicate below stays std-only. A drift test in
 /// `ui_markup_contract_tests.zig` holds this list equal to the real union.
 pub const text_input_event_tags = [_][]const u8{
-    "insert_text",     "delete_backward",     "delete_forward", "delete_word_backward",
-    "delete_word_forward", "clear",           "move_caret",     "set_selection",
-    "set_composition", "commit_composition",  "cancel_composition",
+    "insert_text",         "delete_backward",    "delete_forward",     "delete_word_backward",
+    "delete_word_forward", "clear",              "move_caret",         "set_selection",
+    "set_composition",     "commit_composition", "cancel_composition",
 };
 
 /// The caret-direction member vocabulary (`canvas.TextCaretDirection`).
@@ -156,12 +156,16 @@ pub fn declaredTextInputUnion(comptime T: type) bool {
     return true;
 }
 
-/// The canvas `ScrollState` field vocabulary, pinned here so the
-/// declared-shape predicate below stays std-only. A drift test in
-/// `ui_markup_contract_tests.zig` holds this list equal to the real
-/// struct's fields (names and f32 types alike).
+/// The canvas `ScrollState` field vocabulary — the TWO-AXIS record,
+/// eight per-axis fields — pinned here so the declared-shape predicate
+/// below stays std-only. A drift test in `ui_markup_contract_tests.zig`
+/// holds this list equal to the real struct's fields (names and f32
+/// types alike).
 pub const scroll_state_field_names = [_][]const u8{
-    "offset", "velocity", "viewport_extent", "content_extent",
+    "offset_x",          "offset_y",
+    "velocity_x",        "velocity_y",
+    "viewport_extent_x", "viewport_extent_y",
+    "content_extent_x",  "content_extent_y",
 };
 
 /// The same vocabulary in the TS SDK's spelling (`@native-sdk/core/events`
@@ -169,35 +173,39 @@ pub const scroll_state_field_names = [_][]const u8{
 /// field names the TS source wrote — your names are your names — so the
 /// structural match accepts either spelling, never a mix.
 pub const scroll_state_field_names_ts = [_][]const u8{
+    "offsetX",         "offsetY",
+    "velocityX",       "velocityY",
+    "viewportExtentX", "viewportExtentY",
+    "contentExtentX",  "contentExtentY",
+};
+
+/// The RETIRED one-axis scroll-state vocabulary, kept only to recognize
+/// a pre-two-axis mirror and teach the migration by name (see
+/// `declaredLegacyScrollStateRecord`). Nothing dispatches through these
+/// fields anymore.
+pub const legacy_scroll_state_field_names = [_][]const u8{
+    "offset", "velocity", "viewport_extent", "content_extent",
+};
+
+/// The retired vocabulary in the TS SDK's spelling.
+pub const legacy_scroll_state_field_names_ts = [_][]const u8{
     "offset", "velocity", "viewportExtent", "contentExtent",
 };
 
-/// A Msg arm payload record DECLARING the scroll-state shape rather than
-/// being `canvas.ScrollState` by identity — the transpiled-core case,
-/// where the emitted module declares its own mirror record (type identity
-/// cannot cross the emission boundary). Matched structurally, the
-/// `declaredTextInputUnion` contract applied to `on-scroll`: a struct of
-/// exactly the four field names in either the canvas spelling
-/// (`viewport_extent`, Zig-declared mirrors and `canvas.ScrollState`
-/// itself) or the TS SDK spelling (`viewportExtent`, the emitted-core
-/// mirror — transpiled fields keep their TS names), each numeric. Integer
-/// or float per field (the transpiler's number model classes each slot);
-/// the dispatch translation widens floats exactly and rounds
-/// integer-classed fields to the nearest whole number.
-pub fn declaredScrollStateRecord(comptime T: type) bool {
+fn declaredRecordMatchesVocabulary(comptime T: type, comptime canvas_names: []const []const u8, comptime ts_names: []const []const u8) bool {
     const info = switch (@typeInfo(T)) {
         .@"struct" => |s| s,
         else => return false,
     };
-    if (info.fields.len != scroll_state_field_names.len) return false;
+    if (info.fields.len != canvas_names.len) return false;
     const canvas_spelling = comptime blk: {
-        for (scroll_state_field_names) |name| {
+        for (canvas_names) |name| {
             if (!@hasField(T, name)) break :blk false;
         }
         break :blk true;
     };
     const ts_spelling = comptime blk: {
-        for (scroll_state_field_names_ts) |name| {
+        for (ts_names) |name| {
             if (!@hasField(T, name)) break :blk false;
         }
         break :blk true;
@@ -207,6 +215,31 @@ pub fn declaredScrollStateRecord(comptime T: type) bool {
         if (!isNumeric(field.type)) return false;
     }
     return true;
+}
+
+/// A Msg arm payload record DECLARING the scroll-state shape rather than
+/// being `canvas.ScrollState` by identity — the transpiled-core case,
+/// where the emitted module declares its own mirror record (type identity
+/// cannot cross the emission boundary). Matched structurally, the
+/// `declaredTextInputUnion` contract applied to `on-scroll`: a struct of
+/// exactly the eight per-axis field names in either the canvas spelling
+/// (`viewport_extent_y`, Zig-declared mirrors and `canvas.ScrollState`
+/// itself) or the TS SDK spelling (`viewportExtentY`, the emitted-core
+/// mirror — transpiled fields keep their TS names), each numeric. Integer
+/// or float per field (the transpiler's number model classes each slot);
+/// the dispatch translation widens floats exactly and rounds
+/// integer-classed fields to the nearest whole number.
+pub fn declaredScrollStateRecord(comptime T: type) bool {
+    return declaredRecordMatchesVocabulary(T, &scroll_state_field_names, &scroll_state_field_names_ts);
+}
+
+/// A mirror of the RETIRED one-axis scroll state — `{offset, velocity,
+/// viewport_extent, content_extent}` in either spelling. Recognized only
+/// to fail with a teaching that names the new per-axis fields, so an app
+/// carrying the pre-two-axis record shape hears exactly what to declare
+/// instead of a generic payload rejection.
+pub fn declaredLegacyScrollStateRecord(comptime T: type) bool {
+    return declaredRecordMatchesVocabulary(T, &legacy_scroll_state_field_names, &legacy_scroll_state_field_names_ts);
 }
 
 /// The machine classes a value-carrying Msg arm may declare for the

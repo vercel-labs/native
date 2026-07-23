@@ -1835,14 +1835,20 @@ pub const GpuSurfaceScrollDriver = struct {
     /// The scroll region's layout frame, view-local.
     frame: geometry.RectF,
     /// Total scrollable content size for the region. The vertical max
-    /// scroll offset is `content_size.height - frame.height`.
+    /// scroll offset is `content_size.height - frame.height`; the
+    /// horizontal one is `content_size.width - frame.width` (a region
+    /// that does not scroll horizontally reports `width ==
+    /// frame.width`, so the horizontal max is 0 and the native
+    /// scroller never travels sideways).
     content_size: geometry.SizeF,
-    /// The runtime's current scroll offset (canvas points, y-down).
+    /// The runtime's current scroll offsets (canvas points, y-down,
+    /// x-rightward).
+    offset_x: f32 = 0,
     offset_y: f32 = 0,
-    /// True when the runtime changed the offset from a non-driver source
+    /// True when the runtime changed an offset from a non-driver source
     /// (keyboard scroll, programmatic scroll, rebuild clamp): the host
-    /// must write `offset_y` into the native scroller. False leaves the
-    /// native scroller alone — the driver owns the offset.
+    /// must write `offset_x`/`offset_y` into the native scroller. False
+    /// leaves the native scroller alone — the driver owns the offsets.
     set_offset: bool = false,
     /// Edge behavior for this region's native scroller: false (the
     /// default) pins scrolling at the content edges, true lets the OS
@@ -1859,6 +1865,7 @@ pub const GpuSurfaceScrollDriverEvent = struct {
     window_id: WindowId = 1,
     label: []const u8,
     driver_id: u64,
+    offset_x: f32 = 0,
     offset_y: f32 = 0,
     timestamp_ns: u64 = 0,
 };

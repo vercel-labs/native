@@ -395,9 +395,17 @@ fn widgetClipsForAudit(widget: Widget) bool {
 }
 
 /// Whether the clip scope scrolls vertically by design, making vertical
-/// overhang the normal operating mode rather than damage.
+/// overhang the normal operating mode rather than damage. A
+/// horizontal-only scroll view does NOT scroll vertically: content
+/// escaping it downward is damage nothing can reveal.
 fn scopeScrollsVertically(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.virtualized;
+    return (widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized;
+}
+
+/// The horizontal twin: a scroll viewport granting the horizontal axis
+/// makes horizontal overhang the operating mode, not damage.
+fn scopeScrollsHorizontally(widget: Widget) bool {
+    return widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized;
 }
 
 /// Nearest ancestor whose clip bounds this node: the first clipping
@@ -428,6 +436,7 @@ fn auditNodeContainerEscape(
     const scope_index = clipScopeIndex(layout, node_index);
     const scope = if (scope_index) |index| layout.nodes[index].frame.normalized() else window.normalized();
     const vertical_checked = if (scope_index) |index| !scopeScrollsVertically(layout.nodes[index].widget) else true;
+    const horizontal_checked = if (scope_index) |index| !scopeScrollsHorizontally(layout.nodes[index].widget) else true;
 
     // Attribute the escape to the outermost offender: if any ancestor
     // inside the same scope is already reported, this node's overhang is
@@ -441,8 +450,10 @@ fn auditNodeContainerEscape(
 
     const frame = node.frame.normalized();
     var overrun_x: f32 = 0;
-    overrun_x = @max(overrun_x, overrunPast(frame.maxX(), scope.maxX()));
-    overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x));
+    if (horizontal_checked) {
+        overrun_x = @max(overrun_x, overrunPast(frame.maxX(), scope.maxX()));
+        overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x));
+    }
     var overrun_y: f32 = 0;
     if (vertical_checked) {
         overrun_y = @max(overrun_y, overrunPast(frame.maxY(), scope.maxY()));

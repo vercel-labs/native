@@ -476,12 +476,12 @@ test "payload-carrying handlers build messages from edits and values" {
     };
     const feed = findByKind(scroll_tree.root, .scroll_view).?;
     const scrolled = scroll_tree.msgForScroll(feed.id, .{
-        .offset = 64,
-        .viewport_extent = 72,
-        .content_extent = 200,
+        .offset_y = 64,
+        .viewport_extent_y = 72,
+        .content_extent_y = 200,
     }).?.feed_scrolled;
-    try testing.expectEqual(@as(f32, 64), scrolled.offset);
-    try testing.expectEqual(@as(f32, 128), scrolled.maxOffset());
+    try testing.expectEqual(@as(f32, 64), scrolled.offset_y);
+    try testing.expectEqual(@as(f32, 128), scrolled.axis(.vertical).maxOffset());
     try testing.expectEqual(@as(?Msg, null), tree.msgForScroll(slider.id, .{}));
 
     // Widgets without payload handlers dispatch nothing for edits.
@@ -1441,8 +1441,8 @@ test "virtualWindow resolves the runtime state and virtualList builds only the w
 
     // Typed dispatch: the scroll observation and the approach-end signal
     // both resolve through the container's handlers.
-    const state = canvas.ScrollState{ .offset = 25_000, .viewport_extent = 90, .content_extent = 2_499_975 };
-    try testing.expectEqual(@as(f32, 25_000), tree.msgForScroll(tree.root.id, state).?.feed_scrolled.offset);
+    const state = canvas.ScrollState{ .offset_y = 25_000, .viewport_extent_y = 90, .content_extent_y = 2_499_975 };
+    try testing.expectEqual(@as(f32, 25_000), tree.msgForScroll(tree.root.id, state).?.feed_scrolled.offset_y);
     try testing.expectEqual(Msg.load_more, tree.msgForReachEnd(tree.root.id).?);
 }
 

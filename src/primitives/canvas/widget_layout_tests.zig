@@ -196,6 +196,7 @@ const SpringToken = support.SpringToken;
 const BlurTokenRef = support.BlurTokenRef;
 const ScrollPhysics = support.ScrollPhysics;
 const ScrollState = support.ScrollState;
+const ScrollAxisState = support.ScrollAxisState;
 const VirtualListOptions = support.VirtualListOptions;
 const VirtualListRange = support.VirtualListRange;
 const virtualListRange = support.virtualListRange;
@@ -1446,7 +1447,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
         .deceleration_per_second = 0.5,
         .stop_velocity = 1,
     };
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 10,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1471,7 +1472,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
 }
 
 test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band excursions recover" {
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 250,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1485,7 +1486,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
     const pinned = start.applyWheel(1000, pinned_physics);
     try std.testing.expectEqual(@as(f32, 260), pinned.offset);
     try std.testing.expectEqual(@as(f32, 0), pinned.velocity);
-    var rolling = ScrollState{
+    var rolling = ScrollAxisState{
         .offset = 250,
         .velocity = 400,
         .viewport_extent = 100,
@@ -1512,7 +1513,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
 
     // A stale out-of-range offset on a pinned region self-heals in one
     // kinetic step instead of animating a return.
-    const stale = ScrollState{
+    const stale = ScrollAxisState{
         .offset = 300,
         .viewport_extent = 100,
         .content_extent = 360,

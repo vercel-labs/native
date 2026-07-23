@@ -1117,7 +1117,8 @@ pub const known_events = schema.event_names;
 
 pub const on_scroll_element_message = "on-scroll is only supported on scroll - the runtime emits scroll offsets for scroll containers, so the handler belongs on the scroll element itself";
 pub const on_reach_end_element_message = "on-reach-end is only supported on scroll - the runtime emits the approach-end signal for scroll containers, so the handler belongs on the scroll element itself";
-pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState, or a declared record of its offset/velocity/viewport_extent/content_extent fields for transpiled cores)";
+pub const on_scroll_payload_message = "on-scroll takes a bare Msg tag whose payload is the post-scroll state (a canvas.ScrollState variant, like activity_scrolled: canvas.ScrollState, or a declared record of its offset_x/offset_y/velocity_x/velocity_y/viewport_extent_x/viewport_extent_y/content_extent_x/content_extent_y fields for transpiled cores)";
+pub const on_scroll_legacy_payload_message = "on-scroll payloads are two-axis now: the one-axis {offset, velocity, viewport_extent, content_extent} record was replaced by per-axis fields - declare offset_x/offset_y, velocity_x/velocity_y, viewport_extent_x/viewport_extent_y, content_extent_x/content_extent_y (TS cores: offsetX/offsetY, velocityX/velocityY, viewportExtentX/viewportExtentY, contentExtentX/contentExtentY); a vertical list reads the _y fields where it read the old ones";
 
 pub const on_resize_element_message = "on-resize is only supported on split - the runtime emits fraction changes for split dividers, so the handler belongs on the split element itself";
 pub const on_resize_payload_message = "on-resize takes a bare Msg tag whose payload is the new first-pane fraction (an f32 variant, like sidebar_resized: f32; transpiled cores declare a one-number float arm)";
@@ -1223,6 +1224,22 @@ pub const quiet_hover_element_message = "quiet-hover is only supported on pressa
 pub const overscroll_value_names = [_][]const u8{ "default", "none", "rubber_band" };
 
 pub const overscroll_value_message = "unknown overscroll value - scroll takes default (follow the ScrollPhysics.overscroll token, off unless a theme flips it), none (pin at the content edges), or rubber_band (bounce past them)";
+
+pub const axis_element_message = "axis is only supported on scroll - it declares which axes the region scrolls (vertical, horizontal, or both); anywhere else it would be silently inert";
+
+/// The `axis` attribute's closed value vocabulary: the member names of
+/// `canvas.ScrollAxes`, mirrored as data here (this layer stays
+/// std-only) with a lockstep test in ui_markup_view_tests.zig holding
+/// the mirror equal to the live enum.
+pub const axis_value_names = [_][]const u8{ "vertical", "horizontal", "both" };
+
+pub const axis_value_message = "unknown axis value - scroll takes vertical (the default), horizontal, or both";
+
+pub const axis_virtualized_message = "axis is not supported on a virtualized scroll - windowed virtualization prices rows, not columns, so a virtual list always scrolls vertically";
+
+pub const value_x_element_message = "value-x is only supported on scroll - it is the horizontal scroll offset (the sideways counterpart of value); anywhere else it would be silently inert";
+
+pub const value_x_dependent_attr_message = "value-x needs axis=\"horizontal\" or axis=\"both\" on the same scroll - a vertical-only region never applies a horizontal offset, so without the axis grant it is silently inert";
 
 pub const resize_duration_element_message = "resize-duration is only supported on split - it declares the split's layout tween (milliseconds; 0 snaps, the default): a rebuild that moves the bound value eases the rendered fraction there instead of snapping; anywhere else it would be silently inert";
 
@@ -3247,6 +3264,50 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     if (parseAttrExpression(attribute.value)) |expression| {
                         if (expression == .literal and !nameInList(expression.literal, &overscroll_value_names)) {
                             return attrError(node, attribute, overscroll_value_message);
+                        }
+                    }
+                }
+                if (std.mem.eql(u8, attribute.name, "axis")) {
+                    // Axes exist only where the runtime scrolls: anywhere
+                    // but a scroll container the option is silently inert
+                    // (same policy as overscroll off scroll).
+                    if (!std.mem.eql(u8, node.name, "scroll")) {
+                        return attrError(node, attribute, axis_element_message);
+                    }
+                    // Windowed virtualization is vertical machinery: a
+                    // horizontal grant on a virtualized scroll would be
+                    // silently ignored, so it is a teaching error.
+                    if (node.attr("virtualized") != null) {
+                        return attrError(node, attribute, axis_virtualized_message);
+                    }
+                    // The closed value vocabulary, checked on literals
+                    // here so the teaching error lands at validation
+                    // (bindings resolve at build, where the engines
+                    // enforce the same set).
+                    if (parseAttrExpression(attribute.value)) |expression| {
+                        if (expression == .literal and !nameInList(expression.literal, &axis_value_names)) {
+                            return attrError(node, attribute, axis_value_message);
+                        }
+                    }
+                }
+                if (std.mem.eql(u8, attribute.name, "value-x")) {
+                    // The horizontal offset exists only where the runtime
+                    // scrolls sideways: anywhere but a scroll container
+                    // it is silently inert.
+                    if (!std.mem.eql(u8, node.name, "scroll")) {
+                        return attrError(node, attribute, value_x_element_message);
+                    }
+                    // An offset on an axis the region never grants is
+                    // silently inert, so it is a teaching error (the
+                    // resize-easing-needs-duration policy). A
+                    // binding-valued axis cannot exist (axis takes the
+                    // closed literal set), so the literal check is total.
+                    const axis_raw = node.attr("axis") orelse {
+                        return attrError(node, attribute, value_x_dependent_attr_message);
+                    };
+                    if (parseAttrExpression(axis_raw)) |axis_expression| {
+                        if (axis_expression == .literal and std.mem.eql(u8, axis_expression.literal, "vertical")) {
+                            return attrError(node, attribute, value_x_dependent_attr_message);
                         }
                     }
                 }

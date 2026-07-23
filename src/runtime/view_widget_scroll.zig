@@ -23,6 +23,12 @@ fn canvasWidgetModelDrivenVirtual(widget: canvas.Widget) bool {
     return widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(widget);
 }
 
+fn unionOptionalRects(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
+    const first = a orelse return b;
+    const second = b orelse return first;
+    return unionRects(first, second);
+}
+
 pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
     return struct {
         pub fn canvasWidgetKineticScrollActive(self: *const RuntimeView) bool {
@@ -33,31 +39,59 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) continue;
                 const physics = canvas.widgetScrollPhysics(node.widget, self.widget_tokens.scroll);
-                if (self.canvasWidgetScrollState(index, node, viewport).needsKineticStep(physics)) return true;
+                const state = self.canvasWidgetScrollState(index, node, viewport);
+                if (canvas.widgetScrollsAxis(node.widget, .vertical) and state.axis(.vertical).needsKineticStep(physics)) return true;
+                if (canvas.widgetScrollsAxis(node.widget, .horizontal) and state.axis(.horizontal).needsKineticStep(physics)) return true;
             }
             return false;
         }
 
-        pub fn applyCanvasWidgetScrollRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, delta_y: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
+        /// Route a wheel/trackpad scroll: EACH AXIS resolves
+        /// independently to the nearest ancestor scrollable on that
+        /// axis. A horizontal timeline holding a vertical list splits a
+        /// diagonal gesture — `dy` scrolls the list, `dx` reaches the
+        /// timeline — and a vertical-only tree behaves byte-identically
+        /// to the one-axis routing this generalizes (every scrollable
+        /// there grants the vertical axis and nothing grants the
+        /// horizontal one). Both axes route even at delta 0: a wheel
+        /// event has always overwritten the landing region's velocity,
+        /// so a purely horizontal gesture stills a vertical flick the
+        /// same way a zero-delta vertical wheel did.
+        pub fn applyCanvasWidgetScrollRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, delta: geometry.OffsetF, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
+            const vertical = try applyCanvasWidgetScrollAxisRoute(self, route, .vertical, delta.dy, source);
+            const horizontal = try applyCanvasWidgetScrollAxisRoute(self, route, .horizontal, delta.dx, source);
+            return unionOptionalRects(vertical, horizontal);
+        }
+
+        fn applyCanvasWidgetScrollAxisRoute(self: *RuntimeView, route: []const canvas.WidgetEventRouteEntry, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource) anyerror!?geometry.RectF {
             var depth_limit: ?usize = null;
-            while (self.deepestCanvasWidgetScrollIndex(route, depth_limit)) |scroll_index| {
+            while (self.deepestCanvasWidgetScrollIndexForAxis(route, axis, depth_limit)) |scroll_index| {
                 if (canvasWidgetModelDrivenVirtual(self.widget_layout_nodes[scroll_index].widget)) return null;
-                const has_scroll_parent = self.deepestCanvasWidgetScrollIndex(route, self.widget_layout_nodes[scroll_index].depth) != null;
-                if (has_scroll_parent and !self.canvasWidgetScrollCanConsume(scroll_index, delta_y)) {
+                const has_scroll_parent = self.deepestCanvasWidgetScrollIndexForAxis(route, axis, self.widget_layout_nodes[scroll_index].depth) != null;
+                if (has_scroll_parent and !self.canvasWidgetScrollCanConsumeAxis(scroll_index, axis, delta)) {
                     depth_limit = self.widget_layout_nodes[scroll_index].depth;
                     continue;
                 }
-                if (try self.applyCanvasWidgetScroll(scroll_index, delta_y, source, !has_scroll_parent)) |dirty| return dirty;
+                if (try self.applyCanvasWidgetScrollAxis(scroll_index, axis, delta, source, !has_scroll_parent)) |dirty| return dirty;
                 depth_limit = self.widget_layout_nodes[scroll_index].depth;
             }
             return null;
         }
 
         pub fn deepestCanvasWidgetScrollIndex(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry, depth_limit: ?usize) ?usize {
+            return self.deepestCanvasWidgetScrollIndexForAxis(route, .vertical, depth_limit);
+        }
+
+        /// The deepest routed widget that scrolls on `axis`. The axis
+        /// filter is what makes per-axis routing independent: a
+        /// vertical-only list is invisible to the horizontal walk, so
+        /// `dx` passes through it to the horizontal ancestor.
+        pub fn deepestCanvasWidgetScrollIndexForAxis(self: *const RuntimeView, route: []const canvas.WidgetEventRouteEntry, comptime axis: canvas.ScrollAxis, depth_limit: ?usize) ?usize {
             var result: ?usize = null;
             var result_depth: usize = 0;
             for (route) |entry| {
                 if (!canvasWidgetScrollableKind(entry.kind) or entry.node_index >= self.widget_layout_node_count) continue;
+                if (!canvas.widgetScrollsAxis(self.widget_layout_nodes[entry.node_index].widget, axis)) continue;
                 const depth = self.widget_layout_nodes[entry.node_index].depth;
                 if (depth_limit) |limit| {
                     if (depth >= limit) continue;
@@ -100,50 +134,74 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             return null;
         }
 
+        /// The region's two-axis scroll state. An axis the region does
+        /// not grant is QUIET: offset and velocity 0 and the content
+        /// extent pinned to the viewport, so `on_scroll` consumers and
+        /// the routing/consume checks read `maxOffset() == 0` — never a
+        /// falsely scrollable inactive axis (a vertical list whose rows
+        /// happen to overhang sideways stays horizontally inert).
         pub fn canvasWidgetScrollState(self: *const RuntimeView, scroll_index: usize, scroll_node: canvas.WidgetLayoutNode, viewport: geometry.RectF) canvas.ScrollState {
             const retained = self.widget_scroll_states[scroll_index];
+            const vertical = canvas.widgetScrollsAxis(scroll_node.widget, .vertical);
+            const horizontal = canvas.widgetScrollsAxis(scroll_node.widget, .horizontal);
             return .{
-                .offset = scroll_node.widget.value,
-                .velocity = retained.velocity,
-                .viewport_extent = viewport.height,
-                .content_extent = self.canvasWidgetScrollContentExtent(scroll_index, viewport),
+                .offset_y = if (vertical) scroll_node.widget.value else 0,
+                .offset_x = if (horizontal) scroll_node.widget.value_x else 0,
+                .velocity_y = if (vertical) retained.velocity_y else 0,
+                .velocity_x = if (horizontal) retained.velocity_x else 0,
+                .viewport_extent_y = viewport.height,
+                .viewport_extent_x = viewport.width,
+                .content_extent_y = if (vertical) self.canvasWidgetScrollContentExtent(scroll_index, viewport) else viewport.height,
+                .content_extent_x = if (horizontal) self.canvasWidgetScrollContentExtentX(scroll_index, viewport) else viewport.width,
             };
         }
 
-        pub fn canvasWidgetScrollCanConsume(self: *const RuntimeView, scroll_index: usize, delta_y: f32) bool {
-            if (scroll_index >= self.widget_layout_node_count or delta_y == 0) return false;
+        pub fn canvasWidgetScrollCanConsumeAxis(self: *const RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32) bool {
+            if (scroll_index >= self.widget_layout_node_count or delta == 0) return false;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return false;
             if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return false;
+            if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return false;
 
             if (scroll_node.widget.kind == .textarea) {
                 const max_offset = canvas.textInputMaxScrollOffsetForWidget(scroll_node.widget, self.widget_tokens);
                 if (max_offset <= 0) return false;
                 const current_offset = std.math.clamp(scroll_node.widget.value, 0, max_offset);
-                return if (delta_y > 0) current_offset < max_offset else current_offset > 0;
+                return if (delta > 0) current_offset < max_offset else current_offset > 0;
             }
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return false;
 
-            const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport).axis(axis);
             const max_offset = current.maxOffset();
-            if (current.offset < 0) return delta_y > 0;
-            if (current.offset > max_offset) return delta_y < 0;
-            return if (delta_y > 0) current.offset < max_offset else current.offset > 0;
+            if (current.offset < 0) return delta > 0;
+            if (current.offset > max_offset) return delta < 0;
+            return if (delta > 0) current.offset < max_offset else current.offset > 0;
         }
 
-        pub fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta_y: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
+        pub fn applyCanvasWidgetScroll(self: *RuntimeView, scroll_index: usize, delta: geometry.OffsetF, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
+            const vertical = try self.applyCanvasWidgetScrollAxis(scroll_index, .vertical, delta.dy, source, allow_rubberband);
+            const horizontal = try self.applyCanvasWidgetScrollAxis(scroll_index, .horizontal, delta.dx, source, allow_rubberband);
+            return unionOptionalRects(vertical, horizontal);
+        }
+
+        pub fn applyCanvasWidgetScrollAxis(self: *RuntimeView, scroll_index: usize, comptime axis: canvas.ScrollAxis, delta: f32, source: CanvasWidgetScrollSource, allow_rubberband: bool) anyerror!?geometry.RectF {
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (!canvasWidgetScrollableKind(scroll_node.widget.kind)) return null;
-            if (scroll_node.widget.kind == .textarea) return self.applyCanvasWidgetTextareaScroll(scroll_index, delta_y, source);
+            if (scroll_node.widget.kind == .textarea) {
+                if (axis != .vertical) return null;
+                return self.applyCanvasWidgetTextareaScroll(scroll_index, delta, source);
+            }
             if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
+            if (!canvas.widgetScrollsAxis(scroll_node.widget, axis)) return null;
 
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return null;
 
-            const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            const state = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
+            const current = state.axis(axis);
             // Per-region edge behavior: the region's overscroll override
             // resolved onto the scroll-physics token (off by default —
             // `applyWheel` clamps unless the effective mode is
@@ -156,22 +214,30 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             const rubberband = allow_rubberband and !scroll_node.widget.native_scroll;
             const next = switch (source) {
                 .wheel => if (rubberband)
-                    current.applyWheel(delta_y, physics)
+                    current.applyWheel(delta, physics)
                 else
-                    current.applyWheelClamped(delta_y, physics),
+                    current.applyWheelClamped(delta, physics),
                 .discrete => discrete: {
-                    var state = current;
-                    state.offset += delta_y;
-                    state.velocity = 0;
-                    break :discrete state.clamped();
+                    var axis_state = current;
+                    axis_state.offset += delta;
+                    axis_state.velocity = 0;
+                    break :discrete axis_state.clamped();
                 },
             };
-            self.widget_scroll_states[scroll_index] = next;
+            self.widget_scroll_states[scroll_index] = state.withAxis(axis, next);
             if (next.offset == current.offset) return null;
 
             const offset_delta = next.offset - current.offset;
-            self.widget_layout_nodes[scroll_index].widget.value = next.offset;
-            self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+            switch (axis) {
+                .vertical => {
+                    self.widget_layout_nodes[scroll_index].widget.value = next.offset;
+                    self.translateCanvasWidgetScrollDescendants(scroll_index, .{ .dy = -offset_delta });
+                },
+                .horizontal => {
+                    self.widget_layout_nodes[scroll_index].widget.value_x = next.offset;
+                    self.translateCanvasWidgetScrollDescendants(scroll_index, .{ .dx = -offset_delta });
+                },
+            }
             self.noteCanvasWidgetScrollEvent(scroll_node.widget.id);
 
             try self.refreshCanvasWidgetSemantics();
@@ -185,7 +251,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (widget.kind != .textarea) return null;
 
             const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens) orelse return null;
-            const current = canvas.ScrollState{
+            const current = canvas.ScrollAxisState{
                 .offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, widget.value),
                 .viewport_extent = viewport.height,
                 .content_extent = canvas.textInputContentExtentForWidget(widget, self.widget_tokens),
@@ -208,10 +274,10 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         /// Absolute offset write from a native scroll driver: the OS
-        /// scroller computed the offset (momentum, rubber-band — overscroll
+        /// scroller computed the offsets (momentum, rubber-band — overscroll
         /// values pass through so the bounce is visible), the engine just
         /// follows. Engine velocity is zeroed; the driver owns physics.
-        pub fn applyCanvasWidgetScrollDriverOffset(self: *RuntimeView, scroll_index: usize, offset: f32) anyerror!?geometry.RectF {
+        pub fn applyCanvasWidgetScrollDriverOffset(self: *RuntimeView, scroll_index: usize, offset_x: f32, offset_y: f32) anyerror!?geometry.RectF {
             if (scroll_index >= self.widget_layout_node_count) return null;
             const scroll_node = self.widget_layout_nodes[scroll_index];
             if (scroll_node.widget.kind != .scroll_view or canvasWidgetModelDrivenVirtual(scroll_node.widget)) return null;
@@ -221,14 +287,24 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
             var next = current;
-            next.offset = offset;
-            next.velocity = 0;
+            // Driver offsets land only on axes the region grants: the
+            // sync pins the native scroller's range on ungranted axes,
+            // and a stray report there must not displace content.
+            if (canvas.widgetScrollsAxis(scroll_node.widget, .vertical)) {
+                next.offset_y = offset_y;
+                next.velocity_y = 0;
+            }
+            if (canvas.widgetScrollsAxis(scroll_node.widget, .horizontal)) {
+                next.offset_x = offset_x;
+                next.velocity_x = 0;
+            }
             self.widget_scroll_states[scroll_index] = next;
-            if (next.offset == current.offset) return null;
+            if (next.offset_y == current.offset_y and next.offset_x == current.offset_x) return null;
 
-            const offset_delta = next.offset - current.offset;
-            self.widget_layout_nodes[scroll_index].widget.value = next.offset;
-            self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+            const offset_delta = geometry.OffsetF.init(next.offset_x - current.offset_x, next.offset_y - current.offset_y);
+            self.widget_layout_nodes[scroll_index].widget.value = next.offset_y;
+            self.widget_layout_nodes[scroll_index].widget.value_x = next.offset_x;
+            self.translateCanvasWidgetScrollDescendants(scroll_index, .{ .dx = -offset_delta.dx, .dy = -offset_delta.dy });
             self.noteCanvasWidgetScrollEvent(scroll_node.widget.id);
 
             try self.refreshCanvasWidgetSemantics();
@@ -244,20 +320,40 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return null;
 
+            // Home/End land at the content origin/terminus on EVERY axis
+            // the region grants: a vertical list jumps top/bottom exactly
+            // as before, a horizontal shelf jumps to its left/right edge,
+            // and a freely scrolling region jumps to the corner (the
+            // NSScrollView document begin/end convention).
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
             var next = current;
-            next.offset = switch (target) {
-                .start => 0,
-                .end => current.maxOffset(),
-            };
-            next.velocity = 0;
-            next = next.clamped();
+            if (canvas.widgetScrollsAxis(scroll_node.widget, .vertical)) {
+                var axis_state = current.axis(.vertical);
+                axis_state.offset = switch (target) {
+                    .start => 0,
+                    .end => axis_state.maxOffset(),
+                };
+                axis_state.velocity = 0;
+                next = next.withAxis(.vertical, axis_state.clamped());
+            }
+            if (canvas.widgetScrollsAxis(scroll_node.widget, .horizontal)) {
+                var axis_state = current.axis(.horizontal);
+                axis_state.offset = switch (target) {
+                    .start => 0,
+                    .end => axis_state.maxOffset(),
+                };
+                axis_state.velocity = 0;
+                next = next.withAxis(.horizontal, axis_state.clamped());
+            }
             self.widget_scroll_states[scroll_index] = next;
-            if (next.offset == current.offset) return null;
+            if (next.offset_y == current.offset_y and next.offset_x == current.offset_x) return null;
 
-            const offset_delta = next.offset - current.offset;
-            self.widget_layout_nodes[scroll_index].widget.value = next.offset;
-            self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+            self.widget_layout_nodes[scroll_index].widget.value = next.offset_y;
+            self.widget_layout_nodes[scroll_index].widget.value_x = next.offset_x;
+            self.translateCanvasWidgetScrollDescendants(scroll_index, .{
+                .dx = -(next.offset_x - current.offset_x),
+                .dy = -(next.offset_y - current.offset_y),
+            });
             self.noteCanvasWidgetScrollEvent(scroll_node.widget.id);
 
             try self.refreshCanvasWidgetSemantics();
@@ -276,24 +372,48 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
                 const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) {
-                    self.widget_scroll_states[scroll_index].velocity = 0;
+                    self.widget_scroll_states[scroll_index].velocity_y = 0;
+                    self.widget_scroll_states[scroll_index].velocity_x = 0;
                     continue;
                 }
 
                 const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
                 const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
-                if (!current.needsKineticStep(physics)) {
-                    self.widget_scroll_states[scroll_index].velocity = 0;
-                    continue;
+                var next = current;
+                var moved = geometry.OffsetF{};
+
+                if (canvas.widgetScrollsAxis(scroll_node.widget, .vertical)) {
+                    const current_y = current.axis(.vertical);
+                    if (current_y.needsKineticStep(physics)) {
+                        const next_y = current_y.stepKinetic(dt_ms, physics);
+                        next = next.withAxis(.vertical, next_y);
+                        moved.dy = next_y.offset - current_y.offset;
+                    } else {
+                        next.velocity_y = 0;
+                    }
+                } else {
+                    next.velocity_y = 0;
                 }
 
-                const next = current.stepKinetic(dt_ms, physics);
-                self.widget_scroll_states[scroll_index] = next;
-                if (next.offset == current.offset) continue;
+                if (canvas.widgetScrollsAxis(scroll_node.widget, .horizontal)) {
+                    const current_x = current.axis(.horizontal);
+                    if (current_x.needsKineticStep(physics)) {
+                        const next_x = current_x.stepKinetic(dt_ms, physics);
+                        next = next.withAxis(.horizontal, next_x);
+                        moved.dx = next_x.offset - current_x.offset;
+                    } else {
+                        next.velocity_x = 0;
+                    }
+                } else {
+                    next.velocity_x = 0;
+                }
 
-                const offset_delta = next.offset - current.offset;
-                self.widget_layout_nodes[scroll_index].widget.value = next.offset;
-                self.translateCanvasWidgetScrollDescendants(scroll_index, -offset_delta);
+                self.widget_scroll_states[scroll_index] = next;
+                if (moved.dx == 0 and moved.dy == 0) continue;
+
+                self.widget_layout_nodes[scroll_index].widget.value = next.offset_y;
+                self.widget_layout_nodes[scroll_index].widget.value_x = next.offset_x;
+                self.translateCanvasWidgetScrollDescendants(scroll_index, .{ .dx = -moved.dx, .dy = -moved.dy });
                 self.noteCanvasWidgetScrollEvent(scroll_node.widget.id);
                 dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(scroll_index, scroll_node.frame));
                 changed = true;
@@ -326,11 +446,31 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             return @max(0, bottom - viewport.y);
         }
 
-        pub fn translateCanvasWidgetScrollDescendants(self: *RuntimeView, scroll_index: usize, dy: f32) void {
+        /// The horizontal content extent: how far the region's mounted
+        /// descendants reach rightward, rebased to offset 0. Textareas
+        /// and virtualized containers never scroll horizontally, so
+        /// their horizontal content pins to the viewport width. Closed
+        /// disclosure subtrees are skipped — concealed content lays out
+        /// at full size and must not inflate the scrollable range on
+        /// either axis (the semantics walker applies the same rule).
+        pub fn canvasWidgetScrollContentExtentX(self: *const RuntimeView, scroll_index: usize, viewport: geometry.RectF) f32 {
+            if (scroll_index < self.widget_layout_node_count and
+                (self.widget_layout_nodes[scroll_index].widget.kind == .textarea or self.widget_layout_nodes[scroll_index].widget.layout.virtualized))
+            {
+                return viewport.width;
+            }
+            return canvas_widget_runtime.canvasWidgetLayoutScrollContentExtentX(
+                self.widget_layout_nodes[0..self.widget_layout_node_count],
+                scroll_index,
+                viewport,
+            );
+        }
+
+        pub fn translateCanvasWidgetScrollDescendants(self: *RuntimeView, scroll_index: usize, offset: geometry.OffsetF) void {
             const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
             var index = scroll_index + 1;
             while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > scroll_depth) : (index += 1) {
-                const translated = self.widget_layout_nodes[index].frame.translate(.{ .dx = 0, .dy = dy });
+                const translated = self.widget_layout_nodes[index].frame.translate(offset);
                 self.widget_layout_nodes[index].frame = translated;
                 self.widget_layout_nodes[index].widget.frame = translated;
             }
