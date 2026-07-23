@@ -2468,6 +2468,35 @@ test "a completion handler's chained load replays in recorded order" {
     }
 }
 
+test "a recorded handled event without its journaled result fails the finish check" {
+    // The recorder journals every handled delivery immediately before
+    // the event that dispatched it — a recorded event arriving with a
+    // handler bound and NO fed record before it means the journal was
+    // truncated or hand-edited, and the Msg the recording dispatched
+    // would silently vanish.
+    var fx = VideoEffects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    fx.pushReplayVideoSource(clip_key, 1, .local, false);
+    fx.loadVideo(.{
+        .key = clip_key,
+        .surface = clip_surface,
+        .path = clip_path,
+        .on_event = VideoEffects.videoMsg(.video_event),
+    });
+    const msg = fx.takeVideoMsg(.{
+        .kind = .loaded,
+        .token = 1,
+        .position_ms = 0,
+        .duration_ms = 92_500,
+        .playing = true,
+        .width = 1280,
+        .height = 720,
+    });
+    try std.testing.expect(msg == null);
+    try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
+}
+
 test "an undelivered fed video result fails the finish check" {
     // A fed record is one recorded delivery, and the event that
     // consumed it live follows it in every honest journal — so a fed
@@ -3166,7 +3195,7 @@ test "stopping a stream cancels only its own staged answers" {
         .on_event = VideoEffects.videoMsg(.video_event),
     });
     try fx.feedVideoEvent(.position, 500, 92_500, true, false, 0, 0);
-    fx.stopVideoCancel();
+    fx.stopVideoCancel(fx.videoMintedToken());
 
     var boundary = fx.drainBoundary();
     const msg = fx.takeMsgWithin(&boundary) orelse return error.TestExpectedMsg;

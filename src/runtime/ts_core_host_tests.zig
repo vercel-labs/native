@@ -1732,6 +1732,39 @@ test "video_load decodes whole and events route the seven-field arm by name" {
     try std.testing.expect(replaced.muted);
 }
 
+test "a stale wire key's verbs never touch a playback the bridge did not load" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The bridge opens a stream, then a load the bridge never issued
+    // (a declarative element's) replaces the single engine player.
+    Host.dispatch(fx, .vload);
+    fx.loadVideo(.{
+        .key = 424_242,
+        .surface = 5,
+        .path = "media/declared.mp4",
+    });
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try std.testing.expectEqual(@as(u64, 424_242), fx.videoSnapshot().key);
+
+    // The stale entry's transport verbs no-op: pausing, seeking, or
+    // muting through the old wire key must not mutate someone else's
+    // playback.
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    Host.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 0), fx.videoSnapshot().position_ms);
+    Host.dispatch(fx, .vmute_it);
+    try std.testing.expect(!fx.videoSnapshot().muted);
+
+    // Stop retires the entry and cancels the entry's OWN stream, but
+    // the playback on the channel — someone else's — survives.
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expect(fx.videoSnapshot().playing);
+}
+
 test "stop cancels the stream: staged terminals never outlive it" {
     const fx = freshChannel();
     defer fx.deinit();

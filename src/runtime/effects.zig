@@ -6367,26 +6367,25 @@ pub fn Effects(comptime Msg: type) type {
         /// `stopVideo` plus the stream CANCEL the TS wire promises:
         /// the stopped stream's staged-but-undrained answers — a
         /// synchronous terminal from the very batch that stops it —
-        /// are removed before the channel goes idle, so no event for
-        /// the stream ever reaches the app after this call
-        /// (`Cmd.videoStop`: "no events for the key after this"). The
-        /// stream is identified by its TOKEN, not the public key: the
-        /// key is caller-controlled and shared by every load routed
-        /// through one event arm, and a REPLACED predecessor under
-        /// the same key still speaks its owed terminal — only stop
-        /// cancels. The stream being stopped is the latest ACCEPTED
-        /// load (the wire entry re-keys only on acceptance, and
-        /// acceptance is what mints), so its identity is the last
-        /// minted token even when a synchronous failure already reset
-        /// the channel. The Zig-native `stopVideo` keeps every staged
-        /// answer instead (one terminal per load, never silence); an
-        /// adapter whose public stop is the stream's cancel goes
-        /// through here. A cancelled answer never journals, so replay
-        /// regenerates and cancels the same entries and the timelines
-        /// stay identical.
-        pub fn stopVideoCancel(self: *Self) void {
-            self.cancelPendingVideo(self.video_token_seq);
-            self.stopVideo();
+        /// are removed, so no event for the stream ever reaches the
+        /// app after this call (`Cmd.videoStop`: "no events for the
+        /// key after this"). The stream is identified by its TOKEN
+        /// (`videoMintedToken` at the adapter's own load), not the
+        /// public key: the key is caller-controlled and shared by
+        /// every load routed through one event arm, and a REPLACED
+        /// predecessor under the same key still speaks its owed
+        /// terminal — only stop cancels. The PLAYER stops only while
+        /// the channel still plays that stream: a playback some other
+        /// caller loaded since (a declarative element) must survive a
+        /// stale stream's stop untouched. The Zig-native `stopVideo`
+        /// keeps every staged answer instead (one terminal per load,
+        /// never silence); an adapter whose public stop is the
+        /// stream's cancel goes through here. A cancelled answer never
+        /// journals, so replay regenerates and cancels the same
+        /// entries and the timelines stay identical.
+        pub fn stopVideoCancel(self: *Self, token: u64) void {
+            self.cancelPendingVideo(token);
+            if (self.video.active and self.video.token == token) self.stopVideo();
         }
 
         /// Remove every staged entry belonging to load `token` — the
@@ -6549,6 +6548,10 @@ pub fn Effects(comptime Msg: type) type {
             // new clip's `.loaded`) replays, or that event would be
             // swallowed against the old token.
             if (self.replay) {
+                // Captured BEFORE the apply: a terminal event resets
+                // the channel, and the missing-record check below needs
+                // the handler that was bound when this event dispatched.
+                const event_handler = self.video.on_event;
                 const resolved = self.applyVideoEvent(.{
                     .key = 0,
                     .kind = kind,
@@ -6587,6 +6590,19 @@ pub fn Effects(comptime Msg: type) type {
                     }
                     const event_fn = entry.video_fn orelse return null;
                     return event_fn(entry.event);
+                }
+                if (event_handler != null) {
+                    // A handler was bound when this recorded event
+                    // dispatched, so the recording delivered a Msg and
+                    // journaled its record immediately before this
+                    // event — a missing record is a truncated or
+                    // hand-edited journal, and returning silently
+                    // would drop a Msg the recording dispatched.
+                    std.debug.print(
+                        "session replay: a recorded video event arrived with no journaled result before it - the recorder journals every handled delivery, so the journal is truncated or hand-edited\n",
+                        .{},
+                    );
+                    self.replay_video_diverged = true;
                 }
                 return null;
             }
@@ -6631,6 +6647,17 @@ pub fn Effects(comptime Msg: type) type {
         /// key.
         pub fn videoOwnerToken(self: *const Self) u64 {
             return if (self.video.active) self.video.token else 0;
+        }
+
+        /// The most recently MINTED load identity — valid right after
+        /// `loadVideo` returns even when a synchronous refusal already
+        /// reset the channel (where `videoOwnerToken` reads 0). How an
+        /// adapter remembers which stream its own load opened, so its
+        /// later verbs can prove the playback on the channel is still
+        /// that stream (rejected loads never mint, and adapters
+        /// pre-validate rejections before committing routing state).
+        pub fn videoMintedToken(self: *const Self) u64 {
+            return self.video_token_seq;
         }
 
         /// The video playback state mirrors, for the automation

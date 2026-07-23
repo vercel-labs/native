@@ -507,6 +507,13 @@ pub fn TsCoreHost(comptime core: type) type {
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             event_tag: u8 = 0,
+            /// The load identity this entry's own accepted load minted
+            /// (`Effects.videoMintedToken`): the proof that the
+            /// playback on the single engine channel is still THIS
+            /// stream — a load the bridge never issued (a declarative
+            /// element's) may have replaced it, and the entry's verbs
+            /// must not mutate or cancel someone else's playback.
+            token: u64 = 0,
 
             fn wireKey(entry: *const VideoEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -1085,6 +1092,11 @@ pub fn TsCoreHost(comptime core: type) type {
                             @memcpy(video_entry.key[0..key.len], key);
                             video_entry.event_tag = event_tag;
                             fx.loadVideo(options);
+                            // The identity this load minted (valid even
+                            // when a synchronous refusal already reset
+                            // the channel): the entry's verbs prove
+                            // ownership against it.
+                            video_entry.token = fx.videoMintedToken();
                         }
                     },
                     // video_ctl [op][key_len][key][verb u8][value f64 LE]
@@ -1361,23 +1373,32 @@ pub fn TsCoreHost(comptime core: type) type {
         /// are the engine's to swallow.
         fn runVideoCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
             if (!video_entry.used or !std.mem.eql(u8, video_entry.wireKey(), key)) return;
+            if (verb == 2) {
+                // `Cmd.videoStop` is the stream's CANCEL: the engine
+                // drops THIS stream's staged answers (token-scoped —
+                // even the synchronous terminal of a batch that
+                // loaded, failed, and stopped in one dispatch, and
+                // even when a later load reuses the same event tag),
+                // and stops the player only while the channel still
+                // plays this stream — a playback some other caller
+                // loaded since (a declarative element) survives
+                // untouched. A REPLACED predecessor sharing this arm
+                // keeps its own owed terminal; only stop cancels.
+                const token = video_entry.token;
+                video_entry.used = false;
+                fx.stopVideoCancel(token);
+                return;
+            }
+            // The wire key names the bridge's entry, but the single
+            // engine player may since have been replaced by a load the
+            // bridge never issued (a declarative <video>): transport
+            // verbs act only while the entry's own stream is the
+            // playback on the channel — anything else is a stale key
+            // and no-ops, the idle rule.
+            if (fx.videoOwnerToken() != video_entry.token) return;
             switch (verb) {
                 0 => fx.playVideo(),
                 1 => fx.pauseVideo(),
-                2 => {
-                    // `Cmd.videoStop` is the stream's CANCEL: the
-                    // engine drops the stopped stream's staged answers
-                    // with the player, so nothing for it can reach the
-                    // app after the stop — even the synchronous
-                    // terminal of a batch that loaded, failed, and
-                    // stopped in one dispatch, and even when a later
-                    // load reuses the same event tag. A REPLACED
-                    // predecessor sharing this arm keeps its own owed
-                    // terminal (the cancel is token-scoped inside the
-                    // engine — only stop cancels).
-                    video_entry.used = false;
-                    fx.stopVideoCancel();
-                },
                 // The wire carries the app's f64. In-window offsets pass
                 // through (the engine clamps to the duration itself); a
                 // FINITE offset PAST the exact-integer window saturates
