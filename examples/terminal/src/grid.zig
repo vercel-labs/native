@@ -72,6 +72,15 @@ pub const Session = struct {
             .render = .empty,
         };
         session.stream = .initAlloc(gpa, .init(&session.term));
+        session.installStreamEffects();
+        return session;
+    }
+
+    /// Wire the stream handler's effect callbacks — only `write_pty`
+    /// (query answers routed back to the pty); everything else stays
+    /// null (the emulator's read-only defaults). Called at create and
+    /// after `reset` rebuilds the stream.
+    fn installStreamEffects(session: *Session) void {
         session.stream.handler.effects = .{
             .bell = null,
             .clipboard_write = null,
@@ -84,7 +93,6 @@ pub const Session = struct {
             .write_pty = writePtyResponse,
             .xtversion = null,
         };
-        return session;
     }
 
     pub fn destroy(session: *Session) void {
@@ -100,6 +108,25 @@ pub const Session = struct {
     /// boundary keep parsing).
     pub fn feed(session: *Session, bytes: []const u8) void {
         session.stream.nextSlice(bytes);
+    }
+
+    /// Hard-reset the emulator for a fresh session (a RIS): clears the
+    /// screen, scrollback, modes (application-cursor, reverse video),
+    /// palette overrides, and — by rebuilding the stream — any partial
+    /// escape sequence left mid-parse. Without this, restarting a shell
+    /// after the previous one exited mid-sequence or in a non-default
+    /// mode would misencode the new shell's keys or misparse its first
+    /// output as a continuation of the old stream.
+    pub fn reset(session: *Session) void {
+        session.term.fullReset();
+        session.stream.deinit();
+        session.stream = .initAlloc(session.gpa, .init(&session.term));
+        session.installStreamEffects();
+        session.response_len = 0;
+        session.responses_dropped = 0;
+        session.clearSelection();
+        session.select_head = .{};
+        session.select_block = false;
     }
 
     /// Terminal query answers accumulated by the last feeds; the caller

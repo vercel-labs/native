@@ -126,6 +126,11 @@ fn initFx(model: *Model, fx: *Fx) void {
 
 fn spawnShell(model: *Model, fx: *Fx) void {
     model.phase = .starting;
+    // Hard-reset the emulator so a restarted shell starts from a clean
+    // terminal — no leftover mode (application-cursor, reverse video),
+    // scrollback, palette override, or partial escape sequence from the
+    // session that just ended. (A no-op on the first spawn.)
+    model.session.reset();
     fx.ptySpawn(.{
         .key = shell_key,
         .argv = &.{ default_shell, "-i" },
@@ -357,6 +362,21 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
         .{ .name = "end", .key = .end },
         .{ .name = "pageup", .key = .page_up },
         .{ .name = "pagedown", .key = .page_down },
+        .{ .name = "insert", .key = .insert },
+        // Function keys produce no committed text, so the encoder must
+        // build their escape sequences or the child never sees them.
+        .{ .name = "f1", .key = .f1 },
+        .{ .name = "f2", .key = .f2 },
+        .{ .name = "f3", .key = .f3 },
+        .{ .name = "f4", .key = .f4 },
+        .{ .name = "f5", .key = .f5 },
+        .{ .name = "f6", .key = .f6 },
+        .{ .name = "f7", .key = .f7 },
+        .{ .name = "f8", .key = .f8 },
+        .{ .name = "f9", .key = .f9 },
+        .{ .name = "f10", .key = .f10 },
+        .{ .name = "f11", .key = .f11 },
+        .{ .name = "f12", .key = .f12 },
     };
     for (specials) |entry| {
         if (keyIs(key, entry.name)) return .{ .key = entry.key };

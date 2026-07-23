@@ -6146,6 +6146,11 @@ pub fn Effects(comptime Msg: type) type {
             // record) — reject an over-bound feed rather than deliver a
             // silently truncated prefix.
             if (bytes.len > max_effect_pty_chunk_bytes) return error.PtyChunkTooLarge;
+            // Empty output is a no-op: the live drain only ever delivers
+            // a non-empty batch, so journaling an empty one would write
+            // a zero-length blob record that replay refuses as damage.
+            // A fake feed of "" simply delivers nothing.
+            if (bytes.len == 0) return;
             const staged_len = bytes.len;
             var entry: Entry = .{
                 .kind = .pty,

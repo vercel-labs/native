@@ -468,15 +468,17 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     },
                     .ime_set_composition => blk: {
                         // Buffer the FULL composition (grow to fit, never
-                        // truncate): each set_composition replaces the
+                        // truncate): each set_composition REPLACES the
                         // preedit, so this holds one composition's bytes.
-                        // An allocation failure keeps the prior buffer and
-                        // simply does not update the preedit — the commit
-                        // then forwards what fit, never invalid UTF-8.
+                        // If growth fails, CLEAR the preedit rather than
+                        // leave the prior (now superseded) composition
+                        // active — a later empty commit must never insert
+                        // stale text the user has since replaced.
                         if (input_event.text.len > self.targetless_ime_preedit.len) {
                             if (self.owned_allocator.realloc(self.targetless_ime_preedit, input_event.text.len)) |grown| {
                                 self.targetless_ime_preedit = grown;
                             } else |_| {
+                                self.targetless_ime_preedit_len = 0;
                                 break :blk null;
                             }
                         }
