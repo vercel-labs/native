@@ -322,6 +322,22 @@ const Mapper = struct {
         };
     }
 
+    /// The ABI prefix rides straight into exported symbol spellings
+    /// (`@extern` names, linker entries), so it must be a symbol-safe
+    /// spelling: ASCII letters, digits, and underscores, not starting
+    /// with a digit. Anything else (an embedded NUL, unicode, spaces)
+    /// cannot be represented faithfully as an object-file symbol name.
+    fn symbolPrefix(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const u8 {
+        const text = try self.nonEmptyString(value, at);
+        for (text, 0..) |byte, index| {
+            const ok = byte == '_' or std.ascii.isAlphabetic(byte) or (index > 0 and std.ascii.isDigit(byte));
+            if (!ok) {
+                return self.diags.fail(at, "byte 0x{x:0>2} at offset {d} cannot appear in a linker symbol name — the prefix is spelled verbatim into every exported symbol; use ASCII letters, digits, and underscores, not starting with a digit", .{ byte, index });
+            }
+        }
+        return text;
+    }
+
     fn nonEmptyString(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const u8 {
         const text = try self.string(value, at);
         if (text.len == 0) return self.diags.fail(at, "expected a non-empty string", .{});
@@ -718,7 +734,7 @@ const Mapper = struct {
         const entry = try self.members(value, "abi", &.{ "prefix", "exports", "snapshot_format" });
         entry.warnUnknown();
         return .{
-            .prefix = try self.nonEmptyString(try entry.get("prefix"), "abi.prefix"),
+            .prefix = try self.symbolPrefix(try entry.get("prefix"), "abi.prefix"),
             .exports = try self.stringList(try entry.get("exports"), "abi.exports"),
             .snapshot_format = try self.integer(try entry.get("snapshot_format"), "abi.snapshot_format"),
         };
@@ -1072,7 +1088,7 @@ fn validateAcyclic(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnosti
 
     const Frame = struct {
         name: []const u8,
-        edges: []const []const u8,
+        shape: EntryShape,
         next_edge: usize,
     };
 
@@ -1085,11 +1101,11 @@ fn validateAcyclic(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnosti
         if ((states.get(root) orelse .unvisited) != .unvisited) continue;
         var stack: std.ArrayListUnmanaged(Frame) = .empty;
         try states.put(arena, root, .on_stack);
-        try stack.append(arena, .{ .name = root, .edges = try namedEdges(arena, sidecar.types, root), .next_edge = 0 });
+        try stack.append(arena, .{ .name = root, .shape = try entryShape(arena, sidecar.types, root), .next_edge = 0 });
         while (stack.items.len > 0) {
             const top = &stack.items[stack.items.len - 1];
-            if (top.next_edge < top.edges.len) {
-                const child = top.edges[top.next_edge];
+            if (top.next_edge < top.shape.edges.len) {
+                const child = top.shape.edges[top.next_edge].name;
                 top.next_edge += 1;
                 switch (states.get(child) orelse .unvisited) {
                     .on_stack => {
@@ -1108,46 +1124,64 @@ fn validateAcyclic(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnosti
                     .done => {},
                     .unvisited => {
                         try states.put(arena, child, .on_stack);
-                        try stack.append(arena, .{ .name = child, .edges = try namedEdges(arena, sidecar.types, child), .next_edge = 0 });
+                        try stack.append(arena, .{ .name = child, .shape = try entryShape(arena, sidecar.types, child), .next_edge = 0 });
                     },
                 }
                 continue;
             }
-            // Post-order: the deepest chain below this entry.
-            var deepest: usize = 0;
-            for (top.edges) |child| {
-                deepest = @max(deepest, depths.get(child) orelse 0);
+            // Post-order: the deepest fully expanded value tree under
+            // this entry. Structural wrapping and named chains multiply
+            // when counted separately, so the bound is on their sum —
+            // the depth every downstream walk (encoders, emitters,
+            // sample builders) actually recurses to.
+            var deepest: usize = top.shape.leaf_levels;
+            for (top.shape.edges) |edge| {
+                deepest = @max(deepest, edge.wrap + (depths.get(edge.name) orelse 0));
             }
             const depth = deepest + 1;
             try depths.put(arena, top.name, depth);
             try states.put(arena, top.name, .done);
             if (depth > max_chain_depth and !depth_refused) {
                 depth_refused = true;
-                diags.flag("types", "the type reference graph chains more than {d} record levels — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source", .{max_chain_depth});
+                diags.flag("types", "the value tree under \"{s}\" expands deeper than {d} levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source", .{ top.name, max_chain_depth });
             }
             _ = stack.pop();
         }
     }
 }
 
-/// The named-type edges leaving one table entry (structural nesting
-/// within a reference is bounded by the reader).
-fn namedEdges(arena: std.mem.Allocator, types: Types, name: []const u8) error{OutOfMemory}![]const []const u8 {
-    var edges: std.ArrayListUnmanaged([]const u8) = .empty;
+/// One named-type edge leaving a table entry: the referenced name and
+/// the structural levels (optional/slice) wrapped around the reference
+/// at its use site.
+const Edge = struct { name: []const u8, wrap: usize };
+
+const EntryShape = struct {
+    edges: []const Edge,
+    /// The deepest purely structural member (no named reference): its
+    /// wrapper count plus the leaf itself.
+    leaf_levels: usize,
+};
+
+/// The shape of one table entry's members for depth accounting
+/// (structural nesting within a reference is bounded by the reader, so
+/// the collection recursion is bounded too).
+fn entryShape(arena: std.mem.Allocator, types: Types, name: []const u8) error{OutOfMemory}!EntryShape {
+    var edges: std.ArrayListUnmanaged(Edge) = .empty;
+    var leaf_levels: usize = 0;
     if (findStruct(types, name)) |record| {
-        for (record.fields) |field| try appendNamedRefs(arena, &edges, field.type);
+        for (record.fields) |field| try measureRef(arena, &edges, &leaf_levels, field.type, 0);
     } else if (findUnion(types, name)) |tagged| {
-        for (tagged.arms) |arm| try appendNamedRefs(arena, &edges, arm.payload);
+        for (tagged.arms) |arm| try measureRef(arena, &edges, &leaf_levels, arm.payload, 0);
     }
-    return edges.items;
+    return .{ .edges = edges.items, .leaf_levels = leaf_levels };
 }
 
-fn appendNamedRefs(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged([]const u8), ref: TypeRef) error{OutOfMemory}!void {
+fn measureRef(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged(Edge), leaf_levels: *usize, ref: TypeRef, wrap: usize) error{OutOfMemory}!void {
     switch (ref) {
-        .bool, .f64, .i64, .bytes, .void, .enum_ref => {},
-        .optional => |inner| try appendNamedRefs(arena, edges, inner.*),
-        .slice => |elem| try appendNamedRefs(arena, edges, elem.*),
-        .node, .value, .union_ref => |edge| try edges.append(arena, edge),
+        .bool, .f64, .i64, .bytes, .void, .enum_ref => leaf_levels.* = @max(leaf_levels.*, wrap + 1),
+        .optional => |inner| try measureRef(arena, edges, leaf_levels, inner.*, wrap + 1),
+        .slice => |elem| try measureRef(arena, edges, leaf_levels, elem.*, wrap + 1),
+        .node, .value, .union_ref => |edge| try edges.append(arena, .{ .name = edge, .wrap = wrap }),
     }
 }
 
@@ -1941,5 +1975,57 @@ test "record chains past the depth bound refuse with a teaching" {
     );
     const model_open = "{\"name\": \"Model\", \"fields\": [";
     source = try replaced(arena, source, model_open, try std.fmt.allocPrint(arena, "{s}{s}", .{ chain.items, model_open }));
-    try expectRefusalContaining(source, "more than 256 record levels");
+    try expectRefusalContaining(source, "expands deeper than 256 levels");
+}
+
+test "compound wrapping and chaining refuse on expanded depth" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // 16 records chained through 32 slice wrappers each: chain length
+    // and per-reference nesting both sit far under their own bounds,
+    // but the expanded value tree is ~528 levels deep.
+    var chain: std.ArrayListUnmanaged(u8) = .empty;
+    const links = 16;
+    const wraps = 32;
+    var index: usize = 0;
+    while (index < links) : (index += 1) {
+        var wrapped: std.ArrayListUnmanaged(u8) = .empty;
+        var level: usize = 0;
+        while (level < wraps) : (level += 1) {
+            try wrapped.appendSlice(arena, "{\"kind\": \"slice\", \"elem\": ");
+        }
+        if (index + 1 < links) {
+            try wrapped.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"kind\": \"value\", \"name\": \"Deep{d}\"}}", .{index + 1}));
+        } else {
+            try wrapped.appendSlice(arena, "{\"kind\": \"i64\"}");
+        }
+        level = 0;
+        while (level < wraps) : (level += 1) {
+            try wrapped.append(arena, '}');
+        }
+        try chain.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"name\": \"Deep{d}\", \"fields\": [{{\"name\": \"next\", \"type\": {s}}}]}},\n", .{ index, wrapped.items }));
+    }
+    var source = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"head\", \"type\": {\"kind\": \"value\", \"name\": \"Deep0\"}}",
+    );
+    const model_open = "{\"name\": \"Model\", \"fields\": [";
+    source = try replaced(arena, source, model_open, try std.fmt.allocPrint(arena, "{s}{s}", .{ chain.items, model_open }));
+    try expectRefusalContaining(source, "expands deeper than 256 levels");
+}
+
+test "an abi prefix with symbol-unsafe bytes refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const nul = try replaced(arena, minimal_valid_json, "\"prefix\": \"nsc_core_\"", "\"prefix\": \"nsc_core_\\u0000\"");
+    try expectRefusal(nul, "abi.prefix", "cannot appear in a linker symbol name");
+    const digit = try replaced(arena, minimal_valid_json, "\"prefix\": \"nsc_core_\"", "\"prefix\": \"9core_\"");
+    try expectRefusal(digit, "abi.prefix", "cannot appear in a linker symbol name");
+    const space = try replaced(arena, minimal_valid_json, "\"prefix\": \"nsc_core_\"", "\"prefix\": \"nsc core \"");
+    try expectRefusal(space, "abi.prefix", "cannot appear in a linker symbol name");
 }

@@ -196,12 +196,15 @@ pub fn build(b: *std.Build) void {
     const eject_components_tests = testArtifact(b, eject_components_mod);
 
     // corewire, the contract-sidecar shim generator (tools/corewire):
-    // std-only unit suites for the sidecar reader/validator, the shim
-    // emitter, the extractor, and the canonical value encoding. The
-    // conformance suite — both lanes per ts-core fixture, compared by
-    // layout fingerprint and model-contract artifact — rides the ts-core
-    // e2e block, since it needs node and the transpiler toolchain.
+    // std-only unit suites, one test root per source file (tests live
+    // in the file they cover, and imported files' tests do not run
+    // under an importer's root). The conformance suite — both lanes per
+    // ts-core fixture, compared by layout fingerprint and
+    // model-contract artifact — rides the ts-core e2e block, since it
+    // needs node and the transpiler toolchain.
+    const corewire_sidecar_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/sidecar.zig"));
     const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
+    const corewire_facade_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_facade.zig"));
     const corewire_extract_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/extract.zig"));
     const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
 
@@ -461,7 +464,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(eject_components_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_sidecar_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_facade_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_extract_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
     if (ts_core_e2e_tests) |ts_core_artifacts| {
