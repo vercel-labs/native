@@ -5955,16 +5955,20 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // flows back through the clip-view bounds-change notification.
         [driver scrollWheel:event];
         // Split the RESIDUAL axis: a component the locked driver cannot
-        // travel still belongs to some outer region, so exactly that
-        // component forwards to the wire, where the runtime's per-axis
-        // routing finds the nearest region scrolling it (and pushes any
-        // native driver's resulting offset back through set_offset).
-        // This is how one diagonal gesture scrolls a vertical list AND
-        // the horizontal timeline around it. No double-application is
-        // possible — the driver has no travel on the forwarded axis,
-        // and the wire event carries only that axis.
-        const double residualX = NativeSdkScrollDriverScrollsHorizontally(driver) ? 0 : -event.scrollingDeltaX;
-        const double residualY = NativeSdkScrollDriverScrollsVertically(driver) ? 0 : -event.scrollingDeltaY;
+        // absorb right now — no movement left in that direction and no
+        // elastic bounce on that axis — still belongs to some outer
+        // region, so exactly that component forwards to the wire, where
+        // the runtime's per-axis routing finds the nearest region
+        // scrolling it (and pushes any native driver's resulting offset
+        // back through the set-offset flags). This is how one diagonal
+        // gesture scrolls a vertical list AND the horizontal timeline
+        // around it. No double-application is possible — the driver
+        // cannot move on the forwarded axis, and the wire event carries
+        // only that axis.
+        const double canvasDx = -event.scrollingDeltaX;
+        const double canvasDy = -event.scrollingDeltaY;
+        const double residualX = (canvasDx != 0 && !NativeSdkScrollDriverTakesHorizontal(driver, canvasDx)) ? canvasDx : 0;
+        const double residualY = (canvasDy != 0 && !NativeSdkScrollDriverTakesVertical(driver, canvasDy)) ? canvasDy : 0;
         if (residualX != 0 || residualY != 0) {
             [self queueScrollInputEvent:event deltaX:residualX deltaY:residualY];
         }
@@ -6305,6 +6309,11 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         [driver removeFromSuperview];
         [self.scrollDrivers removeObjectAtIndex:(NSUInteger)index];
     }
+    // Rebuilt in SPEC order every push: the specs ride layout pre-order
+    // (outermost first, deepest last), and the wheel selection walk
+    // depends on that order — a keyed reorder that keeps ids must not
+    // leave a stale creation order deciding which region is "deepest".
+    NSMutableArray *ordered = [[NSMutableArray alloc] initWithCapacity:count];
     for (NSUInteger spec = 0; spec < count; spec += 1) {
         const native_sdk_appkit_scroll_driver_t desired = drivers[spec];
         NativeSdkScrollDriverView *driver = nil;
@@ -6364,7 +6373,9 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
                                   offsetY:desired.offset_y
                                      setY:(created || desired.set_offset_y)];
         }
+        [ordered addObject:driver];
     }
+    self.scrollDrivers = ordered;
 }
 
 // Per-axis programmatic offset write: an axis the runtime did not move
@@ -6387,46 +6398,93 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     }
 }
 
-// Whether the driver's native scroller has travel along each axis: the
-// runtime pins content to the frame on axes the region does not grant,
-// so range IS the grant.
-static BOOL NativeSdkScrollDriverScrollsVertically(NativeSdkScrollDriverView *driver) {
-    return driver.documentView.frame.size.height > driver.contentView.bounds.size.height + 0.5;
+// Direction-aware consumption, the engine's nested-handoff predicate
+// (`canvasWidgetScrollCanConsumeAxis`) restated against the native
+// scroller: a driver consumes a delta on an axis only while its offset
+// can still move in that direction, so a saturated inner region hands
+// an outward swipe to its ancestor exactly like the engine walk does.
+static BOOL NativeSdkScrollDriverCanConsumeVertically(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    if (canvasDelta == 0) return NO;
+    const double offset = driver.contentView.bounds.origin.y;
+    const double maxOffset = driver.documentView.frame.size.height - driver.contentView.bounds.size.height;
+    return canvasDelta > 0 ? offset < maxOffset - 0.5 : offset > 0.5;
 }
 
-static BOOL NativeSdkScrollDriverScrollsHorizontally(NativeSdkScrollDriverView *driver) {
-    return driver.documentView.frame.size.width > driver.contentView.bounds.size.width + 0.5;
+static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    if (canvasDelta == 0) return NO;
+    const double offset = driver.contentView.bounds.origin.x;
+    const double maxOffset = driver.documentView.frame.size.width - driver.contentView.bounds.size.width;
+    return canvasDelta > 0 ? offset < maxOffset - 0.5 : offset > 0.5;
+}
+
+// An ELASTIC axis (rubber_band on a granted axis — exactly when the
+// reconcile armed AllowedElasticity) takes a gesture even with no range
+// or at an edge: the bounce is the point, including on content shorter
+// than its viewport.
+static BOOL NativeSdkScrollDriverElasticVertically(NativeSdkScrollDriverView *driver) {
+    return driver.verticalScrollElasticity == NSScrollElasticityAllowed;
+}
+
+static BOOL NativeSdkScrollDriverElasticHorizontally(NativeSdkScrollDriverView *driver) {
+    return driver.horizontalScrollElasticity == NSScrollElasticityAllowed;
+}
+
+// Whether the driver absorbs this axis's delta right now: it can move
+// that way, or the axis is elastic and bounces.
+static BOOL NativeSdkScrollDriverTakesVertical(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    return NativeSdkScrollDriverElasticVertically(driver) || NativeSdkScrollDriverCanConsumeVertically(driver, canvasDelta);
+}
+
+static BOOL NativeSdkScrollDriverTakesHorizontal(NativeSdkScrollDriverView *driver, double canvasDelta) {
+    return NativeSdkScrollDriverElasticHorizontally(driver) || NativeSdkScrollDriverCanConsumeHorizontally(driver, canvasDelta);
 }
 
 - (NativeSdkScrollDriverView *)scrollDriverForPoint:(NSPoint)viewPoint event:(NSEvent *)event {
-    // Driver specs arrive in layout pre-order, so the LAST hit is the
-    // deepest scroll region under the pointer. The gesture routes to
-    // the deepest region under the pointer that can travel along its
-    // DOMINANT axis — how nested native scrollers resolve a gesture, so
-    // a vertical swipe over a horizontal shelf scrolls the page behind
-    // it — falling back to the deepest region that can travel the
-    // gesture's other axis, and to nil (the engine wire) when nothing
-    // under the pointer can take it: the runtime's per-axis routing
-    // then applies the deltas and pushes the resulting offsets back
-    // into the native scrollers.
-    const double dx = fabs(event.scrollingDeltaX);
-    const double dy = fabs(event.scrollingDeltaY);
-    const BOOL dominantVertical = dy >= dx;
-    NativeSdkScrollDriverView *dominant = nil;
-    NativeSdkScrollDriverView *secondary = nil;
+    // Driver specs ride in layout pre-order (outermost first, deepest
+    // last), mirroring the engine's per-axis walk: the gesture's
+    // DOMINANT axis routes to the DEEPEST region under the pointer that
+    // can consume its delta right now (direction-aware, so a saturated
+    // inner region hands an outward swipe to its ancestor); when none
+    // can, the OUTERMOST elastic region takes it to bounce (the
+    // engine's rubberband-on-the-outermost rule, including short
+    // content — an elastic axis needs no range). The same two steps
+    // repeat for the gesture's other axis, and nil falls through to
+    // the engine wire, whose per-axis routing pushes any resulting
+    // native offsets back through the set-offset flags.
+    const double canvasDx = -event.scrollingDeltaX;
+    const double canvasDy = -event.scrollingDeltaY;
+    const BOOL dominantVertical = fabs(canvasDy) >= fabs(canvasDx);
+    const double dominantDelta = dominantVertical ? canvasDy : canvasDx;
+    const double secondaryDelta = dominantVertical ? canvasDx : canvasDy;
+    NativeSdkScrollDriverView *dominantConsumer = nil;
+    NativeSdkScrollDriverView *dominantElastic = nil;
+    NativeSdkScrollDriverView *secondaryConsumer = nil;
+    NativeSdkScrollDriverView *secondaryElastic = nil;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (!NSPointInRect(viewPoint, driver.frame)) continue;
-        const BOOL vertical = NativeSdkScrollDriverScrollsVertically(driver);
-        const BOOL horizontal = NativeSdkScrollDriverScrollsHorizontally(driver);
-        if (dominantVertical ? vertical : horizontal) dominant = driver;
-        if (dominantVertical ? horizontal : vertical) secondary = driver;
+        const BOOL consumesDominant = dominantVertical
+            ? NativeSdkScrollDriverCanConsumeVertically(driver, dominantDelta)
+            : NativeSdkScrollDriverCanConsumeHorizontally(driver, dominantDelta);
+        const BOOL elasticDominant = dominantVertical
+            ? NativeSdkScrollDriverElasticVertically(driver)
+            : NativeSdkScrollDriverElasticHorizontally(driver);
+        if (consumesDominant) dominantConsumer = driver;
+        if (elasticDominant && !dominantElastic) dominantElastic = driver;
+        if (secondaryDelta != 0) {
+            const BOOL consumesSecondary = dominantVertical
+                ? NativeSdkScrollDriverCanConsumeHorizontally(driver, secondaryDelta)
+                : NativeSdkScrollDriverCanConsumeVertically(driver, secondaryDelta);
+            const BOOL elasticSecondary = dominantVertical
+                ? NativeSdkScrollDriverElasticHorizontally(driver)
+                : NativeSdkScrollDriverElasticVertically(driver);
+            if (consumesSecondary) secondaryConsumer = driver;
+            if (elasticSecondary && !secondaryElastic) secondaryElastic = driver;
+        }
     }
-    if (dominant) return dominant;
-    // Route to the secondary-axis region only when the gesture actually
-    // has that component; a single-axis gesture with no taker goes to
-    // the wire.
-    const double secondaryComponent = dominantVertical ? dx : dy;
-    if (secondary && secondaryComponent > 0) return secondary;
+    if (dominantConsumer) return dominantConsumer;
+    if (dominantDelta != 0 && dominantElastic) return dominantElastic;
+    if (secondaryConsumer) return secondaryConsumer;
+    if (secondaryDelta != 0 && secondaryElastic) return secondaryElastic;
     return nil;
 }
 

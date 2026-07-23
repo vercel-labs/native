@@ -1060,14 +1060,36 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             };
             return switch (self.widget_layout_nodes[index].widget.kind) {
                 .grid, .scroll_view, .list, .data_grid, .table => switch (direction) {
-                    .increment => "pagedown",
-                    .decrement => "pageup",
+                    // Page keys step the vertical axis on every keymap
+                    // except the horizontal-only one (which mirrors the
+                    // whole map sideways) — so a BOTH-axes region whose
+                    // live axis is horizontal needs the both-keymap's
+                    // horizontal keys instead, or the assistive step
+                    // would page a zero-range vertical axis and report
+                    // success without moving.
+                    .increment => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowright" else "pagedown",
+                    .decrement => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowleft" else "pageup",
                 },
                 else => switch (direction) {
                     .increment => "arrowright",
                     .decrement => "arrowleft",
                 },
             };
+        }
+
+        /// Whether a BOTH-axes scroll region's assistive step must take
+        /// the horizontal keys: the vertical axis has no range while
+        /// the horizontal one does (the same live-axis rule its scroll
+        /// semantics report through). Vertical-capable regions with
+        /// vertical range — and horizontal-only regions, whose keymap
+        /// already maps the page keys sideways — keep the page keys.
+        fn canvasWidgetStepAxisHorizontal(self: *const RuntimeView, index: usize) bool {
+            const node = self.widget_layout_nodes[index];
+            if (node.widget.kind != .scroll_view or node.widget.scroll_axes != .both) return false;
+            const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) return false;
+            const state = self.canvasWidgetScrollState(index, node, viewport);
+            return state.axis(.vertical).maxOffset() <= 0 and state.axis(.horizontal).maxOffset() > 0;
         }
 
         pub fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {

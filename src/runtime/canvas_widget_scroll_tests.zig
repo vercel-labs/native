@@ -1912,3 +1912,50 @@ test "a surface anchored to the scroll region itself never rides its content" {
     // ...while the region-anchored surface stayed put.
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 72, 100, 30), retained.findById(3).?.frame);
 }
+
+test "assistive steps on a both-axes region page its live axis" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-both-axes-step", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A BOTH-axes region whose content only overflows SIDEWAYS: the
+    // assistive increment must move the live (horizontal) axis instead
+    // of paging the zero-range vertical one and reporting success.
+    const sheet = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .children = &[_]canvas.Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 60) }},
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.focusView(1, "canvas");
+    harness.runtime.views[0].canvas_widget_focused_id = 1;
+
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 1, .action = .increment });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    // The both-keymap's horizontal line step: max(24, 180 * 0.35) = 63.
+    try std.testing.expectEqual(@as(f32, 63), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 1, .action = .decrement });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value_x);
+}
