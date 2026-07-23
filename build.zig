@@ -3009,14 +3009,23 @@ fn tsCoreE2eArtifact(
     // export the markup fixture's attested symbol set; the binary pairs
     // a FRESH generated mirror with them (the conformance binary's
     // mirror links the stub core's exports — one process cannot carry
-    // both symbol sets).
+    // both symbol sets). A real archive's sidecar carries the compile's
+    // own build_id, which the mirror's boot fence checks against the
+    // identity getters — so the caller supplies the archive's OWN
+    // emitted sidecar through NATIVE_SDK_EXTERNAL_CORE_SIDECAR (the
+    // committed fixture sidecar stays the default for stub-shaped
+    // callers that restate its identity).
     const external_core_parity: ?*std.Build.Step.Compile = if (b.graph.environ_map.get("NATIVE_SDK_EXTERNAL_CORE_ARCHIVE")) |archives| blk: {
         const parity_mod = module(b, target, optimize, "tests/sidecar/external_core_parity_tests.zig");
         parity_mod.link_libc = true;
         parity_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
         parity_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
         parity_mod.addImport("ts_core", markup_fixture_mod);
-        parity_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+        const parity_sidecar: std.Build.LazyPath = if (b.graph.environ_map.get("NATIVE_SDK_EXTERNAL_CORE_SIDECAR")) |sidecar|
+            .{ .cwd_relative = b.dupe(sidecar) }
+        else
+            b.path("tests/sidecar/markup_fixture.contract.json");
+        parity_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, parity_sidecar));
         var inputs = std.mem.tokenizeScalar(u8, archives, std.fs.path.delimiter);
         while (inputs.next()) |input| {
             parity_mod.addObjectFile(.{ .cwd_relative = b.dupe(input) });
