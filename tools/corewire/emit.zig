@@ -322,23 +322,23 @@ const Emitter = struct {
         return true;
     }
 
-    /// Records reachable from the MODEL graph are committed-heap node
-    /// types, and the emitted lane stores such a record BY REFERENCE
-    /// when it doubles as a message arm payload (`picked: *const Item`,
-    /// verified against the shipped emitter) — a storage fact the
-    /// record payload family cannot carry, so mirroring the arm by
-    /// value would silently change the reflected layout. Refuse the
-    /// shape until the schema says storage (SCHEMA-GAPS.md); message-
-    /// only records (the corpus's synthesized inline records and event
-    /// shapes) stay by value, matching the emission.
+    /// Records the type table stores BY REFERENCE anywhere (`node`
+    /// TypeRefs — committed-heap node types, the model root included)
+    /// also ride by reference when they double as a message arm payload
+    /// (`picked: *const Item`, verified against the shipped emitter) —
+    /// a storage fact the record payload family cannot carry, so
+    /// mirroring the arm by value would silently change the reflected
+    /// layout. Refuse that shape until the schema says storage
+    /// (SCHEMA-GAPS.md). Value-stored records — the corpus's
+    /// synthesized inline records, event shapes, and value-promoted
+    /// records like a text-input union's caret and selection payloads —
+    /// stay by value in arms exactly as the emission keeps them.
     fn validateArmStorage(self: *Emitter) Error!void {
-        var model_reach: std.ArrayListUnmanaged([]const u8) = .empty;
-        try self.collectModelReach(&model_reach, .{ .value = self.sidecar.model });
         for (self.sidecar.msg.arms) |arm| {
             switch (arm.payload) {
                 .record => |name| {
-                    if (nameListed(model_reach.items, name)) {
-                        self.diags.flag("msg.arms", "arm \"{s}\": record \"{s}\" is part of the model graph, which the compiled core stores by reference in message arms — a storage fact the record payload family cannot carry; keep the arm's payload a message-only record", .{ arm.name, name });
+                    if (self.nodeStored(name)) {
+                        self.diags.flag("msg.arms", "arm \"{s}\": record \"{s}\" is stored by reference in the model graph, and the compiled core keeps that storage when the record doubles as an arm payload — a fact the record payload family cannot carry; keep the arm's payload a value-stored record", .{ arm.name, name });
                     }
                 },
                 else => {},
@@ -346,27 +346,27 @@ const Emitter = struct {
         }
     }
 
-    fn collectModelReach(self: *Emitter, reach: *std.ArrayListUnmanaged([]const u8), ref: TypeRef) Error!void {
-        switch (ref) {
-            .optional => |inner| try self.collectModelReach(reach, inner.*),
-            .slice => |elem| try self.collectModelReach(reach, elem.*),
-            .node, .value => |name| {
-                if (nameListed(reach.items, name)) return;
-                try reach.append(self.arena, name);
-                const entry = sidecar_mod.findStruct(self.sidecar.types, name) orelse return;
-                for (entry.fields) |field| try self.collectModelReach(reach, field.type);
-            },
-            .union_ref => |name| {
-                if (nameListed(reach.items, name)) return;
-                try reach.append(self.arena, name);
-                const entry = sidecar_mod.findUnion(self.sidecar.types, name) orelse return;
-                for (entry.arms) |arm| {
-                    if (arm.payload == .void) continue;
-                    try self.collectModelReach(reach, arm.payload);
-                }
-            },
-            else => {},
+    /// Whether any reference in the contract stores this record by
+    /// reference (or it is the committed model root itself).
+    fn nodeStored(self: *Emitter, name: []const u8) bool {
+        if (std.mem.eql(u8, self.sidecar.model, name)) return true;
+        for (self.sidecar.types.structs) |entry| {
+            for (entry.fields) |field| {
+                if (refNodeNames(field.type, name)) return true;
+            }
         }
+        for (self.sidecar.types.unions) |entry| {
+            for (entry.arms) |arm| {
+                if (arm.payload != .void and refNodeNames(arm.payload, name)) return true;
+            }
+        }
+        for (self.sidecar.model_helpers) |helper| {
+            if (refNodeNames(helper.returns, name)) return true;
+            for (helper.params) |param| {
+                if (refNodeNames(param, name)) return true;
+            }
+        }
+        return false;
     }
 
     fn allTableNames(self: *Emitter) Error![]const []const u8 {
@@ -1228,6 +1228,16 @@ pub fn referenceCount(sidecar: Sidecar, name: []const u8) usize {
     return count;
 }
 
+/// Whether `ref` contains a by-reference (`node`) reference to `name`.
+fn refNodeNames(ref: TypeRef, name: []const u8) bool {
+    return switch (ref) {
+        .optional => |inner| refNodeNames(inner.*, name),
+        .slice => |elem| refNodeNames(elem.*, name),
+        .node => |ref_name| std.mem.eql(u8, ref_name, name),
+        else => false,
+    };
+}
+
 fn refNames(ref: TypeRef, name: []const u8) usize {
     return switch (ref) {
         .optional => |inner| refNames(inner.*, name),
@@ -1486,7 +1496,7 @@ test "UpdateResult reserves only when the cmd-returning update emits it" {
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
 }
 
-test "a model-reachable record as a message arm payload refuses" {
+test "a node-stored record as a message arm payload refuses; value-stored passes" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1513,9 +1523,30 @@ test "a model-reachable record as a message arm payload refuses" {
     try testing.expectError(error.Refused, emit(arena, parsed, &diags));
     var found = false;
     for (diags.list.items) |item| {
-        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "stores by reference in message arms") != null) found = true;
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "stored by reference in the model graph") != null) found = true;
     }
     try testing.expect(found);
+
+    // The value-stored counterpart is exactly how value-promoted model
+    // records (a text-input union's caret and selection payloads) reach
+    // arms in the emitted lane — it must generate.
+    var value_source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Sel\", \"fields\": [{\"name\": \"anchor\", \"type\": {\"kind\": \"f64\"}}]},");
+    value_source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        value_source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"value\", \"name\": \"Sel\"}}",
+    );
+    value_source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        value_source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"picked\", \"payload\": {\"kind\": \"record\", \"name\": \"Sel\"}}",
+    );
+    const value_generated = try emitFromJson(arena, value_source);
+    try testing.expect(std.mem.indexOf(u8, value_generated, "picked: Sel,") != null);
 }
 
 test "a type named view_unbound refuses (the nested tuple would shadow it)" {
