@@ -311,6 +311,19 @@ pub fn panicSink(ctx: ?*anyopaque, msg: [*]const u8, msg_len: usize, address: u6
     @panic(msg[0..msg_len]);
 }
 
+/// The scalar dispatch entries carry numbers as f64; an integer-classed
+/// value must cross exactly, and the f64 grid is only dense through
+/// 2^53 - 1 — past it, distinct integers alias one wire value, so there
+/// is no honest number to send. The shipped bridge refuses such values
+/// before they ever reach a dispatch; the mirror holds the same line.
+pub fn exactF64(value: i64) f64 {
+    const bound: i64 = 9007199254740992; // 2^53: the first alias point.
+    if (value >= bound or value <= -bound) {
+        @panic("an integer message payload is at or past 2^53 — the f64 wire aliases such values, so dispatching one would corrupt it silently; keep integer payloads within +-(2^53 - 1)");
+    }
+    return @floatFromInt(value);
+}
+
 /// A bare (void) message arm carries zero payload bytes by the
 /// canonical encoding; anything else is layout skew, refused like every
 /// other malformed core buffer.
@@ -388,6 +401,12 @@ test "records, slices, references, and unions round-trip" {
     try testing.expectEqual(@as(i64, -1), decoded.last.move.direction);
     try testing.expect(decoded.last.move.extend);
     try testing.expectEqual(@as(f64, 0.5), decoded.score);
+}
+
+test "exactF64 carries every in-range integer and matches the wire grid" {
+    try testing.expectEqual(@as(f64, 9007199254740991.0), exactF64(9007199254740991));
+    try testing.expectEqual(@as(f64, -9007199254740991.0), exactF64(-9007199254740991));
+    try testing.expectEqual(@as(f64, 0.0), exactF64(0));
 }
 
 test "a decoded model root survives exactly one subsequent decode" {

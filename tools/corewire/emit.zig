@@ -714,12 +714,12 @@ const Emitter = struct {
             .bytes => try self.print("        .{s} => |payload| abi.dispatch_bytes({d}, payload.ptr, payload.len, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
             .number => |class| switch (class) {
                 .f64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, payload, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
-                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, @floatFromInt(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
+                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, shim_rt.exactF64(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
             },
             .number_bytes => |desc| {
                 const number_expr = switch (desc.number_class) {
                     .f64 => try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(desc.number_field)}),
-                    .i64 => try std.fmt.allocPrint(self.arena, "@floatFromInt(payload.{f})", .{ident(desc.number_field)}),
+                    .i64 => try std.fmt.allocPrint(self.arena, "shim_rt.exactF64(payload.{f})", .{ident(desc.number_field)}),
                 };
                 try self.print("        .{s} => |payload| abi.dispatch_number_bytes({d}, {s}, payload.{f}.ptr, payload.{f}.len, &cmd_ptr, &cmd_len),\n", .{ name, tag, number_expr, ident(desc.bytes_field), ident(desc.bytes_field) });
             },
@@ -738,7 +738,7 @@ const Emitter = struct {
                         if (index > 0) try scalars.appendSlice(self.arena, ", ");
                         const record = sidecar_mod.findStruct(self.sidecar.types, type_name).?;
                         const expr = switch (record.fields[field].type) {
-                            .i64 => try std.fmt.allocPrint(self.arena, "@floatFromInt(payload.{f})", .{ident(record.fields[field].name)}),
+                            .i64 => try std.fmt.allocPrint(self.arena, "shim_rt.exactF64(payload.{f})", .{ident(record.fields[field].name)}),
                             else => try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(record.fields[field].name)}),
                         };
                         try scalars.appendSlice(self.arena, expr);
@@ -751,7 +751,7 @@ const Emitter = struct {
             .scalar => |ref| switch (ref) {
                 .bool => try self.print("        .{s} => |payload| abi.dispatch_bool({d}, @intFromBool(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
                 .f64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, payload, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
-                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, @floatFromInt(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
+                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, shim_rt.exactF64(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
                 .bytes => try self.print("        .{s} => |payload| abi.dispatch_bytes({d}, payload.ptr, payload.len, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
                 else => self.diags.flag("msg.arms", "arm \"{s}\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)", .{arm.name}),
             },

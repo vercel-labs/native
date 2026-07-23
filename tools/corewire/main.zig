@@ -80,8 +80,16 @@ pub fn main(init: std.process.Init) !void {
     // identities beyond spelling (symlinks, hard links) stay the
     // caller's responsibility.
     const input_resolved = try std.fs.path.resolve(arena, &.{input});
-    const paths = [_]?[]const u8{ out_path, facade_path };
-    var resolved: [paths.len]?[]const u8 = .{ null, null };
+    // The staging spellings join the checked set: outputs land by
+    // rename from `<path>.corewire-tmp`, so those names are claimed by
+    // this invocation exactly like the outputs themselves.
+    const paths = [_]?[]const u8{
+        out_path,
+        facade_path,
+        if (out_path) |path| try std.fmt.allocPrint(arena, "{s}.corewire-tmp", .{path}) else null,
+        if (facade_path) |path| try std.fmt.allocPrint(arena, "{s}.corewire-tmp", .{path}) else null,
+    };
+    var resolved: [paths.len]?[]const u8 = @splat(null);
     for (paths, 0..) |maybe_path, path_index| {
         const path = maybe_path orelse continue;
         resolved[path_index] = try std.fs.path.resolve(arena, &.{path});
