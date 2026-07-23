@@ -362,7 +362,7 @@ case "line":
 ```zig
 const Effects = native_sdk.UiApp(Model, Msg).Effects;
 
-pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+pub fn update_fx(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .start => fx.spawn(.{
             .key = stream_key,                    // caller-chosen u64, kept in the model
