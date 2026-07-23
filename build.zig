@@ -1268,11 +1268,13 @@ pub fn build(b: *std.Build) void {
     const frontend_examples_step = b.step("test-examples-frontends", "Run frontend example tests");
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react", .owned);
+    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-solid", "Run Solid example tests", "examples/solid", .owned);
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte", .owned);
     addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue", .owned);
     addFileContainsCheckStep(b, file_contains_checker, frontend_examples_step, "test-example-frontend-positioning", "Verify frontend example native shell positioning", &.{
         .{ .path = "examples/next/README.md", .pattern = "opens the native app shell with WebView content." },
         .{ .path = "examples/react/README.md", .pattern = "opens the native app shell with WebView content." },
+        .{ .path = "examples/solid/README.md", .pattern = "opens the native app shell with WebView content." },
         .{ .path = "examples/svelte/README.md", .pattern = "opens the native app shell with WebView content." },
         .{ .path = "examples/vue/README.md", .pattern = "opens the native app shell with WebView content." },
     });

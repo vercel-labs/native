@@ -41,7 +41,7 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 | `native-shell` | Native toolbar/sidebar/statusbar chrome around a WebView content area. |
 | `native-panels` | Split native panels and stacked native controls around WebView content. |
 | `browser` | Layered WebViews for isolated page content, engine link flags wired by hand. |
-| `next`, `react`, `svelte`, `vue` | Frontend projects with managed install/build/dev-server steps. |
+| `next`, `react`, `solid`, `svelte`, `vue` | Frontend projects with managed install/build/dev-server steps. |
 | `ui-inbox` | The builder-view inbox; its `-Dmobile` lib step feeds the mobile host shims. |
 | `mobile-canvas` | Builds the mobile embed static library consumed by the iOS/Android canvas shims. |
 

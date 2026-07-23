@@ -1,0 +1,1 @@
+feature: **SolidJS example**: `examples/solid` mirrors the existing React/Vue/Svelte examples (Vite dev server, `zig build run`/`dev`/`test`), for apps that want SolidJS's fine-grained reactivity instead of a virtual DOM. Requested in #57.
