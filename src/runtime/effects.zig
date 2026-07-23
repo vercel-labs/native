@@ -1596,6 +1596,12 @@ pub const EffectResultRecord = struct {
     /// `.video_load` records: the source the recording host's cascade
     /// resolved (see the kind's doc).
     video_source: EffectVideoSource = .local,
+    /// `.video` records: whether the delivery dispatched a Msg (a
+    /// handler was bound). Replay validates the replayed handler
+    /// presence against it at feed time — a record whose Msg the
+    /// replayed timeline could not dispatch (or would dispatch where
+    /// none was) is divergence, not a silent consume.
+    video_handled: bool = false,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -6440,24 +6446,21 @@ pub fn Effects(comptime Msg: type) type {
                 @min(position_ms, self.video.duration_ms)
             else
                 position_ms;
-            if (self.video.fake) {
-                // The live hosts retire the player at a non-looping
-                // natural end, so a later seek refuses there — the
-                // fake refuses identically (`VideoChannel.completed`),
-                // keeping replay's mirrors on the terminal position
-                // the recording kept.
-                if (!self.video.completed) self.video.position_ms = clamped;
-                return;
-            }
-            const services = self.services orelse return;
-            // Platform first, mirror second: a player the host has
-            // already retired (a completed non-looping playback)
-            // refuses the seek, and moving the mirror anyway would
-            // scrub the snapshot and the house slider away from the
-            // frame actually on the glass. A refused seek changes
-            // nothing — the slider springs back to the truth.
-            services.videoSeek(position_ms) catch return;
+            // The mirror's gate is the DETERMINISTIC completion latch,
+            // identical on every executor: a completed non-looping
+            // playback's player is retired, its seek refuses, and the
+            // mirror must keep the terminal position — live, fake, and
+            // replayed alike. A residual platform verdict beyond that
+            // (no shipping host refuses a seek on a live player) is
+            // fire-and-forget: journaling per-seek outcomes would buy
+            // nothing, and gating the mirror on it would let an exotic
+            // host's answer diverge replay's mirrors from the
+            // recording's.
+            if (self.video.completed) return;
             self.video.position_ms = clamped;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSeek(position_ms) catch {};
         }
 
         /// Set playback volume, clamped to 0.0—1.0 and remembered
@@ -6614,6 +6617,8 @@ pub fn Effects(comptime Msg: type) type {
                 .video_width = event.width,
                 .video_height = event.height,
                 .video_token = platform_event.token,
+                // Past the handler gate above by construction.
+                .video_handled = true,
             });
             return event_fn(event);
         }
@@ -6675,7 +6680,7 @@ pub fn Effects(comptime Msg: type) type {
         /// it, and `feedVideoRecord` routes by that identity.
         pub fn feedVideoEvent(self: *Self, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
             if (!self.video.active) return error.EffectNotFound;
-            return self.feedVideoRecord(self.video.key, self.video.token, kind, position_ms, duration_ms, playing, buffering, width, height);
+            return self.feedVideoRecord(self.video.key, self.video.token, self.video.on_event != null, kind, position_ms, duration_ms, playing, buffering, width, height);
         }
 
         /// Session replay: feed one journaled video record, routed by
@@ -6696,7 +6701,7 @@ pub fn Effects(comptime Msg: type) type {
         /// Msg and reset a replacement the recording kept playing.
         /// Fails when the token matches neither (the replayed updates
         /// issued different loads than the recording).
-        pub fn feedVideoRecord(self: *Self, key: u64, token: u64, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
+        pub fn feedVideoRecord(self: *Self, key: u64, token: u64, handled: bool, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
             // Handler captured NOW, not at delivery: a fed event is one
             // recorded delivery, and under replay the platform `.video`
             // event that follows this record in the journal can apply a
@@ -6716,6 +6721,11 @@ pub fn Effects(comptime Msg: type) type {
             } else {
                 return error.EffectNotFound;
             }
+            // The record says whether the delivery dispatched a Msg
+            // live; the replayed load's handler presence must agree —
+            // a consumed record whose Msg silently vanished (or a Msg
+            // live never dispatched) is divergence, not a delivery.
+            if (handled != (video_fn != null)) return error.EffectNotFound;
             self.stagePendingVideo(.{
                 .seq = self.nextPendingSeq(),
                 .event = .{
@@ -7141,6 +7151,7 @@ pub fn Effects(comptime Msg: type) type {
                                     .video_width = event.width,
                                     .video_height = event.height,
                                     .video_token = entry.token,
+                                    .video_handled = entry.video_fn != null,
                                 });
                             }
                             const event_fn = video_fn orelse continue;
@@ -7155,6 +7166,7 @@ pub fn Effects(comptime Msg: type) type {
                                 .video_width = event.width,
                                 .video_height = event.height,
                                 .video_token = entry.token,
+                                .video_handled = true,
                             });
                             return event_fn(event);
                         },

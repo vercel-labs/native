@@ -1262,6 +1262,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .video => try self.effects.feedVideoRecord(
                         record.key,
                         record.video_token,
+                        record.video_handled,
                         record.video_kind,
                         record.video_position_ms,
                         record.video_duration_ms,

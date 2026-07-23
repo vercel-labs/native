@@ -610,13 +610,14 @@ test "transport after a non-looping completion refuses like a live host" {
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.completed_count);
     try std.testing.expect(!np.video.loaded);
 
-    // Seek and pause against the retired player: refused on the
-    // platform side (the calls still arrive), position untouched — and
-    // the CHANNEL mirror stays at the completion's terminal position
-    // too: a refused seek must not scrub the snapshot and the house
-    // slider away from the frame actually on the glass.
+    // Seek against the retired player: the completion latch refuses
+    // it deterministically before the platform is even asked (the
+    // retired player could only have refused), so the call never
+    // arrives and the CHANNEL mirror stays at the completion's
+    // terminal position — a dead seek must not scrub the snapshot and
+    // the house slider away from the frame actually on the glass.
     try h.app_state.dispatch(&h.harness.runtime, 1, .seek_half);
-    try std.testing.expectEqual(@as(usize, 1), np.video_seek_count);
+    try std.testing.expectEqual(@as(usize, 0), np.video_seek_count);
     try std.testing.expectEqual(@as(u64, 0), np.video.position_ms);
     try std.testing.expectEqual(@as(u64, 10_000), h.app_state.effects.videoSnapshot().position_ms);
     try h.app_state.dispatch(&h.harness.runtime, 1, .pause);
@@ -1800,7 +1801,7 @@ fn patchFirstVideoKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool
         if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video) continue;
-        payload[payload.len - 44] = @intFromEnum(kind);
+        payload[payload.len - 45] = @intFromEnum(kind);
         return true;
     }
     return false;
@@ -1808,7 +1809,7 @@ fn patchFirstVideoKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool
 
 /// Overwrite the `video_kind` byte of the first journaled `.video_load`
 /// record, in place. Per `journal.encodeEffect` the video fields are
-/// the LAST 44 bytes of the effect payload and `video_kind` is the
+/// the LAST 45 bytes of the effect payload and `video_kind` is the
 /// first of them. Framing and every other field stay valid: only
 /// replay's outcome gate can catch the value. Returns whether a record
 /// was damaged.
@@ -1822,7 +1823,7 @@ fn patchFirstVideoLoadKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) 
         if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video_load) continue;
-        payload[payload.len - 44] = @intFromEnum(kind);
+        payload[payload.len - 45] = @intFromEnum(kind);
         return true;
     }
     return false;
@@ -2068,10 +2069,10 @@ test "a video load record claiming a non-outcome kind refuses replay as damage" 
 
 /// Overwrite the `video_position_ms` field of the first journaled
 /// video effect record, in place. Per `journal.encodeEffect` the video
-/// fields are the LAST 44 bytes of the effect payload — video_kind
+/// fields are the LAST 45 bytes of the effect payload — video_kind
 /// (1), position (8), duration (8), playing (1), buffering (1), width
-/// (8), height (8), token (8), source (1) — so the position lives 43
-/// bytes from the end.
+/// (8), height (8), token (8), source (1), handled (1) — so the
+/// position lives 44 bytes from the end.
 /// Framing and every other field stay valid: only replay's damage gate
 /// can catch the value. Returns whether a record was damaged.
 fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
@@ -2084,7 +2085,7 @@ fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video) continue;
-        std.mem.writeInt(u64, payload[payload.len - 43 ..][0..8], position, .little);
+        std.mem.writeInt(u64, payload[payload.len - 44 ..][0..8], position, .little);
         return true;
     }
     return false;
@@ -2396,7 +2397,7 @@ test "an undelivered fed video result fails the finish check" {
         .path = clip_path,
         .on_event = VideoEffects.videoMsg(.video_event),
     });
-    try fx.feedVideoRecord(clip_key, 1, .position, 500, 92_500, true, false, 0, 0);
+    try fx.feedVideoRecord(clip_key, 1, true, .position, 500, 92_500, true, false, 0, 0);
     try std.testing.expectError(error.ReplayVideoDivergence, fx.finishReplay());
 
     // Delivered, the finish is silent again.
@@ -2436,7 +2437,7 @@ test "retired video identities release at the next drain-pass boundary" {
 
     // A journaled record for the replaced load consumes the park (the
     // deterministic token sequence: the first load minted token 1).
-    try fx.feedVideoRecord(clip_key, 1, .failed, 0, 0, false, false, 0, 0);
+    try fx.feedVideoRecord(clip_key, 1, true, .failed, 0, 0, false, false, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), fx.retired_video_len);
 
     // A stopped load with no record behind it releases at the next
@@ -2565,11 +2566,11 @@ test "replayed video records must name the load at their position" {
     });
 
     // Wrong key against the retired first load (token 1).
-    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 1, .failed, 0, 0, false, false, 0, 0));
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 1, true, .failed, 0, 0, false, false, 0, 0));
     // Wrong key against the live load (token 2).
-    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 2, .position, 0, 0, true, false, 0, 0));
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoRecord(clip_key + 5, 2, true, .position, 0, 0, true, false, 0, 0));
     // The honest pairing still delivers.
-    try fx.feedVideoRecord(clip_key + 1, 2, .position, 500, 92_500, true, false, 0, 0);
+    try fx.feedVideoRecord(clip_key + 1, 2, true, .position, 500, 92_500, true, false, 0, 0);
 }
 
 test "unclaimed or misclaimed cascade resolutions fail the finish check" {

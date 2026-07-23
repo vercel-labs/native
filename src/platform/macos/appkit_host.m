@@ -10187,14 +10187,35 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
  * frames. Either way the caller reports the load FAILED instead of
  * acknowledging a playback that can never paint. */
 - (BOOL)videoAttachOutputForItem:(AVPlayerItem *)item {
+    /* Rotated media (iPhone portrait: encoded landscape, presented
+     * through a 90-degree track preferredTransform) needs the
+     * transform BAKED into the vended frames: a raw output tap gets
+     * the encoded orientation — sideways and stretched into the
+     * requested attributes — while AVPlayerLayer would have applied
+     * the transform for presentation. A properties-of-asset video
+     * composition renders it in (verified against a portrait-flagged
+     * H.264 asset: the tap vends encoded orientation without it and
+     * display orientation with it). Identity-transform assets skip
+     * the composition's render pass, and track-less items (streams)
+     * have no transform to bake. */
+    NSArray<AVAssetTrack *> *videoTracks = [item.asset tracksWithMediaType:AVMediaTypeVideo];
+    if (videoTracks.count > 0 && !CGAffineTransformIsIdentity(videoTracks.firstObject.preferredTransform)) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        /* The synchronous variant: this runs at readyToPlay, where the
+         * asset's properties are already loaded, and the completion-
+         * handler replacement is not available on every supported
+         * macOS. */
+        item.videoComposition = [AVMutableVideoComposition videoCompositionWithPropertiesOfAsset:item.asset];
+#pragma clang diagnostic pop
+    }
     CGSize natural = item.presentationSize;
     if (natural.width < 1.0 || natural.height < 1.0) {
         /* Fallback: the first video track's naturalSize with its
          * preferredTransform applied (rotated media reports a
          * transposed natural size). */
-        NSArray<AVAssetTrack *> *tracks = [item.asset tracksWithMediaType:AVMediaTypeVideo];
-        if (tracks.count > 0) {
-            AVAssetTrack *track = tracks.firstObject;
+        if (videoTracks.count > 0) {
+            AVAssetTrack *track = videoTracks.firstObject;
             CGSize transformed = CGSizeApplyAffineTransform(track.naturalSize, track.preferredTransform);
             natural = CGSizeMake(fabs(transformed.width), fabs(transformed.height));
         }
