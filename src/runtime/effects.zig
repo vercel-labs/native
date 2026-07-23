@@ -925,7 +925,7 @@ pub const max_effect_ptys: usize = 4;
 /// never per-read records.
 pub const max_effect_pty_chunk_bytes: usize = 64 * 1024;
 /// The cross-thread output staging ring per pty. When it fills, the io
-/// thread stops reading the master until the loop drains — kernel
+/// thread stops reading the parent end until the loop drains — kernel
 /// back-pressure to the child, a terminal's native flow control. Bytes
 /// are NEVER dropped: a fast producer is slowed, not lied to.
 pub const max_effect_pty_staging_bytes: usize = 256 * 1024;
@@ -1892,10 +1892,10 @@ fn flattenPtyEnviron(environ: std.process.Environ, buffer: []pty_transport.EnvVa
     return buffer[0..count];
 }
 
-/// The pty io thread: one poll loop owning all blocking master I/O.
+/// The pty io thread: one poll loop owning all blocking parent-end I/O.
 /// Reads coalesce into the shared staging ring (parking, not dropping,
 /// when it fills — the loop's drain nudges resumption); outbound bytes
-/// flush when the master accepts them; EOF reaps the child and stages
+/// flush when the parent end accepts them; EOF reaps the child and stages
 /// the exit as the thread's last shared touch. Touches ONLY the
 /// process-lifetime shared block, the transport fds, and the nudge
 /// pipe's read end — never the slot — so a teardown that abandons this
@@ -1916,24 +1916,24 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
 
         // Teardown or a kill asked the thread to wind down: stop reading
         // and go reap. Checked here so a reader PARKED on a full staging
-        // ring — which polls only the nudge pipe, never the master, so
-        // it can never observe a hangup — still exits promptly on the
+        // ring — which polls only the nudge pipe, never the parent end,
+        // so it can never observe a hangup — still exits promptly on the
         // nudge. The kill case is load-bearing beyond teardown: the
         // SIGKILL fells the direct child, but a new-session descendant
-        // that kept the slave open leaves the master with no EOF, so
-        // waiting for the pty to close would strand the exit forever.
+        // that kept the child end open leaves the parent end with no EOF,
+        // so waiting for the pty to close would strand the exit forever.
         // The direct child is dead, so `reapBlocking` below returns at
         // once; the escaped descendant runs on detached, the spawn
         // family's documented limit.
         if (shutdown or killed) break :read_loop;
 
-        const ready = pty_transport.wait(transport.master, nudge_fd, want_read, want_write);
+        const ready = pty_transport.wait(transport.parent, nudge_fd, want_read, want_write);
         if (ready.nudged) pty_transport.drainNudges(nudge_fd);
         if (ready.writable) ptyFlushOutbound(shared, transport, generation);
         if (ready.readable and want_read) {
             const take = @min(local.len, room);
             const n = transport.read(local[0..take]) catch |err| switch (err) {
-                // Nothing ready on the non-blocking master (a spurious
+                // Nothing ready on the non-blocking parent end (a spurious
                 // readable): not EOF — re-poll.
                 error.WouldBlock => continue :read_loop,
                 // A real read error (or normalized EOF) ends the stream.
@@ -2031,7 +2031,7 @@ fn ptyStageOutput(shared: *PtyShared, generation: u64, bytes: []const u8) void {
     if (stamped) ChannelHandle.requestHostWake(&shared.wake, generation);
 }
 
-/// Flush staged outbound bytes toward the child while the master
+/// Flush staged outbound bytes toward the child while the parent end
 /// accepts them. Bounded copies under the mutex, the write itself
 /// outside it.
 fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation: u64) void {
@@ -4315,7 +4315,7 @@ pub fn Effects(comptime Msg: type) type {
             self.releaseVideoSink();
             self.video = .{};
             // Wind down every live pty BEFORE the channel sweep: the
-            // group kill forces the master to EOF, the io thread reaps
+            // group kill forces the parent end to EOF, the io thread reaps
             // and stages the exit as its last shared touch, and a
             // bounded join collects it. Staged events are discarded, no
             // Msg is delivered — the families' teardown discipline. An
@@ -4366,8 +4366,9 @@ pub fn Effects(comptime Msg: type) type {
                             self.retirePtySlot(pty_slot);
                         } else {
                             // Abandon: detach the io thread and leak what
-                            // it can still touch (its staging ring stays
-                            // installed, the master fd stays open).
+                            // it can still touch (its staging ring and
+                            // outbound block stay installed, the parent-
+                            // side fd stays open).
                             if (comptime builtin.os.tag != .freestanding) {
                                 std.debug.print(
                                     "effects teardown: a pty io thread is still running after {d}ms (a descendant may be holding the terminal open past the group kill); abandoning the thread and leaking its fds and staging so teardown can return safely\n",
@@ -10297,7 +10298,7 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Start the real transport for an accepted `ptySpawn`: flatten
         /// the bound environ (the spawn env policy, verbatim), open the
-        /// pty pair, fork the child onto it, and hand the master to a
+        /// pty pair, fork the child onto it, and hand the parent end to a
         /// dedicated io thread. Failures release the slot and stage an
         /// executor-truth `.spawn_failed` terminal — journaled with its
         /// real reason and FED under replay, where the re-run spawn

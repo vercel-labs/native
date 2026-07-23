@@ -1,14 +1,19 @@
 //! POSIX pseudo-terminal primitive: open a pty pair, fork a child with the
-//! slave as its controlling terminal, and hand the caller the master fd to
-//! read output from and write input to. macOS and Linux only — every other
-//! target compiles to the `error.PtyUnsupported` stubs so the effects layer
-//! reports the same loud rejection the null platform's fake pty stands in
-//! for under test.
+//! child end as its controlling terminal, and hand the caller the parent fd
+//! to read output from and write input to. macOS and Linux only — every
+//! other target compiles to the `error.PtyUnsupported` stubs so the effects
+//! layer reports the same loud rejection the null platform's fake pty stands
+//! in for under test.
+//!
+//! (The two ends of a pty pair: the PARENT end is the controlling side the
+//! toolkit keeps, and the CHILD end is the process side that becomes the
+//! spawned program's controlling terminal — POSIX's own APIs spell these
+//! `posix_openpt`/`ptsname`, whose C names we keep at the call site.)
 //!
 //! This is the one place the toolkit forks a child onto a terminal. It
 //! deliberately does NOT use `std.process.spawn`: a pty child needs a
 //! controlling terminal (`login_tty` = setsid + TIOCSCTTY + dup of the
-//! slave onto fds 0/1/2), which the generic spawn path does not set up.
+//! child end onto fds 0/1/2), which the generic spawn path does not set up.
 //! Everything the child touches between fork and exec is async-signal-safe:
 //! argv/envp are built in the PARENT (including the `TERM` override and the
 //! PATH resolution of argv[0]), so the child calls only `login_tty`,
@@ -70,24 +75,24 @@ pub const Error = error{
     PtyCommandNotFound,
 };
 
-/// A live pty: the master fd plus the child pid. Reads and writes go to
-/// `master`; `pid` is signalled for kill and reaped on exit.
+/// A live pty: the parent-end fd plus the child pid. Reads and writes go
+/// to `parent`; `pid` is signalled for kill and reaped on exit.
 pub const Pty = struct {
-    master: c_int,
+    parent: c_int,
     pid: c_int,
 
-    /// Read available output bytes into `buf`. Returns 0 at EOF — which a
-    /// pty master reports as EIO on Linux once the child exits, normalized
+    /// Read available output bytes into `buf`. Returns 0 at EOF — which the
+    /// parent end reports as EIO on Linux once the child exits, normalized
     /// here — and `error.ReadFailed` for anything else.
     pub fn read(self: Pty, buf: []u8) error{ ReadFailed, WouldBlock }!usize {
         while (true) {
-            const r = c.read(self.master, buf.ptr, buf.len);
+            const r = c.read(self.parent, buf.ptr, buf.len);
             if (r >= 0) return @intCast(r);
             switch (errnoValue()) {
                 eintr => continue,
-                // Non-blocking master with nothing ready: not EOF.
+                // Non-blocking parent end with nothing ready: not EOF.
                 eagain => return error.WouldBlock,
-                // EIO from a pty master is the hangup after child exit:
+                // EIO from the parent end is the hangup after child exit:
                 // the stream is over, not broken.
                 eio => return 0,
                 else => return error.ReadFailed,
@@ -96,13 +101,13 @@ pub const Pty = struct {
     }
 
     /// Write input bytes toward the child. Partial writes are possible;
-    /// the caller loops. `error.WouldBlock` means the non-blocking
-    /// master's input buffer is full (the child is not reading) — the
-    /// caller leaves the bytes staged and retries on the next writable
-    /// poll, never blocking the io thread.
+    /// the caller loops. `error.WouldBlock` means the non-blocking parent
+    /// end's input buffer is full (the child is not reading) — the caller
+    /// leaves the bytes staged and retries on the next writable poll,
+    /// never blocking the io thread.
     pub fn write(self: Pty, bytes: []const u8) error{ WriteFailed, WouldBlock }!usize {
         while (true) {
-            const r = c.write(self.master, bytes.ptr, bytes.len);
+            const r = c.write(self.parent, bytes.ptr, bytes.len);
             if (r >= 0) return @intCast(r);
             switch (errnoValue()) {
                 eintr => continue,
@@ -122,7 +127,7 @@ pub const Pty = struct {
             .xpixel = 0,
             .ypixel = 0,
         };
-        _ = c.ioctl(self.master, tiocswinsz, &ws);
+        _ = c.ioctl(self.parent, tiocswinsz, &ws);
     }
 
     /// Signal the child's process group. `graceful` sends SIGTERM (let the
@@ -195,10 +200,10 @@ pub const Pty = struct {
         return self.reapBlocking();
     }
 
-    /// Close the master fd. The child is expected to be reaped separately.
+    /// Close the parent-end fd. The child is expected to be reaped separately.
     pub fn close(self: Pty) void {
         if (!supported) return;
-        _ = c.close(self.master);
+        _ = c.close(self.parent);
     }
 };
 
@@ -230,8 +235,8 @@ pub const EnvVar = struct {
 };
 
 /// Open a pty and fork `argv` onto it. On success the returned `Pty` owns
-/// the master fd and the child pid. The child's environment is exactly the
-/// caller's `env` (or empty) plus a `TERM` entry — no host variables leak
+/// the parent-end fd and the child pid. The child's environment is exactly
+/// the caller's `env` (or empty) plus a `TERM` entry — no host variables leak
 /// in unless the caller put them in `env`, the same explicit-policy shape
 /// the spawn effect's `bindEnviron` draws.
 pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
@@ -266,83 +271,82 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         .xpixel = 0,
         .ypixel = 0,
     };
-    // Open the pty pair by hand rather than `openpty`, so the SLAVE is
-    // opened close-on-exec ATOMICALLY (`open` with O_CLOEXEC). The slave
-    // is the descriptor that matters for the inheritance race the
-    // reviewer flagged: if a concurrent fork on another thread inherited
-    // a non-CLOEXEC slave across its exec, it would hold THIS pty open
-    // after our child exits, so no EOF and no `.exit` event ever
-    // arrives. `posix_openpt` + `grantpt` + `unlockpt` is the portable
-    // primitive underneath `openpty`; the master's CLOEXEC is applied
-    // immediately after (Linux honors O_CLOEXEC on `posix_openpt`
-    // directly; Darwin ignores it, leaving only the master a
-    // sub-syscall window — benign, since an inherited MASTER does not
-    // hold the pty open). pty spawns run on the loop thread, so
-    // `ptsname`'s static buffer is not raced.
-    const master = c.posix_openpt(o_rdwr | o_noctty | o_cloexec_open);
-    if (master < 0) return error.PtyOpenFailed;
-    _ = setCloexec(master);
-    // Non-blocking master: the sole io thread must never block inside a
+    // Open the pty pair by hand rather than `openpty`, so the CHILD end is
+    // opened close-on-exec ATOMICALLY (`open` with O_CLOEXEC). The child
+    // end is the descriptor that matters for the inheritance race: if a
+    // concurrent fork on another thread inherited a non-CLOEXEC child end
+    // across its exec, it would hold THIS pty open after our child exits,
+    // so no EOF and no `.exit` event ever arrives. `posix_openpt` +
+    // `grantpt` + `unlockpt` is the portable primitive underneath
+    // `openpty`; the parent end's CLOEXEC is applied immediately after
+    // (Linux honors O_CLOEXEC on `posix_openpt` directly; Darwin ignores
+    // it, leaving only the parent end a sub-syscall window — benign, since
+    // an inherited parent end does not hold the pty open). pty spawns run
+    // on the loop thread, so `ptsname`'s static buffer is not raced.
+    const parent = c.posix_openpt(o_rdwr | o_noctty | o_cloexec_open);
+    if (parent < 0) return error.PtyOpenFailed;
+    _ = setCloexec(parent);
+    // Non-blocking parent end: the sole io thread must never block inside a
     // write when the child stops reading its stdin (a full pty input
     // buffer), which would stall stdout draining and deadlock both
     // sides. Reads and writes handle EAGAIN; the poll loop paces both.
     {
-        const flags = c.fcntl(master, f_getfl, @as(c_int, 0));
-        if (flags < 0 or c.fcntl(master, f_setfl, flags | o_nonblock) < 0) {
-            _ = c.close(master);
+        const flags = c.fcntl(parent, f_getfl, @as(c_int, 0));
+        if (flags < 0 or c.fcntl(parent, f_setfl, flags | o_nonblock) < 0) {
+            _ = c.close(parent);
             return error.PtyOpenFailed;
         }
     }
-    if (c.grantpt(master) != 0 or c.unlockpt(master) != 0) {
-        _ = c.close(master);
+    if (c.grantpt(parent) != 0 or c.unlockpt(parent) != 0) {
+        _ = c.close(parent);
         return error.PtyOpenFailed;
     }
     // `ptsname` returns libc-managed SHARED storage (not thread-safe):
     // two runtimes spawning ptys on different threads could otherwise
-    // race, the second call overwriting the first's slave name before
+    // race, the second call overwriting the first's child-end name before
     // it opens. A process-wide mutex serializes the resolve-and-copy so
-    // each spawn opens its own slave. (`ptsname_r` is not portably
+    // each spawn opens its own child end. (`ptsname_r` is not portably
     // available — macOS lacks it on older SDKs — so a copy under the
     // lock is the portable answer.)
     var name_buf: [128]u8 = undefined;
-    const slave_name = blk: {
+    const child_name = blk: {
         ptsname_mutex.lock();
         defer ptsname_mutex.unlock();
-        const shared_name = c.ptsname(master) orelse {
-            _ = c.close(master);
+        const shared_name = c.ptsname(parent) orelse {
+            _ = c.close(parent);
             return error.PtyOpenFailed;
         };
         const span = std.mem.span(shared_name);
         if (span.len + 1 > name_buf.len) {
-            _ = c.close(master);
+            _ = c.close(parent);
             return error.PtyOpenFailed;
         }
         @memcpy(name_buf[0..span.len], span);
         name_buf[span.len] = 0;
         break :blk name_buf[0..span.len :0];
     };
-    var slave = c.open(slave_name.ptr, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
-    if (slave < 0) {
-        _ = c.close(master);
+    var child_fd = c.open(child_name.ptr, o_rdwr | o_noctty | o_cloexec_open, @as(c_uint, 0));
+    if (child_fd < 0) {
+        _ = c.close(parent);
         return error.PtyOpenFailed;
     }
-    // Keep the slave off the standard descriptors: `login_tty` dup2's it
-    // onto 0/1/2, and dup2 CLEARS close-on-exec on its copies — but a
-    // SAME-fd dup2 (slave already IS fd 0/1/2, which happens when the
-    // host started with standard descriptors closed) is a no-op that
+    // Keep the child end off the standard descriptors: `login_tty` dup2's
+    // it onto 0/1/2, and dup2 CLEARS close-on-exec on its copies — but a
+    // SAME-fd dup2 (the child end already IS fd 0/1/2, which happens when
+    // the host started with standard descriptors closed) is a no-op that
     // leaves the CLOEXEC flag set, so the child's stdio would vanish at
     // execve. Relocating to a high fd guarantees the dup2 targets are
     // distinct and their CLOEXEC gets cleared.
-    slave = relocateAboveStdio(slave) orelse {
-        _ = c.close(master);
+    child_fd = relocateAboveStdio(child_fd) orelse {
+        _ = c.close(parent);
         return error.PtyOpenFailed;
     };
-    // Push the initial window size onto the slave (the child's terminal)
-    // before the fork so the child's very first TIOCGWINSZ sees the
-    // requested grid. `openpty` applied its `winp` to the slave; match
-    // that — setting it on the master does not reliably propagate before
-    // the slave becomes a controlling terminal.
-    _ = c.ioctl(slave, tiocswinsz, &ws);
+    // Push the initial window size onto the child end (the child's
+    // terminal) before the fork so the child's very first TIOCGWINSZ sees
+    // the requested grid. `openpty` applied its `winp` to the child end;
+    // match that — setting it on the parent end does not reliably
+    // propagate before the child end becomes a controlling terminal.
+    _ = c.ioctl(child_fd, tiocswinsz, &ws);
 
     // The exec self-pipe: close-on-exec on the write end, so a
     // successful `execve` closes it and the parent reads EOF (exec
@@ -359,27 +363,27 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // exec-status poll's timeout is the net for Darwin's residual
     // sub-syscall window.
     const raw_pipe = makePipe(false) catch {
-        _ = c.close(master);
-        _ = c.close(slave);
+        _ = c.close(parent);
+        _ = c.close(child_fd);
         return error.PtyOpenFailed;
     };
     // The write end must also clear the standard descriptors: `login_tty`
-    // dup2's the slave onto 0/1/2 in the child, and if the write end sat
-    // on fd 1 or 2 that dup2 would clobber it — the child could then
+    // dup2's the child end onto 0/1/2 in the child, and if the write end
+    // sat on fd 1 or 2 that dup2 would clobber it — the child could then
     // never report an exec failure, so a missing-interpreter exec would
     // masquerade as a normal exit. (This only bites when the host began
     // with standard descriptors closed; the relocation is a no-op
     // otherwise. `relocateAboveStdio` closes the original on both
     // success and failure.)
     const exec_read = relocateAboveStdio(raw_pipe[0]) orelse {
-        _ = c.close(master);
-        _ = c.close(slave);
+        _ = c.close(parent);
+        _ = c.close(child_fd);
         _ = c.close(raw_pipe[1]);
         return error.PtyOpenFailed;
     };
     const exec_write = relocateAboveStdio(raw_pipe[1]) orelse {
-        _ = c.close(master);
-        _ = c.close(slave);
+        _ = c.close(parent);
+        _ = c.close(child_fd);
         _ = c.close(exec_read);
         return error.PtyOpenFailed;
     };
@@ -387,22 +391,22 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
 
     const pid = c.fork();
     if (pid < 0) {
-        _ = c.close(master);
-        _ = c.close(slave);
+        _ = c.close(parent);
+        _ = c.close(child_fd);
         _ = c.close(exec_pipe[0]);
         _ = c.close(exec_pipe[1]);
         return error.PtyForkFailed;
     }
     if (pid == 0) {
         // CHILD. Async-signal-safe only from here.
-        _ = c.close(master);
+        _ = c.close(parent);
         _ = c.close(exec_pipe[0]);
-        if (c.login_tty(slave) != 0) reportExecFailure(exec_pipe[1]);
+        if (c.login_tty(child_fd) != 0) reportExecFailure(exec_pipe[1]);
         _ = c.execve(resolved_z.ptr, argv_z.ptr, envp_z.ptr);
         reportExecFailure(exec_pipe[1]);
     }
     // PARENT.
-    _ = c.close(slave);
+    _ = c.close(child_fd);
     _ = c.close(exec_pipe[1]);
     // A failure byte, EOF, or the timeout resolves exec status. A real
     // exec failure writes its byte into the pipe buffer INSTANTLY (the
@@ -420,10 +424,10 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     if (failed) {
         var status: c_int = 0;
         while (c.waitpid(pid, &status, 0) < 0 and errnoValue() == eintr) {}
-        _ = c.close(master);
+        _ = c.close(parent);
         return error.PtyCommandNotFound;
     }
-    return .{ .master = master, .pid = pid };
+    return .{ .parent = parent, .pid = pid };
 }
 
 /// CHILD-side exec-failure report: write the errno byte into the self-
@@ -622,9 +626,9 @@ const o_noctty: c_int = switch (builtin.os.tag) {
     .macos => 0x20000,
     else => 0,
 };
-// O_CLOEXEC on the master (posix_openpt, honored on Linux, ignored on
-// Darwin) and on the slave (open, honored on both — the atomic close of
-// the inheritance race).
+// O_CLOEXEC on the parent end (posix_openpt, honored on Linux, ignored on
+// Darwin) and on the child end (open, honored on both — the atomic close
+// of the inheritance race).
 const o_cloexec_open: c_int = switch (builtin.os.tag) {
     .linux => 0x80000,
     .macos => 0x1000000,
@@ -777,20 +781,20 @@ pub const Ready = struct {
     nudged: bool = false,
 };
 
-/// Block until the master is readable (`want_read`), writable
+/// Block until the parent end is readable (`want_read`), writable
 /// (`want_write`), hung up, or the nudge pipe fires. A caller wanting
-/// NEITHER master direction (a parked reader with nothing to write)
+/// NEITHER parent-end direction (a parked reader with nothing to write)
 /// waits on the nudge pipe alone — POLLHUP is unmaskable, so keeping
-/// the master in the set would turn a hangup racing a full staging
+/// the parent end in the set would turn a hangup racing a full staging
 /// ring into a busy loop.
-pub fn wait(master: c_int, nudge_fd: c_int, want_read: bool, want_write: bool) Ready {
+pub fn wait(parent: c_int, nudge_fd: c_int, want_read: bool, want_write: bool) Ready {
     if (comptime !supported) return .{};
-    const master_events: c_short = (if (want_read) pollin else 0) | (if (want_write) pollout else 0);
+    const parent_events: c_short = (if (want_read) pollin else 0) | (if (want_write) pollout else 0);
     var fds = [2]Pollfd{
         .{ .fd = nudge_fd, .events = pollin, .revents = 0 },
-        .{ .fd = master, .events = master_events, .revents = 0 },
+        .{ .fd = parent, .events = parent_events, .revents = 0 },
     };
-    const nfds: c_uint = if (master_events == 0) 1 else 2;
+    const nfds: c_uint = if (parent_events == 0) 1 else 2;
     const r = c.poll(&fds, nfds, -1);
     if (r < 0) return .{};
     return .{
@@ -815,13 +819,13 @@ const pollhup: c_short = 0x10;
 
 // ------------------------------------------------------------------ tests
 
-/// Read the child's whole output, polling the non-blocking master to
+/// Read the child's whole output, polling the non-blocking parent end to
 /// EOF — the effects io loop's poll discipline, condensed for the
 /// in-file tests (which have no effects channel).
 fn testReadAll(p: Pty, buf: []u8) usize {
     var total: usize = 0;
     while (total < buf.len) {
-        const ready = wait(p.master, p.master, true, false);
+        const ready = wait(p.parent, p.parent, true, false);
         if (p.read(buf[total..])) |n| {
             if (n == 0) return total; // EOF
             total += n;
