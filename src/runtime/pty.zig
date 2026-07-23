@@ -26,17 +26,21 @@ const clock = @import("clock.zig");
 
 /// Serializes the descriptor-opening half of every pty spawn in the
 /// process (spawns can originate from independent runtime instances on
-/// different threads): the section from `posix_openpt` through `fork`.
-/// Darwin ignores O_CLOEXEC on `posix_openpt` (and its pipes need a
-/// second syscall for the flag), so a CONCURRENT TOOLKIT FORK landing
-/// between an open and its fcntl would gift its exec'd child a copy of
-/// another spawn's parent-end or pipe descriptor for that child's whole
-/// life. One process-wide lock over the window means our own forks can
-/// never land inside it; an embedder forking on threads the toolkit
-/// does not own keeps the documented residual sub-syscall window, which
-/// the exec probe's timeout nets. `ptsname`'s libc-shared static buffer
-/// rides the same lock. A tiny spinlock — the guarded section is a
-/// handful of bounded syscalls, never the exec-status poll.
+/// different threads): the section from `posix_openpt` through `fork`,
+/// and the wake pipe's creation. Darwin ignores O_CLOEXEC on
+/// `posix_openpt` (and its pipes need a second syscall for the flag),
+/// so a CONCURRENT PTY FORK landing between an open and its fcntl would
+/// gift its exec'd child a copy of another spawn's parent-end or pipe
+/// descriptor for that child's whole life. Forks the lock cannot cover
+/// — job spawns (their process start blocks on its own exec pipe, so
+/// holding a UI-shared lock across it would freeze the loop on a
+/// wedged mount) and embedder forks on foreign threads — keep the
+/// documented residual sub-syscall window: inherited copies die at
+/// those children's execs, and a delayed exec-pipe EOF is resolved by
+/// the carried reap-time verdict rather than guessed. `ptsname`'s
+/// libc-shared static buffer rides the same lock. A tiny spinlock —
+/// the guarded section is a handful of bounded syscalls, never the
+/// exec-status poll.
 const SpinLock = struct {
     locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     fn lock(self: *SpinLock) void {
@@ -822,28 +826,17 @@ const c = struct {
 pub fn pipePair() Error![2]c_int {
     if (comptime !supported) return error.PtyUnsupported;
     // Under the spawn lock: Darwin's pipe-then-fcntl flag gap is a
-    // descriptor-inheritance window exactly like the spawn's own, and
-    // every toolkit fork holds the same lock — so no toolkit child can
-    // inherit a not-yet-CLOEXEC wake pipe across its exec.
+    // descriptor-inheritance window exactly like the spawn's own, so no
+    // PTY fork can inherit a not-yet-CLOEXEC wake pipe across its exec.
+    // Forks the lock does not cover (job spawns, whose process start
+    // blocks on its own exec pipe and must never hold a lock the UI
+    // loop takes; embedder forks on foreign threads) are the bounded
+    // residual: inherited copies die at those children's execs, and the
+    // one lasting effect — a delayed exec-pipe EOF — is resolved by the
+    // carried reap-time verdict.
     pty_spawn_mutex.lock();
     defer pty_spawn_mutex.unlock();
     return makePipe(true);
-}
-
-/// Serialize any toolkit process start against every descriptor-flag
-/// window (`pty_spawn_mutex`): hold across the fork/exec primitive —
-/// bounded, never across a wait on the child — so its fork cannot land
-/// inside another spawn's open-to-CLOEXEC gap, and its own descriptor
-/// setup is covered against pty forks in turn. No-ops on targets
-/// without the pty transport (nothing forks through here there).
-pub fn lockProcessSpawnWindow() void {
-    if (comptime !supported) return;
-    pty_spawn_mutex.lock();
-}
-
-pub fn unlockProcessSpawnWindow() void {
-    if (comptime !supported) return;
-    pty_spawn_mutex.unlock();
 }
 
 /// Create a pipe with both ends close-on-exec (and, when `nonblock`,

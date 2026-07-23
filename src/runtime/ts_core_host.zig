@@ -1825,11 +1825,11 @@ pub fn TsCoreHost(comptime core: type) type {
             if (key.len > 0 and findPty(key) != null) {
                 // The rejection is STAGED (delivered a later frame), so its
                 // key must be self-contained: the wire key points into this
-                // dispatch's command buffer, gone by delivery, so copy it
-                // into the engine's durable staged-key store and reference
-                // that. The app's key rides the refusal, correlating it
-                // with its command — however many rejections one batch
-                // stages, each keeps its own durable buffer.
+                // dispatch's command buffer, gone by delivery, so intern
+                // it in the engine's instance-lived staged-key store and
+                // reference that. The app's key rides the refusal,
+                // correlating it with its command — and the interned
+                // slice stays valid even committed into the model.
                 fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
@@ -1837,8 +1837,8 @@ pub fn TsCoreHost(comptime core: type) type {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
                 // vocabulary for every refusal, never a crash. Staged, so
-                // the requested key rides the engine's durable staged-key
-                // store, not the frame arena.
+                // the requested key rides the engine's interned
+                // instance-lived staged-key store, not the frame arena.
                 fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };

@@ -4307,17 +4307,16 @@ pub fn Effects(comptime Msg: type) type {
         pending_staged_spill: []PendingStaged = &.{},
         pending_staged_head: usize = 0,
         pending_staged_len: usize = 0,
-        /// Durable backing for the KEY bytes a staged Msg carries (a TS
-        /// bridge spawn-rejection names the app's requested key). A staged
-        /// Msg outlives the caller's frame arena, and the caller has no
-        /// durable home for the key (a rejected spawn has no live table
-        /// slot), so `stageLoopKey` copies it here: one heap buffer per
-        /// key (stable address — the array of pointers may grow and move,
-        /// the buffers never do, so already-staged Msgs keep valid
-        /// slices). Reclaimed wholesale the moment the staged stage is
-        /// empty again (every keyed Msg delivered, so no slice is live),
-        /// which `stageLoopKey` checks before it appends — bounding the
-        /// storage to one batch's rejections however large that batch is.
+        /// INTERNED backing for the KEY bytes a staged Msg carries (a TS
+        /// bridge spawn-rejection names the app's requested key). A
+        /// staged Msg outlives the caller's frame arena, the caller has
+        /// no durable home for the key (a rejected spawn has no live
+        /// table slot), and the delivered Msg's consumer may COMMIT the
+        /// slice into its model — so these buffers are instance-lived,
+        /// freed only at deinit (each a stable heap allocation; the
+        /// pointer array may grow and move, the buffers never do).
+        /// Interning bounds the storage by the app's distinct key
+        /// vocabulary, not its rejection count.
         staged_keys: [][]u8 = &.{},
         staged_keys_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
@@ -10863,7 +10862,9 @@ pub fn Effects(comptime Msg: type) type {
                     pty_transport.closeFd(pipe[0]);
                     pty_transport.closeFd(pipe[1]);
                     transport.kill(false);
-                    _ = transport.reapBlocking();
+                    // Bounded (the escalate-then-surrender reap): see
+                    // the thread-start failure path below.
+                    _ = transport.reapEnding();
                     transport.close();
                     return self.failPtyStart(slot, options);
                 }
@@ -10882,7 +10883,11 @@ pub fn Effects(comptime Msg: type) type {
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
                 transport.kill(false);
-                _ = transport.reapBlocking();
+                // Bounded (the escalate-then-surrender reap): the child
+                // may be wedged inside an exec on a stalled mount, and
+                // an unbounded waitpid here would freeze the UI loop
+                // instead of delivering spawn_failed.
+                _ = transport.reapEnding();
                 transport.close();
                 return self.failPtyStart(slot, options);
             };
@@ -11513,25 +11518,25 @@ pub fn Effects(comptime Msg: type) type {
             });
         }
 
-        /// Copy a staged Msg's KEY bytes into durable storage and return
-        /// the durable slice, for a caller (the TS bridge) whose staged
-        /// rejection must name a key it has no live table slot to hold
-        /// (a duplicate or table-full spawn). The slice outlives the
-        /// caller's frame arena and stays valid until the staged Msg is
-        /// delivered — however many rejections one `Cmd.batch` stages,
-        /// each gets its own stable buffer, so none clobbers another
-        /// still awaiting delivery. Call BEFORE `stageLoopMsg` and pass
-        /// the returned slice into the built Msg. Loop-thread only; the
-        /// same self-contained/deterministic-replay contract as
-        /// `stageLoopMsg` rides on the caller.
+        /// INTERN a staged Msg's KEY bytes and return the interned slice,
+        /// for a caller (the TS bridge) whose staged rejection must name
+        /// a key it has no live table slot to hold (a duplicate or
+        /// table-full spawn). The slice is INSTANCE-LIVED, freed only at
+        /// deinit: the delivered Msg's consumer may commit the slice
+        /// into its model (the TS commit walker shares pointers that
+        /// live outside the frame arena rather than copying them), so
+        /// reclaiming mid-run would dangle a committed model. Interning
+        /// bounds the storage by the app's DISTINCT key vocabulary —
+        /// keys are app-authored names, so repeat rejections of the same
+        /// key cost nothing — not by the rejection count. Call BEFORE
+        /// `stageLoopMsg` and pass the returned slice into the built
+        /// Msg. Loop-thread only; the same deterministic-replay contract
+        /// as `stageLoopMsg` rides on the caller.
         pub fn stageLoopKey(self: *Self, key: []const u8) []const u8 {
             if (key.len == 0) return "";
-            // The stage is empty: every previously staged Msg delivered,
-            // so no slice into these buffers is live — reclaim them all
-            // before appending this batch's first key. This is the only
-            // point storage is released (never at delivery, where the Msg
-            // being handed to `update` still references its key).
-            if (self.pending_staged_len == 0) self.releaseStagedKeys();
+            for (self.staged_keys[0..self.staged_keys_len]) |existing| {
+                if (std.mem.eql(u8, existing, key)) return existing;
+            }
             if (self.staged_keys_len == self.staged_keys.len) {
                 const new_cap = if (self.staged_keys.len == 0) 8 else self.staged_keys.len * 2;
                 const grown = self.allocator.alloc([]u8, new_cap) catch
@@ -11548,9 +11553,9 @@ pub fn Effects(comptime Msg: type) type {
             return buf;
         }
 
-        /// Free every durable staged-Msg key buffer. Safe only when the
-        /// staged stage is empty (no delivered-pending Msg references
-        /// one) or at teardown.
+        /// Free every interned staged-Msg key buffer. Deinit only: a
+        /// committed model may reference these slices for as long as the
+        /// app lives.
         fn releaseStagedKeys(self: *Self) void {
             for (self.staged_keys[0..self.staged_keys_len]) |buf| self.allocator.free(buf);
             self.staged_keys_len = 0;
@@ -12249,12 +12254,16 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn runChild(self: *Self, ctx: *SpawnWorkerContext, slot_index: u16, generation: u32, io: std.Io) void {
-            // The process start runs under the toolkit's spawn-window
-            // lock: this fork must never land inside a pty spawn's (or
-            // wake pipe's) open-to-CLOEXEC gap, where its exec'd child
-            // would inherit that descriptor for its whole life. The lock
-            // covers only the bounded start — never a wait on the child.
-            pty_transport.lockProcessSpawnWindow();
+            // NOT under the pty spawn-window lock, deliberately: the
+            // std process start waits on its own exec-status pipe, and
+            // an `execve` stalled on a wedged mount would hold the lock
+            // unbounded — freezing the UI loop the moment a pty spawn
+            // needs it. A job fork landing inside a pty flag gap is the
+            // bounded residual instead (shared with embedder forks): the
+            // inherited copies die at the job child's exec, and a job
+            // whose exec stalls merely delays the pty's exec-pipe EOF —
+            // which the carried reap-time verdict resolves correctly, so
+            // no misclassification and no unbounded harm either way.
             const spawn_result = std.process.spawn(io, .{
                 .argv = ctx.argv(),
                 .stdin = if (ctx.stdin_len > 0) .pipe else .ignore,
@@ -12274,7 +12283,6 @@ pub fn Effects(comptime Msg: type) type {
                 // the descendant story on both platforms).
                 .pgid = if (builtin.os.tag == .windows) null else 0,
             });
-            pty_transport.unlockProcessSpawnWindow();
             var child = spawn_result catch return;
 
             ctx.child_mutex.lock();

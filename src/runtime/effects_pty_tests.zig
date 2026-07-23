@@ -412,6 +412,12 @@ test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {
         const want = std.fmt.bufPrint(&expect, "k{d}", .{i}) catch unreachable;
         try testing.expectEqualStrings(want, slices[i]);
     }
+
+    // Interned: re-staging a known key returns the SAME instance-lived
+    // slice — repeat rejections of one key cost nothing, and a model
+    // that committed the earlier slice stays valid for the app's life.
+    const again = fx.stageLoopKey("k1");
+    try testing.expectEqual(slices[1].ptr, again.ptr);
 }
 
 test "a write after the fed exit is staged refuses and counts - the live rule on fakes" {
