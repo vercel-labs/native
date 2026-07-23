@@ -438,6 +438,34 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
     try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
 }
 
+test "a write refused after the exit is staged still counts into dropped_writes" {
+    if (comptime !pty_transport.supported) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    // A child that exits immediately and prints nothing: the io thread
+    // stages the exit; the loop has not delivered it yet.
+    fx.ptySpawn(.{
+        .key = 57,
+        .argv = &.{ "/bin/sh", "-c", "exit 0" },
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var waited: u64 = 0;
+    while (fx.pty_pending_count.load(.seq_cst) == 0 and waited < 5_000) {
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(2), .awake);
+        waited += 2;
+    }
+    try testing.expect(fx.pty_pending_count.load(.seq_cst) > 0);
+
+    // The staged-exit window: the write is refused (no io thread will
+    // flush it) but COUNTED — the exit event reads the drop count at
+    // delivery, which has not happened yet, so no refusal is silent.
+    try testing.expect(!fx.ptyWrite(57, "late"));
+    const exit = try expectExit(&fx, 57, .exited);
+    try testing.expectEqual(@as(i32, 0), exit.code);
+    try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
+}
+
 test "a fed output batch over the chunk bound and NUL-bearing term/argv are refused" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();

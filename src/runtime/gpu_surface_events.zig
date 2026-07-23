@@ -485,6 +485,23 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         if (owns_preedit) self.targetless_ime_preedit_len = 0;
                         break :blk if (input_event.text.len > 0) input_event.text else null;
                     },
+                    // A key_down CARRYING text is the other committed-text
+                    // shape: hosts without a separate text event for plain
+                    // typing (the GTK path when no input method consumes
+                    // the key) deliver the printable on the key event
+                    // itself — the focused-widget rule
+                    // (`canvasWidgetTextEditEventFromGpuInput`) inserts
+                    // from it, and the target-less fallback must too or
+                    // ordinary typing never reaches `on_text` there. Same
+                    // chord gate; specials (enter, backspace) carry no
+                    // text on any host, so nothing doubles with the
+                    // key_down fallback dispatched above.
+                    .key_down => blk: {
+                        if (canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event)) break :blk null;
+                        if (input_event.text.len == 0) break :blk null;
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        break :blk input_event.text;
+                    },
                     .ime_set_composition => blk: {
                         // Buffer the FULL composition (grow to fit, never
                         // truncate): each set_composition REPLACES the

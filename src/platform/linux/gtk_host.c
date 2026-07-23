@@ -2462,6 +2462,30 @@ static const char *native_sdk_shortcut_key_for_keyval(guint keyval, char *buffer
         case GDK_KEY_Right: return "arrowright";
         case GDK_KEY_Up: return "arrowup";
         case GDK_KEY_Down: return "arrowdown";
+        case GDK_KEY_Delete:
+        case GDK_KEY_KP_Delete: return "delete";
+        case GDK_KEY_Home:
+        case GDK_KEY_KP_Home: return "home";
+        case GDK_KEY_End:
+        case GDK_KEY_KP_End: return "end";
+        case GDK_KEY_Page_Up:
+        case GDK_KEY_KP_Page_Up: return "pageup";
+        case GDK_KEY_Page_Down:
+        case GDK_KEY_KP_Page_Down: return "pagedown";
+        case GDK_KEY_Insert:
+        case GDK_KEY_KP_Insert: return "insert";
+        case GDK_KEY_F1: return "f1";
+        case GDK_KEY_F2: return "f2";
+        case GDK_KEY_F3: return "f3";
+        case GDK_KEY_F4: return "f4";
+        case GDK_KEY_F5: return "f5";
+        case GDK_KEY_F6: return "f6";
+        case GDK_KEY_F7: return "f7";
+        case GDK_KEY_F8: return "f8";
+        case GDK_KEY_F9: return "f9";
+        case GDK_KEY_F10: return "f10";
+        case GDK_KEY_F11: return "f11";
+        case GDK_KEY_F12: return "f12";
         default: return "";
     }
 }

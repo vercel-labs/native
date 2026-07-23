@@ -490,6 +490,75 @@ test "a command-chorded text event never types a literal character into the pty"
     try testing.expectEqualStrings("c", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "typing carried on the key event reaches the pty - the no-separate-text-event host shape" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Hosts without a separate text event for plain typing deliver the
+    // printable on the key_down itself; the committed-text channel must
+    // carry it to the pty or typing is silently lost there.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "j",
+        .text = "j",
+    } });
+    try testing.expectEqualStrings("j", app_state.effects.ptyWrittenBytes(1));
+}
+
+test "chorded punctuation and function keys encode their control sequences" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Ctrl+\ is SIGQUIT to a terminal user — chorded punctuation has no
+    // text-channel fallback, so the encoder must speak or the control
+    // byte is silently lost. The emulator's legacy encoding maps it to
+    // the FS control byte (0x1C).
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "\\",
+        .modifiers = .{ .control = true },
+    } });
+    try testing.expectEqualStrings("\x1c", app_state.effects.ptyWrittenBytes(1));
+
+    // Ctrl+[ rides the emulator's fixterms CSI-u encoding (the ESC
+    // chord stays distinguishable from a bare Escape press) — the same
+    // bytes the emulator's own terminal sends for this chord.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "[",
+        .modifiers = .{ .control = true },
+    } });
+    try testing.expectEqualStrings("\x1c\x1b[91;5u", app_state.effects.ptyWrittenBytes(1));
+
+    // F1 encodes its escape sequence (ESC O P) — function keys commit
+    // no text, so the encoder is their only road to the child.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "f1",
+    } });
+    try testing.expectEqualStrings("\x1c\x1b[91;5u\x1bOP", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "restart during starting is a no-op - the original session is not duplicated" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

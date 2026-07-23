@@ -501,11 +501,19 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
     const chorded = event.modifiers.control or event.modifiers.super or alt_is_chord;
     if (!chorded) return null;
     if (key.len == 1) {
+        // The emulator's encoder expects the pressed CHARACTER as UTF-8
+        // alongside the logical key — the shape its host normally
+        // supplies — and derives the chord bytes from it: legacy C0
+        // sequences (Ctrl+C -> 0x03, Ctrl+\ -> 0x1C) where they exist,
+        // and the fixterms CSI-u encoding for the exceptions (Ctrl+[,
+        // Ctrl+I, Ctrl+M keep their unchorded bytes unambiguous).
         const ch = key[0];
+        const utf8 = key[0..1];
         if (ch >= 'a' and ch <= 'z') {
             const base = @intFromEnum(vt.input.Key.key_a);
             return .{
                 .key = @enumFromInt(base + @as(c_int, ch - 'a')),
+                .utf8 = utf8,
                 .unshifted = ch,
             };
         }
@@ -513,11 +521,32 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
             const base = @intFromEnum(vt.input.Key.digit_0);
             return .{
                 .key = @enumFromInt(base + @as(c_int, ch - '0')),
+                .utf8 = utf8,
                 .unshifted = ch,
             };
         }
+        // Chorded punctuation carries real control meaning a terminal
+        // user expects — Ctrl+[ is the ESC chord, Ctrl+\ is SIGQUIT,
+        // Ctrl+] exits telnet — and has no text-channel fallback, so an
+        // unmapped key here is silently lost input.
+        const punctuation = [_]struct { ch: u8, key: vt.input.Key }{
+            .{ .ch = '[', .key = .bracket_left },
+            .{ .ch = ']', .key = .bracket_right },
+            .{ .ch = '\\', .key = .backslash },
+            .{ .ch = ';', .key = .semicolon },
+            .{ .ch = '\'', .key = .quote },
+            .{ .ch = ',', .key = .comma },
+            .{ .ch = '.', .key = .period },
+            .{ .ch = '/', .key = .slash },
+            .{ .ch = '-', .key = .minus },
+            .{ .ch = '=', .key = .equal },
+            .{ .ch = '`', .key = .backquote },
+        };
+        for (punctuation) |entry| {
+            if (ch == entry.ch) return .{ .key = entry.key, .utf8 = utf8, .unshifted = entry.ch };
+        }
     }
-    if (keyIs(key, "space")) return .{ .key = .space, .unshifted = ' ' };
+    if (keyIs(key, "space")) return .{ .key = .space, .utf8 = " ", .unshifted = ' ' };
     return null;
 }
 

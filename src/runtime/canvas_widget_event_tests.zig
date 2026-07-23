@@ -975,6 +975,41 @@ test "target-less IME preedit is per-surface and command chords never commit tex
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
     try std.testing.expectEqualStrings("x", app_state.last_committed[0..app_state.last_committed_len]);
+
+    // A key_down CARRYING text is the other committed-text shape (hosts
+    // whose plain typing rides the key event, no separate text event):
+    // it must reach the target-less consumer too.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .key_down,
+        .key = "j",
+        .text = "j",
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.committed_count);
+    try std.testing.expectEqualStrings("j", app_state.last_committed[0..app_state.last_committed_len]);
+
+    // The same chord gate applies on the key_down carrier: a chorded
+    // key never types its literal character.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .key_down,
+        .key = "j",
+        .text = "j",
+        .modifiers = .{ .control = true },
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.committed_count);
+
+    // A key_down WITHOUT text (a special, or an IM-consumed key echoed
+    // for activation) commits nothing.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.committed_count);
 }
 
 test "runtime dispatches opted-in canvas widget drag events" {

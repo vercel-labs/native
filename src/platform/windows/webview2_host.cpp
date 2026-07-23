@@ -1273,6 +1273,24 @@ static std::string shortcutKeyFromWParam(WPARAM wparam) {
         case VK_RIGHT: return "arrowright";
         case VK_UP: return "arrowup";
         case VK_DOWN: return "arrowdown";
+        case VK_DELETE: return "delete";
+        case VK_HOME: return "home";
+        case VK_END: return "end";
+        case VK_PRIOR: return "pageup";
+        case VK_NEXT: return "pagedown";
+        case VK_INSERT: return "insert";
+        case VK_F1: return "f1";
+        case VK_F2: return "f2";
+        case VK_F3: return "f3";
+        case VK_F4: return "f4";
+        case VK_F5: return "f5";
+        case VK_F6: return "f6";
+        case VK_F7: return "f7";
+        case VK_F8: return "f8";
+        case VK_F9: return "f9";
+        case VK_F10: return "f10";
+        case VK_F11: return "f11";
+        case VK_F12: return "f12";
         case VK_OEM_PLUS: return "=";
         case VK_OEM_MINUS: return "-";
         case VK_OEM_COMMA: return ",";
@@ -1347,6 +1365,18 @@ static std::string shortcutKeyLabel(const std::string &key) {
     if (key == "arrowright") return "Right";
     if (key == "arrowup") return "Up";
     if (key == "arrowdown") return "Down";
+    if (key == "delete") return "Del";
+    if (key == "home") return "Home";
+    if (key == "end") return "End";
+    if (key == "pageup") return "PgUp";
+    if (key == "pagedown") return "PgDn";
+    if (key == "insert") return "Ins";
+    if (key.size() >= 2 && key.size() <= 3 && key[0] == 'f' &&
+        std::isdigit(static_cast<unsigned char>(key[1]))) {
+        std::string label = key;
+        label[0] = 'F';
+        return label;
+    }
     return key;
 }
 

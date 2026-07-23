@@ -6619,12 +6619,18 @@ pub fn Effects(comptime Msg: type) type {
             const accepted = accepted: {
                 if (!shared.open or shared.generation != slot.generation) break :accepted false;
                 // The reaper has finished (exit staged): there is no io
-                // thread left to send bytes, and the exit's accounting
-                // is already finalized — a late write must NOT queue
-                // bytes nobody will flush, nor mutate the staged exit's
-                // dropped_writes. Silently drop it (a write after the
-                // child is gone could never have landed anyway).
-                if (shared.exit_staged or shared.io_done) break :accepted false;
+                // thread left to send bytes, so a late write must not
+                // queue bytes nobody will flush. It still COUNTS — the
+                // no-silent-refusal contract: the exit event reads
+                // `dropped_writes` under this mutex at drain delivery,
+                // which has not happened yet (the loop thread is here),
+                // so the refusal lands in the delivered count. Only a
+                // write after the exit DELIVERS misses it, and that one
+                // finds no slot at all (the documented cancel race).
+                if (shared.exit_staged or shared.io_done) {
+                    shared.dropped_writes +|= 1;
+                    break :accepted false;
+                }
                 if (bytes.len > max_effect_pty_write_bytes or
                     shared.out_len + bytes.len > max_effect_pty_outbound_bytes or
                     shared.out_write_count == max_effect_pty_write_records)
