@@ -1974,13 +1974,17 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
             shared.out_front_sent = 0;
         }
         const cancelled = shared.kill_requested;
-        shared.exit_signal = exit.signal;
         shared.exit_reason = if (cancelled)
             .cancelled
         else if (exit.signal != 0)
             .signaled
         else
             .exited;
+        // `signal` is meaningful ONLY for `.signaled` (a fatal signal
+        // the child was not sent by cancel). A cancelled end reports
+        // signal 0 even though the toolkit's own SIGKILL is what felled
+        // it — the API contract is "signal != 0 iff reason == signaled".
+        shared.exit_signal = if (shared.exit_reason == .signaled) exit.signal else 0;
         // A cancelled or signaled end carries no meaningful child exit
         // code (the doc's -1 sentinel); only a natural exit does.
         shared.exit_code = if (cancelled or exit.signal != 0) effect_error_exit_code else exit.code;

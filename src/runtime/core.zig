@@ -335,14 +335,15 @@ pub const Runtime = struct {
     /// text on `ime_commit_composition` (the host emits an EMPTY commit
     /// when the marked text is committed unchanged, so the composed
     /// bytes live only here), cleared on cancel or a direct text_input.
-    /// Sized to one pty write's worth of composition (4 KiB): a single
-    /// IME composition before commit is a phrase, not a document, and
-    /// this matches the per-write bound the committed text flows through
-    /// anyway. An extreme composition past it truncates on a UTF-8
-    /// boundary (never mid-code-point), the loud-bounded house style.
+    /// Grows to fit the current composition (never truncated): each
+    /// `ime_set_composition` REPLACES the preedit with the host's full
+    /// composition string, so this holds at most one composition's
+    /// bytes, reallocated up through `owned_allocator` only when a
+    /// larger one arrives and freed at `deinit`. `.len` is the allocated
+    /// capacity; `targetless_ime_preedit_len` is the bytes in use.
     /// Focused text widgets never use this — their editor applies the
     /// composition directly.
-    targetless_ime_preedit: [4096]u8 = undefined,
+    targetless_ime_preedit: []u8 = &.{},
     targetless_ime_preedit_len: usize = 0,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
@@ -517,6 +518,11 @@ pub const Runtime = struct {
     /// host) call it to return the storage.
     pub fn deinit(self: *Runtime) void {
         self.disarmMediaSurfaceWakes();
+        if (self.targetless_ime_preedit.len > 0) {
+            self.owned_allocator.free(self.targetless_ime_preedit);
+            self.targetless_ime_preedit = &.{};
+            self.targetless_ime_preedit_len = 0;
+        }
         for (self.canvas_font_entries[0..self.canvas_font_count]) |entry| {
             // Return the HOST side of the registration before the bytes:
             // registration pushed the face to platforms with host-side

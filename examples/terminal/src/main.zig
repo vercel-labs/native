@@ -208,7 +208,10 @@ fn writeInput(fx: *Fx, bytes: []const u8) void {
 /// same journaled command channel as typed input.
 fn flushResponses(model: *Model, fx: *Fx) void {
     const pending = model.session.pendingResponses();
-    if (pending.len > 0) fx.ptyWrite(shell_key, pending);
+    // Chunk like typed input: a batch that pipelined many queries can
+    // produce more than the per-write bound of replies, which a single
+    // ptyWrite would refuse whole — leaving the child waiting forever.
+    if (pending.len > 0) writeInput(fx, pending);
     model.session.clearResponses();
 }
 

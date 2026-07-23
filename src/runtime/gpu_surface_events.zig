@@ -467,13 +467,21 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         break :blk if (input_event.text.len > 0) input_event.text else null;
                     },
                     .ime_set_composition => blk: {
-                        // Truncate on a UTF-8 boundary, never mid-code-
-                        // point: a byte-wise cut could split a multibyte
-                        // sequence and an empty commit would then forward
-                        // invalid UTF-8 as committed text.
-                        const len = utf8TruncatedLen(input_event.text, self.targetless_ime_preedit.len);
-                        @memcpy(self.targetless_ime_preedit[0..len], input_event.text[0..len]);
-                        self.targetless_ime_preedit_len = len;
+                        // Buffer the FULL composition (grow to fit, never
+                        // truncate): each set_composition replaces the
+                        // preedit, so this holds one composition's bytes.
+                        // An allocation failure keeps the prior buffer and
+                        // simply does not update the preedit — the commit
+                        // then forwards what fit, never invalid UTF-8.
+                        if (input_event.text.len > self.targetless_ime_preedit.len) {
+                            if (self.owned_allocator.realloc(self.targetless_ime_preedit, input_event.text.len)) |grown| {
+                                self.targetless_ime_preedit = grown;
+                            } else |_| {
+                                break :blk null;
+                            }
+                        }
+                        @memcpy(self.targetless_ime_preedit[0..input_event.text.len], input_event.text);
+                        self.targetless_ime_preedit_len = input_event.text.len;
                         break :blk null; // preedit is provisional
                     },
                     .ime_commit_composition => blk: {
@@ -787,16 +795,4 @@ fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []co
 
 fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
-}
-
-/// The largest length <= `max` at which `text` (valid UTF-8) can be cut
-/// without splitting a code point: if the byte at the cut is a UTF-8
-/// continuation byte (0b10xxxxxx), back up to the start of that
-/// sequence. Keeps a truncated IME preedit from later committing
-/// invalid UTF-8.
-fn utf8TruncatedLen(text: []const u8, max: usize) usize {
-    var len = @min(text.len, max);
-    if (len == text.len) return len;
-    while (len > 0 and (text[len] & 0xC0) == 0x80) len -= 1;
-    return len;
 }
