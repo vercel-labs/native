@@ -37,13 +37,15 @@ pub const Session = struct {
     render: vt.RenderState,
     /// Terminal answers to queries (DSR, DA1, XTVERSION, ...) produced
     /// while feeding output; the app drains this after every feed and
-    /// writes it back to the pty. Sized to hold a large pipelined burst
-    /// of query replies from one output batch (each reply is a handful
-    /// of bytes, so 16 KiB covers thousands); a response that would
-    /// overflow is dropped WHOLE (never cut, which would desync the
-    /// child's parser) and counted. The count is the honest record that
-    /// a reply was lost, checkable by the app.
-    response_buffer: [response_capacity]u8 = undefined,
+    /// writes it back to the pty. Heap-allocated and GROWN TO FIT (up to
+    /// `response_capacity_max`): replies may sit retained here while the
+    /// app's outbound ring is full, and further output keeps feeding —
+    /// its replies must accumulate, not evaporate. A reply past the max
+    /// (a child that ignored the whole pending ring while pipelining
+    /// queries) is dropped WHOLE (never cut, which would desync the
+    /// child's parser) and counted — the honest record that a reply was
+    /// lost, checkable by the app.
+    response_buffer: []u8 = &.{},
     response_len: usize = 0,
     responses_dropped: u32 = 0,
     /// Keyboard-selection state: the anchor stays put, the head moves.
@@ -58,8 +60,13 @@ pub const Session = struct {
 
     pub const CellPos = struct { x: u16 = 0, y: u16 = 0 };
 
-    /// Query-answer buffer size.
+    /// Query-answer buffer's INITIAL size (it grows to fit).
     pub const response_capacity: usize = 16 * 1024;
+
+    /// The growth ceiling — matched to the app's pending-outbound ring:
+    /// retained replies past this could never be enqueued whole anyway,
+    /// so growing further would only defer the same counted drop.
+    pub const response_capacity_max: usize = 256 * 1024;
 
     /// The app feeds output in sub-slices no larger than this, draining
     /// answers after each, so a burst of pipelined query replies cannot
@@ -86,6 +93,8 @@ pub const Session = struct {
             .stream = undefined,
             .render = .empty,
         };
+        errdefer session.term.deinit(gpa);
+        session.response_buffer = try gpa.alloc(u8, response_capacity);
         session.stream = .initAlloc(gpa, .init(&session.term));
         session.installStreamEffects();
         return session;
@@ -115,6 +124,7 @@ pub const Session = struct {
         session.render.deinit(gpa);
         session.stream.deinit();
         session.term.deinit(gpa);
+        gpa.free(session.response_buffer);
         gpa.destroy(session);
     }
 
@@ -165,11 +175,28 @@ pub const Session = struct {
 
     fn writePtyResponse(handler: *vt.TerminalStream.Handler, bytes: [:0]const u8) void {
         const session: *Session = @alignCast(@fieldParentPtr("term", handler.terminal));
-        if (session.response_len + bytes.len > session.response_buffer.len) {
-            session.responses_dropped +|= 1;
-            return;
+        const needed = session.response_len + bytes.len;
+        if (needed > session.response_buffer.len) {
+            // Grow to fit (doubling), up to the ceiling: replies may be
+            // retained here across feeds while the app's outbound ring
+            // is full, so accumulation is normal, not exceptional. Past
+            // the ceiling — or under allocation failure — the reply
+            // drops WHOLE and counted, never cut.
+            if (needed > response_capacity_max) {
+                session.responses_dropped +|= 1;
+                return;
+            }
+            var new_cap = @max(session.response_buffer.len * 2, response_capacity);
+            while (new_cap < needed) new_cap *= 2;
+            if (new_cap > response_capacity_max) new_cap = response_capacity_max;
+            if (session.gpa.realloc(session.response_buffer, new_cap)) |grown| {
+                session.response_buffer = grown;
+            } else |_| {
+                session.responses_dropped +|= 1;
+                return;
+            }
         }
-        @memcpy(session.response_buffer[session.response_len .. session.response_len + bytes.len], bytes);
+        @memcpy(session.response_buffer[session.response_len..needed], bytes);
         session.response_len += bytes.len;
     }
 

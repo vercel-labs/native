@@ -449,6 +449,15 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const encode_options: vt.input.KeyEncodeOptions = .fromTerminal(&session.term);
+    // The runtime folds the platform's PRIMARY modifier into `super`.
+    // On macOS primary IS the GUI key, so the fold is harmless there —
+    // but on hosts whose primary is Ctrl, a bare Ctrl chord arrives as
+    // ctrl+super and the encoder would skip its C0 byte (Ctrl+C must
+    // deliver ETX and interrupt the child, never a CSI-u chord). Undo
+    // the alias for the encoder: super counts only when Ctrl is not the
+    // key raising it. (The one loss is the GUI+Ctrl double chord, which
+    // encodes as plain Ctrl — the convention terminals follow anyway.)
+    const encoder_super = mods.super and !mods.control;
     _ = vt.input.encodeKey(&writer, .{
         .key = key.key,
         .action = .press,
@@ -456,7 +465,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
             .shift = mods.shift,
             .ctrl = mods.control,
             .alt = mods.alt,
-            .super = mods.super,
+            .super = encoder_super,
         },
         .utf8 = key.utf8,
         .unshifted_codepoint = key.unshifted,

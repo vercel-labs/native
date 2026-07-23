@@ -559,6 +559,59 @@ test "chorded punctuation and function keys encode their control sequences" {
     try testing.expectEqualStrings("\x1c\x1b[91;5u\x1bOP", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "a primary-aliased Ctrl chord still encodes its C0 byte" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Hosts whose PRIMARY modifier is Ctrl report a bare Ctrl chord
+    // with BOTH bits set; the runtime folds primary into `super`. The
+    // encoder must still see a clean Ctrl+C and emit ETX (0x03) — a
+    // stray super would demote it to a CSI-u chord the foreground shell
+    // never treats as an interrupt.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "c",
+        .modifiers = .{ .control = true, .primary = true },
+    } });
+    try testing.expectEqualStrings("\x03", app_state.effects.ptyWrittenBytes(1));
+}
+
+test "retained replies keep accumulating while further output feeds - the buffer grows" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const session = app_state.model.session;
+
+    // The outbound ring is full and the child keeps pipelining DSR
+    // queries — more reply bytes than the buffer's initial capacity.
+    // Every reply must accumulate (the buffer grows), none dropped:
+    // clearing or dropping would strand a child blocked on an answer.
+    app_state.model.outbound_len = app_state.model.outbound_buffer.len;
+    const burst = "\x1b[6n" ** 6000; // ~36 KiB of replies, > 16 KiB initial
+    session.feed(burst);
+    app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
+    try testing.expectEqual(@as(u32, 0), session.responses_dropped);
+    try testing.expect(session.pendingResponses().len > grid.Session.response_capacity);
+
+    // The ring drains; the whole accumulated batch moves and clears.
+    app_state.model.outbound_len = 0;
+    app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
+    try testing.expectEqual(@as(usize, 0), session.pendingResponses().len);
+    try testing.expectEqual(@as(u64, 0), app_state.model.outbound_dropped);
+}
+
 test "a query reply refused by a full ring is retained and retried, never cleared" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

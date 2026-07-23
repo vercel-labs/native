@@ -220,6 +220,64 @@ test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed gu
     try testing.expect(fx.ptyWrite(81, "past the recording"));
 }
 
+test "a write against a synchronously failed spawn journals the verdict replay's park consumes" {
+    if (comptime !pty_transport.supported) return;
+    const VerdictCapture = struct {
+        write_records: u32 = 0,
+        last_code: i32 = -1,
+
+        fn journal(self: *@This()) effects_mod.EffectJournal {
+            return .{ .context = self, .record_fn = record };
+        }
+
+        fn record(context: *anyopaque, rec: effects_mod.EffectResultRecord) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (rec.kind == .pty and rec.pty_kind == .write) {
+                self.write_records += 1;
+                self.last_code = rec.code;
+            }
+        }
+    };
+
+    // LIVE: the transport fails synchronously (missing binary), the
+    // slot releases, but the staged spawn_failed terminal keeps the key
+    // occupied — a same-dispatch write refuses AND journals its verdict,
+    // because replay holds the same window as a parked slot where the
+    // write consumes one.
+    var capture: VerdictCapture = .{};
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.bindJournal(capture.journal());
+        fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try testing.expect(!fx.ptyWrite(91, "same dispatch"));
+        try testing.expectEqual(@as(u32, 1), capture.write_records);
+        try testing.expectEqual(@as(i32, 0), capture.last_code);
+        _ = try expectExit(&fx, 91, .spawn_failed);
+        // Past the terminal's delivery the key is free: no slot, no
+        // staged terminal — a write refuses with NO verdict (replay's
+        // retired park matches).
+        try testing.expect(!fx.ptyWrite(91, "after delivery"));
+        try testing.expectEqual(@as(u32, 1), capture.write_records);
+    }
+
+    // REPLAY: the same dispatch stream — the parked spawn holds the
+    // key, the write consumes the journaled refusal, the fed
+    // spawn_failed retires the park, and the feeds settle exactly.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
+        try fx.pushReplayPtyWriteVerdict(91, false);
+        try testing.expect(!fx.ptyWrite(91, "same dispatch"));
+        try fx.feedPtyExit(91, -1, 0, .spawn_failed, 0);
+        _ = try expectExit(&fx, 91, .spawn_failed);
+        try testing.expect(!fx.ptyWrite(91, "after delivery"));
+        try fx.settleReplayFeeds();
+    }
+}
+
 test "the replay verdict queue grows past its inline window and stays keyed" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();

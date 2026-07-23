@@ -6708,7 +6708,26 @@ pub fn Effects(comptime Msg: type) type {
         /// a live occupancy and the payload is non-empty — both
         /// deterministic across the replayed dispatch stream.
         pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) bool {
-            const slot = self.findPtySlot(key) orelse return false;
+            const slot = self.findPtySlot(key) orelse {
+                // A spawn whose transport failed SYNCHRONOUSLY released
+                // its slot, but its staged executor-truth terminal keeps
+                // the key occupied until delivery — and REPLAY keeps that
+                // same window occupied as a parked slot, where a write
+                // consumes a verdict. Journal the refusal here so the two
+                // verdict streams stay aligned: live refuses against the
+                // staged terminal, replay consumes the recorded refusal
+                // against the park. A key with no spawn at all refuses
+                // with no verdict on both sides (no slot, no park).
+                if (bytes.len > 0 and !self.replay and self.stagedPtyOccupiesKey(key)) {
+                    self.journalNote(.{
+                        .kind = .pty,
+                        .key = key,
+                        .pty_kind = .write,
+                        .code = 0,
+                    });
+                }
+                return false;
+            };
             if (bytes.len == 0) return true;
             if (self.replay) return self.takeReplayPtyWriteVerdict(key);
             const accepted = ptyWriteAdmit(slot, bytes);
