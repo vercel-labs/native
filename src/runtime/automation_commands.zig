@@ -40,6 +40,9 @@ pub const AutomationWidgetTarget = struct {
 pub const AutomationWidgetWheel = struct {
     target: AutomationWidgetTarget,
     delta_y: f32,
+    /// Horizontal wheel delta (the optional fourth token): 0 — the
+    /// classic three-token form — scrolls vertically exactly as before.
+    delta_x: f32 = 0,
 };
 
 /// `widget-context-menu <view-label> <id> <item-index>`: invoke one of
@@ -238,18 +241,27 @@ pub fn parseAutomationProvenanceTarget(value: []const u8) !AutomationProvenanceT
     return .{ .view_label = view.token, .id = id };
 }
 
+/// `widget-wheel <view-label> <id> <delta-y> [delta-x]`: the optional
+/// fourth token scrolls the horizontal axis (per-axis routing applies,
+/// exactly like a real trackpad gesture with both deltas).
 pub fn parseAutomationWidgetWheel(value: []const u8) !AutomationWidgetWheel {
     const view = takeAutomationToken(value) orelse return error.InvalidCommand;
     const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
     const delta_part = takeAutomationToken(id_part.rest) orelse return error.InvalidCommand;
-    if (takeAutomationToken(delta_part.rest) != null) return error.InvalidCommand;
     const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
     if (id == 0) return error.InvalidCommand;
     const delta_y = std.fmt.parseFloat(f32, delta_part.token) catch return error.InvalidCommand;
     if (!std.math.isFinite(delta_y)) return error.InvalidCommand;
+    var delta_x: f32 = 0;
+    if (takeAutomationToken(delta_part.rest)) |delta_x_part| {
+        if (takeAutomationToken(delta_x_part.rest) != null) return error.InvalidCommand;
+        delta_x = std.fmt.parseFloat(f32, delta_x_part.token) catch return error.InvalidCommand;
+        if (!std.math.isFinite(delta_x)) return error.InvalidCommand;
+    }
     return .{
         .target = .{ .view_label = view.token, .id = id },
         .delta_y = delta_y,
+        .delta_x = delta_x,
     };
 }
 
@@ -627,6 +639,12 @@ test "runtime parses automation widget wheel targets" {
     try std.testing.expectEqualStrings("canvas", wheel.target.view_label);
     try std.testing.expectEqual(@as(canvas.ObjectId, 42), wheel.target.id);
     try std.testing.expectEqual(@as(f32, 18.5), wheel.delta_y);
+    try std.testing.expectEqual(@as(f32, 0), wheel.delta_x);
+
+    // The optional fourth token is the horizontal delta.
+    const diagonal = try parseAutomationWidgetWheel("canvas 42 18.5 -6");
+    try std.testing.expectEqual(@as(f32, 18.5), diagonal.delta_y);
+    try std.testing.expectEqual(@as(f32, -6), diagonal.delta_x);
 
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel(""));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas"));
@@ -635,6 +653,7 @@ test "runtime parses automation widget wheel targets" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nope"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nan"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 18 extra"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 18 6 extra"));
 }
 
 test "runtime parses automation widget context-menu items" {

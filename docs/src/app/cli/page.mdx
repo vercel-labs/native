@@ -229,8 +229,8 @@ Interact with the automation server of a running automation-enabled app. See [Au
   <dd>Invoke a widget's declared context-menu item by index — the snapshot lists each widget's items in order.</dd>
   <dt><code>automate widget-drag &lt;view-label&gt; &lt;widget-id&gt; &lt;start-x-ratio&gt; &lt;end-x-ratio&gt; [&lt;start-y-ratio&gt; &lt;end-y-ratio&gt;]</code></dt>
   <dd>Dispatch pointer down/drag/up across a retained canvas widget.</dd>
-  <dt><code>automate widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt;</code></dt>
-  <dd>Dispatch wheel input at a retained canvas widget.</dd>
+  <dt><code>automate widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt; [&lt;delta-x&gt;]</code></dt>
+  <dd>Dispatch wheel input at a retained canvas widget; the optional <code>delta-x</code> scrolls the horizontal axis (each axis routes to the nearest region that scrolls it).</dd>
   <dt><code>automate widget-key &lt;view-label&gt; &lt;key&gt; [&lt;text&gt;]</code></dt>
   <dd>Dispatch key input to the focused retained canvas widget.</dd>
   <dt><code>automate widget-pinch &lt;view-label&gt; &lt;scale&gt; [&lt;x&gt; &lt;y&gt;]</code></dt>

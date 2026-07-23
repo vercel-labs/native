@@ -335,6 +335,11 @@ pub const Msg = union(enum) {
     grid_scrolled: canvas.ScrollState,
     detail_scrolled: canvas.ScrollState,
     songs_scrolled: canvas.ScrollState,
+    /// The detail page's "From the collection" shelf — a HORIZONTAL
+    /// scroll region, so its controlled echo rides the state's
+    /// `offset_x` into `value_x` (the sideways twin of the offsets
+    /// above).
+    shelf_scrolled: canvas.ScrollState,
     /// Context menu: queue a track to play after the current one.
     queue_track: u8,
     /// Context menu: copy the track title to the clipboard via `pbcopy`
@@ -348,13 +353,13 @@ pub const Msg = union(enum) {
     /// process exits) send these — never a markup on-* event — so the
     /// dead-state lint must not ask for one.
     pub const view_unbound = .{
-        "set_appearance", "chrome_changed", "canvas_resized",
-        "open_album",     "close_album",    "play_album",
-        "play_track",     "select_track",   "select_next",
-        "select_previous", "play_selected", "frame_clock",
-        "audio_event",    "grid_scrolled",  "detail_scrolled",
-        "songs_scrolled", "queue_track",    "copy_title",
-        "copied",
+        "set_appearance",  "chrome_changed", "canvas_resized",
+        "open_album",      "close_album",    "play_album",
+        "play_track",      "select_track",   "select_next",
+        "select_previous", "play_selected",  "frame_clock",
+        "audio_event",     "grid_scrolled",  "detail_scrolled",
+        "songs_scrolled",  "shelf_scrolled", "queue_track",
+        "copy_title",      "copied",
     };
 };
 
@@ -367,6 +372,9 @@ pub const Model = struct {
     /// the model observes the applied offset and echoes it back.
     grid_scroll: f32 = 0,
     detail_scroll: f32 = 0,
+    /// The detail page's album shelf, HORIZONTAL: the echoed `offset_x`
+    /// the view binds back as `value_x`.
+    shelf_scroll_x: f32 = 0,
     /// Chrome overlay geometry from `on_chrome` (tall hidden-inset
     /// titlebar): the header leads with a spacer this wide so its
     /// controls clear the traffic lights, and matches its height to the
@@ -490,22 +498,21 @@ pub const Model = struct {
     /// the derived fns (`nowPlayingTitle`, `playPauseIcon`,
     /// `progressFraction`, ...) instead of these backing stores.
     pub const view_unbound = .{
-        "tab",             "open_album",     "grid_scroll",
-        "detail_scroll",   "canvas_width",   "songs_scroll",
-        "now",             "selected",       "playing",
-        "elapsed_ms",      "frame_ns",       "now_duration_ms",
-        "platform_duration_ms",
-        "assets_missing",  "stream_failed",  "buffering",
-        "url_base_len",    "cache_dir_len",  "queue_dropped",
-        "seek_fraction",   "copies_done",    "copy_failed",
-        "appearance",      "search_buffer",  "url_base_buffer",
-        "cache_dir_buffer", "queue",         "covers",
-        "chrome_top",      "chrome_bottom",  "host_form_factor",
-        "native_tabs",     "urlBase",
-        "cacheDir",        "streamingConfigured", "searching",
-        "colorScheme",     "hasNowPlaying",  "playingAlbum",
-        "visibleAlbums",   "visibleTracks",  "miniBarVisible",
-        "formFactor",
+        "tab",             "open_album",           "grid_scroll",
+        "detail_scroll",   "shelf_scroll_x",       "canvas_width",
+        "songs_scroll",    "now",                  "selected",
+        "playing",         "elapsed_ms",           "frame_ns",
+        "now_duration_ms", "platform_duration_ms", "assets_missing",
+        "stream_failed",   "buffering",            "url_base_len",
+        "cache_dir_len",   "queue_dropped",        "seek_fraction",
+        "copies_done",     "copy_failed",          "appearance",
+        "search_buffer",   "url_base_buffer",      "cache_dir_buffer",
+        "queue",           "covers",               "chrome_top",
+        "chrome_bottom",   "host_form_factor",     "native_tabs",
+        "urlBase",         "cacheDir",             "streamingConfigured",
+        "searching",       "colorScheme",          "hasNowPlaying",
+        "playingAlbum",    "visibleAlbums",        "visibleTracks",
+        "miniBarVisible",  "formFactor",           "otherAlbums",
     };
 
     // ------------------------------------------------------------- queries
@@ -679,6 +686,27 @@ pub const Model = struct {
     }
 
     /// Albums matching the search query, derived into the build arena.
+    /// Every album EXCEPT `exclude`, in catalog order and unfiltered —
+    /// the detail page's "From the collection" shelf browses the whole
+    /// catalog sideways, whatever the search field holds.
+    pub fn otherAlbums(model: *const Model, arena: std.mem.Allocator, exclude: u8) []const AlbumCell {
+        const out = arena.alloc(AlbumCell, albums.len) catch return &.{};
+        var count: usize = 0;
+        for (&albums) |*album| {
+            if (album.id == exclude) continue;
+            out[count] = .{
+                .id = album.id,
+                .title = album.title,
+                .artist = album.artist,
+                .initials = album.initials,
+                .cover = model.coverFor(album.id),
+                .playing = model.playingAlbum() == album.id,
+            };
+            count += 1;
+        }
+        return out[0..count];
+    }
+
     pub fn visibleAlbums(model: *const Model, arena: std.mem.Allocator) []const AlbumCell {
         const out = arena.alloc(AlbumCell, albums.len) catch return &.{};
         var count: usize = 0;
@@ -870,11 +898,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .grid_scrolled => |state| model.grid_scroll = state.offset_y,
         .detail_scrolled => |state| model.detail_scroll = state.offset_y,
         .songs_scrolled => |state| model.songs_scroll = state.offset_y,
+        .shelf_scrolled => |state| model.shelf_scroll_x = state.offset_x,
         .open_album => |id| {
             model.open_album = id;
             model.tab = .albums;
-            // A fresh record opens at its top.
+            // A fresh record opens at its top, with its shelf at the
+            // leading edge.
             model.detail_scroll = 0;
+            model.shelf_scroll_x = 0;
         },
         .close_album => model.open_album = null,
         .play_album => |id| startTrack(model, fx, albumTracks(id)[0].id),

@@ -979,7 +979,27 @@ test "a full session: open an album, play it, and use the context menus" {
 
     tree = try buildTree(arena, &model);
     try testing.expect(findByLabel(tree.root, "Album detail") != null);
-    try testing.expectEqual(@as(usize, album.track_count), countListItems(tree.root));
+    // Track rows count inside the track LIST: the page also carries the
+    // "From the collection" shelf, whose album tiles are listitems too.
+    try testing.expectEqual(@as(usize, album.track_count), countListItems(findByLabel(tree.root, "Album tracks").?));
+
+    // The collection shelf: every OTHER album on a horizontal rail —
+    // wheel delta_x and Left/Right scroll it while the page keeps
+    // vertical scrolling (each axis routes to the nearest region that
+    // scrolls it).
+    const shelf = findByLabel(tree.root, "More albums").?;
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, shelf.kind);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, shelf.scroll_axes);
+    try testing.expectEqual(model.shelf_scroll_x, shelf.value_x);
+    try testing.expectEqual(@as(usize, model_mod.albums.len - 1), countListItems(shelf));
+
+    // The shelf echo is the controlled-scroll shape on the HORIZONTAL
+    // axis: the applied offset_x lands in the model and binds back as
+    // value_x, and opening an album resets the rail.
+    apply(&model, tree.msgForScroll(shelf.id, .{ .offset_x = 96, .viewport_extent_x = 480, .content_extent_x = 960 }).?);
+    try testing.expectEqual(@as(f32, 96), model.shelf_scroll_x);
+    tree = try buildTree(arena, &model);
+    try testing.expectEqual(@as(f32, 96), findByLabel(tree.root, "More albums").?.value_x);
 
     // Play album starts the record's first track. The button carries its
     // play icon inline (widget.icon) beside the label: one widget, one
@@ -2231,7 +2251,7 @@ test "the navigation projection follows the visible page stack" {
     // identical depth readouts at every step — the projection is a pure
     // derivation, so a journal replayed without a host is identical.
     const journal = [_]Msg{
-        .{ .open_album = 2 }, .show_songs, .show_albums, .close_album,
+        .{ .open_album = 2 }, .show_songs,  .show_albums, .close_album,
         .{ .open_album = 5 }, .close_album,
     };
     var first = Model{};
@@ -2506,7 +2526,7 @@ test "one Msg journal drives both shells deterministically" {
     const expected_form = [journal.len]model_mod.FormFactor{
         .compact, .compact, .compact, .compact,
         .regular, .regular, .regular, .compact,
-        .regular, .compact,  .compact,
+        .regular, .compact, .compact,
     };
 
     var first = Model{};
