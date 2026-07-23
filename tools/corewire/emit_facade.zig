@@ -144,8 +144,8 @@ const FacadeEmitter = struct {
         try names.append(self.arena, self.sidecar.msg.name);
 
         for (names.items) |name| {
-            if (!isTsIdentifier(name)) {
-                self.diags.flag("types", "\"{s}\" is not a declarable TypeScript identifier, and TypeScript has no quoted-declaration escape — rename it in the core source", .{name});
+            if (pipelineIdentifierIssue(name, .declaration)) |issue| {
+                self.diags.flag("types", "type name \"{s}\" {s} — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source", .{ name, issue });
             }
             // Ambient globals the generated module leans on: a local
             // declaration would shadow them out from under the encoders.
@@ -153,19 +153,35 @@ const FacadeEmitter = struct {
                 self.diags.flag("types", "\"Uint8Array\" shadows the ambient byte type every encoder in the generated facade uses; rename the type in the core source", .{});
             }
         }
+        // Arm names become union members and constructor-name fragments
+        // in the compiled module; member and field names become its
+        // struct fields and enum members — all verbatim.
         for (self.sidecar.msg.arms) |arm| {
-            if (!isIdentifierFragment(arm.name)) {
-                self.diags.flag("msg.arms", "arm \"{s}\" cannot join the facade's constructor names (nsc_core_msg_<arm>); use identifier characters in the core source", .{arm.name});
+            if (pipelineIdentifierIssue(arm.name, .member)) |issue| {
+                self.diags.flag("msg.arms", "arm \"{s}\" {s} — the facade must stay declarable end to end; rename it in the core source", .{ arm.name, issue });
             }
         }
-        // The subset records identifier-named properties only (a quoted
-        // member has no accepted spelling), and a one-member
-        // string-literal union is not a union node, so neither construct
-        // can be authored in the source language the facade projects to.
+        for (self.sidecar.types.unions) |entry| {
+            for (entry.arms) |arm| {
+                if (pipelineIdentifierIssue(arm.name, .member)) |issue| {
+                    self.diags.flag("types.unions", "arm \"{s}\" of \"{s}\" {s} — the facade must stay declarable end to end; rename it in the core source", .{ arm.name, entry.name, issue });
+                }
+            }
+        }
+        for (self.sidecar.types.enums) |entry| {
+            for (entry.members) |member| {
+                if (pipelineIdentifierIssue(member, .member)) |issue| {
+                    self.diags.flag("types.enums", "member \"{s}\" of \"{s}\" {s} — the facade must stay declarable end to end; rename it in the core source", .{ member, entry.name, issue });
+                }
+            }
+        }
+        // Field names ride to the compiled module's struct fields
+        // verbatim (and the subset accepts identifier-named properties
+        // only), so the pipeline rule covers them whole.
         for (self.sidecar.types.structs) |entry| {
             for (entry.fields) |field| {
-                if (!isBareProperty(field.name)) {
-                    self.diags.flag("types", "field \"{s}\" is not an identifier-named property, which the projected subset cannot declare; rename it in the core source", .{field.name});
+                if (pipelineIdentifierIssue(field.name, .member)) |issue| {
+                    self.diags.flag("types", "field \"{s}\" {s} — the facade must stay declarable end to end; rename it in the core source", .{ field.name, issue });
                 }
             }
         }
@@ -173,8 +189,8 @@ const FacadeEmitter = struct {
             switch (arm.payload) {
                 .number_bytes => |desc| {
                     for ([_][]const u8{ desc.number_field, desc.bytes_field }) |field_name| {
-                        if (!isBareProperty(field_name)) {
-                            self.diags.flag("msg.arms", "field \"{s}\" is not an identifier-named property, which the projected subset cannot declare; rename it in the core source", .{field_name});
+                        if (pipelineIdentifierIssue(field_name, .member)) |issue| {
+                            self.diags.flag("msg.arms", "field \"{s}\" {s} — the facade must stay declarable end to end; rename it in the core source", .{ field_name, issue });
                         }
                     }
                 },
@@ -1182,6 +1198,44 @@ fn isBareProperty(name: []const u8) bool {
     return isIdentifierFragment(name);
 }
 
+/// Why a name cannot survive the WHOLE proxy pipeline, or null when it
+/// can. The facade is TypeScript, but the validation proxy compiles it
+/// with the shipped transpiler, which emits identifiers VERBATIM into
+/// the downstream module (it has no quoting machinery) — so every name
+/// the facade declares must be legal in both languages: the shared
+/// identifier charset (letters, digits, underscore; `$` exists only on
+/// the TypeScript side), a non-digit start, not the discard spelling,
+/// and no keyword or primitive-type name of either language.
+const NameRole = enum {
+    /// A TypeScript declaration (type alias, interface): TypeScript's
+    /// reserved words apply on top of the compiled module's rules.
+    declaration,
+    /// A member position (property, union arm, enum member):
+    /// TypeScript accepts reserved words there — the corpus's own
+    /// `number` field proves it — so only the compiled module's rules
+    /// apply.
+    member,
+};
+
+fn pipelineIdentifierIssue(name: []const u8, role: NameRole) ?[]const u8 {
+    if (name.len == 0) return "is empty";
+    if (std.mem.eql(u8, name, "_")) return "is the discard spelling in the compiled module";
+    if (name[0] >= '0' and name[0] <= '9') return "starts with a digit";
+    for (name) |char| {
+        const ok = (char >= 'a' and char <= 'z') or (char >= 'A' and char <= 'Z') or
+            (char >= '0' and char <= '9') or char == '_';
+        if (!ok) return "uses characters outside the compiled module's identifier set (letters, digits, underscore)";
+    }
+    if (std.zig.Token.keywords.has(name)) return "is a keyword in the compiled module";
+    if (std.zig.isPrimitive(name)) return "is a primitive type name in the compiled module";
+    if (role == .declaration) {
+        for (ts_reserved_words) |word| {
+            if (std.mem.eql(u8, name, word)) return "is a reserved word in TypeScript";
+        }
+    }
+    return null;
+}
+
 fn isIdentifierFragment(name: []const u8) bool {
     if (name.len == 0) return false;
     for (name) |char| {
@@ -1440,27 +1494,16 @@ test "TS line terminators escape inside emitted string literals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // Enum members ride string literals; LS (U+2028) and PS (U+2029)
-    // would end the literal at scan time unescaped.
-    const source = try std.mem.replaceOwned(
-        u8,
-        arena,
-        sidecar_mod.minimal_valid_json,
-        "\"enums\": []",
-        "\"enums\": [{\"name\": \"Mode\", \"members\": [\"a\\u2028b\", \"c\\u2029d\"]}]",
-    );
-    const wired = try std.mem.replaceOwned(
-        u8,
-        arena,
-        source,
-        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
-        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"Mode\"}}",
-    );
-    const generated = try facadeFromJson(arena, wired);
-    try testing.expect(std.mem.indexOf(u8, generated, "\"a\\u2028b\"") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "\"c\\u2029d\"") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "\xe2\x80\xa8") == null);
-    try testing.expect(std.mem.indexOf(u8, generated, "\xe2\x80\xa9") == null);
+    // The identifier fences keep author strings out of the exotic
+    // range, so this escaper is defense in depth — pinned directly:
+    // LS/PS are scanner line terminators, and quotes, backslashes, and
+    // ASCII terminators ride their own escapes.
+    try testing.expectEqualStrings("A\\u2028B", try tsString(arena, "A\xe2\x80\xa8B"));
+    try testing.expectEqualStrings("C\\u2029D", try tsString(arena, "C\xe2\x80\xa9D"));
+    try testing.expectEqualStrings("q\\\"x\\\\y\\nz", try tsString(arena, "q\"x\\y\nz"));
+    // NEL is ordinary text to the scanner (its terminator set is
+    // LF/CR/LS/PS) and passes through.
+    try testing.expectEqualStrings("n\xc2\x85m", try tsString(arena, "n\xc2\x85m"));
 }
 
 test "number_bytes fields in the reserved nsc space refuse" {
@@ -1514,7 +1557,7 @@ test "facade names that TypeScript cannot declare refuse with a teaching" {
     try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
     var found = false;
     for (diags.list.items) |item| {
-        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "not a declarable TypeScript identifier") != null) found = true;
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "is a reserved word in TypeScript") != null) found = true;
     }
     try testing.expect(found);
 }

@@ -315,11 +315,14 @@ fn tableName(comptime T: type, comptime container: []const u8, comptime member: 
 }
 
 /// The compiler names anonymous containers `<Parent>__struct_<digits>`
-/// (instance counter to the end of the name); an AUTHORED type merely
-/// containing the marker (`Foo__struct_Row`) keeps its own identity.
+/// (instance counter to the end of the name). Only the FINAL marker
+/// counts: an authored `Foo__struct_Row` keeps its identity, while an
+/// anonymous member nested under it (`Foo__struct_Row__struct_17`) is
+/// recognized by its last suffix — matching the first marker would
+/// retain the counter-bearing name verbatim and break determinism.
 fn isAnonymousName(comptime name: []const u8) bool {
     inline for (.{ "__struct_", "__union_" }) |marker| {
-        if (std.mem.indexOf(u8, name, marker)) |at| {
+        if (std.mem.lastIndexOf(u8, name, marker)) |at| {
             const digits = name[at + marker.len ..];
             if (digits.len > 0) {
                 var all_digits = true;
@@ -524,6 +527,19 @@ test "extraction of a small core produces a valid sidecar" {
 
     // Determinism: a second evaluation is byte-identical.
     try testing.expectEqualStrings(json, comptime sidecarJson(Core, "src/core.ts"));
+}
+
+test "anonymous-name detection keys on the final compiler suffix" {
+    // Authored names merely containing the marker keep their identity;
+    // only a trailing instance counter marks a compiler-named type.
+    comptime {
+        std.debug.assert(!isAnonymousName("Foo__struct_Row"));
+        std.debug.assert(!isAnonymousName("Task"));
+        std.debug.assert(!isAnonymousName("Foo__union_2x"));
+        std.debug.assert(isAnonymousName("Msg__struct_26987"));
+        std.debug.assert(isAnonymousName("Foo__struct_Row__struct_17"));
+        std.debug.assert(isAnonymousName("Edit__union_4"));
+    }
 }
 
 test "reflected strings are JSON-escaped" {
