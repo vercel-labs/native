@@ -33,9 +33,15 @@
 //!   deterministic zero/sample model builders so a compiled facade can
 //!   prove its encodings against the host's canonical encoder.
 //!
-//! Deterministic: a pure function of the sidecar value, pinned by a
-//! test. FACADE-GAPS in SCHEMA-GAPS.md records each inexpressible
-//! surface with the subset rule that pins it.
+//! Input model: the generator consumes CONTRACT FACTS — the author
+//! module's own declarations (types, arms, unbound markings) plus the
+//! profile's constants. In production those facts precede compilation
+//! (the facade is the compile's entry, so no compiler-emitted artifact
+//! can feed it); the conformance harness drives this emitter from
+//! corpus sidecars as its adapter, which is sound because a sidecar
+//! encodes exactly those facts. Deterministic: a pure function of the
+//! fact value, pinned by a test. FACADE-GAPS in SCHEMA-GAPS.md records
+//! each inexpressible surface with the subset rule that pins it.
 
 const std = @import("std");
 const sidecar_mod = @import("sidecar.zig");
