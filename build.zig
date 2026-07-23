@@ -2955,23 +2955,29 @@ fn tsCoreE2eArtifact(
 
     const conformance_mod = module(b, target, optimize, "tests/sidecar/conformance_tests.zig");
     conformance_mod.addImport("native_sdk", desktop_mod);
+    // The canonical value encoder the facade parity axis compares
+    // against (the same module the generated shims stage).
+    conformance_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
     conformance_mod.addImport("ts_markup_core", markup_fixture_mod);
     conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    conformance_mod.addImport("facade_markup_core", facadeCoreModule(b, target, optimize, node, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
     const conformance_fixtures = [_]struct {
         ts_import: []const u8,
         shim_import: []const u8,
+        facade_import: []const u8,
         core_mod: *std.Build.Module,
         entry: []const u8,
     }{
-        .{ .ts_import = "ts_host_core", .shim_import = "shim_host_core", .core_mod = fixture_mod, .entry = "tests/ts-core/fixture.ts" },
-        .{ .ts_import = "ts_soundboard_core", .shim_import = "shim_soundboard_core", .core_mod = soundboard_core_mod, .entry = "examples/soundboard-ts/src/core.ts" },
-        .{ .ts_import = "ts_monitor_core", .shim_import = "shim_monitor_core", .core_mod = monitor_core_mod, .entry = "examples/system-monitor-ts/src/core.ts" },
-        .{ .ts_import = "ts_ai_chat_core", .shim_import = "shim_ai_chat_core", .core_mod = ai_chat_core_mod, .entry = "examples/ai-chat-ts/src/core.ts" },
+        .{ .ts_import = "ts_host_core", .shim_import = "shim_host_core", .facade_import = "facade_host_core", .core_mod = fixture_mod, .entry = "tests/ts-core/fixture.ts" },
+        .{ .ts_import = "ts_soundboard_core", .shim_import = "shim_soundboard_core", .facade_import = "facade_soundboard_core", .core_mod = soundboard_core_mod, .entry = "examples/soundboard-ts/src/core.ts" },
+        .{ .ts_import = "ts_monitor_core", .shim_import = "shim_monitor_core", .facade_import = "facade_monitor_core", .core_mod = monitor_core_mod, .entry = "examples/system-monitor-ts/src/core.ts" },
+        .{ .ts_import = "ts_ai_chat_core", .shim_import = "shim_ai_chat_core", .facade_import = "facade_ai_chat_core", .core_mod = ai_chat_core_mod, .entry = "examples/ai-chat-ts/src/core.ts" },
     };
     for (conformance_fixtures) |fixture| {
         const sidecar_json = sidecarExtractJson(b, target, optimize, extract_mod, fixture.core_mod, fixture.entry);
         conformance_mod.addImport(fixture.ts_import, fixture.core_mod);
         conformance_mod.addImport(fixture.shim_import, sidecarShimModule(b, target, optimize, corewire_exe, sidecar_json));
+        conformance_mod.addImport(fixture.facade_import, facadeCoreModule(b, target, optimize, node, corewire_exe, sidecar_json));
     }
 
     return .{
@@ -3006,6 +3012,50 @@ fn sidecarShimModule(
     _ = staged.addCopyFile(b.path("tools/corewire/core_abi.zig"), "core_abi.zig");
     return b.createModule(.{
         .root_source_file = shim_root,
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// One fixture's compiled-facade module: run corewire over the sidecar
+/// for its TypeScript projection (core_facade.ts), then compile that
+/// projection through the shipped transpiler — the checker/emitter tier
+/// is the compile, so this step IS the subset-acceptance proof — and
+/// stage the emitted Zig beside its rt kernel like any fixture core.
+fn facadeCoreModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    node: []const u8,
+    corewire_exe: *std.Build.Step.Compile,
+    sidecar_json: std.Build.LazyPath,
+) *std.Build.Module {
+    const generate = b.addRunArtifact(corewire_exe);
+    generate.addArg("--sidecar");
+    generate.addFileArg(sidecar_json);
+    generate.addArg("--facade");
+    const facade_ts = generate.addOutputFileArg("core_facade.ts");
+    const staged_ts = b.addWriteFiles();
+    const facade_entry = staged_ts.addCopyFile(facade_ts, "core.ts");
+
+    const transpile = b.addSystemCommand(&.{node});
+    transpile.addFileArg(b.path("packages/core/src/cli.ts"));
+    transpile.addFileArg(facade_entry);
+    transpile.addArg("-o");
+    const emitted_core = transpile.addOutputFileArg("core.zig");
+    tsCoreAddDirInputs(b, transpile, "packages/core/sdk");
+    const transpiler_sources = [_][]const u8{
+        "checker.ts", "cli.ts", "diagnostics.ts", "emitter.ts", "infer.ts", "modules.ts", "transpile.ts", "typed_ast.ts", "types.ts",
+    };
+    for (transpiler_sources) |source| {
+        transpile.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
+    }
+
+    const staged = b.addWriteFiles();
+    const core_root = staged.addCopyFile(emitted_core, "core.zig");
+    _ = staged.addCopyFile(b.path("packages/core/rt/rt.zig"), "rt.zig");
+    return b.createModule(.{
+        .root_source_file = core_root,
         .target = target,
         .optimize = optimize,
     });

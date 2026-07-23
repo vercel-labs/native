@@ -103,22 +103,26 @@ const FacadeEmitter = struct {
     // ------------------------------------------------------- fencing
 
     fn validateNames(self: *FacadeEmitter) Error!void {
+        // Declaration names (type-table entries and the message union)
+        // must be plain TypeScript identifiers: TypeScript has no
+        // quoted-declaration escape. Field, member, and arm names are
+        // free — properties may quote, and arm names ride string
+        // literals plus identifier FRAGMENTS (constructor suffixes), so
+        // they only need fragment-safe characters.
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (self.sidecar.types.structs) |entry| {
-            try names.append(self.arena, entry.name);
-            for (entry.fields) |field| try names.append(self.arena, field.name);
-        }
+        for (self.sidecar.types.structs) |entry| try names.append(self.arena, entry.name);
         for (self.sidecar.types.enums) |entry| try names.append(self.arena, entry.name);
-        for (self.sidecar.types.unions) |entry| {
-            try names.append(self.arena, entry.name);
-            for (entry.arms) |arm| try names.append(self.arena, arm.name);
-        }
+        for (self.sidecar.types.unions) |entry| try names.append(self.arena, entry.name);
         try names.append(self.arena, self.sidecar.msg.name);
-        for (self.sidecar.msg.arms) |arm| try names.append(self.arena, arm.name);
 
         for (names.items) |name| {
             if (!isTsIdentifier(name)) {
                 self.diags.flag("types", "\"{s}\" is not a declarable TypeScript identifier, and TypeScript has no quoted-declaration escape — rename it in the core source", .{name});
+            }
+        }
+        for (self.sidecar.msg.arms) |arm| {
+            if (!isIdentifierFragment(arm.name)) {
+                self.diags.flag("msg.arms", "arm \"{s}\" cannot join the facade's constructor names (nsc_core_msg_<arm>); use identifier characters in the core source", .{arm.name});
             }
         }
         const facade_decls = [_][]const u8{ "initialModel", "update", "viewUnbound", "asciiBytes" };
@@ -211,7 +215,7 @@ const FacadeEmitter = struct {
     fn structInterface(self: *FacadeEmitter, entry: *const sidecar_mod.Struct) Error!void {
         try self.print("\nexport interface {s} {{", .{entry.name});
         for (entry.fields) |field| {
-            try self.print("\n  readonly {s}: {s};", .{ field.name, try self.spellRef(field.type, entry.name, field.name) });
+            try self.print("\n  readonly {s}: {s};", .{ try tsProp(self.arena, field.name), try self.spellRef(field.type, entry.name, field.name) });
         }
         try self.raw("\n}\n");
     }
@@ -234,7 +238,7 @@ const FacadeEmitter = struct {
             .void => return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\" }}", .{escaped}),
             .bytes => return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly value: Uint8Array }}", .{escaped}),
             .number => return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly value: number }}", .{escaped}),
-            .number_bytes => |desc| return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly {s}: number; readonly {s}: Uint8Array }}", .{ escaped, desc.number_field, desc.bytes_field }),
+            .number_bytes => |desc| return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly {s}: number; readonly {s}: Uint8Array }}", .{ escaped, try tsProp(self.arena, desc.number_field), try tsProp(self.arena, desc.bytes_field) }),
             .record => |name| {
                 if (nameListed(self.inlined, name) and emit_mod.isSynthesizedRef(self.sidecar.msg.name, arm.name, name)) {
                     // The transpiled contract flattened these fields
@@ -244,7 +248,7 @@ const FacadeEmitter = struct {
                     var text: std.ArrayListUnmanaged(u8) = .empty;
                     try text.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"", .{escaped}));
                     for (record.fields) |field| {
-                        try text.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "; readonly {s}: {s}", .{ field.name, try self.spellRef(field.type, name, field.name) }));
+                        try text.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "; readonly {s}: {s}", .{ try tsProp(self.arena, field.name), try self.spellRef(field.type, name, field.name) }));
                     }
                     try text.appendSlice(self.arena, " }");
                     return text.items;
@@ -342,16 +346,21 @@ const FacadeEmitter = struct {
                 .void => try self.print("\nexport function nsc_core_msg_{s}(): {s} {{\n  return {{ kind: \"{s}\" }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
                 .bytes => try self.print("\nexport function nsc_core_msg_{s}(value: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
                 .number => try self.print("\nexport function nsc_core_msg_{s}(value: number): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
-                .number_bytes => |desc| try self.print("\nexport function nsc_core_msg_{s}({s}: number, {s}: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", {s}: {s}, {s}: {s} }};\n}}\n", .{ arm.name, desc.number_field, desc.bytes_field, msg, tsString(self.arena, arm.name), desc.number_field, desc.number_field, desc.bytes_field, desc.bytes_field }),
+                .number_bytes => |desc| {
+                    const number_param = try tsParam(self.arena, desc.number_field, 0);
+                    const bytes_param = try tsParam(self.arena, desc.bytes_field, 1);
+                    try self.print("\nexport function nsc_core_msg_{s}({s}: number, {s}: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", {s}: {s}, {s}: {s} }};\n}}\n", .{ arm.name, number_param, bytes_param, msg, tsString(self.arena, arm.name), try tsProp(self.arena, desc.number_field), number_param, try tsProp(self.arena, desc.bytes_field), bytes_param });
+                },
                 .record => |name| {
                     if (nameListed(self.inlined, name) and emit_mod.isSynthesizedRef(msg, arm.name, name)) {
                         const record = sidecar_mod.findStruct(self.sidecar.types, name).?;
                         var params: std.ArrayListUnmanaged(u8) = .empty;
                         var fields: std.ArrayListUnmanaged(u8) = .empty;
                         for (record.fields, 0..) |field, index| {
+                            const param = try tsParam(self.arena, field.name, index);
                             if (index > 0) try params.appendSlice(self.arena, ", ");
-                            try params.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: {s}", .{ field.name, try self.spellRef(field.type, name, field.name) }));
-                            try fields.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: {s}", .{ field.name, field.name }));
+                            try params.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: {s}", .{ param, try self.spellRef(field.type, name, field.name) }));
+                            try fields.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: {s}", .{ try tsProp(self.arena, field.name), param }));
                         }
                         try self.print("\nexport function nsc_core_msg_{s}({s}): {s} {{\n  return {{ kind: \"{s}\"{s} }};\n}}\n", .{ arm.name, params.items, msg, tsString(self.arena, arm.name), fields.items });
                     } else {
@@ -426,7 +435,7 @@ const FacadeEmitter = struct {
         try out.appendSlice(self.arena, "{\n");
         for (entry.fields) |field| {
             try out.appendSlice(self.arena, try self.indentText(depth + 1));
-            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: ", .{field.name}));
+            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: ", .{try tsProp(self.arena, field.name)}));
             try field_value(self, out, field.type, depth + 1);
             try out.appendSlice(self.arena, ",\n");
         }
@@ -747,8 +756,11 @@ const FacadeEmitter = struct {
 
     fn structEncoder(self: *FacadeEmitter, entry: *const sidecar_mod.Struct) Error!void {
         try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n  const parts: Uint8Array[] = [...nscfNoParts()];\n", .{ try self.encoderNameFor(entry.name), entry.name });
-        for (entry.fields) |field| {
-            try self.fieldEncodeStatements(field.type, try std.fmt.allocPrint(self.arena, "value.{s}", .{field.name}), 1, 0);
+        for (entry.fields, 0..) |field, index| {
+            // Temp names seed per field: every statement shares one
+            // function scope, and optional/slice nesting takes the +1
+            // steps within the field's own range.
+            try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 1, index * 8);
         }
         try self.raw("  return nscfCat(parts);\n}\n");
     }
@@ -836,6 +848,41 @@ fn tsString(arena: std.mem.Allocator, text: []const u8) []const u8 {
         }
     }
     return out.items;
+}
+
+/// A property spelling: plain identifiers stay bare (reserved words
+/// are legal property names); anything else quotes.
+fn tsProp(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
+    if (isIdentifierFragment(name) and name.len > 0 and !(name[0] >= '0' and name[0] <= '9')) {
+        return name;
+    }
+    return std.fmt.allocPrint(arena, "\"{s}\"", .{tsString(arena, name)});
+}
+
+/// A property ACCESS: dot for plain spellings, brackets otherwise.
+fn tsAccess(arena: std.mem.Allocator, base: []const u8, name: []const u8) error{OutOfMemory}![]const u8 {
+    if (isIdentifierFragment(name) and name.len > 0 and !(name[0] >= '0' and name[0] <= '9')) {
+        return std.fmt.allocPrint(arena, "{s}.{s}", .{ base, name });
+    }
+    return std.fmt.allocPrint(arena, "{s}[\"{s}\"]", .{ base, tsString(arena, name) });
+}
+
+/// A parameter name derived from an authored field name: reserved words
+/// and exotic spellings fall back to a positional name (parameters,
+/// unlike properties, must be plain identifiers).
+fn tsParam(arena: std.mem.Allocator, name: []const u8, index: usize) error{OutOfMemory}![]const u8 {
+    if (isTsIdentifier(name)) return name;
+    return std.fmt.allocPrint(arena, "arg{d}", .{index});
+}
+
+fn isIdentifierFragment(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |char| {
+        const ok = (char >= 'a' and char <= 'z') or (char >= 'A' and char <= 'Z') or
+            (char >= '0' and char <= '9') or char == '_' or char == '$';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 fn isTsIdentifier(name: []const u8) bool {

@@ -40,17 +40,23 @@ const canvas = native_sdk.canvas;
 const contract = canvas.ui_markup.contract;
 
 const stub_core = @import("stub_core.zig");
+const corewire_rt = @import("corewire_rt");
 
 const ts_markup = @import("ts_markup_core");
 const shim_markup = @import("shim_markup_core");
+const facade_markup = @import("facade_markup_core");
 const ts_host = @import("ts_host_core");
 const shim_host = @import("shim_host_core");
+const facade_host = @import("facade_host_core");
 const ts_soundboard = @import("ts_soundboard_core");
 const shim_soundboard = @import("shim_soundboard_core");
+const facade_soundboard = @import("facade_soundboard_core");
 const ts_monitor = @import("ts_monitor_core");
 const shim_monitor = @import("shim_monitor_core");
+const facade_monitor = @import("facade_monitor_core");
 const ts_ai_chat = @import("ts_ai_chat_core");
 const shim_ai_chat = @import("shim_ai_chat_core");
+const facade_ai_chat = @import("facade_ai_chat_core");
 
 const testing = std.testing;
 
@@ -227,6 +233,182 @@ test "ai-chat: helper methods keep the exported call surface" {
 // methods — linked against the stub core's exported symbol set. No
 // compiled core exists yet (the ABI is a draft), so these paths are
 // compile- and link-proven here, not executed.
+
+// ------------------------------------------------ facade parity axis
+//
+// The third comparison: the sidecar's TypeScript projection
+// (core_facade.ts), compiled through the shipped transpiler (the
+// compile IS the subset-acceptance proof), must produce the exact
+// canonical bytes the host's decoder expects. The facade encodes its
+// deterministic sample and zero models in compiled subset arithmetic;
+// the reference bytes come from the shared canonical encoder
+// (corewire_rt.encodeAlloc) over the SHIM module's mirror type — the
+// sidecar-classed layout — after a by-name value conversion (the
+// facade compile's own number classes are inference-decided and may
+// legally differ; the bytes must not).
+
+/// Convert a value between two structurally-equivalent mirror types by
+/// field/arm/member NAME, normalizing numeric classes and reference
+/// storage (pointers deref on read, re-materialize on write).
+fn convertValue(comptime Target: type, value: anytype, allocator: std.mem.Allocator) !Target {
+    const Source = @TypeOf(value);
+    if (@typeInfo(Source) == .pointer and @typeInfo(Source).pointer.size == .one) {
+        return convertValue(Target, value.*, allocator);
+    }
+    switch (@typeInfo(Target)) {
+        .bool => return value,
+        .int => return switch (@typeInfo(Source)) {
+            .int => @intCast(value),
+            .float => @intFromFloat(value),
+            else => @compileError("cannot convert " ++ @typeName(Source) ++ " to " ++ @typeName(Target)),
+        },
+        .float => return switch (@typeInfo(Source)) {
+            .float => @floatCast(value),
+            .int => @floatFromInt(value),
+            else => @compileError("cannot convert " ++ @typeName(Source) ++ " to " ++ @typeName(Target)),
+        },
+        .@"enum" => {
+            switch (value) {
+                inline else => |tag| return @field(Target, @tagName(tag)),
+            }
+        },
+        .optional => |info| {
+            if (value) |inner| return try convertValue(info.child, inner, allocator);
+            return null;
+        },
+        .pointer => |info| switch (info.size) {
+            .slice => {
+                if (info.child == u8) return allocator.dupe(u8, value);
+                const out = try allocator.alloc(info.child, value.len);
+                for (out, value) |*slot, element| {
+                    slot.* = try convertValue(info.child, element, allocator);
+                }
+                return out;
+            },
+            .one => {
+                const out = try allocator.create(info.child);
+                out.* = try convertValue(info.child, value, allocator);
+                return out;
+            },
+            else => @compileError("no conversion for " ++ @typeName(Target)),
+        },
+        .@"struct" => |info| {
+            var out: Target = undefined;
+            inline for (info.fields) |field| {
+                @field(out, field.name) = try convertValue(field.type, @field(value, field.name), allocator);
+            }
+            return out;
+        },
+        .@"union" => |info| {
+            switch (value) {
+                inline else => |payload, tag| {
+                    inline for (info.fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, @tagName(tag))) {
+                            if (field.type == void) return @unionInit(Target, field.name, {});
+                            return @unionInit(Target, field.name, try convertValue(field.type, payload, allocator));
+                        }
+                    }
+                    unreachable;
+                },
+            }
+        },
+        else => @compileError("no conversion for " ++ @typeName(Target)),
+    }
+}
+
+/// The facade's compiled snapshot encoder must byte-match the canonical
+/// encoder over the sidecar-classed mirror layout, for both the zero
+/// model and the deterministic sample.
+fn expectSnapshotParity(comptime facade: type, comptime shim: type) !void {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    facade.rt.resetAll();
+    const models = [_]*const facade.Model{ facade.initialModel(), facade.nsc_core_sample_model() };
+    for (models) |model| {
+        const facade_bytes = facade.nsc_core_model_snapshot(1, model);
+        const converted = try convertValue(shim.Model, model, arena);
+        const canonical = corewire_rt.encodeAlloc(shim.Model, converted, arena);
+        try testing.expectEqualSlices(u8, canonical, facade_bytes);
+    }
+    facade.rt.resetAll();
+}
+
+fn expectScalarProbeParity(comptime facade: type) !void {
+    const f64_values = [_]f64{
+        0.0,     -0.0,                    1.0,                    -1.0,               0.5,                 -2.75,
+        0.1,     1.5625,                  1e300,                  -1e300,             1e-300,              5e-324,
+        -5e-324, 2.2250738585072014e-308, 1.7976931348623157e308, 9007199254740991.0, -9007199254740991.0, 3.141592653589793,
+    };
+    for (f64_values) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_f64(value);
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    // The infinities and the canonical quiet NaN.
+    const specials = [_]f64{ std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    for (specials) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_f64(value);
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    const i64_values = [_]i64{ 0, 1, -1, 255, 256, -256, 65535, -65536, 42424242, -1234567890123, 9007199254740991, -9007199254740991 };
+    for (i64_values) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_i64(@floatFromInt(value));
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    facade.rt.frameReset();
+}
+
+test "markup fixture: facade scalar encodings match native bit patterns" {
+    try expectScalarProbeParity(facade_markup);
+}
+
+test "markup fixture: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_markup, shim_markup);
+}
+
+test "markup fixture: facade wire constructors carry declaration-order tags" {
+    // The constructor family is the dispatch-table projection: the arm
+    // a constructor builds must sit at its wire tag in the facade's own
+    // compiled union.
+    const add = facade_markup.nsc_core_msg_add();
+    try testing.expectEqual(@as(usize, 0), @intFromEnum(std.meta.activeTag(add)));
+    const zoomed = facade_markup.nsc_core_msg_zoomed(1.5, 7, true);
+    try testing.expectEqual(@as(usize, 9), @intFromEnum(std.meta.activeTag(zoomed)));
+    try testing.expectEqual(@as(f64, 1.5), zoomed.zoomed.factor);
+    try testing.expect(zoomed.zoomed.fromBoard);
+    try testing.expectEqual(@as(usize, 0), facade_markup.nsc_core_tag_add);
+    try testing.expectEqual(@as(usize, 9), facade_markup.nsc_core_tag_zoomed);
+}
+
+test "host fixture: facade scalar encodings match native bit patterns" {
+    try expectScalarProbeParity(facade_host);
+}
+
+test "host fixture: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_host, shim_host);
+}
+
+test "soundboard: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_soundboard, shim_soundboard);
+}
+
+test "system monitor: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_monitor, shim_monitor);
+}
+
+test "ai-chat: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_ai_chat, shim_ai_chat);
+}
 
 /// Reference every public declaration, recursing into declared types
 /// (all of a shim's public type declarations are its own, so the walk
