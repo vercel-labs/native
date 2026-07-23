@@ -124,7 +124,18 @@ fn encodeInto(comptime T: type, value: T, allocator: std.mem.Allocator, out: *st
             const bits: u64 = if (std.math.isNan(value)) 0x7ff8000000000000 else @bitCast(value);
             try appendInt(u64, bits, allocator, out);
         },
-        .@"enum" => try appendInt(u32, @intCast(@intFromEnum(value)), allocator, out),
+        .@"enum" => |info| {
+            // Positional: the wire value is the declaration-order
+            // member INDEX, never the enum's numeric value (mirror
+            // enums make them equal; the codec must not rely on it).
+            const member_index: u32 = blk: {
+                inline for (info.fields, 0..) |field, field_index| {
+                    if (value == @field(T, field.name)) break :blk @intCast(field_index);
+                }
+                unreachable;
+            };
+            try appendInt(u32, member_index, allocator, out);
+        },
         .optional => |info| {
             if (value) |inner| {
                 try out.append(allocator, 1);
@@ -155,7 +166,16 @@ fn encodeInto(comptime T: type, value: T, allocator: std.mem.Allocator, out: *st
             comptime std.debug.assert(info.tag_type != null);
             switch (value) {
                 inline else => |payload, tag| {
-                    try out.append(allocator, @intCast(@intFromEnum(tag)));
+                    // Positional, like enums: the declaration-order arm
+                    // index rides the wire, never the tag's numeric
+                    // value.
+                    const arm_index: u8 = comptime blk: {
+                        for (info.fields, 0..) |field, field_index| {
+                            if (std.mem.eql(u8, field.name, @tagName(tag))) break :blk @intCast(field_index);
+                        }
+                        unreachable;
+                    };
+                    try out.append(allocator, arm_index);
                     if (@TypeOf(payload) != void) {
                         try encodeInto(@TypeOf(payload), payload, allocator, out);
                     }
@@ -214,11 +234,16 @@ pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T
             return @bitCast(reader.int(u64));
         },
         .@"enum" => |info| {
-            const index = reader.int(u32);
-            if (index >= info.fields.len) {
+            const member_index = reader.int(u32);
+            if (member_index >= info.fields.len) {
                 @panic("a core buffer carries an enum member index past the declared members — the compiled core and the generated shim disagree about the contract; rebuild the app");
             }
-            return @enumFromInt(index);
+            // Positional: index into declaration order, never the
+            // enum's numeric value.
+            inline for (info.fields, 0..) |field, field_index| {
+                if (member_index == field_index) return @field(T, field.name);
+            }
+            unreachable;
         },
         .optional => |info| {
             const present = reader.take(1)[0];
@@ -427,6 +452,18 @@ test "a decoded model root survives exactly one subsequent decode" {
     try testing.expectEqualStrings("second", second.label);
     try testing.expectEqual(@as(i64, 2), second.count);
     resetAll();
+}
+
+test "discriminants ride declaration-order positions, not numeric values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Sparse = enum(u8) { low = 5, high = 9 };
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0 }, encodeAlloc(Sparse, .high, a));
+    try testing.expectEqual(Sparse.high, decodeExact(Sparse, &.{ 1, 0, 0, 0 }, a));
+    const Tagged = union(enum(u8)) { first: i64 = 3, second = 7 };
+    try testing.expectEqualSlices(u8, &.{1}, encodeAlloc(Tagged, .second, a));
+    try testing.expect(decodeExact(Tagged, &.{1}, a) == .second);
 }
 
 test "void union arms ride as the bare arm index" {

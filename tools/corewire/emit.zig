@@ -436,8 +436,8 @@ const Emitter = struct {
             \\}};
             \\
         , .{
-            commentText(self.arena, self.sidecar.entry),
-            commentText(self.arena, self.sidecar.compiler_version),
+            try commentText(self.arena, self.sidecar.entry),
+            try commentText(self.arena, self.sidecar.compiler_version),
             self.sidecar.build_id,
             std.zig.fmtString(self.sidecar.abi.prefix),
             self.sidecar.build_id,
@@ -1257,8 +1257,8 @@ fn nameListed(names: []const []const u8, name: []const u8) bool {
 /// Sidecar strings quoted inside the generated module's comments:
 /// control characters would break the comment line, so they become
 /// spaces (comments are provenance, never load-bearing).
-fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
-    const out = arena.dupe(u8, text) catch return "";
+fn commentText(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const u8 {
+    const out = try arena.dupe(u8, text);
     for (out) |*char| {
         if (char.* < 0x20 or char.* == 0x7f) char.* = ' ';
     }

@@ -336,14 +336,14 @@ const FacadeEmitter = struct {
             \\
             \\import {{ asciiBytes }} from "@native-sdk/core";
             \\
-        , .{ commentText(self.arena, self.sidecar.entry), commentText(self.arena, self.sidecar.compiler_version), self.sidecar.build_id });
+        , .{ try commentText(self.arena, self.sidecar.entry), try commentText(self.arena, self.sidecar.compiler_version), self.sidecar.build_id });
     }
 
     fn typeMirrors(self: *FacadeEmitter) Error!void {
         for (self.sidecar.types.enums) |entry| {
             try self.print("\nexport type {s} =", .{entry.name});
             for (entry.members, 0..) |member, index| {
-                try self.print("{s} \"{s}\"", .{ if (index == 0) "" else " |", tsString(self.arena, member) });
+                try self.print("{s} \"{s}\"", .{ if (index == 0) "" else " |", try tsString(self.arena, member) });
             }
             try self.raw(";\n");
         }
@@ -392,7 +392,7 @@ const FacadeEmitter = struct {
     /// the facade's choice — the emitted contract erases them, so any
     /// spelling projects to the same compiled layout.
     fn armTypeLiteral(self: *FacadeEmitter, union_name: []const u8, arm_name: []const u8, payload: ?TypeRef) Error![]const u8 {
-        const escaped = tsString(self.arena, arm_name);
+        const escaped = try tsString(self.arena, arm_name);
         const ref = payload orelse
             return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\" }}", .{escaped});
         // A synthesized inline record flattens beside `kind`, exactly
@@ -422,7 +422,7 @@ const FacadeEmitter = struct {
     }
 
     fn msgArmTypeLiteral(self: *FacadeEmitter, arm: sidecar_mod.MsgArm) Error![]const u8 {
-        const escaped = tsString(self.arena, arm.name);
+        const escaped = try tsString(self.arena, arm.name);
         switch (arm.payload) {
             .void => return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\" }}", .{escaped}),
             .bytes => return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly value: Uint8Array }}", .{escaped}),
@@ -522,12 +522,12 @@ const FacadeEmitter = struct {
             \\
         );
         for (self.sidecar.msg.unbound) |name| {
-            try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
+            try self.print("  \"{s}\",\n", .{try tsString(self.arena, name)});
         }
         for (field_unbound.items) |name| {
             // A name unbound on both sides rides once.
             if (nameListed(self.sidecar.msg.unbound, name)) continue;
-            try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
+            try self.print("  \"{s}\",\n", .{try tsString(self.arena, name)});
         }
         try self.raw("] as const;\n");
     }
@@ -577,13 +577,13 @@ const FacadeEmitter = struct {
         try self.raw("\n// One typed constructor per message arm (the dispatch-table\n// projection): the host names arms by wire tag, this side by name.\n");
         for (self.sidecar.msg.arms) |arm| {
             switch (arm.payload) {
-                .void => try self.print("\nexport function nsc_core_msg_{s}(): {s} {{\n  return {{ kind: \"{s}\" }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
-                .bytes => try self.print("\nexport function nsc_core_msg_{s}(value: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
-                .number => try self.print("\nexport function nsc_core_msg_{s}(value: number): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, tsString(self.arena, arm.name) }),
+                .void => try self.print("\nexport function nsc_core_msg_{s}(): {s} {{\n  return {{ kind: \"{s}\" }};\n}}\n", .{ arm.name, msg, try tsString(self.arena, arm.name) }),
+                .bytes => try self.print("\nexport function nsc_core_msg_{s}(value: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, try tsString(self.arena, arm.name) }),
+                .number => try self.print("\nexport function nsc_core_msg_{s}(value: number): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, msg, try tsString(self.arena, arm.name) }),
                 .number_bytes => |desc| {
                     const number_param = try tsParam(self.arena, desc.number_field, 0);
                     const bytes_param = try tsParam(self.arena, desc.bytes_field, 1);
-                    try self.print("\nexport function nsc_core_msg_{s}({s}: number, {s}: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", {s}: {s}, {s}: {s} }};\n}}\n", .{ arm.name, number_param, bytes_param, msg, tsString(self.arena, arm.name), try tsProp(self.arena, desc.number_field), number_param, try tsProp(self.arena, desc.bytes_field), bytes_param });
+                    try self.print("\nexport function nsc_core_msg_{s}({s}: number, {s}: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", {s}: {s}, {s}: {s} }};\n}}\n", .{ arm.name, number_param, bytes_param, msg, try tsString(self.arena, arm.name), try tsProp(self.arena, desc.number_field), number_param, try tsProp(self.arena, desc.bytes_field), bytes_param });
                 },
                 .record => |name| {
                     // Synthesized names pattern on the CONTRACT's message
@@ -599,13 +599,13 @@ const FacadeEmitter = struct {
                             try params.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: {s}", .{ param, try self.spellRef(field.type, name, field.name) }));
                             try fields.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: {s}", .{ try tsProp(self.arena, field.name), param }));
                         }
-                        try self.print("\nexport function nsc_core_msg_{s}({s}): {s} {{\n  return {{ kind: \"{s}\"{s} }};\n}}\n", .{ arm.name, params.items, msg, tsString(self.arena, arm.name), fields.items });
+                        try self.print("\nexport function nsc_core_msg_{s}({s}): {s} {{\n  return {{ kind: \"{s}\"{s} }};\n}}\n", .{ arm.name, params.items, msg, try tsString(self.arena, arm.name), fields.items });
                     } else {
-                        try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, name, msg, tsString(self.arena, arm.name) });
+                        try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, name, msg, try tsString(self.arena, arm.name) });
                     }
                 },
-                .union_ref, .enum_ref => |name| try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, name, msg, tsString(self.arena, arm.name) }),
-                .scalar => |ref| try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, try self.spellRef(ref, "", ""), msg, tsString(self.arena, arm.name) }),
+                .union_ref, .enum_ref => |name| try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, name, msg, try tsString(self.arena, arm.name) }),
+                .scalar => |ref| try self.print("\nexport function nsc_core_msg_{s}(value: {s}): {s} {{\n  return {{ kind: \"{s}\", value: value }};\n}}\n", .{ arm.name, try self.spellRef(ref, "", ""), msg, try tsString(self.arena, arm.name) }),
             }
         }
     }
@@ -649,7 +649,7 @@ const FacadeEmitter = struct {
             },
             .enum_ref => |name| {
                 const entry = sidecar_mod.findEnum(self.sidecar.types, name).?;
-                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "\"{s}\"", .{tsString(self.arena, entry.members[0])}));
+                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "\"{s}\"", .{try tsString(self.arena, entry.members[0])}));
             },
             .union_ref => |name| {
                 const entry = sidecar_mod.findUnion(self.sidecar.types, name).?;
@@ -683,11 +683,11 @@ const FacadeEmitter = struct {
     fn unionValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), entry: *const sidecar_mod.Union, arm_index: usize, depth: usize, field_value: FieldValueFn) Error!void {
         const arm = entry.arms[arm_index];
         if (arm.payload == .void) {
-            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\" }}", .{tsString(self.arena, arm.name)}));
+            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\" }}", .{try tsString(self.arena, arm.name)}));
             return;
         }
         if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
-            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\"", .{tsString(self.arena, arm.name)}));
+            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\"", .{try tsString(self.arena, arm.name)}));
             for (record.fields) |field| {
                 try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: ", .{try tsProp(self.arena, field.name)}));
                 try field_value(self, out, field.type, depth);
@@ -695,7 +695,7 @@ const FacadeEmitter = struct {
             try out.appendSlice(self.arena, " }");
             return;
         }
-        try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\", value: ", .{tsString(self.arena, arm.name)}));
+        try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\", value: ", .{try tsString(self.arena, arm.name)}));
         try field_value(self, out, arm.payload, depth);
         try out.appendSlice(self.arena, " }");
     }
@@ -738,7 +738,7 @@ const FacadeEmitter = struct {
             .enum_ref => |name| {
                 const entry = sidecar_mod.findEnum(self.sidecar.types, name).?;
                 const member = entry.members[@intCast(@mod(n, @as(i64, @intCast(entry.members.len))))];
-                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "\"{s}\"", .{tsString(self.arena, member)}));
+                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "\"{s}\"", .{try tsString(self.arena, member)}));
             },
             .union_ref => |name| {
                 const entry = sidecar_mod.findUnion(self.sidecar.types, name).?;
@@ -974,7 +974,7 @@ const FacadeEmitter = struct {
                 if (index + 1 == entry.members.len) {
                     try self.print("  return {d};\n}}\n", .{index});
                 } else {
-                    try self.print("  if (value === \"{s}\") {{\n    return {d};\n  }}\n", .{ tsString(self.arena, member), index });
+                    try self.print("  if (value === \"{s}\") {{\n    return {d};\n  }}\n", .{ try tsString(self.arena, member), index });
                 }
             }
         }
@@ -1023,7 +1023,7 @@ const FacadeEmitter = struct {
     fn unionEncoder(self: *FacadeEmitter, entry: *const sidecar_mod.Union) Error!void {
         try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n", .{ try self.encoderNameFor(entry.name), self.spellName(entry.name) });
         for (entry.arms, 0..) |arm, index| {
-            try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte({d})];\n", .{ tsString(self.arena, arm.name), index });
+            try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte({d})];\n", .{ try tsString(self.arena, arm.name), index });
             if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
                 // Flattened beside `kind`: encode the record's fields
                 // off the narrowed arm in declaration order.
@@ -1035,7 +1035,7 @@ const FacadeEmitter = struct {
             }
             try self.raw("    return nscfCat(parts);\n  }\n");
         }
-        try self.print("  throw {{ kind: \"nscf_contract\", teaching: asciiBytes(\"{s} carries an arm outside its declared union — the value and the contract disagree\") }} as NscfContractError;\n}}\n", .{tsString(self.arena, entry.name)});
+        try self.print("  throw {{ kind: \"nscf_contract\", teaching: asciiBytes(\"{s} carries an arm outside its declared union — the value and the contract disagree\") }} as NscfContractError;\n}}\n", .{try tsString(self.arena, entry.name)});
     }
 
     /// Statements appending `expr`'s canonical encoding to `parts`.
@@ -1098,8 +1098,8 @@ fn nameListed(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
-    const out = arena.dupe(u8, text) catch return "";
+fn commentText(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const u8 {
+    const out = try arena.dupe(u8, text);
     for (out) |*char| {
         if (char.* < 0x20 or char.* == 0x7f) char.* = ' ';
     }
@@ -1121,7 +1121,7 @@ fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
 /// terminators are LF, CR, LS (U+2028), and PS (U+2029) — all escaped
 /// here (NEL U+0085 is ordinary text to the scanner); quotes and
 /// backslashes escape byte-for-byte.
-fn tsString(arena: std.mem.Allocator, text: []const u8) []const u8 {
+fn tsString(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var index: usize = 0;
     while (index < text.len) {
@@ -1130,17 +1130,17 @@ fn tsString(arena: std.mem.Allocator, text: []const u8) []const u8 {
             (text[index + 2] == 0xa8 or text[index + 2] == 0xa9))
         {
             const escape: []const u8 = if (text[index + 2] == 0xa8) "\\u2028" else "\\u2029";
-            out.appendSlice(arena, escape) catch return text;
+            try out.appendSlice(arena, escape);
             index += 3;
             continue;
         }
         switch (char) {
-            '"' => out.appendSlice(arena, "\\\"") catch return text,
-            '\\' => out.appendSlice(arena, "\\\\") catch return text,
-            '\n' => out.appendSlice(arena, "\\n") catch return text,
-            '\r' => out.appendSlice(arena, "\\r") catch return text,
-            '\t' => out.appendSlice(arena, "\\t") catch return text,
-            else => out.append(arena, char) catch return text,
+            '"' => try out.appendSlice(arena, "\\\""),
+            '\\' => try out.appendSlice(arena, "\\\\"),
+            '\n' => try out.appendSlice(arena, "\\n"),
+            '\r' => try out.appendSlice(arena, "\\r"),
+            '\t' => try out.appendSlice(arena, "\\t"),
+            else => try out.append(arena, char),
         }
         index += 1;
     }
@@ -1153,7 +1153,7 @@ fn tsProp(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const
     if (isIdentifierFragment(name) and name.len > 0 and !(name[0] >= '0' and name[0] <= '9')) {
         return name;
     }
-    return std.fmt.allocPrint(arena, "\"{s}\"", .{tsString(arena, name)});
+    return std.fmt.allocPrint(arena, "\"{s}\"", .{try tsString(arena, name)});
 }
 
 /// A property ACCESS: dot for plain spellings, brackets otherwise.
@@ -1161,7 +1161,7 @@ fn tsAccess(arena: std.mem.Allocator, base: []const u8, name: []const u8) error{
     if (isIdentifierFragment(name) and name.len > 0 and !(name[0] >= '0' and name[0] <= '9')) {
         return std.fmt.allocPrint(arena, "{s}.{s}", .{ base, name });
     }
-    return std.fmt.allocPrint(arena, "{s}[\"{s}\"]", .{ base, tsString(arena, name) });
+    return std.fmt.allocPrint(arena, "{s}[\"{s}\"]", .{ base, try tsString(arena, name) });
 }
 
 /// A parameter name derived from an authored field name: reserved words

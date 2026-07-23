@@ -308,10 +308,29 @@ fn lastComponent(comptime full: []const u8) []const u8 {
 /// spelling.
 fn tableName(comptime T: type, comptime container: []const u8, comptime member: []const u8) []const u8 {
     const last = lastComponent(@typeName(T));
-    if (std.mem.indexOf(u8, last, "__struct_") != null or std.mem.indexOf(u8, last, "__union_") != null) {
+    if (isAnonymousName(last)) {
         return container ++ "_" ++ member;
     }
     return last;
+}
+
+/// The compiler names anonymous containers `<Parent>__struct_<digits>`
+/// (instance counter to the end of the name); an AUTHORED type merely
+/// containing the marker (`Foo__struct_Row`) keeps its own identity.
+fn isAnonymousName(comptime name: []const u8) bool {
+    inline for (.{ "__struct_", "__union_" }) |marker| {
+        if (std.mem.indexOf(u8, name, marker)) |at| {
+            const digits = name[at + marker.len ..];
+            if (digits.len > 0) {
+                var all_digits = true;
+                for (digits) |char| {
+                    if (char < '0' or char > '9') all_digits = false;
+                }
+                if (all_digits) return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn isBytes(comptime T: type) bool {
@@ -350,7 +369,7 @@ fn isNumberBytesShape(comptime T: type) bool {
         .@"struct" => |s| s,
         else => return false,
     };
-    const anonymous = std.mem.indexOf(u8, lastComponent(@typeName(T)), "__struct_") != null;
+    const anonymous = isAnonymousName(lastComponent(@typeName(T)));
     return anonymous and info.fields.len == 2 and
         (info.fields[0].type == f64 or info.fields[0].type == i64) and
         isBytes(info.fields[1].type);
