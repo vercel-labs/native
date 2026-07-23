@@ -528,7 +528,7 @@
     },
     {
       "name": "on-hover-leave",
-      "doc": "The paired exit edge for on-hover-enter: dispatched when the pointer leaves the element's hit region - by moving off, leaving the window, the element unmounting, or content scrolling/reflowing out from under a stationary pointer (the hover wash's exact resolution). Every enter is answered by exactly one eventual leave; the leave Msg is captured when the enter dispatches, so it survives the element's removal."
+      "doc": "The paired exit edge for on-hover-enter: dispatched when the pointer leaves the element's hit region - by moving off, leaving the window, the element unmounting, or content scrolling/reflowing out from under a stationary pointer (the hover wash's exact resolution). Every enter is answered by exactly one eventual leave; the leave Msg is captured while the element stands (kept fresh across rebuilds), so it survives the element's removal."
     }
   ],
   "scoped": {

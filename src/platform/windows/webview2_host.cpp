@@ -443,6 +443,10 @@ struct NativeView {
     int gpu_nonblank = 0;
     uint32_t gpu_sample_color = 0;
     int gpu_pointer_down = 0;
+    /* TrackMouseEvent(TME_LEAVE) armed for the current hover session:
+     * set on the first WM_MOUSEMOVE, cleared by the WM_MOUSELEAVE it
+     * buys, re-armed by the next move. */
+    int gpu_mouse_tracking = 0;
     double gpu_pointer_x = 0;
     double gpu_pointer_y = 0;
     WCHAR gpu_pending_high_surrogate = 0;
@@ -2767,6 +2771,18 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             return 0;
         }
         case WM_MOUSEMOVE: {
+            /* Win32 only reports the pointer LEAVING the client area on
+             * request: arm TME_LEAVE once per hover session so the
+             * WM_MOUSELEAVE below can retire hover state (washes, hover
+             * Msgs, tooltip intent) the way the AppKit host's
+             * mouseExited does. */
+            if (!view->gpu_mouse_tracking) {
+                TRACKMOUSEEVENT track = {};
+                track.cbSize = sizeof(track);
+                track.dwFlags = TME_LEAVE;
+                track.hwndTrack = hwnd;
+                if (TrackMouseEvent(&track)) view->gpu_mouse_tracking = 1;
+            }
             const double x = (double)(short)LOWORD(lparam) / scale;
             const double y = (double)(short)HIWORD(lparam) / scale;
             view->gpu_pointer_x = x;
@@ -2775,6 +2791,17 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             emitGpuSurfaceInput(host, *view, kind, x, y, 0, 0, 0, "", "", gpuModifierFlags());
             return 0;
         }
+        case WM_MOUSELEAVE:
+            view->gpu_mouse_tracking = 0;
+            /* The pointer left the client area without a press in
+             * flight: the window-leave edge, reported as the same
+             * pointer cancel a capture loss emits. A captured drag
+             * keeps receiving moves outside the window and settles
+             * through its own up/capture-change instead. */
+            if (!view->gpu_pointer_down) {
+                emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
+            }
+            return 0;
         case WM_CAPTURECHANGED:
             if (view->gpu_pointer_down) {
                 view->gpu_pointer_down = 0;

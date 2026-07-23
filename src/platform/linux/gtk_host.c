@@ -838,6 +838,7 @@ static GtkWidget *native_sdk_make_native_widget(int kind, const char *label, con
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_SET_COMPOSITION 8
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_COMMIT_COMPOSITION 9
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION 10
+#define NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL 11
 
 static uint64_t native_sdk_gpu_timestamp_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ull;
@@ -1349,6 +1350,21 @@ static void native_sdk_gpu_pointer_motion(GtkEventControllerMotion *controller, 
     native_sdk_emit_gpu_surface_input(view, kind, x, y, 0, 0, 0, "", "", modifiers);
 }
 
+static void native_sdk_gpu_pointer_leave(GtkEventControllerMotion *controller, gpointer data) {
+    native_sdk_gtk_native_view_t *view = data;
+    if (!view) return;
+    /* The pointer left the canvas without a press in flight: the
+     * window-leave edge the runtime retires hover state on (washes,
+     * hover Msgs, tooltip intent), matching the AppKit host's
+     * mouseExited. A leave DURING a drag is the gesture wandering
+     * outside the widget, not the pointer abandoning it - the drag's
+     * own release (or gesture cancel) settles that, so a mid-drag
+     * leave emits nothing. */
+    if (view->gpu_pointer_down) return;
+    const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
+    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", modifiers);
+}
+
 static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return FALSE;
@@ -1450,6 +1466,7 @@ static void native_sdk_setup_gpu_surface_view(native_sdk_gtk_native_view_t *view
 
     GtkEventController *motion = gtk_event_controller_motion_new();
     g_signal_connect(motion, "motion", G_CALLBACK(native_sdk_gpu_pointer_motion), view);
+    g_signal_connect(motion, "leave", G_CALLBACK(native_sdk_gpu_pointer_leave), view);
     gtk_widget_add_controller(view->widget, motion);
 
     GtkEventController *scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);

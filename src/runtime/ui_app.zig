@@ -912,6 +912,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// dispatches must not drain recursively through `dispatch`'s
         /// tail.
         hover_msg_draining: bool = false,
+        /// Handler-tree currency for hover-Msg delivery — the shared
+        /// invariant over every rebuild/error seam: `trees_current`
+        /// holds while the LAST rebuild attempt (main tree or window
+        /// slots) fully succeeded, so a failed build — or a failed
+        /// publication that left `self.tree` pointing at a build the
+        /// runtime never adopted — defers entering edges instead of
+        /// resolving them through a stale tree or consuming them as
+        /// absent. `build_generation` ticks on every successful
+        /// rebuild, so standing captures refresh exactly when handler
+        /// bindings can have moved and never otherwise. Captured leaves
+        /// dispatch regardless: their Msgs are owned bytes, not tree
+        /// lookups.
+        trees_current: bool = true,
+        build_generation: u64 = 0,
+        /// The `build_generation` the mirror's captures were last
+        /// refreshed against.
+        hover_msg_captured_generation: u64 = 0,
         /// Nonzero while `eventFn` is on the stack: `dispatch` and
         /// `drainEffects` tails drain hover edges only for DIRECT
         /// callers (embedders, command handlers, tests) — inside a
@@ -1619,6 +1636,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// window converges within the same rebuild instead of waiting
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+            self.rebuildTree(runtime, window_id) catch |err| {
+                // The handler trees may now disagree with the runtime's
+                // retained state (a failed build, or a failed
+                // publication after `self.tree` already moved): flag
+                // them stale so hover-Msg delivery defers entering
+                // edges until a rebuild lands (see `trees_current`).
+                self.trees_current = false;
+                return err;
+            };
+            self.trees_current = true;
+            self.build_generation +%= 1;
+        }
+
+        fn rebuildTree(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.syncModel(runtime, window_id);
             if (comptime features.runtime_markup) {
                 // Under automation, drive the interpreter from the first
@@ -2391,8 +2422,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn rebuildWindowSlots(self: *Self, runtime: *Runtime) anyerror!void {
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
-                try self.rebuildWindowSlot(runtime, slot);
+                self.rebuildWindowSlot(runtime, slot) catch |err| {
+                    // Same staleness flag as `rebuild`: a slot tree that
+                    // failed to build or publish defers hover enters
+                    // into it (see `trees_current`).
+                    self.trees_current = false;
+                    return err;
+                };
             }
+            // Slot success moves handler bindings (captures must
+            // refresh) but never RESTORES currency — only a successful
+            // main rebuild does that, since slot-only paths can run
+            // while the main tree is still the stale one.
+            self.build_generation +%= 1;
         }
 
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
@@ -4337,6 +4379,39 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 std.mem.eql(u8, standing_label, self.hoverMsgViewLabel());
             const mirror_len = self.hover_msg_chain_len;
 
+            // Handler bindings move with rebuilds: when the trees
+            // changed since the standing captures were taken, refresh
+            // every mirror entry's capture from its live tree — a leave
+            // handler ADDED while the listener already stood must be
+            // captured before an unmount needs it, and a changed
+            // payload delivers its latest value. UPSERT only: an
+            // element whose leave binding VANISHED keeps the previously
+            // captured Msg (the standing enter was promised its pair;
+            // unbinding never un-promises it). Runs before the settled
+            // fast path below, which compares ids and would never see a
+            // binding-only change.
+            if (mirror_len > 0 and self.trees_current and self.hover_msg_captured_generation != self.build_generation) {
+                if (self.treeForViewLabel(self.hoverMsgViewLabel())) |mirror_tree| {
+                    var refreshed = true;
+                    for (0..mirror_len) |position| {
+                        const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
+                        var slot = self.hover_msg_slots[position];
+                        const fresh_slot = slot == hover_msg_slot_none;
+                        if (fresh_slot) slot = self.claimHoverSlot();
+                        self.captureHoverLeave(slot, leave_msg) catch {
+                            // Transient (allocation): retry on the next
+                            // drain — the generation stays behind so
+                            // this refresh runs again.
+                            if (fresh_slot) self.releaseHoverSlot(slot);
+                            refreshed = false;
+                            continue;
+                        };
+                        self.hover_msg_slots[position] = slot;
+                    }
+                    if (refreshed) self.hover_msg_captured_generation = self.build_generation;
+                }
+            }
+
             // The diff is a SET diff over listener ids, not a positional
             // one: containment is per listener, so an outer listener
             // unbinding (or binding) while an inner one stands must
@@ -4368,13 +4443,37 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (identical) return false;
 
-            // A transiently unavailable handler tree (a failed rebuild
-            // cleared it) must not consume entering edges as silence:
-            // defer the whole step — the chains still differ, so the
-            // next drain retries once the tree is back. Pure-leave and
-            // reorder-only transitions keep flowing: their Msgs are
-            // captures, not tree lookups.
-            if (entering_any and self.treeForViewLabel(standing_label) == null) return false;
+            // Entering edges resolve through the DESTINATION view's
+            // handler tree, and only a CURRENT one (`trees_current`): a
+            // failed rebuild may have cleared it, or — worse — left a
+            // tree standing whose build the runtime never adopted, and
+            // resolving through that dispatches stale handlers or
+            // consumes enters as absent. When it is not ready, the
+            // enters DEFER (the standing chain keeps carrying them, so
+            // the drain after the next successful rebuild retries)
+            // while the leaves this transition owes still dispatch
+            // below — their Msgs are owned captures, not tree lookups,
+            // and a broken destination must never withhold them.
+            const destination_ready = !entering_any or
+                (self.trees_current and self.treeForViewLabel(standing_label) != null);
+            if (!destination_ready) {
+                var any_leaving = false;
+                for (self.hover_msg_chain[0..mirror_len]) |id| {
+                    const still_standing = same_view and blk: {
+                        for (standing_chain[0..standing_len]) |candidate| {
+                            if (candidate == id) break :blk true;
+                        }
+                        break :blk false;
+                    };
+                    if (!still_standing) {
+                        any_leaving = true;
+                        break;
+                    }
+                }
+                // Nothing deliverable now: enters wait for a current
+                // tree, retained entries stay put.
+                if (!any_leaving) return false;
+            }
 
             // The leaves this pass owes — mirror ids absent from the
             // standing chain — innermost-first. Their captured Msgs own
@@ -4422,6 +4521,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
             @memcpy(self.hover_msg_slots[0..standing_len], retained_slots[0..standing_len]);
             self.hover_msg_chain_len = standing_len;
+            // A deferred entering side stays OUT of the mirror: the
+            // standing chain still carries those ids, so the drain
+            // after the next successful rebuild sees them entering and
+            // delivers then.
+            if (!destination_ready) self.unwindHoverEnters(&entering_at, 0);
 
             // Deliver: leaves innermost-first, then enters
             // outermost-first; retained ids dispatch nothing. Each
@@ -4438,6 +4542,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // its element still stands there.
                 const captured: ?MsgT = if (slot == hover_msg_slot_none) null else self.hover_msg_leave_msgs[slot];
                 const msg = captured orelse blk: {
+                    if (!self.trees_current) break :blk null;
                     const live = self.treeForViewLabel(leave_label_storage[0..leave_label_len]) orelse break :blk null;
                     break :blk live.msgFor(id, .hover_leave);
                 } orelse {
@@ -4453,7 +4558,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.releaseHoverSlot(slot);
             }
             for (standing_chain[0..standing_len], 0..) |id, position| {
+                if (!destination_ready) break;
                 if (!entering_at[position]) continue;
+                if (!self.trees_current) {
+                    // An earlier edge's failed rebuild left the trees
+                    // stale mid-batch: the same deferral as above — drop
+                    // the unentered tail from the mirror and retry after
+                    // a rebuild lands.
+                    self.unwindHoverEnters(&entering_at, position);
+                    break;
+                }
                 // Resolve from the LIVE tree per edge: an earlier edge
                 // in this batch may have rebuilt the view (payload
                 // bytes are only promised for their own dispatch), and

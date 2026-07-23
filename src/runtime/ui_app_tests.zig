@@ -6002,6 +6002,10 @@ test "touch-shaped input (down/up/drag without hover) never synthesizes hover ms
 const CaptureModel = struct {
     churns: u32 = 0,
     show_row: bool = true,
+    bind_leave: bool = true,
+    exploded: bool = false,
+    two_entered: u32 = 0,
+    two_left: u32 = 0,
     left_storage: [32]u8 = [_]u8{0} ** 32,
     left_len: usize = 0,
 
@@ -6015,6 +6019,11 @@ const CaptureMsg = union(enum) {
     hide_row,
     entered,
     left: []const u8,
+    entered_two,
+    left_two,
+    bind_leave_now,
+    explode,
+    calm,
 };
 
 const CaptureApp = ui_app_model.UiApp(CaptureModel, CaptureMsg);
@@ -6029,12 +6038,29 @@ fn captureUpdate(model: *CaptureModel, msg: CaptureMsg) void {
             @memcpy(model.left_storage[0..len], text[0..len]);
             model.left_len = len;
         },
+        .entered_two => model.two_entered += 1,
+        .left_two => model.two_left += 1,
+        .bind_leave_now => model.bind_leave = true,
+        .explode => model.exploded = true,
+        .calm => model.exploded = false,
     }
 }
 
 /// The leave Msg's payload is a `ui.fmt` slice — build-arena bytes that
 /// the arena pair recycles two builds later. The capture must own them.
+/// `exploded` renders a view past the per-view widget-node budget, so
+/// its rebuild FAILS AT PUBLICATION — `self.tree` moved to a build the
+/// runtime never adopted, the exact stale-tree seam the hover drain's
+/// currency invariant covers.
 fn captureView(ui: *CaptureApp.Ui, model: *const CaptureModel) CaptureApp.Ui.Node {
+    if (model.exploded) {
+        var rows: [1100]CaptureApp.Ui.Node = undefined;
+        for (&rows, 0..) |*node, index| {
+            node.* = ui.text(.{ .key = canvas.uiKey(@as(u64, index)) }, "x");
+        }
+        const row_nodes: []const CaptureApp.Ui.Node = rows[0..];
+        return ui.column(.{ .gap = 0 }, row_nodes);
+    }
     if (!model.show_row) {
         return ui.column(.{ .gap = 0 }, .{ui.text(.{}, ui.fmt("churn {d}", .{model.churns}))});
     }
@@ -6042,8 +6068,13 @@ fn captureView(ui: *CaptureApp.Ui, model: *const CaptureModel) CaptureApp.Ui.Nod
         ui.row(.{
             .height = 40,
             .on_hover_enter = .entered,
-            .on_hover_leave = .{ .left = ui.fmt("left-after-{d}-churns", .{model.churns}) },
+            .on_hover_leave = if (model.bind_leave) CaptureMsg{ .left = ui.fmt("left-after-{d}-churns", .{model.churns}) } else null,
         }, .{ui.text(.{}, "Capture row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered_two,
+            .on_hover_leave = .left_two,
+        }, .{ui.text(.{}, "Second row")}),
         ui.text(.{}, ui.fmt("churn {d}", .{model.churns})),
     });
 }
@@ -6090,19 +6121,18 @@ test "a captured hover-leave msg owns its arena payload across rebuilds and unmo
     try hoverMove(harness, app, 50, 20);
 
     // Churn rebuilds until the arena pair has recycled the bytes the
-    // enter-time payload lived in. The capture deep-copied them, and the
-    // enter-time value is the contract — later rebuilds bind a payload
-    // naming their own churn count, but leave answers what enter
-    // announced.
+    // enter-time payload lived in. The capture deep-copies each build's
+    // LATEST binding (kept fresh as the trees change), so the payload
+    // is always owned bytes, never a pointer into a recycled arena.
     for (0..3) |_| {
         try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.churn", .window_id = 1 } });
     }
     try std.testing.expectEqual(@as(u32, 3), app_state.model.churns);
 
     // Unmount the row under the stationary pointer: the captured leave
-    // dispatches with the enter-time bytes, intact.
+    // dispatches the last build's binding, bytes intact.
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
-    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+    try std.testing.expectEqualStrings("left-after-3-churns", app_state.model.leftText());
 }
 
 test "a direct dispatch that unmounts the hovered element delivers its leave immediately" {
@@ -6181,4 +6211,97 @@ test "another pointer's contact never rides a mouse's hover proof" {
         .y = 20,
     } });
     try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+test "a leave handler added while the listener stands is captured before the unmount needs it" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    app_state.model.bind_leave = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave handler bound: nothing to capture yet.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqualStrings("", app_state.model.leftText());
+
+    // A rebuild ADDS the leave binding while the listener stands: the
+    // capture refresh picks it up (id-identical chains included), so
+    // the later unmount can still deliver the pair.
+    try app_state.dispatch(&harness.runtime, 1, .bind_leave_now);
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "a failed publication defers enters but never withholds captured leaves" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // The explode rebuild exceeds the per-view widget-node budget: the
+    // build succeeded (self.tree moved) but the runtime refused it, so
+    // the handler tree is non-null AND stale — the drain must key on
+    // currency, not non-nullness.
+    if (app_state.dispatch(&harness.runtime, 1, .explode)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expect(app_state.model.exploded);
+
+    // The pointer moves to the second row (hit-tested against the
+    // runtime's RETAINED tree, which never adopted the failed build):
+    // row one's captured leave delivers NOW — a broken destination
+    // never withholds owned captures — while row two's enter defers
+    // rather than resolving through the stale tree. The leave Msg's
+    // own rebuild still fails (the model remains exploded), so the
+    // event ERRORS after the Msg landed — the degradation contract:
+    // the edge is delivered, the failure is loud.
+    if (hoverMove(harness, app, 50, 60)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.two_entered);
+
+    // Recovery: a successful rebuild restores currency and the very
+    // same dispatch's drain delivers the deferred enter.
+    try app_state.dispatch(&harness.runtime, 1, .calm);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // And the pair completes on exit.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
 }
