@@ -3501,10 +3501,11 @@ fn svelteIndexHtml(allocator: std.mem.Allocator, names: TemplateNames) ![]const 
 
 fn svelteMainJs() []const u8 {
     return
+    \\import { mount } from "svelte";
     \\import App from "./App.svelte";
     \\import "./app.css";
     \\
-    \\const app = new App({ target: document.getElementById("app") });
+    \\const app = mount(App, { target: document.getElementById("app") });
     \\
     \\export default app;
     \\
