@@ -121,6 +121,15 @@ const Emitter = struct {
             "update",        "commitModelRoot", "sidecar_build_id", "sidecar_abi_version",
             "deterministic", "async_free",      "snapshotModel",    "referenceAttestedExports",
         });
+        // The host layer wires channels by PROBING these declaration
+        // names (`@hasDecl` — export presence IS the wiring decision),
+        // so they are off limits even when the channel is absent: a
+        // mere type under one of these names would falsely activate
+        // the channel and then fail as a non-function.
+        try reserved.appendSlice(self.arena, &.{
+            "subscriptions", "commandMsg",    "frameMsg",  "keyMsg",
+            "pinchMsg",      "appearanceMsg", "chromeMsg", "envMsgs",
+        });
         // The wiring aliases (wiringAliases) claim the host layer's
         // fixed spellings whenever the sidecar's own names differ.
         if (!std.mem.eql(u8, self.sidecar.model, "Model")) try reserved.append(self.arena, "Model");
@@ -133,14 +142,9 @@ const Emitter = struct {
         }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
         if (self.sidecar.update_returns_cmd) try reserved.append(self.arena, "UpdateResult");
-        if (self.sidecar.has_subscriptions) try reserved.append(self.arena, "subscriptions");
-        if (self.sidecar.channels.command_msg) try reserved.append(self.arena, "commandMsg");
-        if (self.sidecar.channels.frame_msg) try reserved.appendSlice(self.arena, &.{ "frameMsg", "FrameEvent" });
-        if (self.sidecar.channels.key_msg) try reserved.appendSlice(self.arena, &.{ "keyMsg", "KeyEvent" });
-        if (self.sidecar.channels.pinch_msg) try reserved.appendSlice(self.arena, &.{ "pinchMsg", "PinchEvent", "PinchPhase" });
-        if (self.sidecar.channels.appearance_msg != null) try reserved.append(self.arena, "appearanceMsg");
-        if (self.sidecar.channels.chrome_msg != null) try reserved.append(self.arena, "chromeMsg");
-        if (self.sidecar.channels.env_msgs.len > 0) try reserved.append(self.arena, "envMsgs");
+        if (self.sidecar.channels.frame_msg) try reserved.append(self.arena, "FrameEvent");
+        if (self.sidecar.channels.key_msg) try reserved.append(self.arena, "KeyEvent");
+        if (self.sidecar.channels.pinch_msg) try reserved.appendSlice(self.arena, &.{ "PinchEvent", "PinchPhase" });
 
         const table_names = try self.allTableNames();
         for (table_names) |name| {
@@ -1465,6 +1469,31 @@ test "sidecar-selected root names get the wiring's fixed spellings as aliases" {
     const default_generated = try emitFromJson(arena, sidecar_mod.minimal_valid_json);
     try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Model = Model;") == null);
     try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Msg = Msg;") == null);
+}
+
+test "channel detection names are reserved even when the channel is absent" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // channels.frame_msg is false in the minimal sidecar, but the host
+    // probes the DECL name — a type called frameMsg would falsely wire
+    // the channel and then fail as a non-function.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"frameMsg\", \"members\": [\"a\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"frameMsg\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "\"frameMsg\" collides") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "a chrome arm holding its insets by reference refuses" {
