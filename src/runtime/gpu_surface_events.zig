@@ -443,7 +443,23 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 else => false,
             };
             const ime_grace_swallow = ime_grace == .swallow;
-            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned or ime_grace_swallow)
+            // The target-less twin of the cancel grace: the text_input
+            // trailing a target-less composition's cancel is that
+            // composition's converted commit — it delivers TARGET-LESS
+            // on the owning surface, never into whichever text widget
+            // holds focus by now. One-shot: any other event disarms.
+            const targetless_commit_grace = grace: {
+                if (!self.targetless_ime_commit_grace) break :grace false;
+                self.targetless_ime_commit_grace = false;
+                break :grace input_event.kind == .text_input and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    );
+            };
+            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned or ime_grace_swallow or targetless_commit_grace)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -643,7 +659,15 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         break :blk if (text.len > 0) text else null;
                     },
                     .ime_cancel_composition => blk: {
-                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        if (owns_preedit) {
+                            self.targetless_ime_preedit_len = 0;
+                            // Hold one event for the converted-commit
+                            // shape (cancel-then-text_input): the
+                            // trailing text still belongs to this
+                            // surface's composition. A plain cancel's
+                            // own key_down disarms it.
+                            self.targetless_ime_commit_grace = true;
+                        }
                         break :blk null;
                     },
                     else => null,

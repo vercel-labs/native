@@ -1029,6 +1029,115 @@ test "a widget-started composition resolves in its starting editor after focus m
     try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
 }
 
+test "a target-less converted commit stays target-less past a focus move" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+        last_committed: [16]u8 = undefined,
+        last_committed_len: usize = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-targetless-converted-commit", .source = platform.WebViewSource.html("<h1>T</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                    const text = keyboard_event.keyboard.text;
+                    const len = @min(text.len, self.last_committed.len);
+                    @memcpy(self.last_committed[0..len], text[0..len]);
+                    self.last_committed_len = len;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(10, 10, 160, 32), .text = "" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+
+    // The composition starts TARGET-LESS; a text field then takes
+    // focus mid-sequence. The converted commit (cancel-then-text_input)
+    // still belongs to the target-less consumer: the trailing text
+    // delivers target-less, the field stays untouched.
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "ka",
+    } });
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "KA",
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", retained.findById(2).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try std.testing.expectEqualStrings("KA", app_state.last_committed[0..app_state.last_committed_len]);
+
+    // A plain target-less cancel is chased by its own key_down, which
+    // disarms the grace: the next typing routes to the focused field.
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "ne",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "z",
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("z", retained.findById(2).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+}
+
 test "a converted commit's trailing text lands in the composing editor, not the new focus" {
     const TestApp = struct {
         committed_count: u32 = 0,

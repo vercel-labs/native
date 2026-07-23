@@ -356,6 +356,14 @@ pub const Runtime = struct {
     targetless_ime_preedit_window: platform.WindowId = 0,
     targetless_ime_preedit_label: [platform.max_view_label_bytes]u8 = undefined,
     targetless_ime_preedit_label_len: usize = 0,
+    /// The target-less twin of `RuntimeView.canvas_widget_ime_commit_grace`:
+    /// armed when the owning surface's composition CANCELS, because the
+    /// hosts encode a converted commit as cancel-then-text_input — the
+    /// trailing text_input still belongs to the target-less composition
+    /// and must deliver target-less (to the same surface, matched via
+    /// the preedit owner fields above) rather than into whichever text
+    /// widget holds focus by then. One-shot: any other event disarms it.
+    targetless_ime_commit_grace: bool = false,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
