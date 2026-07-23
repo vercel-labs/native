@@ -396,6 +396,26 @@ const FacadeEmitter = struct {
                 }
             }
         }
+        // The authoring surface is ONE list resolved by name, so a name
+        // that is both a model field and a message arm cannot be marked
+        // on one side only — the sidecar's split lists carry more than
+        // the projection can say. Refuse the divergent case instead of
+        // silently marking the wrong declaration.
+        for (self.sidecar.msg.unbound) |name| {
+            const also_field = for (model.fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) break true;
+            } else false;
+            if (also_field and !nameListed(self.sidecar.model_unbound, name)) {
+                self.diags.flag("msg.unbound", "\"{s}\" is an unbound message arm AND a bound model field — the projection's single unbound list resolves by name and would mark both; rename one side in the core source", .{name});
+            }
+        }
+        for (field_unbound.items) |name| {
+            const also_arm = sidecar_mod.findArm(self.sidecar.msg, name) != null;
+            if (also_arm and !nameListed(self.sidecar.msg.unbound, name)) {
+                self.diags.flag("model_unbound", "\"{s}\" is an unbound model field AND a bound message arm — the projection's single unbound list resolves by name and would mark both; rename one side in the core source", .{name});
+            }
+        }
+        if (self.diags.hasErrors()) return;
         if (field_unbound.items.len == 0 and self.sidecar.msg.unbound.len == 0) return;
         try self.raw(
             \\
@@ -411,6 +431,8 @@ const FacadeEmitter = struct {
             try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
         }
         for (field_unbound.items) |name| {
+            // A name unbound on both sides rides once.
+            if (nameListed(self.sidecar.msg.unbound, name)) continue;
             try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
         }
         try self.raw("] as const;\n");
@@ -470,7 +492,10 @@ const FacadeEmitter = struct {
                     try self.print("\nexport function nsc_core_msg_{s}({s}: number, {s}: Uint8Array): {s} {{\n  return {{ kind: \"{s}\", {s}: {s}, {s}: {s} }};\n}}\n", .{ arm.name, number_param, bytes_param, msg, tsString(self.arena, arm.name), try tsProp(self.arena, desc.number_field), number_param, try tsProp(self.arena, desc.bytes_field), bytes_param });
                 },
                 .record => |name| {
-                    if (nameListed(self.inlined, name) and emit_mod.isSynthesizedRef(msg, arm.name, name)) {
+                    // Synthesized names pattern on the CONTRACT's message
+                    // name; the facade's fixed `Msg` spelling is only the
+                    // declared type.
+                    if (nameListed(self.inlined, name) and emit_mod.isSynthesizedRef(self.sidecar.msg.name, arm.name, name)) {
                         const record = sidecar_mod.findStruct(self.sidecar.types, name).?;
                         var params: std.ArrayListUnmanaged(u8) = .empty;
                         var fields: std.ArrayListUnmanaged(u8) = .empty;
@@ -1122,6 +1147,52 @@ test "unbound helper names stay out of the facade's viewUnbound list" {
     // sidecar fact.
     try testing.expect(std.mem.indexOf(u8, generated, "\"count\",") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "\"summary\",") == null);
+}
+
+test "renamed message roots still flatten their synthesized payload records" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A single-use Event_loaded record on a union named Event: the arm
+    // type flattens it, so the constructor must build the flattened
+    // shape, not a `value` member.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"name\": \"Msg\"", "\"name\": \"Event\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Event_loaded\", \"fields\": [{\"name\": \"status\", \"type\": {\"kind\": \"f64\"}}, {\"name\": \"ok\", \"type\": {\"kind\": \"bool\"}}]},");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"loaded\", \"payload\": {\"kind\": \"record\", \"name\": \"Event_loaded\"}}",
+    );
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "| { readonly kind: \"loaded\"; readonly status: number; readonly ok: boolean }") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export function nsc_core_msg_loaded(status: number, ok: boolean): Msg {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "return { kind: \"loaded\", status: status, ok: ok };") != null);
+}
+
+test "an unbound name split across homonymous field and arm refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Msg arm "count" is unbound; Model field "count" is bound: one
+    // name-resolved list cannot say that.
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"count\", \"payload\": {\"kind\": \"void\"}}",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "\"unbound\": [\"label_set\"]", "\"unbound\": [\"count\"]");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "single unbound list resolves by name") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "nested optionals refuse in the projection" {
