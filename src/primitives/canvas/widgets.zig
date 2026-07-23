@@ -914,6 +914,18 @@ pub const Widget = struct {
     /// widget a hit target; platforms without a window-drag channel
     /// treat the press as dead space.
     window_drag: bool = false,
+    /// The widget listens for hover-enter/hover-leave Msgs
+    /// (`ElementOptions.on_hover_enter` / `on_hover_leave`; markup
+    /// `on-hover-enter` / `on-hover-leave`): the builder stamps this
+    /// from the bound handlers, and the runtime tracks the pointer's
+    /// containment against it — enter when the pointer enters the
+    /// widget's hit region, leave when it exits. Like the chart's
+    /// `hover_details`, the flag makes the widget hit-testable WITHOUT
+    /// claiming presses (clicks keep falling through to the nearest
+    /// claiming ancestor) and without any hover wash of its own — the
+    /// wash stays a per-kind visual channel, so binding hover on a
+    /// quiet content tile never lights it up.
+    hover_msgs: bool = false,
     /// Plot data for `.chart` widgets: model-derived series (values,
     /// token colors, kind) plus domain/grid options. The retained tree
     /// copies series and points into per-view storage like text/spans,

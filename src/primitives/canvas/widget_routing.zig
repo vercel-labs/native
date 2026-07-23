@@ -151,6 +151,37 @@ pub fn widgetHoverTargetForHit(layout: anytype, hit: WidgetHit) WidgetHit {
     return target;
 }
 
+/// The hover-Msg containment chain for a raw hit: every widget on the
+/// hit path (the target itself, then its ancestors) whose bound
+/// hover-enter/hover-leave handlers are live
+/// (`widget_access.widgetListensForHoverMsgs`), written into `output`
+/// OUTERMOST FIRST — the DOM's mouseenter order, so a diff against the
+/// previously delivered chain fires enters outermost-first and leaves
+/// innermost-first by construction. Nested listeners each track their
+/// own containment: moving from a listening card onto a listening row
+/// inside it keeps the card's entry (the pointer never left the card),
+/// exactly like the browser pair this models. The chain is empty for
+/// apps that bind no hover handlers, so unbound trees pay nothing.
+pub fn widgetHoverMsgChainFromNode(layout: anytype, node_index: usize, output: []ObjectId) []const ObjectId {
+    var chain: [max_widget_depth]ObjectId = undefined;
+    var chain_len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) break;
+        if (widget_access.widgetListensForHoverMsgs(layout.nodes[index].widget) and chain_len < chain.len) {
+            chain[chain_len] = layout.nodes[index].widget.id;
+            chain_len += 1;
+        }
+        current = layout.nodes[index].parent_index;
+    }
+    const len = @min(chain_len, output.len);
+    // The walk collected innermost-first; deliver outermost-first.
+    for (0..len) |index| {
+        output[index] = chain[chain_len - 1 - index];
+    }
+    return output[0..len];
+}
+
 /// The nearest ancestor of `node_index` with the given kind, as a hit.
 fn widgetAncestorHitOfKind(layout: anytype, node_index: usize, kind: WidgetKind) ?WidgetHit {
     var current: ?usize = if (node_index < layout.nodes.len) layout.nodes[node_index].parent_index else null;

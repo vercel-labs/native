@@ -1570,6 +1570,36 @@ test "compiled anchored picker (anchor, on-dismiss, on-hold) matches the interpr
     try testing.expect(crumb.semantics.actions.press);
 }
 
+// ------------------------------------------------------- hover-pair parity
+
+const HoverCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.hover_markup_source);
+
+test "compiled hover pair (on-hover-enter, on-hover-leave) matches the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.Model{};
+
+    var view = try InboxInterpreter.init(arena, fixture.hover_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(HoverCompiled.build(&compiled_ui, &model));
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+
+    // Both engines stamp the listener flag (hover-hittable, never
+    // pressable) and bind both edges through the handler table.
+    const panel = fixture.findByKind(compiled.root, .panel).?;
+    const row = fixture.findByKind(compiled.root, .row).?;
+    try testing.expect(panel.hover_msgs and row.hover_msgs);
+    try testing.expect(!row.semantics.actions.press);
+    try testing.expect(canvas.widgetIsHitTarget(row));
+    try testing.expectEqual(fixture.Msg.add, compiled.msgFor(panel.id, .hover_enter).?);
+    try testing.expectEqual(@as(u32, 0), compiled.msgFor(panel.id, .hover_leave).?.toggle);
+    try testing.expect(compiled.msgFor(row.id, .hover_leave) == null);
+}
+
 // -------------------------------------------------- split panes and trees
 
 const PaneCompiled = canvas.CompiledMarkupView(fixture.PaneModel, fixture.PaneMsg, fixture.pane_markup_source);

@@ -104,6 +104,17 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.widgetHoverTargetForHit(self, raw);
     }
 
+    /// The hover-Msg containment chain for a raw hit (see
+    /// `widget_routing.widgetHoverMsgChainFromNode`): every live
+    /// hover-listening widget on the hit path, outermost first. Null
+    /// (or an off-tree) hit yields the empty chain — the pointer
+    /// stands inside no listener.
+    pub fn hoverMsgChainForHit(self: WidgetLayoutTree, hit: ?WidgetHit, output: []ObjectId) []const ObjectId {
+        const raw = hit orelse return output[0..0];
+        if (raw.index >= self.nodes.len) return output[0..0];
+        return widget_routing.widgetHoverMsgChainFromNode(self, raw.index, output);
+    }
+
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
         return widget_routing.routeWidgetPointerEvent(self, event, .{}, output);
     }

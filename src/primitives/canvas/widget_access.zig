@@ -84,6 +84,13 @@ pub fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
     if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
     if (widget.window_drag) return true;
+    // A hover-Msg listener is hoverable by the same rule the chart's
+    // hover details use below: the runtime must be able to resolve the
+    // pointer onto it to track enter/leave containment. It still
+    // claims no presses — clicks fall through to the nearest claiming
+    // ancestor exactly like plain text — so binding hover flips only
+    // where hover attributes, never where clicks land.
+    if (widget.hover_msgs) return true;
     // A chart with hover details opted in is hoverable (the runtime
     // tracks the pointer over it to snap the detail card to the nearest
     // sample). It still claims no presses — clicks fall through to the
@@ -91,6 +98,14 @@ pub fn isHitTarget(widget: Widget) bool {
     // only where hover attributes, not where clicks land.
     if (widget.kind == .chart) return widget.chart.hover_details;
     return widgetKindHitTarget(widget.kind);
+}
+
+/// Whether this widget's bound hover-enter/hover-leave Msgs are LIVE:
+/// the containment walk (`widgetHoverMsgChainFromNode`) collects only
+/// these. Disabled widgets stand down exactly like they do for presses
+/// (the hit test skips them too).
+pub fn widgetListensForHoverMsgs(widget: Widget) bool {
+    return widget.id != 0 and !widget.state.disabled and widget.hover_msgs;
 }
 
 /// Whether this widget is a live window-drag surface: a press landing

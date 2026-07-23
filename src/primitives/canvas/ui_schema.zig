@@ -533,6 +533,17 @@ pub const events = [_]EventInfo{
     .{ .code = 8, .name = "hold" },
     .{ .code = 9, .name = "resize", .payload = .fraction, .only_on_element = "split" },
     .{ .code = 10, .name = "reach-end", .only_on_element = "scroll" },
+    // The pointer-hover pair (the Elm onMouseEnter/onMouseLeave
+    // convention): hover-enter dispatches when the pointer enters a
+    // bound element's hit region, hover-leave when it exits — discrete
+    // containment edges, never per-move. Binding either makes the
+    // element hover-hittable the way a bound press makes any element
+    // pressable (so both stay legal everywhere, like the press family)
+    // WITHOUT claiming presses, painting a wash, or adding an
+    // accessibility action. Hover comes from mouse/trackpad pointers
+    // only — touch input never synthesizes it.
+    .{ .code = 11, .name = "hover-enter" },
+    .{ .code = 12, .name = "hover-leave" },
 };
 
 // ------------------------------------------------------- token vocabulary
