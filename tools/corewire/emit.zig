@@ -96,6 +96,7 @@ const Emitter = struct {
         try self.mirrorTypes();
         try self.modelStruct();
         try self.msgUnion();
+        try self.wiringAliases();
         try self.tagTable();
         try self.entryPoints();
         try self.channels();
@@ -117,8 +118,12 @@ const Emitter = struct {
             "std",           "shim_rt",         "core_abi",         "abi",
             "rt",            "msg_tags",        "boot",             "initialModel",
             "update",        "commitModelRoot", "sidecar_build_id", "sidecar_abi_version",
-            "deterministic", "async_free",      "snapshotModel",
+            "deterministic", "async_free",      "snapshotModel",    "referenceAttestedExports",
         });
+        // The wiring aliases (wiringAliases) claim the host layer's
+        // fixed spellings whenever the sidecar's own names differ.
+        if (!std.mem.eql(u8, self.sidecar.model, "Model")) try reserved.append(self.arena, "Model");
+        if (!std.mem.eql(u8, self.sidecar.msg.name, "Msg")) try reserved.append(self.arena, "Msg");
         // Optional glue reserves its name only when it is emitted.
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
@@ -506,6 +511,20 @@ const Emitter = struct {
         try self.raw("\n};\n");
     }
 
+    /// The host wiring names its roots by fixed spelling — the staged
+    /// main re-exports `core.Model` and `core.Msg`, and the adapter and
+    /// bridge reflect those decls — so a sidecar whose own names differ
+    /// gets aliases (same types; aliases are transparent to every
+    /// reflecting consumer).
+    fn wiringAliases(self: *Emitter) Error!void {
+        if (!std.mem.eql(u8, self.sidecar.model, "Model")) {
+            try self.print("\n/// The host wiring's spelling for the root state type.\npub const Model = {f};\n", .{ident(self.sidecar.model)});
+        }
+        if (!std.mem.eql(u8, self.sidecar.msg.name, "Msg")) {
+            try self.print("\n/// The host wiring's spelling for the message union.\npub const Msg = {f};\n", .{ident(self.sidecar.msg.name)});
+        }
+    }
+
     fn tagTable(self: *Emitter) Error!void {
         try self.raw(
             \\
@@ -555,10 +574,14 @@ const Emitter = struct {
             \\}
             \\
             \\/// The sidecar's abi.exports list is a biconditional attestation:
-            \\/// every listed symbol exists in the object. Referencing each one
-            \\/// makes the linker prove the "exists" direction against the real
-            \\/// binary (a checker proves list shape; only a link can prove
-            \\/// symbols).
+            \\/// every listed symbol exists in the object, and the object
+            \\/// exports nothing else under the prefix. Referencing each listed
+            \\/// symbol makes the LINKER prove the "exists" direction against
+            \\/// the real binary. The "nothing else" direction is not provable
+            \\/// from the consumer side — a linker ignores unreferenced extra
+            \\/// exports, and this generator never opens the object — so it
+            \\/// belongs to the producer's conformance suite, which probes the
+            \\/// object's full symbol table at compile time.
             \\fn referenceAttestedExports() void {
             \\
         );
@@ -1316,6 +1339,24 @@ test "boot references every attested export so the link proves the set" {
     // Unwired channel entries are NOT attested and must not be
     // referenced (their absence in the object is the valid state).
     try testing.expect(std.mem.indexOf(u8, generated, "doNotOptimizeAway(abi.key_msg)") == null);
+}
+
+test "sidecar-selected root names get the wiring's fixed spellings as aliases" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"Model\"", "\"State\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"slot\": \"Model.count\"", "\"slot\": \"State.count\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"name\": \"Msg\"", "\"name\": \"Event\"");
+    const generated = try emitFromJson(arena, source);
+    // The host wiring re-exports core.Model/core.Msg by those exact
+    // spellings; the aliases keep a renamed contract compilable.
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const Model = State;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const Msg = Event;") != null);
+    // The default names alias nothing (a self-alias would not compile).
+    const default_generated = try emitFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Model = Model;") == null);
+    try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Msg = Msg;") == null);
 }
 
 test "the shim restates the module-graph attestations" {
