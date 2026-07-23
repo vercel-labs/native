@@ -125,11 +125,12 @@ const Emitter = struct {
         // module-level type under any of them would be shadowed, which
         // the compiler refuses.
         try reserved.appendSlice(self.arena, &.{
-            "T",       "n",          "model",     "msg",      "payload",  "encoded",
-            "cmd_ptr", "cmd_len",    "subs_ptr",  "subs_len", "snap_ptr", "snap_len",
-            "out",     "out_ptr",    "out_len",   "tag",      "tag_name", "name",
-            "frame",   "key",        "pinch",     "value",    "self",     "index",
-            "args",    "args_tuple", "allocator", "fields",   "next",     "helper_args",
+            "T",           "n",          "model",     "msg",      "payload",  "encoded",
+            "cmd_ptr",     "cmd_len",    "subs_ptr",  "subs_len", "snap_ptr", "snap_len",
+            "out",         "out_ptr",    "out_len",   "tag",      "tag_name", "name",
+            "frame",       "key",        "pinch",     "value",    "self",     "index",
+            "args",        "args_tuple", "allocator", "fields",   "field",    "next",
+            "helper_args",
         });
         for (self.sidecar.model_helpers) |helper| {
             for (helper.params, 0..) |_, param_index| {
@@ -1431,6 +1432,25 @@ test "UpdateResult reserves only when the cmd-returning update emits it" {
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const UpdateResult = enum(u8) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+}
+
+test "a type named after the tag-table capture refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The comptime consistency block captures |field, tag_name|; a
+    // module-level type under either spelling would be shadowed.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"field\", \"members\": [\"a\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"field\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
 }
 
 test "a helper taking a generated glue name refuses" {

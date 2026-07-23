@@ -278,8 +278,16 @@ fn canonicalSpelling(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]
         if (std.mem.eql(u8, component.name, "..")) {
             // `base` carries no symlinks once canonical, so its lexical
             // parent IS its real parent; a `..` under a nonexistent
-            // tail unwinds the tail it just added.
+            // tail unwinds the tail it just added — and may land back
+            // on EXISTING ground, so canonicalization must resume (a
+            // symlink after the pop would otherwise ride unresolved).
             base = std.fs.path.dirname(base) orelse base;
+            if (!exists) {
+                if (std.Io.Dir.cwd().realPathFile(io, base, &buffer)) |len| {
+                    base = try arena.dupe(u8, buffer[0..len]);
+                    exists = true;
+                } else |_| {}
+            }
             continue;
         }
         const candidate = try std.fs.path.join(arena, &.{ base, component.name });
