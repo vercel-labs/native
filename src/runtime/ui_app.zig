@@ -3976,8 +3976,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // The natural end retired the player, so play would
                 // refuse with one `.failed` — a broken answer to a
                 // valid control. Play on a finished playback means
-                // from-the-start: a fresh load of the same source.
+                // from-the-start: a fresh load of the same source. The
+                // restart mints a fresh load identity, so declarative
+                // ownership re-captures it (`video_declared_token`) —
+                // the reconciler must keep recognizing the playback it
+                // started, or removal and flag deltas would go dead
+                // after a replay-from-end.
+                const declared = self.video_declared_token != 0 and
+                    self.effects.videoOwnerToken() == self.video_declared_token;
                 self.effects.restartVideo();
+                if (declared) self.video_declared_token = self.effects.videoOwnerToken();
             } else {
                 self.effects.playVideo();
             }

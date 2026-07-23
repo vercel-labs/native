@@ -1378,10 +1378,19 @@ pub fn TsCoreHost(comptime core: type) type {
                     video_entry.used = false;
                     fx.stopVideoCancel();
                 },
-                // The wire carries the app's f64; anything that is not a
-                // millisecond offset seeks to 0 (the engine clamps the
-                // high end to the duration itself).
-                3 => fx.seekVideo(if (value >= 0 and value <= 9007199254740992.0) @intFromFloat(value) else 0),
+                // The wire carries the app's f64. In-window offsets pass
+                // through (the engine clamps to the duration itself); a
+                // finite offset PAST the exact-integer window saturates
+                // just below it — still beyond every real duration, so
+                // the engine's clamp lands it at the end, exactly what
+                // an oversized forward seek asks for. Only NaN and
+                // negatives (not millisecond offsets at all) seek to 0.
+                3 => fx.seekVideo(if (value >= 0 and value <= 9007199254740992.0)
+                    @intFromFloat(value)
+                else if (value > 9007199254740992.0)
+                    runtime_effects.max_effect_video_scalar_exclusive - 1
+                else
+                    0),
                 // The engine clamps volume to 0..1 (NaN clamps to the
                 // bound arithmetic's result deterministically).
                 4 => fx.setVideoVolume(@floatCast(value)),

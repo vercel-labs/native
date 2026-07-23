@@ -248,6 +248,7 @@ const mini_core = struct {
             width: f64,
             height: f64,
         },
+        vseek_far, // 70: video_ctl seek "clip" 1e16ms (past the exact window)
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -535,6 +536,7 @@ const mini_core = struct {
             .vpause_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 1, 0) },
             .vstop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 2, 0) },
             .vseek_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 45_000) },
+            .vseek_far => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 1e16) },
             .vvol_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 4, 0.25) },
             .vmute_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 5, 1) },
             .vloop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 6, 1) },
@@ -1831,6 +1833,12 @@ test "video_ctl verbs drive the engine channel, gated by the wire key" {
 
     Host.dispatch(fx, .vseek_it);
     try std.testing.expectEqual(@as(u64, 45_000), fx.videoSnapshot().position_ms);
+
+    // A finite offset past the exact-integer window is still a forward
+    // seek: it saturates just below the window (the engine clamps it
+    // to the duration once one is known) - never a rewind to zero.
+    Host.dispatch(fx, .vseek_far);
+    try std.testing.expectEqual(effects_mod.max_effect_video_scalar_exclusive - 1, fx.videoSnapshot().position_ms);
 
     Host.dispatch(fx, .vvol_it);
     try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);

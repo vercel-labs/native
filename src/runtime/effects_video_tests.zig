@@ -1221,6 +1221,16 @@ test "the house chrome toggle restarts a finished playback from the start" {
     try std.testing.expect(fx.videoSnapshot().active);
     try std.testing.expect(!fx.videoSnapshot().completed);
     try std.testing.expect(fx.videoSnapshot().playing);
+
+    // The restart minted a fresh load identity and declarative
+    // ownership re-captured it: flag deltas still apply, and removing
+    // the element still stops the playback the reconciler restarted.
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_muted);
+    try std.testing.expect(np.video.muted);
+    try std.testing.expect(fx.videoSnapshot().muted);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .toggle_show);
+    try std.testing.expect(!fx.videoSnapshot().active);
+    try std.testing.expect(!np.video.loaded);
 }
 
 test "the house chrome slider seeks proportionally into the playback" {
