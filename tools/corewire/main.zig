@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
         }
         for (resolved[path_index + 1 ..]) |maybe_other| {
             const other = maybe_other orelse continue;
-            if (std.ascii.eqlIgnoreCase(path, other)) {
+            if (std.ascii.eqlIgnoreCase(path, other) or sameExistingFile(init.io, path, other)) {
                 try stderr.print("corewire: --out and --facade name one file ({s}) — the second projection would overwrite the first\n", .{path});
                 try stderr.flush();
                 std.process.exit(2);
@@ -180,12 +180,17 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Whether two paths currently resolve to one existing file, by asking
-/// the filesystem (inode identity where the platform reports it): the
-/// alias net behind the lexical checks. Nonexistent paths are distinct.
+/// the filesystem for canonical paths: the alias net behind the lexical
+/// checks (Unicode case folding, symlinks — a canonical path is unique
+/// per volume, so distinct files can never compare equal). Nonexistent
+/// paths are distinct; hard links carry distinct canonical paths and
+/// stay the caller's responsibility.
 fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
-    const stat_a = std.Io.Dir.cwd().statFile(io, a, .{}) catch return false;
-    const stat_b = std.Io.Dir.cwd().statFile(io, b, .{}) catch return false;
-    return stat_a.inode == stat_b.inode;
+    var buffer_a: [std.fs.max_path_bytes]u8 = undefined;
+    var buffer_b: [std.fs.max_path_bytes]u8 = undefined;
+    const len_a = std.Io.Dir.cwd().realPathFile(io, a, &buffer_a) catch return false;
+    const len_b = std.Io.Dir.cwd().realPathFile(io, b, &buffer_b) catch return false;
+    return std.mem.eql(u8, buffer_a[0..len_a], buffer_b[0..len_b]);
 }
 
 fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) !void {
