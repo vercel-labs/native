@@ -1454,12 +1454,24 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
          * ones (the preedit is still visible while the key is consumed). */
         if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) {
             /* Remember the key so its release is swallowed too — a
-             * key_up without its key_down would be an orphan event. */
+             * key_up without its key_down would be an orphan event.
+             * DEDUPLICATED: autorepeat delivers many suppressed
+             * key_downs for one held key but only one final release, so
+             * a repeat must not stack entries a later ordinary release
+             * of the same key would then be eaten by. */
+            size_t free_slot = G_N_ELEMENTS(view->gpu_suppressed_keys);
+            gboolean recorded = FALSE;
             for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keys); i++) {
-                if (view->gpu_suppressed_keys[i] == 0) {
-                    view->gpu_suppressed_keys[i] = keyval;
+                if (view->gpu_suppressed_keys[i] == keyval) {
+                    recorded = TRUE;
                     break;
                 }
+                if (view->gpu_suppressed_keys[i] == 0 && free_slot == G_N_ELEMENTS(view->gpu_suppressed_keys)) {
+                    free_slot = i;
+                }
+            }
+            if (!recorded && free_slot < G_N_ELEMENTS(view->gpu_suppressed_keys)) {
+                view->gpu_suppressed_keys[free_slot] = keyval;
             }
             return TRUE;
         }
@@ -1513,6 +1525,10 @@ static void native_sdk_gpu_focus_leave(GtkEventControllerFocus *controller, gpoi
     }
     gtk_im_context_reset(view->gpu_im_context);
     gtk_im_context_focus_out(view->gpu_im_context);
+    /* Pending suppressed releases die with the focus: their key_ups go
+     * to whichever surface focuses next (or nowhere), and a stale entry
+     * here would eat the same key's legitimate release after refocus. */
+    memset(view->gpu_suppressed_keys, 0, sizeof(view->gpu_suppressed_keys));
 }
 
 static void native_sdk_setup_gpu_surface_view(native_sdk_gtk_native_view_t *view) {

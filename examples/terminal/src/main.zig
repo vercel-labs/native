@@ -429,7 +429,17 @@ fn copySelection(model: *Model, fx: *Fx) void {
         model.copy_failed = true;
         model.copied_bytes = 0;
         return;
-    }) orelse return;
+    }) orelse {
+        // No emulator range while the MODEL still holds an anchor: a
+        // prior selection re-pin failed and cleared the highlight (see
+        // `applySelection`), so this copy has nothing to serialize —
+        // that is a failed copy, not a quiet no-op.
+        if (model.session.selectionActive()) {
+            model.copy_failed = true;
+            model.copied_bytes = 0;
+        }
+        return;
+    };
     defer model.session.gpa.free(text);
     model.copied_bytes = text.len;
     fx.writeClipboard(.{
@@ -475,21 +485,29 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
         update(model, .restart, fx);
         return;
     }
-    if (primary and keyIs(event.key, "arrowup")) {
-        session.scrollLines(-if (mods.shift) @as(isize, model.rows) else 1);
-        return;
-    }
-    if (primary and keyIs(event.key, "arrowdown")) {
-        session.scrollLines(if (mods.shift) @as(isize, model.rows) else 1);
-        return;
-    }
-    if (primary and keyIs(event.key, "home")) {
-        session.scrollToTop();
-        return;
-    }
-    if (primary and keyIs(event.key, "end")) {
-        session.scrollToBottom();
-        return;
+    // Scrollback chords pause while a keyboard selection is armed: the
+    // selection's anchor and head are VIEWPORT coordinates and the
+    // emulator range is pinned to absolute cells, so scrolling under an
+    // armed selection would leave the painted caret naming different
+    // text than a copy returns. (The chords fall through to the
+    // selection block below, where primary+arrows are simply inert.)
+    if (!model.selecting) {
+        if (primary and keyIs(event.key, "arrowup")) {
+            session.scrollLines(-if (mods.shift) @as(isize, model.rows) else 1);
+            return;
+        }
+        if (primary and keyIs(event.key, "arrowdown")) {
+            session.scrollLines(if (mods.shift) @as(isize, model.rows) else 1);
+            return;
+        }
+        if (primary and keyIs(event.key, "home")) {
+            session.scrollToTop();
+            return;
+        }
+        if (primary and keyIs(event.key, "end")) {
+            session.scrollToBottom();
+            return;
+        }
     }
 
     if (model.selecting) {

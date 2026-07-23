@@ -63,6 +63,11 @@ var pty_spawn_mutex: SpinLock = .{};
 const max_surrendered_pids = 16;
 var surrendered_pids: [max_surrendered_pids]c_int = @splat(-1);
 var surrendered_lock: SpinLock = .{};
+/// Ring cursor for full-table overwrites: each overflow evicts the
+/// OLDEST standing entry in turn (its zombie stands), never the same
+/// slot repeatedly — a fixed victim would forget every surrender after
+/// the first overflow while slot 0's zombie kept its retry seat.
+var surrendered_evict: usize = 0;
 
 fn recordSurrenderedPid(pid: c_int) void {
     surrendered_lock.lock();
@@ -73,9 +78,11 @@ fn recordSurrenderedPid(pid: c_int) void {
             return;
         }
     }
-    // Full: overwrite the oldest (slot 0) — its zombie stands, the
-    // newer surrender gets the retry chance.
-    surrendered_pids[0] = pid;
+    // Full: evict round-robin — the newer surrender gets the retry
+    // chance, and successive overflows spread the forgotten zombies
+    // across the table instead of pinning them all behind one slot.
+    surrendered_pids[surrendered_evict] = pid;
+    surrendered_evict = (surrendered_evict + 1) % max_surrendered_pids;
 }
 
 /// Opportunistically reap previously surrendered children (WNOHANG,

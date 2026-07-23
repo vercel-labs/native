@@ -450,6 +450,12 @@ struct NativeView {
     double gpu_pointer_x = 0;
     double gpu_pointer_y = 0;
     WCHAR gpu_pending_high_surrogate = 0;
+    /* One-shot: the WM_KEYDOWN just dispatched a registered shortcut, so
+     * the already-translated WM_CHAR trailing it is the SAME keystroke
+     * and must not also type (AltGr raises Ctrl+Alt, so an AltGr chord
+     * that matches a ctrl+alt accelerator would otherwise both fire the
+     * accelerator and insert its composed character). */
+    bool gpu_shortcut_ate_char = false;
     /* UTF-8 preedit last sent as ime_set_composition; empty = no active
      * composition. Mirrors gpu_preedit_text in the GTK host and markedText
      * in the AppKit host. */
@@ -2693,6 +2699,14 @@ static std::string gpuSurfaceKeyName(WPARAM wparam) {
 }
 
 static void gpuSurfaceCharInput(Host *host, NativeView &view, WPARAM wparam) {
+    /* A keystroke a registered shortcut consumed never ALSO types: the
+     * message loop translated its WM_CHAR before the accelerator could
+     * refuse it. One-shot — consumed by the first translated unit and
+     * re-disarmed at the next WM_KEYDOWN either way. */
+    if (view.gpu_shortcut_ate_char) {
+        view.gpu_shortcut_ate_char = false;
+        return;
+    }
     const WCHAR unit = (WCHAR)wparam;
     std::wstring wide;
     if (unit >= 0xD800 && unit <= 0xDBFF) {
@@ -2714,7 +2728,8 @@ static void gpuSurfaceCharInput(Host *host, NativeView &view, WPARAM wparam) {
      * EXCEPT AltGr: Windows raises Ctrl+Alt together for it, and an
      * AltGr-composed printable (AltGr+Q -> "@" on German layouts) IS
      * committed text — the one chord whose WM_CHAR must flow, or those
-     * layouts lose the character entirely. Win alone still gates. */
+     * layouts lose the character entirely (an AltGr chord a shortcut
+     * consumed was already discarded above). Win alone still gates. */
     const bool altgr = keyDown(VK_CONTROL) && keyDown(VK_MENU);
     if (!altgr && (keyDown(VK_CONTROL) || keyDown(VK_MENU))) return;
     if (keyDown(VK_LWIN) || keyDown(VK_RWIN)) return;
@@ -2913,7 +2928,18 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         }
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
-            if (emitShortcutForHwnd(host, GetAncestor(hwnd, GA_ROOT), wparam)) return 0;
+            /* A fresh keystroke re-disarms the one-shot: a shortcut that
+             * translated to no WM_CHAR (F-keys) must not leave it armed
+             * to eat a later ordinary character. */
+            view->gpu_shortcut_ate_char = false;
+            if (emitShortcutForHwnd(host, GetAncestor(hwnd, GA_ROOT), wparam)) {
+                /* The keystroke was consumed as a shortcut; its
+                 * already-translated WM_CHAR (posted by the message
+                 * loop's TranslateMessage before this dispatch) must
+                 * not ALSO type — one keystroke, one action. */
+                view->gpu_shortcut_ate_char = true;
+                return 0;
+            }
             const std::string key = gpuSurfaceKeyName(wparam);
             if (!key.empty()) {
                 emitGpuSurfaceInput(host, *view, kGpuInputKeyDown, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, key.c_str(), "", gpuModifierFlags());

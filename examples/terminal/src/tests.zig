@@ -1102,6 +1102,95 @@ test "a failed selection serialization is an error, never a silent no-selection"
     try testing.expectError(error.OutOfMemory, session.selectionText(std.testing.failing_allocator));
 }
 
+test "scrollback chords pause while a selection is armed" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Scrollback to move through, then arm a selection.
+    var line: [16]u8 = undefined;
+    for (0..120) |index| {
+        app_state.model.session.feed(std.fmt.bufPrint(&line, "line {d}\r\n", .{index}) catch unreachable);
+    }
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "space",
+        .modifiers = .{ .primary = true, .shift = true },
+    } });
+    try testing.expect(app_state.model.selecting);
+
+    // The selection's coordinates are viewport-relative and the
+    // emulator range is absolute: scrolling under it would desync the
+    // painted caret from the copyable text, so the chord is inert.
+    const before = app_state.model.session.scrollbar().offset;
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "home",
+        .modifiers = .{ .primary = true },
+    } });
+    try testing.expectEqual(before, app_state.model.session.scrollbar().offset);
+
+    // Selection dismissed, the same chord scrolls again.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "home",
+        .modifiers = .{ .primary = true },
+    } });
+    try testing.expect(app_state.model.session.scrollbar().offset != before);
+}
+
+test "a copy over a vanished emulator range reports failure, never a quiet no-op" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    app_state.model.session.feed("some text\r\n");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "space",
+        .modifiers = .{ .primary = true, .shift = true },
+    } });
+    try testing.expect(app_state.model.selecting);
+
+    // Simulate a failed selection re-pin: the emulator range vanished
+    // while the model still holds its anchor (`applySelection` clears
+    // the highlight when it cannot pin).
+    app_state.model.session.term.screens.active.clearSelection();
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "c",
+        .modifiers = .{ .primary = true },
+    } });
+    try testing.expect(app_state.model.copy_failed);
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "the session fingerprint covers real cells, not just byte counters" {
     const gpa = testing.allocator;
     // Two sessions fed the SAME number of output bytes with different
