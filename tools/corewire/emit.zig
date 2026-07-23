@@ -367,106 +367,13 @@ const Emitter = struct {
 
     // --------------------------------------------------- mirror types
 
-    /// A table entry whose name follows the schema's synthesized
-    /// pattern for its one reference site (`<Container>_<member>`) is
-    /// emitted inline there, matching the transpiler's inline anonymous
-    /// records.
-    ///
-    /// The sidecar carries no synthesized-vs-authored marker, so a
-    /// single-use AUTHORED type that happens to spell exactly
-    /// `<Container>_<member>` at its one reference site is
-    /// indistinguishable from a synthesized entry and inlines too —
-    /// layout, fingerprint, and binding surface stay identical either
-    /// way; only `@typeName`-carrying artifacts see the difference.
-    /// The bias must run this direction: real synthesized records (the
-    /// common case, pinned by the conformance corpus) MUST inline to
-    /// mirror the emitted module. Closing the ambiguity needs a schema
-    /// fact (see SCHEMA-GAPS.md).
-    fn isSynthesizedRef(container: []const u8, member: []const u8, name: []const u8) bool {
-        if (name.len != container.len + 1 + member.len) return false;
-        return std.mem.startsWith(u8, name, container) and
-            name[container.len] == '_' and
-            std.mem.endsWith(u8, name, member);
-    }
-
     /// Inline a table entry only when the pattern matches AND the entry
     /// is referenced exactly once in the whole sidecar: an authored type
     /// that merely spells like the pattern but is shared across sites
     /// stays a named top-level declaration (inlining it at one site
     /// would leave the others dangling).
     fn inlinedNames(self: *Emitter) Error![]const []const u8 {
-        var candidates: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (self.sidecar.types.structs) |entry| {
-            for (entry.fields) |field| {
-                try noteCandidate(&candidates, self.arena, entry.name, field.name, field.type);
-            }
-        }
-        for (self.sidecar.types.unions) |entry| {
-            for (entry.arms) |arm| {
-                try noteCandidate(&candidates, self.arena, entry.name, arm.name, arm.payload);
-            }
-        }
-        for (self.sidecar.msg.arms) |arm| {
-            switch (arm.payload) {
-                .record => |name| if (isSynthesizedRef(self.sidecar.msg.name, arm.name, name)) {
-                    try candidates.append(self.arena, name);
-                },
-                else => {},
-            }
-        }
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (candidates.items) |name| {
-            if (try self.referenceCount(name) == 1) try names.append(self.arena, name);
-        }
-        return names.items;
-    }
-
-    fn noteCandidate(names: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator, container: []const u8, member: []const u8, ref: TypeRef) error{OutOfMemory}!void {
-        switch (ref) {
-            .optional => |inner| try noteCandidate(names, arena, container, member, inner.*),
-            .slice => |elem| try noteCandidate(names, arena, container, member, elem.*),
-            .node, .value => |name| if (isSynthesizedRef(container, member, name)) {
-                try names.append(arena, name);
-            },
-            else => {},
-        }
-    }
-
-    /// How many reference sites name a table entry, across the whole
-    /// sidecar (model root, table fields and arms, msg descriptors,
-    /// helper signatures).
-    fn referenceCount(self: *Emitter, name: []const u8) Error!usize {
-        var count: usize = 0;
-        if (std.mem.eql(u8, self.sidecar.model, name)) count += 1;
-        for (self.sidecar.types.structs) |entry| {
-            for (entry.fields) |field| count += refNames(field.type, name);
-        }
-        for (self.sidecar.types.unions) |entry| {
-            for (entry.arms) |arm| count += refNames(arm.payload, name);
-        }
-        for (self.sidecar.msg.arms) |arm| {
-            switch (arm.payload) {
-                .record, .union_ref, .enum_ref => |payload_name| {
-                    if (std.mem.eql(u8, payload_name, name)) count += 1;
-                },
-                .scalar => |ref| count += refNames(ref, name),
-                else => {},
-            }
-        }
-        for (self.sidecar.model_helpers) |helper| {
-            count += refNames(helper.returns, name);
-            for (helper.params) |param| count += refNames(param, name);
-        }
-        return count;
-    }
-
-    fn refNames(ref: TypeRef, name: []const u8) usize {
-        return switch (ref) {
-            .optional => |inner| refNames(inner.*, name),
-            .slice => |elem| refNames(elem.*, name),
-            .node, .value, .enum_ref, .union_ref => |ref_name| @intFromBool(std.mem.eql(u8, ref_name, name)),
-            else => 0,
-        };
+        return inlinedTableNames(self.arena, self.sidecar);
     }
 
     fn mirrorTypes(self: *Emitter) Error!void {
@@ -1144,6 +1051,109 @@ const Emitter = struct {
         , .{ self.sidecar.abi.snapshot_format, ident(self.sidecar.model), ident(self.sidecar.model) });
     }
 };
+
+// ------------------------------------------------- shared analysis
+//
+// Both projections of the sidecar — the Zig mirror and the TypeScript
+// facade — must agree on which table entries are synthesized anonymous
+// records, or the two sides would declare different type surfaces for
+// one contract.
+
+/// A table entry whose name follows the schema's synthesized pattern
+/// for a reference site (`<Container>_<member>`).
+///
+/// The sidecar carries no synthesized-vs-authored marker, so a
+/// single-use AUTHORED type that happens to spell exactly
+/// `<Container>_<member>` at its one reference site is indistinguishable
+/// from a synthesized entry and inlines too — layout, fingerprint, and
+/// binding surface stay identical either way; only `@typeName`-carrying
+/// artifacts see the difference. The bias must run this direction: real
+/// synthesized records (the common case, pinned by the conformance
+/// corpus) MUST inline to mirror the emitted module. Closing the
+/// ambiguity needs a schema fact (see SCHEMA-GAPS.md).
+pub fn isSynthesizedRef(container: []const u8, member: []const u8, name: []const u8) bool {
+    if (name.len != container.len + 1 + member.len) return false;
+    return std.mem.startsWith(u8, name, container) and
+        name[container.len] == '_' and
+        std.mem.endsWith(u8, name, member);
+}
+
+/// The table entries emitted inline at their single reference site:
+/// pattern-matching names referenced exactly once in the whole sidecar.
+pub fn inlinedTableNames(arena: std.mem.Allocator, sidecar: Sidecar) error{OutOfMemory}![]const []const u8 {
+    var candidates: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (sidecar.types.structs) |entry| {
+        for (entry.fields) |field| {
+            try noteCandidate(&candidates, arena, entry.name, field.name, field.type);
+        }
+    }
+    for (sidecar.types.unions) |entry| {
+        for (entry.arms) |arm| {
+            try noteCandidate(&candidates, arena, entry.name, arm.name, arm.payload);
+        }
+    }
+    for (sidecar.msg.arms) |arm| {
+        switch (arm.payload) {
+            .record => |name| if (isSynthesizedRef(sidecar.msg.name, arm.name, name)) {
+                try candidates.append(arena, name);
+            },
+            else => {},
+        }
+    }
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (candidates.items) |name| {
+        if (referenceCount(sidecar, name) == 1) try names.append(arena, name);
+    }
+    return names.items;
+}
+
+fn noteCandidate(names: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator, container: []const u8, member: []const u8, ref: TypeRef) error{OutOfMemory}!void {
+    switch (ref) {
+        .optional => |inner| try noteCandidate(names, arena, container, member, inner.*),
+        .slice => |elem| try noteCandidate(names, arena, container, member, elem.*),
+        .node, .value => |name| if (isSynthesizedRef(container, member, name)) {
+            try names.append(arena, name);
+        },
+        else => {},
+    }
+}
+
+/// How many reference sites name a table entry, across the whole
+/// sidecar (model root, table fields and arms, msg descriptors, helper
+/// signatures).
+pub fn referenceCount(sidecar: Sidecar, name: []const u8) usize {
+    var count: usize = 0;
+    if (std.mem.eql(u8, sidecar.model, name)) count += 1;
+    for (sidecar.types.structs) |entry| {
+        for (entry.fields) |field| count += refNames(field.type, name);
+    }
+    for (sidecar.types.unions) |entry| {
+        for (entry.arms) |arm| count += refNames(arm.payload, name);
+    }
+    for (sidecar.msg.arms) |arm| {
+        switch (arm.payload) {
+            .record, .union_ref, .enum_ref => |payload_name| {
+                if (std.mem.eql(u8, payload_name, name)) count += 1;
+            },
+            .scalar => |ref| count += refNames(ref, name),
+            else => {},
+        }
+    }
+    for (sidecar.model_helpers) |helper| {
+        count += refNames(helper.returns, name);
+        for (helper.params) |param| count += refNames(param, name);
+    }
+    return count;
+}
+
+fn refNames(ref: TypeRef, name: []const u8) usize {
+    return switch (ref) {
+        .optional => |inner| refNames(inner.*, name),
+        .slice => |elem| refNames(elem.*, name),
+        .node, .value, .enum_ref, .union_ref => |ref_name| @intFromBool(std.mem.eql(u8, ref_name, name)),
+        else => 0,
+    };
+}
 
 fn nameListed(names: []const []const u8, name: []const u8) bool {
     for (names) |candidate| {

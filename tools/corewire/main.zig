@@ -17,12 +17,15 @@
 const std = @import("std");
 const sidecar_mod = @import("sidecar.zig");
 const emit_mod = @import("emit.zig");
+const emit_facade_mod = @import("emit_facade.zig");
 
 const usage =
-    \\usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --check)
+    \\usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --check)
     \\
-    \\Generate the Zig mirror module (core_shim.zig) for a compiled core
-    \\from its contract sidecar, or validate the sidecar alone (--check).
+    \\Generate the Zig mirror module (core_shim.zig) and/or the TypeScript
+    \\projection (core_facade.ts) for a compiled core from its contract
+    \\sidecar, or validate the sidecar alone (--check). --out and --facade
+    \\combine; --check stands alone.
     \\
 ;
 
@@ -36,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
 
     var sidecar_path: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
+    var facade_path: ?[]const u8 = null;
     var check_only = false;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -46,6 +50,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--out") and index + 1 < args.len) {
             index += 1;
             out_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--facade") and index + 1 < args.len) {
+            index += 1;
+            facade_path = args[index];
         } else if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
         } else {
@@ -59,8 +66,10 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(2);
     };
-    // Exactly one mode: validate-only or generate.
-    if ((out_path == null) == !check_only) {
+    // Either validate-only, or at least one generation target — never
+    // both (a checker that writes files is not a checker).
+    const generates = out_path != null or facade_path != null;
+    if (generates == check_only) {
         try stderr.print("{s}", .{usage});
         try stderr.flush();
         std.process.exit(2);
@@ -82,10 +91,10 @@ pub fn main(init: std.process.Init) !void {
         error.OutOfMemory => return err,
     };
 
-    // `--check` runs the FULL pipeline and discards the text: a sidecar
-    // must never pass the checker and then refuse at generate time
-    // (emitter-level rules — emission-name collisions above all — are
-    // part of the contract's validity).
+    // `--check` runs the FULL pipeline (both projections) and discards
+    // the text: a sidecar must never pass the checker and then refuse at
+    // generate time (emitter-level rules — emission-name collisions
+    // above all — are part of the contract's validity).
     const generated: []const u8 = emit_mod.emit(arena, parsed, &diags) catch |err| switch (err) {
         error.Refused => {
             try diags.write(input, stderr);
@@ -94,19 +103,37 @@ pub fn main(init: std.process.Init) !void {
         },
         error.OutOfMemory => return err,
     };
+    const facade: ?[]const u8 = if (check_only or facade_path != null)
+        emit_facade_mod.emitFacade(arena, parsed, &diags) catch |err| switch (err) {
+            error.Refused => {
+                try diags.write(input, stderr);
+                try stderr.flush();
+                std.process.exit(1);
+            },
+            error.OutOfMemory => return err,
+        }
+    else
+        null;
 
     // Warnings (unknown additive fields) surface even on success.
     try diags.write(input, stderr);
     try stderr.flush();
 
     if (out_path) |out| {
-        if (std.fs.path.dirname(out)) |dir| {
-            std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
-        }
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = generated }) catch |err| {
-            try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
-            try stderr.flush();
-            std.process.exit(1);
-        };
+        try writeOutput(init, stderr, out, generated);
     }
+    if (facade_path) |out| {
+        try writeOutput(init, stderr, out, facade.?);
+    }
+}
+
+fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) !void {
+    if (std.fs.path.dirname(out)) |dir| {
+        std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
+    }
+    std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = data }) catch |err| {
+        try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
+        try stderr.flush();
+        std.process.exit(1);
+    };
 }
