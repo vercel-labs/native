@@ -193,8 +193,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.output_bytes += event.bytes.len;
                 feedOutput(model, fx, event.bytes);
                 // The child produced output, so it is reading: its stdin
-                // FIFO likely has room now — push any pending outbound.
+                // FIFO likely has room now — push any pending outbound,
+                // then let a reply the full ring retained take the room
+                // the flush just freed (stdin order: it is older than
+                // anything a later dispatch could enqueue).
                 flushOutbound(model, fx);
+                moveResponsesToOutbound(model, fx);
             },
             .exit => {
                 model.phase = if (event.reason == .rejected or event.reason == .spawn_failed) .failed else .ended;
@@ -284,7 +288,18 @@ fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) bool {
 /// bytes do not outlive this dispatch, so a right-now refusal cannot be
 /// retried later — it is counted as dropped instead, never silent.
 /// Hitting this at all means the child ignored the whole 256 KiB ring.
+///
+/// STDIN ORDER comes first: a query reply retained behind a full ring is
+/// OLDER than this keystroke and must reach the child before it. The
+/// retained reply gets its retry now; if it still cannot enter the ring,
+/// the keystroke must not jump the queue — it drops counted rather than
+/// arrive before an answer the child may be parsing toward.
 fn enqueueTransient(model: *Model, fx: *Fx, bytes: []const u8) void {
+    moveResponsesToOutbound(model, fx);
+    if (model.session.response_len > 0) {
+        model.outbound_dropped += bytes.len;
+        return;
+    }
     if (!enqueueOutbound(model, fx, bytes)) {
         model.outbound_dropped += bytes.len;
     }

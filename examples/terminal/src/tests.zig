@@ -584,6 +584,53 @@ test "a primary-aliased Ctrl chord still encodes its C0 byte" {
     try testing.expectEqualStrings("\x03", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "stdin order holds: a retained reply reaches the child before newer typing" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+    const session = app_state.model.session;
+
+    // A DSR reply is generated while the ring is full: retained.
+    session.feed("\x1b[6n");
+    const reply = try gpa.dupe(u8, session.pendingResponses());
+    defer gpa.free(reply);
+    app_state.model.outbound_len = app_state.model.outbound_buffer.len;
+    app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
+    try testing.expectEqual(reply.len, session.pendingResponses().len);
+
+    // Typing while the reply is stuck must not jump the stdin queue:
+    // the keystroke drops counted, the reply stays first in line.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "y",
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+    try testing.expectEqual(@as(u64, 1), app_state.model.outbound_dropped);
+    try testing.expectEqual(reply.len, session.pendingResponses().len);
+
+    // The ring frees (the child read): the next keystroke moves the
+    // retained reply FIRST, then itself — the child's stdin order.
+    app_state.model.outbound_len = 0;
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "x",
+    } });
+    const written = app_state.effects.ptyWrittenBytes(1);
+    try testing.expectEqual(reply.len + 1, written.len);
+    try testing.expect(std.mem.startsWith(u8, written, reply));
+    try testing.expect(std.mem.endsWith(u8, written, "x"));
+    try testing.expectEqual(@as(usize, 0), session.pendingResponses().len);
+}
+
 test "retained replies keep accumulating while further output feeds - the buffer grows" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
