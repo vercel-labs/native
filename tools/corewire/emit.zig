@@ -866,9 +866,14 @@ const Emitter = struct {
         return true;
     }
 
+    /// A BY-VALUE record reference, for the structural vocabularies the
+    /// host constructs by field name (channel records) or the engines
+    /// match without pointer transparency (text-input payload records):
+    /// a `node` reference mirrors as `*const T`, which neither
+    /// consumer's shape accepts, so it must not satisfy these checks.
     fn recordOf(self: *Emitter, ref: TypeRef) ?*const sidecar_mod.Struct {
         return switch (ref) {
-            .node, .value => |name| sidecar_mod.findStruct(self.sidecar.types, name),
+            .value => |name| sidecar_mod.findStruct(self.sidecar.types, name),
             else => null,
         };
     }
@@ -1079,7 +1084,7 @@ const Emitter = struct {
             , .{ident(self.sidecar.msg.name)});
             for (self.sidecar.msg.arms, 0..) |arm, tag| {
                 if (arm.payload == .void) {
-                    try self.print("        {d} => return .{f},\n", .{ tag, ident(arm.name) });
+                    try self.print("        {d} => {{\n            shim_rt.assertVoidPayload(payload);\n            return .{f};\n        }},\n", .{ tag, ident(arm.name) });
                 } else {
                     try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
                 }
@@ -1460,6 +1465,61 @@ test "sidecar-selected root names get the wiring's fixed spellings as aliases" {
     const default_generated = try emitFromJson(arena, sidecar_mod.minimal_valid_json);
     try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Model = Model;") == null);
     try testing.expect(std.mem.indexOf(u8, default_generated, "pub const Msg = Msg;") == null);
+}
+
+test "a chrome arm holding its insets by reference refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The host constructs the chrome record BY VALUE field by field; a
+    // node (by-reference) insets record cannot take that construction.
+    const source =
+        \\{
+        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "types": {
+        \\    "structs": [
+        \\      {"name": "Model", "fields": [{"name": "chromeTop", "type": {"kind": "f64"}}]},
+        \\      {"name": "Insets", "fields": [
+        \\        {"name": "top", "type": {"kind": "f64"}}, {"name": "right", "type": {"kind": "f64"}},
+        \\        {"name": "bottom", "type": {"kind": "f64"}}, {"name": "left", "type": {"kind": "f64"}}
+        \\      ]},
+        \\      {"name": "Buttons", "fields": [
+        \\        {"name": "x", "type": {"kind": "f64"}}, {"name": "y", "type": {"kind": "f64"}},
+        \\        {"name": "width", "type": {"kind": "f64"}}, {"name": "height", "type": {"kind": "f64"}}
+        \\      ]},
+        \\      {"name": "Msg_chrome_changed", "fields": [
+        \\        {"name": "insets", "type": {"kind": "node", "name": "Insets"}},
+        \\        {"name": "buttons", "type": {"kind": "value", "name": "Buttons"}},
+        \\        {"name": "tabsProjected", "type": {"kind": "bool"}}
+        \\      ]}
+        \\    ],
+        \\    "enums": [], "unions": []
+        \\  },
+        \\  "model": "Model", "model_helpers": [], "model_unbound": [],
+        \\  "msg": {"name": "Msg", "arms": [
+        \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
+        \\  ], "unbound": []},
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
+        \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
+        \\    "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes",
+        \\    "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input",
+        \\    "dispatch_scroll_state", "subscriptions", "frame_reset", "model_snapshot", "helper_call",
+        \\    "collect"], "snapshot_format": 1},
+        \\  "integer_slots": [], "deterministic": true, "async_free": true
+        \\}
+    ;
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "insets: top/right/bottom/left numbers") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "the shim restates the module-graph attestations" {

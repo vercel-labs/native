@@ -304,6 +304,15 @@ pub fn panicSink(ctx: ?*anyopaque, msg: [*]const u8, msg_len: usize, address: u6
     @panic(msg[0..msg_len]);
 }
 
+/// A bare (void) message arm carries zero payload bytes by the
+/// canonical encoding; anything else is layout skew, refused like every
+/// other malformed core buffer.
+pub fn assertVoidPayload(payload: []const u8) void {
+    if (payload.len != 0) {
+        @panic("a channel message carries payload bytes on a bare arm — the compiled core and the generated shim disagree about the contract; rebuild the app so both come from one compile");
+    }
+}
+
 pub fn unknownHelperPanic(helper_index: u32) noreturn {
     var message: [128]u8 = undefined;
     @panic(std.fmt.bufPrint(&message, "the compiled core knows no helper at index {d} — the sidecar and the object disagree; rebuild the app so both come from one compile", .{helper_index}) catch "unknown helper index — rebuild the app");
@@ -400,4 +409,6 @@ test "void union arms ride as the bare arm index" {
     try testing.expectEqualSlices(u8, &.{1}, encodeAlloc(Event, .clear, a));
     const decoded = decodeExact(Event, &.{1}, a);
     try testing.expect(decoded == .clear);
+    // A bare arm's canonical payload is zero bytes exactly.
+    assertVoidPayload(&.{});
 }
