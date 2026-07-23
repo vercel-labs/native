@@ -4,7 +4,9 @@ import { CodeToggle } from "@/components/code-toggle";
 
 # Scroll
 
-A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload — or, in a transpiled TypeScript core, a declared record of the same `offset`/`velocity`/`viewport_extent`/`content_extent` fields, matched by name — that delivers the post-scroll offset and viewport/content extents, so the model can observe position without owning it. Echo the offset into a model field bound as `value` and the model owns the position too: setting the field scrolls the region (the controlled-scroll shape). Scrolling pins at the content edges by default — no rubber-band bounce; kinetic motion stops cleanly at the boundary. `overscroll="rubber_band"` opts one region into bouncing past its edges (both the engine physics and the native macOS scroller honor it), and the `ScrollPhysics.overscroll` design token flips the app-wide default, which per-region values override. `on-reach-end` dispatches a plain Msg when a scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (appending a batch grows the extent and re-arms the next approach). A programmatic jump to the end fires once and never re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it. Pair with [list](/components/list) for layout-culled rows, or the builder's [virtual list](/components/virtual-list) for dataset-scale windows.
+A scroll view: wrap multiple children in a single column inside it. The engine owns wheel, kinetic, and keyboard scrolling and draws the scrollbar while a scroll is in flight; `on-scroll` names a Msg variant with a `canvas.ScrollState` payload — or, in a transpiled TypeScript core, a declared record of the same two-axis fields (`offset_x`/`offset_y`, `velocity_x`/`velocity_y`, `viewport_extent_x`/`viewport_extent_y`, `content_extent_x`/`content_extent_y`), matched by name — that delivers the post-scroll offsets and viewport/content extents on both axes, so the model can observe position without owning it. Echo `offset_y` into a model field bound as `value` and the model owns the position too: setting the field scrolls the region (the controlled-scroll shape).
+
+`axis` declares which axes the region scrolls: `vertical` (the default), `horizontal`, or `both`. A horizontal grant opts the region into wheel/trackpad `delta_x`, a bottom-edge scrollbar, and the horizontal keymap — Left/Right step in lines, and a horizontal-only region takes Home/End/PageUp/PageDown on its one axis too. The horizontal offset rides `value-x`, the sideways counterpart of `value` with the same source-wins reconcile. Nested regions route each wheel axis independently: every axis of a scroll gesture travels to the nearest ancestor that scrolls on that axis, so inside a horizontal timeline holding a vertical list, `delta_y` scrolls the list while `delta_x` reaches the timeline — one diagonal gesture, two regions, no fighting. Virtualized scrolls stay vertical (windowed virtualization prices rows, not columns). Scrolling pins at the content edges by default — no rubber-band bounce; kinetic motion stops cleanly at the boundary. `overscroll="rubber_band"` opts one region into bouncing past its edges (both the engine physics and the native macOS scroller honor it), and the `ScrollPhysics.overscroll` design token flips the app-wide default, which per-region values override. `on-reach-end` dispatches a plain Msg when a scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (appending a batch grows the extent and re-arms the next approach). A programmatic jump to the end fires once and never re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it. Pair with [list](/components/list) for layout-culled rows, or the builder's [virtual list](/components/virtual-list) for dataset-scale windows.
 
 <ComponentPreview name="scroll" alt="A scroll region rendered by the engine" caption="a fixed-height scroll region; the engine draws the scrollbar during scrolling" />
 
@@ -24,7 +26,7 @@ A scroll view: wrap multiple children in a single column inside it. The engine o
 </scroll>
 ```
 
-The arm receives the scroll state and stores what the model wants to remember — echo `offset` into a field bound as the scroll's `value` and the model owns the position too:
+The arm receives the scroll state and stores what the model wants to remember — echo `offsetY` into a field bound as the scroll's `value` (and `offsetX` into `value-x` on horizontal-capable regions) and the model owns the position too:
 
 <CodeToggle>
 
@@ -34,15 +36,27 @@ import { type ScrollState } from "@native-sdk/core/events";
 export type Msg = /* ... */ | { readonly kind: "log_scrolled"; readonly scroll: ScrollState };
 // in update:
 case "log_scrolled":
-  return { ...model, changelog_offset: msg.scroll.offset };
+  return { ...model, changelog_offset: msg.scroll.offsetY };
 ```
 
 ```zig
 // Msg arm: log_scrolled: canvas.ScrollState
-.log_scrolled => |scroll| model.changelog_offset = scroll.offset,
+.log_scrolled => |scroll| model.changelog_offset = scroll.offset_y,
 ```
 
 </CodeToggle>
+
+A horizontal shelf declares its axis and reads the `X` fields:
+
+```html
+<scroll axis="horizontal" height="180" on-scroll="shelf_scrolled">
+  <row gap="8">
+    <panel width="140"><text>Cover 1</text></panel>
+    <panel width="140"><text>Cover 2</text></panel>
+    <panel width="140"><text>Cover 3</text></panel>
+  </row>
+</scroll>
+```
 
 ## Programmatic construction (Zig)
 
@@ -62,4 +76,4 @@ ui.scroll(.{ .height = 240, .padding = 8, .on_scroll = Ui.scrollMsg(.log_scrolle
 
 ## Attributes
 
-<AttrTable attrs={["on-scroll", "on-reach-end", "overscroll", "height", "width", "padding"]} />
+<AttrTable attrs={["on-scroll", "on-reach-end", "axis", "value-x", "overscroll", "height", "width", "padding"]} />

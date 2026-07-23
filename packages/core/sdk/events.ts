@@ -40,15 +40,24 @@
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
 
 /// The scroll-state mirror markup's `on-scroll` matches structurally: a
-/// record of exactly these four numeric fields. Offsets and extents are
-/// canvas points; `velocity` is points per second while a fling decays.
-/// Echo `offset` into the model field bound as the scroll's `value` to
-/// keep the region model-driven (setting that field in update scrolls it).
+/// record of exactly these eight numeric fields — the TWO-AXIS shape, one
+/// offset/velocity/viewport/content quartet per axis. Offsets and extents
+/// are canvas points; velocities are points per second while a fling
+/// decays. A vertical list carries live `...Y` fields and quiet `...X`
+/// ones (offset 0, content pinned to the viewport width); a horizontal
+/// shelf the reverse. Echo `offsetY` into the model field bound as the
+/// scroll's `value` (and `offsetX` into `value-x` on horizontal-capable
+/// regions) to keep the region model-driven — setting those fields in
+/// update scrolls it.
 export interface ScrollState {
-  readonly offset: number;
-  readonly velocity: number;
-  readonly viewportExtent: number;
-  readonly contentExtent: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
+  readonly velocityX: number;
+  readonly velocityY: number;
+  readonly viewportExtentX: number;
+  readonly viewportExtentY: number;
+  readonly contentExtentX: number;
+  readonly contentExtentY: number;
 }
 
 /// The presented-frame channel's record (`frameMsg(model, frame)`): the

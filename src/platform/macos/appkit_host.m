@@ -579,6 +579,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
+@property(nonatomic, assign) double pendingScrollDriverOffsetX;
 @property(nonatomic, assign) double pendingScrollDriverOffsetY;
 @property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
 @property(nonatomic, assign) BOOL controlClickActive;
@@ -6298,10 +6299,14 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
             driver.driverId = desired.driver_id;
             driver.drawsBackground = NO;
             driver.hasVerticalScroller = YES;
-            driver.hasHorizontalScroller = NO;
+            // The horizontal scroller engages only when the driver's
+            // content is wider than its frame — the runtime pins
+            // content_width to the frame width on regions without a
+            // horizontal axis grant, so vertical-only regions never
+            // grow one.
+            driver.hasHorizontalScroller = YES;
             driver.scrollerStyle = NSScrollerStyleOverlay;
             driver.autohidesScrollers = YES;
-            driver.horizontalScrollElasticity = NSScrollElasticityNone;
             driver.automaticallyAdjustsContentInsets = NO;
             NativeSdkScrollDriverDocumentView *document = [[NativeSdkScrollDriverDocumentView alloc] initWithFrame:NSMakeRect(0, 0, MAX(desired.content_width, 1), MAX(desired.content_height, 1))];
             driver.documentView = document;
@@ -6317,19 +6322,25 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         // runtime owns.
         NSScrollElasticity elasticity = desired.rubber_band ? NSScrollElasticityAllowed : NSScrollElasticityNone;
         if (driver.verticalScrollElasticity != elasticity) driver.verticalScrollElasticity = elasticity;
+        // Horizontal elasticity follows the same per-region flag but
+        // stays AUTOMATIC when allowed: a bouncing region whose content
+        // never exceeds its width (a vertical list) must not rubber-band
+        // sideways on stray delta_x.
+        NSScrollElasticity horizontalElasticity = desired.rubber_band ? NSScrollElasticityAutomatic : NSScrollElasticityNone;
+        if (driver.horizontalScrollElasticity != horizontalElasticity) driver.horizontalScrollElasticity = horizontalElasticity;
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));
         if (driver.documentView && !NSEqualSizes(driver.documentView.frame.size, contentSize)) {
             [driver.documentView setFrameSize:contentSize];
         }
-        if (created || desired.set_offset) [self applyScrollDriverOffset:driver offsetY:desired.offset_y];
+        if (created || desired.set_offset) [self applyScrollDriverOffset:driver offsetX:desired.offset_x offsetY:desired.offset_y];
     }
 }
 
-- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetY:(double)offsetY {
+- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetX:(double)offsetX offsetY:(double)offsetY {
     self.applyingScrollDriverOffset = YES;
-    [driver.contentView setBoundsOrigin:NSMakePoint(0, offsetY)];
+    [driver.contentView setBoundsOrigin:NSMakePoint(offsetX, offsetY)];
     [driver reflectScrolledClipView:driver.contentView];
     self.applyingScrollDriverOffset = NO;
 }
@@ -6367,17 +6378,18 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     NSClipView *clipView = note.object;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (driver.contentView != clipView) continue;
-        [self queueScrollDriverEventWithId:driver.driverId offsetY:clipView.bounds.origin.y];
+        [self queueScrollDriverEventWithId:driver.driverId offsetX:clipView.bounds.origin.x offsetY:clipView.bounds.origin.y];
         return;
     }
 }
 
-- (void)queueScrollDriverEventWithId:(uint64_t)driverId offsetY:(double)offsetY {
+- (void)queueScrollDriverEventWithId:(uint64_t)driverId offsetX:(double)offsetX offsetY:(double)offsetY {
     if (!self.host || self.surfaceLabel.length == 0) return;
     if (self.scrollDriverEventPending && self.pendingScrollDriverId != driverId) {
         [self emitQueuedScrollDriverEvent];
     }
     self.pendingScrollDriverId = driverId;
+    self.pendingScrollDriverOffsetX = offsetX;
     self.pendingScrollDriverOffsetY = offsetY;
     if (self.scrollDriverEventPending) return;
     self.scrollDriverEventPending = YES;
@@ -6399,6 +6411,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 - (void)emitQueuedScrollDriverEvent {
     if (!self.scrollDriverEventPending) return;
     const uint64_t driverId = self.pendingScrollDriverId;
+    const double offsetX = self.pendingScrollDriverOffsetX;
     const double offsetY = self.pendingScrollDriverOffsetY;
     self.scrollDriverEventPending = NO;
     if (!self.host || self.surfaceLabel.length == 0) return;
@@ -6411,6 +6424,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .timestamp_ns = NativeSdkTimestampNanoseconds(),
         .widget_id = driverId,
+        .scroll_driver_offset_x = offsetX,
         .scroll_driver_offset_y = offsetY,
     }];
 }

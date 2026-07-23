@@ -297,9 +297,11 @@ typedef struct {
     int high_contrast;
     uint64_t timer_id;
     /* GPU_SURFACE_SCROLL_DRIVER / CONTEXT_MENU_ACTION payloads: widget_id
-     * carries the driver id / menu token; scroll_driver_offset_y the new
-     * content offset (canvas points, y-down, overscroll passes through);
-     * menu_item_id the selected context-menu item (0 = dismissed). */
+     * carries the driver id / menu token; scroll_driver_offset_x/_y the
+     * new content offsets (canvas points, x-rightward, y-down,
+     * overscroll passes through); menu_item_id the selected
+     * context-menu item (0 = dismissed). */
+    double scroll_driver_offset_x;
     double scroll_driver_offset_y;
     uint32_t menu_item_id;
     /* GPU_SURFACE_FRAME payloads: host-stamped durations of the most
@@ -684,6 +686,7 @@ typedef struct {
     double height;
     double content_width;
     double content_height;
+    double offset_x;
     double offset_y;
     int set_offset;
     /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
