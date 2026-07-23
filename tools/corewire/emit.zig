@@ -173,7 +173,15 @@ const Emitter = struct {
         // Helper methods share the model struct's member namespace with
         // its fields — and "view_unbound" is the opt-out tuple's
         // spelling, which every reflecting consumer reads as data, so a
-        // helper must never take it.
+        // helper must never take it. A helper may not take a reserved
+        // name either: methods shadow file-scope declarations inside
+        // the struct, so a helper named after generated glue (callHelper
+        // above all) would capture the glue's own call sites.
+        for (self.sidecar.model_helpers) |helper| {
+            if (nameListed(reserved.items, helper.name)) {
+                self.diags.flag("model_helpers", "helper \"{s}\" collides with a declaration the generated shim itself must make (methods shadow file-scope names inside the model struct); rename the helper in the core source", .{helper.name});
+            }
+        }
         if (sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model)) |model| {
             for (self.sidecar.model_helpers) |helper| {
                 if (std.mem.eql(u8, helper.name, "view_unbound")) {
@@ -1417,6 +1425,29 @@ test "UpdateResult reserves only when the cmd-returning update emits it" {
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const UpdateResult = enum(u8) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+}
+
+test "a helper taking a generated glue name refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Methods shadow file-scope declarations inside the model struct: a
+    // helper named callHelper would capture the forwarders' own calls.
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"callHelper\", \"params\": [], \"returns\": {\"kind\": \"bool\"}, \"arena\": false}]",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "shadow file-scope names") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "a helper named view_unbound refuses with a teaching" {
