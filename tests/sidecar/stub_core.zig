@@ -136,13 +136,13 @@ export fn nsc_core_model_snapshot(snap: *[*]const u8, snap_len: *usize) void {
     noCore();
 }
 
-export fn nsc_core_helper_call(helper: u32, args: [*]const u8, args_len: usize, out: *[*]const u8, out_len: *usize) i32 {
+export fn nsc_core_helper_call(helper: u32, args: [*]const u8, args_len: usize, out: *[*]const u8, out_len: *usize) void {
     _ = helper;
     _ = args;
     _ = args_len;
     _ = out;
     _ = out_len;
-    return 1;
+    noCore();
 }
 
 export fn nsc_core_collect() void {}

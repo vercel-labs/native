@@ -1110,15 +1110,14 @@ const Emitter = struct {
             \\
             \\/// Call the compiled core's exported helper at `index` (the
             \\/// sidecar's model_helpers order IS the call index) and decode the
-            \\/// result. Results are read-arena resident, the same
-            \\/// until-next-dispatch lifetime view builds get from transpiler
-            \\/// output.
+            \\/// result. An unknown index traps core-side through the panic
+            \\/// sink; there is no status to check. Results are read-arena
+            \\/// resident, the same until-next-dispatch lifetime view builds get
+            \\/// from transpiler output.
             \\fn callHelper(comptime T: type, index: u32, args: []const u8, allocator: std.mem.Allocator) T {
             \\    var out_ptr: [*]const u8 = undefined;
             \\    var out_len: usize = 0;
-            \\    if (abi.helper_call(index, args.ptr, args.len, &out_ptr, &out_len) != 0) {
-            \\        shim_rt.unknownHelperPanic(index);
-            \\    }
+            \\    abi.helper_call(index, args.ptr, args.len, &out_ptr, &out_len);
             \\    return shim_rt.decodeExact(T, out_ptr[0..out_len], allocator);
             \\}
             \\

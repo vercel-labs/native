@@ -313,11 +313,6 @@ pub fn assertVoidPayload(payload: []const u8) void {
     }
 }
 
-pub fn unknownHelperPanic(helper_index: u32) noreturn {
-    var message: [128]u8 = undefined;
-    @panic(std.fmt.bufPrint(&message, "the compiled core knows no helper at index {d} — the sidecar and the object disagree; rebuild the app so both come from one compile", .{helper_index}) catch "unknown helper index — rebuild the app");
-}
-
 // --------------------------------------------------------------- tests
 
 const testing = std.testing;

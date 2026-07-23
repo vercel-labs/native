@@ -27,6 +27,14 @@
 //! - Encoded buffers use the canonical value encoding (shim_rt.zig):
 //!   little-endian, headerless, schema-driven, record fields in sidecar
 //!   declaration order.
+//! - Narrow integers in these signatures (u8 tags, u32 member/helper
+//!   indices, the sink's u64 address) are C-SIGNATURE PLUMBING for
+//!   host-produced values, never value-payload crossings: payload
+//!   numbers ride the two-class number model (f64/i64) exclusively.
+//! - Four entries are runtime-owned mode symbols rather than ordinary
+//!   compiled-core exports: set_panic_sink, init, frame_reset, and
+//!   collect (which folds the transient-arena reset). The rest project
+//!   the core module's own surface.
 
 const std = @import("std");
 
@@ -43,6 +51,12 @@ pub const snapshot_format: u32 = 1;
 /// address (0 when unknown); `ctx` echoes the registered context
 /// pointer. The sink must not return and must not call back into any
 /// core entry point.
+///
+/// The sink covers DETECTED traps only: contract violations the core's
+/// own checks catch throw with their teaching text, and an exception
+/// that escapes the core reaches the sink with an "Uncaught " prefix on
+/// its message. Hardware faults (SIGSEGV/SIGBUS) belong to the host's
+/// process-wide handler — the core installs no signal handlers.
 pub const PanicSinkFn = *const fn (
     ctx: ?*anyopaque,
     msg: [*]const u8,
@@ -85,8 +99,9 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// every previously returned pointer.
         pub const init = Symbol(fn () callconv(.c) void, "init");
         /// The boot command bytes produced by init (empty when the
-        /// core's init returns a bare model). Valid until the first
-        /// dispatch entry or the next init.
+        /// core's init returns a bare model). Arena truth governs the
+        /// lifetime: valid until the next frame_reset, dispatch entry,
+        /// or init.
         pub const boot_cmd = Symbol(fn (cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "boot_cmd");
 
         // ---------------------------------------------------- dispatch
@@ -117,15 +132,22 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const subscriptions = Symbol(fn (subs: *[*]const u8, subs_len: *usize) callconv(.c) void, "subscriptions");
         pub const frame_reset = Symbol(fn () callconv(.c) void, "frame_reset");
         /// The committed model in the canonical value encoding of the
-        /// sidecar's model type (root record, declaration-order fields).
+        /// sidecar's model type (root record, declaration-order fields),
+        /// encoded on demand from the committed heap into a transient
+        /// buffer: valid until the next dispatch entry, frame_reset,
+        /// init, or collect (arena truth — the buffer does NOT survive a
+        /// frame reset; re-read after resetting).
         pub const model_snapshot = Symbol(fn (snap: *[*]const u8, snap_len: *usize) callconv(.c) void, "model_snapshot");
         /// Call the exported helper at `helper` (index into the
-        /// sidecar's model_helpers). Returns 0 on success, 1 for an
-        /// unknown index (generator/sidecar skew — refused loudly).
-        pub const helper_call = Symbol(fn (helper: u32, args: [*]const u8, args_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) i32, "helper_call");
-        /// Reference-cycle collection over the model heap; observable
-        /// model state unchanged, previously returned snapshot and
-        /// helper pointers invalidated.
+        /// sidecar's model_helpers). An unknown index is a generator/
+        /// sidecar skew and TRAPS through the panic sink — it is never a
+        /// status the host is asked to check.
+        pub const helper_call = Symbol(fn (helper: u32, args: [*]const u8, args_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "helper_call");
+        /// Reference-cycle collection over the model heap, with the
+        /// transient-arena reset folded in (a runtime-owned mode
+        /// symbol): observable model state unchanged, every previously
+        /// returned snapshot, helper, cmd, and subscription pointer
+        /// invalidated.
         pub const collect = Symbol(fn () callconv(.c) void, "collect");
 
         // -------------------------- conditional channel entries
