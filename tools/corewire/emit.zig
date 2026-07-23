@@ -181,6 +181,12 @@ const Emitter = struct {
             if (nameListed(reserved.items, helper.name)) {
                 self.diags.flag("model_helpers", "helper \"{s}\" collides with a declaration the generated shim itself must make (methods shadow file-scope names inside the model struct); rename the helper in the core source", .{helper.name});
             }
+            // The same shadowing applies to the mirror's own type
+            // declarations: a field spelled `row: Row` inside the model
+            // struct resolves Row to a method of that name first.
+            if (nameListed(table_names, helper.name) or std.mem.eql(u8, helper.name, self.sidecar.msg.name)) {
+                self.diags.flag("model_helpers", "helper \"{s}\" shadows the type of the same name inside the model struct, where field types resolve; rename one in the core source", .{helper.name});
+            }
         }
         if (sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model)) |model| {
             for (self.sidecar.model_helpers) |helper| {

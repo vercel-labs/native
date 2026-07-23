@@ -386,6 +386,7 @@ fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime s
             }
             return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}";
         },
+        .pointer => @compileError("Msg arm payloads held BY REFERENCE (" ++ @typeName(T) ++ ") have no schema form: the named-type payload family carries no storage kind, so a by-reference record arm cannot be described faithfully in sidecar format 1 — see SCHEMA-GAPS.md"),
         else => @compileError("no payload descriptor for Msg arm payload " ++ @typeName(T)),
     }
 }

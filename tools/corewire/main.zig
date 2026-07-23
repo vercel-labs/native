@@ -198,14 +198,14 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(2);
             }
         }
-        break :blk stageOutput(init, stderr, out, facade.?) catch |err| switch (err) {
-            error.Staging => {
-                // The sibling projection was already staged; leave no
-                // stray staging file behind the failure.
-                if (shim_staged) |staged| std.Io.Dir.cwd().deleteFile(init.io, staged) catch {};
-                std.process.exit(1);
-            },
-            else => return err,
+        break :blk stageOutput(init, stderr, out, facade.?) catch |err| {
+            // The sibling projection was already staged; leave no stray
+            // staging file behind ANY failure shape.
+            if (shim_staged) |staged| std.Io.Dir.cwd().deleteFile(init.io, staged) catch {};
+            switch (err) {
+                error.Staging => std.process.exit(1),
+                else => return err,
+            }
         };
     } else null;
 
@@ -252,25 +252,27 @@ pub fn main(init: std.process.Init) !void {
 /// before the file exists.
 fn canonicalSpelling(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    // The canonical base: cwd for relative paths, the root for absolute.
-    var base: []const u8 = if (std.fs.path.isAbsolute(path))
-        try arena.dupe(u8, "/")
+    // Platform-aware parsing: the component iterator understands the
+    // native roots and separators (drive and UNC spellings included),
+    // so two spellings of one root land on one prefix.
+    var components = std.fs.path.componentIterator(path);
+    var base: []const u8 = if (components.root()) |root|
+        try arena.dupe(u8, root)
     else blk: {
         const len = std.Io.Dir.cwd().realPath(io, &buffer) catch break :blk try arena.dupe(u8, ".");
         break :blk try arena.dupe(u8, buffer[0..len]);
     };
     var exists = true;
-    var components = std.mem.tokenizeScalar(u8, path, std.fs.path.sep);
     while (components.next()) |component| {
-        if (std.mem.eql(u8, component, ".")) continue;
-        if (std.mem.eql(u8, component, "..")) {
+        if (std.mem.eql(u8, component.name, ".")) continue;
+        if (std.mem.eql(u8, component.name, "..")) {
             // `base` carries no symlinks once canonical, so its lexical
             // parent IS its real parent; a `..` under a nonexistent
             // tail unwinds the tail it just added.
             base = std.fs.path.dirname(base) orelse base;
             continue;
         }
-        const candidate = try std.fs.path.join(arena, &.{ base, component });
+        const candidate = try std.fs.path.join(arena, &.{ base, component.name });
         if (exists) {
             if (std.Io.Dir.cwd().realPathFile(io, candidate, &buffer)) |len| {
                 base = try arena.dupe(u8, buffer[0..len]);
