@@ -67,15 +67,19 @@ pub fn emitFacade(arena: std.mem.Allocator, sidecar: Sidecar, diags: *sidecar_mo
 /// TypeScript reserved words a declaration may not take (no quoting
 /// escape exists on that side, unlike Zig's @"..." names).
 const ts_reserved_words = [_][]const u8{
-    "break",     "case",     "catch",     "class",   "const",     "continue",   "debugger",  "default",
-    "delete",    "do",       "else",      "enum",    "export",    "extends",    "false",     "finally",
-    "for",       "function", "if",        "import",  "in",        "instanceof", "new",       "null",
-    "return",    "super",    "switch",    "this",    "throw",     "true",       "try",       "typeof",
-    "var",       "void",     "while",     "with",    "let",       "static",     "yield",     "await",
-    "interface", "type",     "number",    "boolean", "string",    "object",     "undefined",
+    "break",     "case",      "catch",  "class",   "const",      "continue",   "debugger",  "default",
+    "delete",    "do",        "else",   "enum",    "export",     "extends",    "false",     "finally",
+    "for",       "function",  "if",     "import",  "in",         "instanceof", "new",       "null",
+    "return",    "super",     "switch", "this",    "throw",      "true",       "try",       "typeof",
+    "var",       "void",      "while",  "with",    "let",        "static",     "yield",     "await",
+    "interface", "type",      "number", "boolean", "string",     "object",     "undefined",
+    // Intrinsic type keywords: a declaration under one would make every
+    // reference bind the built-in, erasing the contract silently.
+    "any",
+    "unknown",   "never",     "bigint", "symbol",
     // Strict-mode reservations (modules are always strict).
-    "implements",
-    "package",   "private",  "protected", "public",  "arguments", "eval",
+     "implements", "package",    "private",   "protected",
+    "public",    "arguments", "eval",
 };
 
 const FacadeEmitter = struct {
@@ -1387,7 +1391,13 @@ test "strict-mode reserved words cannot declare" {
     try testing.expect(!isTsIdentifier("implements"));
     try testing.expect(!isTsIdentifier("private"));
     try testing.expect(!isTsIdentifier("arguments"));
+    try testing.expect(!isTsIdentifier("any"));
+    try testing.expect(!isTsIdentifier("unknown"));
+    try testing.expect(!isTsIdentifier("never"));
+    try testing.expect(!isTsIdentifier("bigint"));
+    try testing.expect(!isTsIdentifier("symbol"));
     try testing.expect(isTsIdentifier("implementation"));
+    try testing.expect(isTsIdentifier("anywhere"));
 }
 
 test "a flattened field spelled kind refuses against the discriminator" {

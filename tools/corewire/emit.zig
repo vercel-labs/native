@@ -126,12 +126,16 @@ const Emitter = struct {
         // module-level type under any of them would be shadowed, which
         // the compiler refuses.
         try reserved.appendSlice(self.arena, &.{
-            "T",           "n",          "model",     "msg",      "payload",  "encoded",
-            "cmd_ptr",     "cmd_len",    "subs_ptr",  "subs_len", "snap_ptr", "snap_len",
-            "out",         "out_ptr",    "out_len",   "tag",      "tag_name", "name",
-            "frame",       "key",        "pinch",     "value",    "self",     "index",
-            "args",        "args_tuple", "allocator", "fields",   "field",    "next",
+            "T",           "n",            "model",     "msg",      "payload",  "encoded",
+            "cmd_ptr",     "cmd_len",      "subs_ptr",  "subs_len", "snap_ptr", "snap_len",
+            "out",         "out_ptr",      "out_len",   "tag",      "tag_name", "name",
+            "frame",       "key",          "pinch",     "value",    "self",     "index",
+            "args",        "args_tuple",   "allocator", "fields",   "field",    "next",
             "helper_args",
+            // The unbound-list tuples nest inside Model and Msg, where
+            // they would shadow a same-named top-level type at every
+            // field-type resolution inside those structs.
+            "view_unbound",
         });
         for (self.sidecar.model_helpers) |helper| {
             for (helper.params, 0..) |_, param_index| {
@@ -1512,6 +1516,23 @@ test "a model-reachable record as a message arm payload refuses" {
         if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "stores by reference in message arms") != null) found = true;
     }
     try testing.expect(found);
+}
+
+test "a type named view_unbound refuses (the nested tuple would shadow it)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"view_unbound\", \"members\": [\"a\", \"b\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"view_unbound\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
 }
 
 test "a type named after the tag-table capture refuses" {
