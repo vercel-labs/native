@@ -1078,7 +1078,13 @@ const CycleWalk = struct {
 
 fn validateMsg(sidecar: Sidecar, diags: *Diagnostics) void {
     // Tags are positional and dense by construction — there is no
-    // explicit tag field to get wrong. The reader checks the u8 bound.
+    // explicit tag field to get wrong. The reader checks the u8 bound,
+    // and the floor: a valueless union or enum has no declarable mirror
+    // form (`union(enum) {}` is not a type) and nothing could ever
+    // dispatch or encode it.
+    if (sidecar.msg.arms.len == 0) {
+        diags.flag("msg.arms", "the message union declares no arms — a core with no messages cannot dispatch; declare at least one arm", .{});
+    }
     if (sidecar.msg.arms.len > 256) {
         diags.flag("msg.arms", "{d} arms exceed the 256-arm bound (wire tags ride a u8) — V6", .{sidecar.msg.arms.len});
     }
@@ -1086,11 +1092,17 @@ fn validateMsg(sidecar: Sidecar, diags: *Diagnostics) void {
     // encoding carries a one-byte arm index), and the mirror's enums
     // ride enum(u8) with member index = wire value.
     for (sidecar.types.unions, 0..) |entry, index| {
+        if (entry.arms.len == 0) {
+            diags.flag(pathOfStatic(diags, "types.unions[{d}]", .{index}), "union \"{s}\" declares no arms — a valueless union has no mirror form; declare at least one arm", .{entry.name});
+        }
         if (entry.arms.len > 256) {
             diags.flag(pathOfStatic(diags, "types.unions[{d}]", .{index}), "union \"{s}\" has {d} arms; encoded union values carry a one-byte declaration-order arm index (256 arms at most)", .{ entry.name, entry.arms.len });
         }
     }
     for (sidecar.types.enums, 0..) |entry, index| {
+        if (entry.members.len == 0) {
+            diags.flag(pathOfStatic(diags, "types.enums[{d}]", .{index}), "enum \"{s}\" declares no members — a valueless enum has no mirror form; declare at least one member", .{entry.name});
+        }
         if (entry.members.len > 256) {
             diags.flag(pathOfStatic(diags, "types.enums[{d}]", .{index}), "enum \"{s}\" has {d} members; the mirror's enums ride a u8 tag with member index = wire value (256 members at most)", .{ entry.name, entry.members.len });
         }
@@ -1548,6 +1560,29 @@ test "V6: more than 256 arms refuses" {
     // The unbound list must still resolve.
     const patched = try replaced(arena, source, "\"unbound\": [\"label_set\"]", "\"unbound\": []");
     try expectRefusal(patched, "msg.arms", "exceed the 256-arm bound");
+}
+
+test "valueless message unions, tabled unions, and enums refuse" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const no_arms = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}},\n      {\"name\": \"label_set\", \"payload\": {\"kind\": \"bytes\"}}",
+        "",
+    );
+    const patched = try replaced(arena, no_arms, "\"unbound\": [\"label_set\"]", "\"unbound\": []");
+    try expectRefusal(patched, "msg.arms", "declares no arms");
+
+    const empty_enum = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"Hollow\"}}",
+    );
+    const with_enum = try replaced(arena, empty_enum, "\"enums\": []", "\"enums\": [{\"name\": \"Hollow\", \"members\": []}]");
+    try expectRefusal(with_enum, "types.enums[0]", "declares no members");
 }
 
 test "a tabled union past the one-byte arm bound refuses" {

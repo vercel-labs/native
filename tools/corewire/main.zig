@@ -75,16 +75,25 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
     // Distinct paths only: the two projections must not overwrite each
-    // other, and no output may destroy the input contract.
+    // other, and no output may destroy the input contract. Compared
+    // lexically normalized (cwd-resolved, `.`/`..` folded) — filesystem
+    // identities beyond spelling (symlinks, hard links) stay the
+    // caller's responsibility.
+    const input_resolved = try std.fs.path.resolve(arena, &.{input});
     const paths = [_]?[]const u8{ out_path, facade_path };
+    var resolved: [paths.len]?[]const u8 = .{ null, null };
     for (paths, 0..) |maybe_path, path_index| {
         const path = maybe_path orelse continue;
-        if (std.mem.eql(u8, path, input)) {
+        resolved[path_index] = try std.fs.path.resolve(arena, &.{path});
+    }
+    for (resolved, 0..) |maybe_path, path_index| {
+        const path = maybe_path orelse continue;
+        if (std.mem.eql(u8, path, input_resolved)) {
             try stderr.print("corewire: output {s} names the sidecar itself — generating would destroy the input contract\n", .{path});
             try stderr.flush();
             std.process.exit(2);
         }
-        for (paths[path_index + 1 ..]) |maybe_other| {
+        for (resolved[path_index + 1 ..]) |maybe_other| {
             const other = maybe_other orelse continue;
             if (std.mem.eql(u8, path, other)) {
                 try stderr.print("corewire: --out and --facade name one file ({s}) — the second projection would overwrite the first\n", .{path});

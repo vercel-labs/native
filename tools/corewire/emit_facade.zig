@@ -143,6 +143,20 @@ const FacadeEmitter = struct {
                 }
             }
         }
+        // number_bytes descriptor fields never enter the type table but
+        // become constructor parameters and record members all the same.
+        for (self.sidecar.msg.arms) |arm| {
+            switch (arm.payload) {
+                .number_bytes => |desc| {
+                    for ([_][]const u8{ desc.number_field, desc.bytes_field }) |field_name| {
+                        if (std.mem.startsWith(u8, field_name, "nsc_core_") or std.mem.startsWith(u8, field_name, "nscf")) {
+                            self.diags.flag("msg.arms", "field \"{s}\" takes the facade's reserved nsc name space; rename it in the core source", .{field_name});
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
         for (self.sidecar.types.structs) |entry| try self.fenceDecl(entry.name, &facade_decls);
         for (self.sidecar.types.enums) |entry| try self.fenceDecl(entry.name, &facade_decls);
         for (self.sidecar.types.unions) |entry| try self.fenceDecl(entry.name, &facade_decls);
@@ -978,6 +992,30 @@ test "composite slice elements parenthesize in the projection" {
     );
     const generated = try facadeFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "readonly label: readonly (number | null)[];") != null);
+}
+
+test "number_bytes fields in the reserved nsc space refuse" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // An authored "nscf_arg1" beside an exotic sibling would collide
+    // with the sibling's positional parameter fallback.
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"number_bytes\", \"number_field\": \"nscf_arg1\", \"number_class\": \"f64\", \"bytes_field\": \"body-data\"}}",
+    );
+    _ = &source;
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "reserved nsc name space") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "a type taking a generated facade declaration's name refuses" {
