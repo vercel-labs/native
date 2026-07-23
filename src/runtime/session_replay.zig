@@ -486,6 +486,13 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
             if (signaled != (record.pty_signal != 0)) return true;
             if (record.exit_reason != .exited and record.code != runtime_effects.effect_error_exit_code) return true;
         },
+        // A write-admission verdict carries only the accepted bit in
+        // `code` (1/0) — no blob, no signal, no drop count.
+        .write => {
+            if (record.pty_blob_len > 0) return true;
+            if (record.code != 0 and record.code != 1) return true;
+            if (record.pty_signal != 0 or record.pty_dropped_writes != 0) return true;
+        },
     }
     return false;
 }
@@ -496,9 +503,9 @@ fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
 /// regenerating admission refusal, `.spawn_failed` = executor-truth
 /// start failure, the rest = real endings).
 fn ptyRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
-    // Output records always carry `.exited` (the live drain never
-    // touches the reason on an output).
-    if (record.pty_kind == .output and record.exit_reason != .exited) return true;
+    // Output and write-verdict records always carry `.exited` (neither
+    // journal site ever touches the reason).
+    if (record.pty_kind != .exit and record.exit_reason != .exited) return true;
     // The regenerating-provenance bit only ever rides an admission
     // refusal — an `.exit` record whose reason is `.rejected`.
     if (record.truncated and (record.pty_kind != .exit or record.exit_reason != .rejected)) return true;

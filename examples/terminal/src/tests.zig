@@ -510,9 +510,10 @@ test "a recorded terminal session replays byte-identical offline - no shell pres
     });
     try testing.expect(report.ok());
     try testing.expect(report.checkpoints_verified > 0);
-    // No process ran: the replayed spawn parked, three journaled
-    // results fed (two output batches, one exit).
-    try testing.expectEqual(@as(u64, 3), report.effects_fed);
+    // No process ran: the replayed spawn parked, four journaled
+    // results fed (two output batches, the typed input's write-admission
+    // verdict, one exit).
+    try testing.expectEqual(@as(u64, 4), report.effects_fed);
     try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
 
     // The replayed emulator rebuilt the identical screen from the

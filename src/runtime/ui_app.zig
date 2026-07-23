@@ -1381,6 +1381,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             record.exit_reason,
                             record.pty_dropped_writes,
                         ),
+                        // Write-admission verdicts are executor truth
+                        // (whether the FIFO had room depends on how fast
+                        // the child was reading): queue each for the
+                        // replayed dispatch's own `ptyWrite` calls, which
+                        // consume them in call order — the clock feed's
+                        // shape.
+                        .write => try self.effects.pushReplayPtyWriteVerdict(record.code == 1),
                     },
                     // Spectrum records feed through the band-carrying
                     // helper so replay repaints identical bars; every

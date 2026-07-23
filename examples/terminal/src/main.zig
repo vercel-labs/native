@@ -207,6 +207,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.outbound_head = 0;
                 model.outbound_len = 0;
             },
+            // Write-admission verdicts are journal-only (replay
+            // machinery); the engine never delivers one as an event.
+            .write => unreachable,
         },
         .key => |event| handleKey(model, fx, event),
         .text => |event| {

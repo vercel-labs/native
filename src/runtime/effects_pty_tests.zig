@@ -189,6 +189,34 @@ test "a signaled exit carries its signal; a signaled feed with no signal is refu
     try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
 }
 
+test "replay-mode ptyWrite returns the journaled verdicts, never a recomputed guess" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+
+    // The replayed spawn parks; the parked occupancy holds the key.
+    fx.ptySpawn(.{ .key = 81, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+
+    // The journal recorded refuse-then-accept (a full FIFO that later
+    // drained). The replayed writes must return exactly that — the
+    // fake has no child, so recomputing admission locally would answer
+    // `true` for the first write and diverge any model that retained
+    // the refused bytes.
+    try fx.pushReplayPtyWriteVerdict(false);
+    try fx.pushReplayPtyWriteVerdict(true);
+    try testing.expect(!fx.ptyWrite(81, "retained bytes"));
+    try testing.expect(fx.ptyWrite(81, "delivered bytes"));
+
+    // Boundary alignment: an empty payload consumes no verdict (both
+    // sides return true before the admission decision), and a write
+    // past the recorded count answers optimistically with a divergence
+    // warning rather than trapping.
+    try fx.pushReplayPtyWriteVerdict(false);
+    try testing.expect(fx.ptyWrite(81, ""));
+    try testing.expect(!fx.ptyWrite(81, "consumes the queued refusal"));
+    try testing.expect(fx.ptyWrite(81, "past the recording"));
+}
+
 test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
@@ -318,6 +346,8 @@ fn drainUntilExit(fx: *DirectFx, budget_ms: u64) !struct {
                     try output.appendSlice(testing.allocator, msg.pty.bytes);
                 },
                 .exit => return .{ .output = output, .records = records, .exit = msg.pty },
+                // Journal-only write verdicts never deliver as events.
+                .write => unreachable,
             }
         }
         try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(2), .awake);
@@ -470,6 +500,12 @@ const PtySessionModel = struct {
     /// (and in the fingerprint checkpoints that pin it).
     output_digest: u64 = 0,
     output_bytes: u64 = 0,
+    /// `ptyWrite` admission verdicts folded into MODEL STATE — the
+    /// retain-refused-bytes pattern a real terminal uses. Replay must
+    /// reproduce the recorded verdicts exactly or these counters (and
+    /// the fingerprint checkpoints rendering them) diverge.
+    write_accepts: u32 = 0,
+    write_refusals: u32 = 0,
 
     fn record(model: *PtySessionModel, event: effects_mod.EffectPtyEvent) void {
         switch (event.kind) {
@@ -486,7 +522,13 @@ const PtySessionModel = struct {
                 }
                 model.last_code = event.code;
             },
+            // Journal-only write verdicts never deliver as events.
+            .write => unreachable,
         }
+    }
+
+    fn recordWriteVerdict(model: *PtySessionModel, accepted: bool) void {
+        if (accepted) model.write_accepts += 1 else model.write_refusals += 1;
     }
 };
 
@@ -494,6 +536,7 @@ const PtySessionMsg = union(enum) {
     spawn,
     spawn_dup,
     type_command,
+    type_oversized,
     event: effects_mod.EffectPtyEvent,
 };
 
@@ -517,10 +560,20 @@ fn ptySessionUpdate(model: *PtySessionModel, msg: PtySessionMsg, fx: *PtySession
             .argv = &.{"sh"},
             .on_event = PtySessionApp.Effects.ptyMsg(.event),
         }),
-        // Journaled as a command dispatch; the write itself is inert
-        // under replay (the recorded output already carries its
-        // consequences) — "replay reproduces stdin for free".
-        .type_command => _ = fx.ptyWrite(session_pty_key, "ls\r"),
+        // Journaled as a command dispatch; the write's BYTES are inert
+        // under replay (the recorded output already carries their
+        // consequences), but its admission VERDICT is executor truth the
+        // journal feeds — the model folds it in so replay must take the
+        // identical accept/refuse path.
+        .type_command => model.recordWriteVerdict(fx.ptyWrite(session_pty_key, "ls\r")),
+        // Over the per-write bound: refused live (the all-or-nothing
+        // admission), and the journaled refusal must return under
+        // replay too — a recomputed optimistic `true` would diverge the
+        // model and the fingerprint.
+        .type_oversized => model.recordWriteVerdict(fx.ptyWrite(
+            session_pty_key,
+            &(comptime [_]u8{'z'} ** (effects_mod.max_effect_pty_write_bytes + 1)),
+        )),
         .event => |event| model.record(event),
     }
 }
@@ -533,6 +586,7 @@ fn ptySessionView(ui: *PtySessionApp.Ui, model: *const PtySessionModel) PtySessi
         ui.text(.{}, ui.fmt("{d} batches / {d} bytes", .{ model.output_events, model.output_bytes })),
         ui.text(.{}, ui.fmt("digest {x}", .{model.output_digest})),
         ui.text(.{}, ui.fmt("{d} exits ({d}) {d} rejected", .{ model.exit_events, model.last_code, model.rejected_events })),
+        ui.text(.{}, ui.fmt("{d} writes ok / {d} refused", .{ model.write_accepts, model.write_refusals })),
     });
 }
 
@@ -540,6 +594,7 @@ fn ptySessionCommand(name: []const u8) ?PtySessionMsg {
     if (std.mem.eql(u8, name, "pty.spawn")) return .spawn;
     if (std.mem.eql(u8, name, "pty.spawn-dup")) return .spawn_dup;
     if (std.mem.eql(u8, name, "pty.type")) return .type_command;
+    if (std.mem.eql(u8, name, "pty.type-oversized")) return .type_oversized;
     return null;
 }
 
@@ -635,13 +690,21 @@ fn recordPtySession(gpa: std.mem.Allocator, buffer: *JournalBuffer, store: *sess
     try testing.expectEqual(@as(u32, 1), app_state.model.output_events);
 
     // The app types; the scripted shell answers with echo + listing in
-    // one coalesced batch (what the live ring would deliver).
+    // one coalesced batch (what the live ring would deliver). The
+    // write's admission verdict journals and lands in the model.
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "pty.type", .window_id = 1 } });
     try testing.expectEqualStrings("ls\r", app_state.effects.ptyWrittenBytes(session_pty_key));
+    try testing.expectEqual(@as(u32, 1), app_state.model.write_accepts);
     try app_state.effects.feedPtyOutput(session_pty_key, "ls\r\nREADME.md\r\nsrc\r\nsh-5.2$ ");
     try harness.runtime.dispatchPlatformEvent(app, .wake);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
     try testing.expectEqual(@as(u32, 2), app_state.model.output_events);
+
+    // An over-bound write: refused live (all-or-nothing), the verdict
+    // journaled — replay must take the identical refusal path.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "pty.type-oversized", .window_id = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try testing.expectEqual(@as(u32, 1), app_state.model.write_refusals);
 
     // The duplicate spawn: one regenerating `.rejected` exit.
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "pty.spawn-dup", .window_id = 1 } });
@@ -675,6 +738,8 @@ test "a recorded pty session replays fingerprint-identical offline with no shell
     try testing.expectEqual(@as(u32, 2), recorded.model.output_events);
     try testing.expectEqual(@as(u32, 1), recorded.model.exit_events);
     try testing.expectEqual(@as(u32, 1), recorded.model.rejected_events);
+    try testing.expectEqual(@as(u32, 1), recorded.model.write_accepts);
+    try testing.expectEqual(@as(u32, 1), recorded.model.write_refusals);
 
     // The output bytes live in the blob store, not the journal — the
     // dynamic-image pipeline (two batches, two blobs).
@@ -698,11 +763,16 @@ test "a recorded pty session replays fingerprint-identical offline with no shell
     });
     try testing.expect(report.ok());
     try testing.expect(report.checkpoints_verified > 0);
-    // Two output batches and the exit FEED; the duplicate spawn's
-    // rejection regenerates from the replayed dispatch and its record
-    // is skipped.
-    try testing.expectEqual(@as(u64, 3), report.effects_fed);
+    // Two output batches, two write-admission verdicts, and the exit
+    // FEED; the duplicate spawn's rejection regenerates from the
+    // replayed dispatch and its record is skipped.
+    try testing.expectEqual(@as(u64, 5), report.effects_fed);
     try testing.expectEqual(@as(u64, 1), report.effects_skipped);
+    // THE verdict pin: the replayed writes took the recorded
+    // accept/refuse paths (one of each), never a recomputed guess —
+    // model equality covers the counters, the fingerprint the pixels.
+    try testing.expectEqual(@as(u32, 1), app_state.model.write_accepts);
+    try testing.expectEqual(@as(u32, 1), app_state.model.write_refusals);
     try testing.expectEqualDeep(recorded.model, app_state.model);
     try testing.expectEqual(recorded.fingerprint, harness.runtime.sessionStateFingerprint());
     // Nothing is left occupied: the fed exit retired the parked spawn.

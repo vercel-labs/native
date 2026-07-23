@@ -59,15 +59,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             .output => {
                 model.session.feed(event.bytes);
                 const answers = model.session.pendingResponses();
-                if (answers.len > 0) fx.ptyWrite(shell_key, answers);
+                if (answers.len > 0) _ = fx.ptyWrite(shell_key, answers);
                 model.session.clearResponses();
             },
             // The exactly-one terminal: exited, signaled, cancelled,
             // rejected, or spawn_failed.
             .exit => model.phase = if (event.reason == .exited) .ended else .failed,
+            // Write-admission verdicts are journal/replay machinery;
+            // they never arrive as events.
+            .write => unreachable,
         },
-        // Typed text goes straight to the child's stdin.
-        .text => |event| fx.ptyWrite(shell_key, event.text),
+        // Typed text goes straight to the child's stdin. `ptyWrite`
+        // returns whether the payload was accepted whole — a caller
+        // that must not lose bytes retains a refused payload and
+        // retries as the child reads (see the example's outbound ring).
+        .text => |event| _ = fx.ptyWrite(shell_key, event.text),
         .viewport => |size| {
             model.session.resize(size.cols, size.rows);
             fx.ptyResize(shell_key, size.cols, size.rows);
@@ -96,7 +102,7 @@ The full app lives in [`examples/terminal`](https://github.com/native-sdk/native
     </tr>
     <tr>
       <td><code>ptyWrite</code></td>
-      <td>Bytes toward the child's stdin (keystrokes, pastes, query answers). Journaled as command payloads, so replay reproduces them for free.</td>
+      <td>Bytes toward the child's stdin (keystrokes, pastes, query answers), all-or-nothing: returns whether the payload was accepted, so a caller that must not lose bytes retains a refusal and retries. Journaled as command payloads — verdicts included — so replay reproduces them for free.</td>
     </tr>
     <tr>
       <td><code>ptyResize</code></td>
@@ -141,7 +147,7 @@ Scrollback windows the viewport through the emulator's page list; keyboard-first
 
 The output bytes **are** the effect result, and the session journal treats them the way [dynamic images](/dynamic-images) treat decoded pixels. When a recorded session streams pty output, each batch's bytes are written — at effect-result time — into the content-addressed blob store beside the journal (`blobs/<sha256[..16]>`), and the journal record carries the hash and length. Identical batches (a repeated prompt, a redrawn screen) share one blob.
 
-**Replay never spawns a process.** The `ptySpawn` is an ordinary replayed dispatch that parks the pty (the key registers as live; `ptyWrite`/`ptyResize`/`ptyKill` become inert — the recorded output already carries their consequences), and the journaled output batches and exit feed verbatim: the blob store supplies the bytes, the emulator re-runs the same VT parsing, and the fingerprint checkpoints verify the replayed grid against the recording frame by frame. A journal whose `blobs/` directory is missing or damaged refuses loudly rather than replaying a different session.
+**Replay never spawns a process.** The `ptySpawn` is an ordinary replayed dispatch that parks the pty (the key registers as live; `ptyWrite`/`ptyResize`/`ptyKill` send nothing — the recorded output already carries their consequences), and the journaled output batches and exit feed verbatim: the blob store supplies the bytes, the emulator re-runs the same VT parsing, and the fingerprint checkpoints verify the replayed grid against the recording frame by frame. `ptyWrite` admission verdicts are journaled too — whether the outbound buffer had room is executor truth, like the bytes themselves — so a replayed write returns exactly what the live one did and an app that retains refused input takes the identical path. A journal whose `blobs/` directory is missing or damaged refuses loudly rather than replaying a different session.
 
 ```sh
 NATIVE_SDK_SESSION_RECORD=session/app.journal native run   # records blobs/ beside the journal

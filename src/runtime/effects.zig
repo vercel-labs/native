@@ -961,6 +961,13 @@ pub const max_effect_pty_write_capture_bytes: usize = 4096;
 pub const EffectPtyEventKind = enum(u8) {
     output,
     exit,
+    /// Journal-only: one `ptyWrite` admission verdict (accepted rides the
+    /// record's `code`, 1/0). The verdict is EXECUTOR TRUTH — whether the
+    /// outbound FIFO and record ring had room depends on how fast the
+    /// child was reading — so replay must feed the recorded verdicts
+    /// rather than recompute them against a fake with no child. Never
+    /// delivered as an event: no `EffectPtyEvent` ever carries this kind.
+    write,
 };
 
 /// Payload for `on_event` Msg constructors of pty effects. `bytes` is
@@ -1724,6 +1731,11 @@ pub const EffectResultKind = enum(u8) {
 /// Bounded like everything else: more reads per drain window than this
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
+/// Replay-queued `ptyWrite` verdicts held between drains. One dispatch
+/// can legitimately issue hundreds of writes (a large paste drained in
+/// per-write-bound chunks, refused chunks retried within the same
+/// update), so the bound is generous; a bitset keeps it one bit each.
+pub const max_effect_replay_pty_write_entries: usize = 4096;
 
 /// Inline capacity of the replayed video cascade-resolution queue
 /// (`Effects.pushReplayVideoSource`). Records precede the event whose
@@ -3907,15 +3919,17 @@ pub fn Effects(comptime Msg: type) type {
         /// the staging FIFO, and the services snapshot at
         /// `wake_snapshot`). Defaults to `process_allocator`, and
         /// any replacement MUST delegate every allocation it does not
-        /// refuse to `process_allocator`'s backing: retire and teardown
-        /// free the header/FIFO storage through `process_allocator`
-        /// directly (the snapshot is created AND destroyed through this
-        /// seam, which is what lets the snapshot lifetime tests count
-        /// it). Swap seam for the channel start-failure and
-        /// snapshot-lifetime tests — `loadImage` stages its source
-        /// buffer from the app allocator, so its failure tests inject
-        /// there; channel storage is process-lifetime and needs this
-        /// explicit seam.
+        /// refuse to `process_allocator`'s backing: CHANNEL retire and
+        /// teardown free the header/FIFO storage through
+        /// `process_allocator` directly (the snapshot is created AND
+        /// destroyed through this seam, which is what lets the snapshot
+        /// lifetime tests count it). Pty session buffers (staging ring,
+        /// outbound block) allocate AND free through this seam, so a
+        /// tracking or arena replacement sees its own frees. Swap seam
+        /// for the channel start-failure and snapshot-lifetime tests —
+        /// `loadImage` stages its source buffer from the app allocator,
+        /// so its failure tests inject there; channel storage is
+        /// process-lifetime and needs this explicit seam.
         channel_storage_allocator: std.mem.Allocator = process_allocator,
         /// Session-record sink: every drain-delivered result is reported
         /// here (loop thread, right before its Msg runs through
@@ -3942,6 +3956,21 @@ pub fn Effects(comptime Msg: type) type {
         /// divergence signal (the replayed update read the clock more
         /// often than the recorded one). Reported loudly once.
         replay_clock_underflows: u64 = 0,
+        /// Journaled `ptyWrite` admission verdicts queued for replay-mode
+        /// writes (FIFO; fed from `.pty`/`.write` records before the
+        /// consuming event dispatches — the `replay_clock` shape). The
+        /// verdict is executor truth: live it depends on how fast the
+        /// child drained the outbound FIFO, so a replayed write must take
+        /// the RECORDED path — retaining or removing the app's pending
+        /// bytes exactly as the live run did — never an optimistic
+        /// recomputation against a fake with no child.
+        replay_pty_write_verdicts: std.StaticBitSet(max_effect_replay_pty_write_entries) = .initEmpty(),
+        replay_pty_write_head: usize = 0,
+        replay_pty_write_len: usize = 0,
+        /// Replay writes that found no journaled verdict: a divergence
+        /// signal (the replayed update wrote more often than the recorded
+        /// one). Reported loudly once.
+        replay_pty_write_underflows: u64 = 0,
         /// Journaled launch-env deliveries queued for the replay-mode
         /// envMsgs dispatch (FIFO; fed from `.env` records before the
         /// installing event dispatches). Empty under replay means the
@@ -5215,6 +5244,38 @@ pub fn Effects(comptime Msg: type) type {
             const index = (self.replay_clock_head + self.replay_clock_len) % max_effect_replay_clock_entries;
             self.replay_clock[index] = value;
             self.replay_clock_len += 1;
+        }
+
+        /// Queue one journaled `ptyWrite` admission verdict for a
+        /// replay-mode write (the `.pty`/`.write` record feed — the
+        /// clock queue's shape).
+        pub fn pushReplayPtyWriteVerdict(self: *Self, accepted: bool) error{EffectNotFound}!void {
+            if (self.replay_pty_write_len >= max_effect_replay_pty_write_entries) return error.EffectNotFound;
+            const index = (self.replay_pty_write_head + self.replay_pty_write_len) % max_effect_replay_pty_write_entries;
+            self.replay_pty_write_verdicts.setValue(index, accepted);
+            self.replay_pty_write_len += 1;
+        }
+
+        /// Pop the next journaled write verdict for a replay-mode
+        /// `ptyWrite`. An empty queue is a divergence signal (the
+        /// replayed update wrote more often than the recording did);
+        /// reported once, answered optimistically — the fingerprint
+        /// checkpoints catch the divergence either way.
+        fn takeReplayPtyWriteVerdict(self: *Self) bool {
+            if (self.replay_pty_write_len == 0) {
+                self.replay_pty_write_underflows += 1;
+                if (self.replay_pty_write_underflows == 1 and comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "session replay: a ptyWrite found no journaled verdict - the replayed update writes more often than the recording did (nondeterministic control flow); answering accepted\n",
+                        .{},
+                    );
+                }
+                return true;
+            }
+            const accepted = self.replay_pty_write_verdicts.isSet(self.replay_pty_write_head);
+            self.replay_pty_write_head = (self.replay_pty_write_head + 1) % max_effect_replay_pty_write_entries;
+            self.replay_pty_write_len -= 1;
+            return accepted;
         }
 
         /// Journal one launch-env delivery (an `.env` record): the TS
@@ -6501,13 +6562,35 @@ pub fn Effects(comptime Msg: type) type {
         /// caller that must not lose bytes (a large paste) retains the
         /// payload on false and retries as the child reads and the FIFO
         /// drains. The truth is a single admission decision, so the caller
-        /// never has to model the byte and record limits itself. Under
-        /// session replay writes are inert (true, nothing queued): the
-        /// replayed update re-issues them deterministically and the
-        /// journaled output already contains their consequences.
+        /// never has to model the byte and record limits itself.
+        ///
+        /// The verdict is EXECUTOR TRUTH — live it depends on how fast
+        /// the child drained the FIFO — so while a session records, every
+        /// verdict journals (a `.pty`/`.write` record), and under session
+        /// replay the write is inert but RETURNS THE RECORDED VERDICT
+        /// (fed like every other executor truth, never recomputed): an
+        /// app that retains refused bytes takes the identical
+        /// retain/remove path in both runs. The journal/feed boundary is
+        /// exact: a verdict is journaled (and consumed) iff the key names
+        /// a live occupancy and the payload is non-empty — both
+        /// deterministic across the replayed dispatch stream.
         pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) bool {
             const slot = self.findPtySlot(key) orelse return false;
             if (bytes.len == 0) return true;
+            if (self.replay) return self.takeReplayPtyWriteVerdict();
+            const accepted = ptyWriteAdmit(slot, bytes);
+            self.journalNote(.{
+                .kind = .pty,
+                .key = key,
+                .pty_kind = .write,
+                .code = if (accepted) 1 else 0,
+            });
+            return accepted;
+        }
+
+        /// The admission decision behind `ptyWrite` — the live half the
+        /// journaled verdict records.
+        fn ptyWriteAdmit(slot: *PtySlot, bytes: []const u8) bool {
             if (slot.fake) {
                 if (bytes.len > max_effect_pty_write_bytes) {
                     slot.dropped_writes +|= 1;
@@ -10336,7 +10419,6 @@ pub fn Effects(comptime Msg: type) type {
         /// wait on child I/O). The `PtyShared` header stays allocated
         /// forever, the channel headers' bounded-leak invariant.
         fn retirePtySlot(self: *Self, slot: *PtySlot) void {
-            _ = self;
             if (slot.shared) |shared| {
                 shared.mutex.lock();
                 shared.open = false;
@@ -10353,8 +10435,12 @@ pub fn Effects(comptime Msg: type) type {
                 // `open`), and `ptyWrite` runs on this same loop thread —
                 // so at retire nothing reaches them. Only the small
                 // `PtyShared` header stays, the channel bounded-leak rule.
-                if (staging) |st| process_allocator.destroy(st);
-                if (outbound) |ob| process_allocator.destroy(ob);
+                // Freed through the SAME seam that allocated them
+                // (`channel_storage_allocator`): a swapped-in tracking or
+                // arena allocator must see its own frees, never a
+                // mismatched destroy against the default backing.
+                if (staging) |st| self.channel_storage_allocator.destroy(st);
+                if (outbound) |ob| self.channel_storage_allocator.destroy(ob);
             }
             if (comptime pty_transport.supported) {
                 if (slot.io_thread) |thread| {
@@ -10418,19 +10504,19 @@ pub fn Effects(comptime Msg: type) type {
             };
             staging.* = .{};
             const outbound = self.channel_storage_allocator.create(PtyOutbound) catch {
-                process_allocator.destroy(staging);
+                self.channel_storage_allocator.destroy(staging);
                 return self.failPtyStart(slot, options);
             };
             outbound.* = .{};
             const pipe = pty_transport.pipePair() catch {
-                process_allocator.destroy(outbound);
-                process_allocator.destroy(staging);
+                self.channel_storage_allocator.destroy(outbound);
+                self.channel_storage_allocator.destroy(staging);
                 return self.failPtyStart(slot, options);
             };
             var env_buffer: [pty_transport.max_env_entries]pty_transport.EnvVar = undefined;
             const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer) orelse {
-                process_allocator.destroy(outbound);
-                process_allocator.destroy(staging);
+                self.channel_storage_allocator.destroy(outbound);
+                self.channel_storage_allocator.destroy(staging);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
                 return self.failPtyStart(slot, options);
@@ -10442,8 +10528,8 @@ pub fn Effects(comptime Msg: type) type {
                 .cols = slot.cols,
                 .rows = slot.rows,
             }) catch {
-                process_allocator.destroy(outbound);
-                process_allocator.destroy(staging);
+                self.channel_storage_allocator.destroy(outbound);
+                self.channel_storage_allocator.destroy(staging);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
                 return self.failPtyStart(slot, options);
@@ -10500,8 +10586,8 @@ pub fn Effects(comptime Msg: type) type {
                     shared.owner = null;
                     shared.mutex.unlock();
                     revokeChannelWake(&shared.wake);
-                    process_allocator.destroy(staging);
-                    process_allocator.destroy(outbound);
+                    self.channel_storage_allocator.destroy(staging);
+                    self.channel_storage_allocator.destroy(outbound);
                     pty_transport.closeFd(pipe[0]);
                     pty_transport.closeFd(pipe[1]);
                     transport.kill(false);
@@ -10519,8 +10605,8 @@ pub fn Effects(comptime Msg: type) type {
                 shared.owner = null;
                 shared.mutex.unlock();
                 revokeChannelWake(&shared.wake);
-                process_allocator.destroy(staging);
-                process_allocator.destroy(outbound);
+                self.channel_storage_allocator.destroy(staging);
+                self.channel_storage_allocator.destroy(outbound);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
                 transport.kill(false);
