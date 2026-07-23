@@ -1012,13 +1012,45 @@ test "a claimed key stays claimed when its command rebuilds the tree mid-dispatc
     } });
     try harness.runtime.focusView(1, "other");
     try harness.runtime.focusView(1, "canvas");
+    // The space literal itself — exactly what a surviving carry would
+    // swallow — must flow: the grace died at blur.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
         .kind = .text_input,
-        .text = "y",
+        .text = " ",
     } });
     try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
+
+    // And the carry is KEYED: armed by a claimed Space, a DIFFERENT
+    // key's committed text arriving next (hosts that emit input-method
+    // text before its key_down can interleave one) flows instead of
+    // feeding the stale latch.
+    const rearmed_again = [_]canvas.Widget{
+        .{
+            .id = 8,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 96, 32),
+            .text = "Run",
+        },
+    };
+    var nodes_rearmed_again: [3]canvas.WidgetLayoutNode = undefined;
+    const layout_rearmed_again = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &rearmed_again }, geometry.RectF.init(0, 0, 240, 120), &nodes_rearmed_again);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout_rearmed_again);
+    harness.runtime.views[0].canvas_widget_focused_id = 8;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "q",
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.committed_count);
 }
 
 test "a widget-started composition resolves in its starting editor after focus moves" {
@@ -1567,6 +1599,238 @@ test "a programmatic focus move disarms the cancel grace like a pointer one" {
     } });
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas-a");
     try std.testing.expectEqualStrings("x", retained.findById(3).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+}
+
+test "a target-less composition owns its surface's keys - navigation and the trailing resolver stop, fresh keys flow" {
+    const TestApp = struct {
+        keydown_count: u32 = 0,
+        committed_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-ime-key-ownership", .source = platform.WebViewSource.html("<h1>K</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.target != null) return;
+                    if (keyboard_event.keyboard.phase == .key_down) self.keydown_count += 1;
+                    if (keyboard_event.keyboard.phase == .text_input) self.committed_count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    harness.runtime.views[0].focused = true;
+
+    // DURING the composition, key_downs are input-method machinery
+    // (candidate navigation): never app-level keys — a terminal mapping
+    // ArrowDown would scroll while the user is picking a candidate.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowdown",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.keydown_count);
+
+    // The commit delivers the composed text; the confirming key's own
+    // key_down TRAILS it on hosts that run the input-method filter
+    // before surfacing the key — swallowed, or Enter would also send a
+    // key the app maps (CR submitting a half-typed shell command).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.keydown_count);
+    // One-shot: a genuinely fresh Enter afterwards is an app key.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
+
+    // The cancel shape: Escape's own key_down trails the cancel it
+    // produced — swallowed once, and the next Escape flows.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\xad",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "escape",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
+
+    // The converted-commit shape: cancel, the trailing text_input (the
+    // conversion's result, delivered target-less), THEN the resolving
+    // key's key_down — still swallowed, the grace re-arms across the
+    // conversion.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8d",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "ki",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try std.testing.expectEqual(@as(u32, 3), app_state.keydown_count);
+}
+
+test "a target-less composition dies at its surface's blur - the next composition belongs to the focused editor" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-ime-targetless-blur", .source = platform.WebViewSource.html("<h1>B</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-b",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 120, 240, 120),
+    });
+    try harness.runtime.focusView(1, "canvas-a");
+
+    // A target-less composition starts (no editor focused), then focus
+    // leaves the surface WITHOUT a host cancellation and returns.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b",
+    } });
+    try harness.runtime.focusView(1, "canvas-b");
+    try harness.runtime.focusView(1, "canvas-a");
+
+    // An editor takes focus and a NEW composition begins: it belongs to
+    // the editor — a stale target-less preedit surviving the blur would
+    // claim it as a continuation and steal its commit.
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(10, 10, 160, 32), .text = "" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas-a", layout);
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_set_composition,
+        .text = "ne",
+        .composition_cursor = 2,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas-a");
+    try std.testing.expectEqualStrings("ne", retained.findById(2).?.widget.text);
+    try std.testing.expect(retained.findById(2).?.widget.text_composition != null);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_commit_composition,
+        .text = "ne",
+    } });
+    try std.testing.expectEqualStrings("ne", (try harness.runtime.canvasWidgetLayout(1, "canvas-a")).findById(2).?.widget.text);
     try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
 }
 

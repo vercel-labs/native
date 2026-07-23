@@ -112,6 +112,28 @@ pub fn canvasRenderAnimationStartNsForView(view: *const RuntimeView) u64 {
 /// `RuntimeView.canvas_widget_ime_commit_grace`).
 pub const ImeCommitGrace = enum { none, route_to_owner, swallow };
 
+/// The split-event claim carry's key (see
+/// `RuntimeView.canvas_widget_claimed_key_grace`): which claimed
+/// activation key is waiting for its own committed literal. Only the
+/// text-producing activation keys arm one — every other claimed key's
+/// commit is nothing, so there is no split to carry.
+pub const CanvasWidgetClaimedKeyGrace = enum {
+    none,
+    space,
+    enter,
+
+    /// Whether `text` is the committed literal the armed key itself
+    /// produces — the keying that stops the carry from eating a
+    /// DIFFERENT key's text.
+    pub fn coversText(self: CanvasWidgetClaimedKeyGrace, text: []const u8) bool {
+        return switch (self) {
+            .none => false,
+            .space => std.mem.eql(u8, text, " "),
+            .enter => std.mem.eql(u8, text, "\r") or std.mem.eql(u8, text, "\n"),
+        };
+    }
+};
+
 /// Blur-side IME hygiene, shared by EVERY focus-mutation entry point —
 /// the pointer-driven focus move, the programmatic `focusView`, and the
 /// window-level `clearFocusedView` blur all route here so the class is
@@ -136,12 +158,21 @@ pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
     // Enter/Space activation that moves focus before its key-up would
     // otherwise leave the carry armed to swallow the refocused view's
     // first unrelated commit.
-    view.canvas_widget_claimed_key_grace = false;
-    if (runtime.targetless_ime_commit_grace and
+    view.canvas_widget_claimed_key_grace = .none;
+    if ((runtime.targetless_ime_preedit_len > 0 or
+        runtime.targetless_ime_commit_grace or
+        runtime.targetless_ime_resolved_key_grace) and
         runtime.targetless_ime_preedit_window == view.window_id and
         std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
     {
+        // The buffered preedit dies with the grace — a live target-less
+        // composition surviving its surface's blur would hijack the
+        // next composition as a continuation
+        // (`ime_continuation_owned_targetless`) even after an editor
+        // takes focus, routing that editor's commit target-less.
+        runtime.targetless_ime_preedit_len = 0;
         runtime.targetless_ime_commit_grace = false;
+        runtime.targetless_ime_resolved_key_grace = false;
     }
 }
 
@@ -489,8 +520,13 @@ pub const RuntimeView = struct {
     /// next event. The trailing text_input then counts as claimed even
     /// though the activation may have rebuilt the tree in between —
     /// one physical keystroke never doubles into a command and a
-    /// literal character across the event split.
-    canvas_widget_claimed_key_grace: bool = false,
+    /// literal character across the event split. KEYED by which
+    /// activation key armed it: the carry swallows only that key's own
+    /// committed literal (space's " ", enter's CR/LF) — an unrelated
+    /// key's text arriving next (a second key pressed while the claimed
+    /// one is still held, on hosts that emit input-method text before
+    /// its key_down) flows instead of being eaten by a stale latch.
+    canvas_widget_claimed_key_grace: CanvasWidgetClaimedKeyGrace = .none,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     /// True when `canvas_widget_focus_visible_id` was written by the
     /// KEYBOARD focus contract (`setCanvasWidgetFocusFromKeyboard`) —

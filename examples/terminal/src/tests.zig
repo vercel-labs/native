@@ -131,6 +131,42 @@ test "the grid paints real text runs with theme-derived ANSI and exact truecolor
     try testing.expect(saw_exact);
 }
 
+test "a concealed row never blanks the rows painted after it" {
+    const session = try createSession(80, 6);
+    defer session.destroy();
+    // Row 0: sixty concealed cells (SGR 8) — painting emits NO text for
+    // them. Row 1: ordinary visible text.
+    session.feed("\x1b[8m" ++ ("x" ** 60) ++ "\x1b[0m\r\nvisible\r\n");
+
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // Squeeze the text store to less than the concealed row's RAW bytes
+    // (but comfortably over the visible row's): a preflight that counts
+    // suppressed bytes measures row 0 past the budget, stops painting
+    // there, and silently blanks every row after — including "visible",
+    // which fits with room to spare.
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 800, 200),
+        .tokens = .{},
+        .running = true,
+        .selecting = false,
+        .text_reserve = canvas.max_display_list_text_bytes - 32,
+    });
+    var saw_visible = false;
+    var saw_concealed = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (std.mem.indexOf(u8, text.text, "visible") != null) saw_visible = true;
+                if (std.mem.indexOf(u8, text.text, "x") != null) saw_concealed = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_visible);
+    try testing.expect(!saw_concealed);
+}
+
 test "inverse video paints text in the background color, not on itself" {
     const session = try createSession(20, 3);
     defer session.destroy();
@@ -455,6 +491,60 @@ test "IME: a preedit is provisional; only the commit reaches the pty" {
     try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "IME: composition keys never encode into the pty - navigation, the confirming enter, then fresh keys" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Candidate navigation DURING the composition: the arrow belongs to
+    // the input method, never the emulator's encoder.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "arrowdown",
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+
+    // The confirming Enter's own key_down trails the commit on hosts
+    // that run the input-method filter first: the child must see the
+    // composed bytes and NOT a CR that would submit the command early.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
+
+    // A genuinely fresh Enter afterwards encodes CR — the swallow is
+    // one keystroke, never a mode.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try testing.expectEqualStrings("\xe3\x81\x8b\r", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "a command-chorded text event never types a literal character into the pty" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
@@ -694,6 +784,29 @@ test "a query reply refused by a full ring is retained and retried, never cleare
     const written = app_state.effects.ptyWrittenBytes(1);
     try testing.expectEqual(reply_len, written.len);
     try testing.expect(std.mem.startsWith(u8, written, "\x1b["));
+}
+
+test "session exit counts retained reply bytes as loss, never silent" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // A DSR reply waits retained when the child dies: those bytes can
+    // never land, so they count as outbound loss — a zero tally over
+    // vanished bytes would misreport the session as lossless.
+    app_state.model.session.feed("\x1b[6n");
+    const reply_len = app_state.model.session.pendingResponses().len;
+    try testing.expect(reply_len > 0);
+    try app_state.effects.feedPtyExit(1, 0, 0, .exited, 0);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try testing.expectEqual(app.Phase.ended, app_state.model.phase);
+    try testing.expectEqual(@as(u64, reply_len), app_state.model.outbound_dropped);
+    try testing.expectEqual(@as(usize, 0), app_state.model.session.pendingResponses().len);
 }
 
 test "a payload the outbound ring cannot hold whole is dropped whole, never torn" {

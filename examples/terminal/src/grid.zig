@@ -26,6 +26,10 @@ pub const max_cells: usize = 7168;
 /// renderer matches rows across rebuilds and damage stays row-shaped.
 const grid_id_base: u64 = 0x7e21_0000_0000_0000;
 
+/// One text run's staging capacity — shared by the paint loop's scratch
+/// and the preflight's per-cell cap so measure and emission agree.
+const text_scratch_bytes: usize = 8192;
+
 /// One live emulator session. Heap-owned by the app (the model holds a
 /// pointer): the emulator allocates internally and its state is derived
 /// entirely from journaled inputs — fed pty bytes, resizes, and
@@ -447,7 +451,7 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     // cluster is at most a few hundred bytes, so 8 KiB is generous. The
     // run-break flushes when the buffer nears full, so long runs simply
     // split across draw commands rather than overflow.
-    var text_scratch: [8192]u8 = undefined;
+    var text_scratch: [text_scratch_bytes]u8 = undefined;
     var row_index: usize = 0;
     while (row_index < rs.row_data.len) : (row_index += 1) {
         // Command-count stop: once within one row's worst case of the
@@ -678,15 +682,27 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
 /// plus every grapheme combining mark. Used to break a run before a
 /// cell that would overflow the run scratch, and to measure a row's
 /// total for the atomic text-store stop.
+/// The bytes painting will actually EMIT for one cell — the preflight
+/// (`rowTextBytes`) sums these against the text store, so this must
+/// mirror the paint loop's suppressions exactly: an invisible-styled
+/// cell paints nothing, and a cluster's marks stop at the run scratch's
+/// capacity (the Zalgo cap). Counting suppressed bytes would measure a
+/// paintable row past the budget and silently blank every row after it.
 fn cellTextBytes(cell: anytype) usize {
     const cp: u21 = switch (cell.raw.content_tag) {
         .codepoint, .codepoint_grapheme => cell.raw.content.codepoint.data,
         else => 0,
     };
     if (cp == 0) return 0;
+    if (cell.raw.style_id != 0 and cell.style.flags.invisible) return 0;
     var n: usize = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
     if (cell.raw.content_tag == .codepoint_grapheme) {
-        for (cell.grapheme) |extra| n += std.unicode.utf8CodepointSequenceLength(extra) catch 1;
+        for (cell.grapheme) |extra| {
+            // The paint loop's mark cap, from a fresh buffer (an
+            // oversized cell always restarts one): stop where it stops.
+            if (n + 8 > text_scratch_bytes) break;
+            n += std.unicode.utf8CodepointSequenceLength(extra) catch 1;
+        }
     }
     return n;
 }

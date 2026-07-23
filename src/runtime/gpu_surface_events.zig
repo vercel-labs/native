@@ -482,6 +482,28 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         input_event.label,
                     );
             };
+            // The key channel's twin: hosts that run the input-method
+            // filter before surfacing the key deliver the RESOLVING
+            // keystroke's own key_down right after the commit/cancel it
+            // produced, textless — that key belongs to the input method
+            // (the Enter that confirmed a candidate must not also reach
+            // the app-level key fallback and send CR to a terminal).
+            // One-shot, armed at the resolution below; any other event
+            // disarms (hosts that surface the key BEFORE the resolution
+            // are absorbed by the composition-active gate at the
+            // fallback instead).
+            const targetless_resolved_key = grace: {
+                if (!self.targetless_ime_resolved_key_grace) break :grace false;
+                self.targetless_ime_resolved_key_grace = false;
+                break :grace input_event.kind == .key_down and
+                    input_event.text.len == 0 and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    );
+            };
             var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned or ime_grace_swallow or targetless_commit_grace)
                 null
             else
@@ -528,14 +550,27 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // against a tree the activation already rebuilt (see
                 // `canvas_widget_claimed_key_grace`).
                 const split_claim = self.views[index].canvas_widget_claimed_key_grace;
-                self.views[index].canvas_widget_claimed_key_grace = false;
-                if (split_claim and input_event.kind == .text_input) break :blk true;
+                self.views[index].canvas_widget_claimed_key_grace = .none;
+                // KEYED: the carry swallows only the armed key's OWN
+                // committed literal. A different key's text arriving
+                // first (a second key pressed while the claimed one is
+                // held, on hosts that emit input-method text before its
+                // key_down) must flow, not feed a stale latch.
+                if (input_event.kind == .text_input and split_claim.coversText(input_event.text)) break :blk true;
                 const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
                 // Arm the carry when this claimed key_down brought no
                 // text of its own — its committed character may follow
-                // as a separate event.
+                // as a separate event. Only the text-producing
+                // activation keys arm one; other claimed keys commit
+                // nothing, so there is nothing to carry.
                 if (claimed and input_event.kind == .key_down and input_event.text.len == 0) {
-                    self.views[index].canvas_widget_claimed_key_grace = true;
+                    self.views[index].canvas_widget_claimed_key_grace =
+                        if (std.ascii.eqlIgnoreCase(input_event.key, "space"))
+                            .space
+                        else if (std.ascii.eqlIgnoreCase(input_event.key, "enter"))
+                            .enter
+                        else
+                            .none;
                 }
                 break :blk claimed;
             };
@@ -584,7 +619,25 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // dismissed a surface was consumed by the dismissal and
                 // never falls through.
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
+                    // A live composition owns its surface's keyboard:
+                    // while this surface holds a target-less preedit,
+                    // every key_down is input-method machinery —
+                    // candidate-navigation arrows and Backspace, and the
+                    // confirming Enter on hosts that surface the key
+                    // before the commit — never an app-level key (a
+                    // terminal mapping Enter to CR would submit the
+                    // half-composed command). The key that RESOLVED the
+                    // composition may trail its commit/cancel instead
+                    // (`targetless_resolved_key`); both shapes stop here.
+                    const composition_owns_key = targetless_resolved_key or
+                        (self.targetless_ime_preedit_len > 0 and
+                            self.targetless_ime_preedit_window == input_event.window_id and
+                            std.mem.eql(
+                                u8,
+                                self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                                input_event.label,
+                            ));
+                    if (self.views[index].kind == .gpu_surface and self.views[index].focused and !composition_owns_key) {
                         try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                             .window_id = input_event.window_id,
                             .view_label = self.views[index].label,
@@ -635,6 +688,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         // a composition in progress.
                         if (canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event)) break :blk null;
                         if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        // A converted commit's trailing insert is still a
+                        // composition resolution: the resolving key's own
+                        // key_down follows IT on the hosts that surface
+                        // the key after the input-method filter ran.
+                        if (targetless_commit_grace) self.targetless_ime_resolved_key_grace = true;
                         break :blk if (input_event.text.len > 0) input_event.text else null;
                     },
                     // A key_down CARRYING text is the other committed-text
@@ -691,7 +749,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                             self.targetless_ime_preedit[0..self.targetless_ime_preedit_len]
                         else
                             "";
-                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        if (owns_preedit) {
+                            self.targetless_ime_preedit_len = 0;
+                            // The resolving key's own key_down may trail
+                            // this commit (`targetless_resolved_key`).
+                            self.targetless_ime_resolved_key_grace = true;
+                        }
                         break :blk if (text.len > 0) text else null;
                     },
                     .ime_cancel_composition => blk: {
@@ -703,6 +766,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                             // surface's composition. A plain cancel's
                             // own key_down disarms it.
                             self.targetless_ime_commit_grace = true;
+                            // And the cancelling key's own key_down may
+                            // trail the cancel (Escape ending a
+                            // composition must not ALSO send ESC).
+                            self.targetless_ime_resolved_key_grace = true;
                         }
                         break :blk null;
                     },

@@ -217,10 +217,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.dropped_writes = event.dropped_writes;
                 // The child is gone: bytes still queued can never land —
                 // drop them COUNTED (they are outbound loss like any
-                // other), and drop retained emulator replies too, or the
-                // frame pump would retry flushing them against the dead
-                // key until restart.
+                // other), and drop retained emulator replies too — ALSO
+                // counted (a DSR reply the full ring retained is outbound
+                // loss the same way) — or the frame pump would retry
+                // flushing them against the dead key until restart.
                 model.outbound_dropped += model.outbound_len;
+                model.outbound_dropped += model.session.pendingResponses().len;
                 model.outbound_head = 0;
                 model.outbound_len = 0;
                 model.session.clearResponses();

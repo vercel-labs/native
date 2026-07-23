@@ -364,6 +364,15 @@ pub const Runtime = struct {
     /// the preedit owner fields above) rather than into whichever text
     /// widget holds focus by then. One-shot: any other event disarms it.
     targetless_ime_commit_grace: bool = false,
+    /// The key channel's twin of the commit grace: armed when the owning
+    /// surface's target-less composition RESOLVES (commit, cancel, or a
+    /// converted commit's trailing text_input), because hosts that run
+    /// the input method filter before surfacing the key deliver the
+    /// resolving keystroke's own key_down AFTER the resolution, textless
+    /// — and that key belongs to the input method (the Enter that
+    /// confirmed a candidate must not also reach the app-level key
+    /// fallback as a key). One-shot: any other event disarms it.
+    targetless_ime_resolved_key_grace: bool = false,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
