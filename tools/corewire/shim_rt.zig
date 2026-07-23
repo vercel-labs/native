@@ -191,7 +191,13 @@ pub const Reader = struct {
 /// dispatch path).
 pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T {
     switch (@typeInfo(T)) {
-        .bool => return reader.take(1)[0] != 0,
+        .bool => {
+            const raw = reader.take(1)[0];
+            if (raw > 1) {
+                @panic("a core buffer carries a boolean discriminant past 1 — the compiled core and the generated shim disagree about a type's layout; rebuild the app so both come from one compile");
+            }
+            return raw == 1;
+        },
         .int => {
             comptime std.debug.assert(T == i64);
             return @bitCast(reader.int(u64));
@@ -210,6 +216,9 @@ pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T
         .optional => |info| {
             const present = reader.take(1)[0];
             if (present == 0) return null;
+            if (present != 1) {
+                @panic("a core buffer carries a presence discriminant past 1 — the compiled core and the generated shim disagree about a type's layout; rebuild the app so both come from one compile");
+            }
             return decode(info.child, reader, allocator);
         },
         .pointer => |info| switch (info.size) {

@@ -114,10 +114,10 @@ const Emitter = struct {
     fn validateEmissionNames(self: *Emitter) Error!void {
         var reserved: std.ArrayListUnmanaged([]const u8) = .empty;
         try reserved.appendSlice(self.arena, &.{
-            "std",                 "shim_rt",       "core_abi",        "abi",
-            "rt",                  "msg_tags",      "boot",            "initialModel",
-            "update",              "UpdateResult",  "commitModelRoot", "sidecar_build_id",
-            "sidecar_abi_version", "deterministic", "async_free",      "snapshotModel",
+            "std",           "shim_rt",         "core_abi",         "abi",
+            "rt",            "msg_tags",        "boot",             "initialModel",
+            "update",        "commitModelRoot", "sidecar_build_id", "sidecar_abi_version",
+            "deterministic", "async_free",      "snapshotModel",
         });
         // Optional glue reserves its name only when it is emitted.
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
@@ -126,6 +126,7 @@ const Emitter = struct {
             try reserved.append(self.arena, "msgFromWire");
         }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
+        if (self.sidecar.update_returns_cmd) try reserved.append(self.arena, "UpdateResult");
         if (self.sidecar.has_subscriptions) try reserved.append(self.arena, "subscriptions");
         if (self.sidecar.channels.command_msg) try reserved.append(self.arena, "commandMsg");
         if (self.sidecar.channels.frame_msg) try reserved.appendSlice(self.arena, &.{ "frameMsg", "FrameEvent" });
@@ -145,13 +146,32 @@ const Emitter = struct {
             self.diags.flag("msg.name", "message union name \"{s}\" collides with another declaration of the generated shim; rename the union in the core source", .{self.sidecar.msg.name});
         }
         // Helper methods share the model struct's member namespace with
-        // its fields.
+        // its fields — and "view_unbound" is the opt-out tuple's
+        // spelling, which every reflecting consumer reads as data, so a
+        // helper must never take it.
         if (sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model)) |model| {
             for (self.sidecar.model_helpers) |helper| {
+                if (std.mem.eql(u8, helper.name, "view_unbound")) {
+                    self.diags.flag("model_helpers", "helper \"view_unbound\" takes the unbound-list declaration's spelling — the contract reflection reads that name as the opt-out tuple; rename the helper in the core source", .{});
+                }
                 for (model.fields) |field| {
                     if (std.mem.eql(u8, helper.name, field.name)) {
                         self.diags.flag("model_helpers", "helper \"{s}\" collides with the model field of the same name — the mirror declares helpers as model methods, one member namespace; rename one in the core source", .{helper.name});
                     }
+                }
+            }
+            if (self.sidecar.model_unbound.len > 0) {
+                for (model.fields) |field| {
+                    if (std.mem.eql(u8, field.name, "view_unbound")) {
+                        self.diags.flag("model_unbound", "the model field \"view_unbound\" collides with the unbound-list declaration the mirror must make; rename the field in the core source", .{});
+                    }
+                }
+            }
+        }
+        if (self.sidecar.msg.unbound.len > 0) {
+            for (self.sidecar.msg.arms) |arm| {
+                if (std.mem.eql(u8, arm.name, "view_unbound")) {
+                    self.diags.flag("msg.unbound", "the message arm \"view_unbound\" collides with the unbound-list declaration the mirror must make; rename the arm in the core source", .{});
                 }
             }
         }
@@ -519,17 +539,34 @@ const Emitter = struct {
     fn entryPoints(self: *Emitter) Error!void {
         const model_name = try std.fmt.allocPrint(self.arena, "{f}", .{ident(self.sidecar.model)});
 
-        // Boot. Identity first (pure getters, the staleness fence),
-        // then the sink, then init — the ABI's required ordering.
-        try self.print(
+        // Boot. Export attestation first (V11's link-time half: the
+        // bindings resolve lazily, so referencing every attested
+        // symbol here turns a missing export into a LINK failure
+        // instead of a latent hole), then identity (pure getters, the
+        // staleness fence), then the sink, then init — the ABI's
+        // required ordering.
+        try self.raw(
             \\
-            \\fn boot() void {{
+            \\fn boot() void {
+            \\    referenceAttestedExports();
             \\    shim_rt.verifyIdentity(abi.abi_version_fn(), abi.build_id(), sidecar_abi_version, sidecar_build_id);
             \\    abi.set_panic_sink(shim_rt.panicSink, null);
             \\    abi.init();
-            \\}}
+            \\}
             \\
-        , .{});
+            \\/// The sidecar's abi.exports list is a biconditional attestation:
+            \\/// every listed symbol exists in the object. Referencing each one
+            \\/// makes the linker prove the "exists" direction against the real
+            \\/// binary (a checker proves list shape; only a link can prove
+            \\/// symbols).
+            \\fn referenceAttestedExports() void {
+            \\
+        );
+        for (self.sidecar.abi.exports) |suffix| {
+            const binding = if (std.mem.eql(u8, suffix, "abi_version")) "abi_version_fn" else suffix;
+            try self.print("    std.mem.doNotOptimizeAway(abi.{f});\n", .{ident(binding)});
+        }
+        try self.raw("}\n");
 
         if (self.sidecar.init_returns_cmd) {
             try self.print(
@@ -671,9 +708,15 @@ const Emitter = struct {
         }
     }
 
-    /// A union payload carrying exactly the eleven text-input event
-    /// tags routes through the dedicated dispatch entry — the same
-    /// structural recognition the markup engines apply.
+    /// A union payload declaring the text-input event shape routes
+    /// through the dedicated dispatch entry — the same structural
+    /// recognition the markup engines apply (ui_markup_reflect's
+    /// declaredTextInputUnion, restated over sidecar data): exactly the
+    /// eleven tags, insert_text a bytes payload, the seven verb arms
+    /// void, move_caret a caret-move record, set_selection a numeric
+    /// anchor/focus record, set_composition a bytes-text plus optional
+    /// numeric cursor record. Anything short of the full shape is an
+    /// ordinary union payload on the record entry.
     fn isTextInputUnion(self: *Emitter, type_name: []const u8) bool {
         const entry = sidecar_mod.findUnion(self.sidecar.types, type_name) orelse return false;
         if (entry.arms.len != text_input_event_tags.len) return false;
@@ -683,7 +726,87 @@ const Emitter = struct {
             }
             return false;
         }
+        for (entry.arms) |arm| {
+            if (std.mem.eql(u8, arm.name, "insert_text")) {
+                if (arm.payload != .bytes) return false;
+            } else if (std.mem.eql(u8, arm.name, "move_caret")) {
+                if (!self.isCaretMoveRecord(arm.payload)) return false;
+            } else if (std.mem.eql(u8, arm.name, "set_selection")) {
+                if (!self.isSelectionRecord(arm.payload)) return false;
+            } else if (std.mem.eql(u8, arm.name, "set_composition")) {
+                if (!self.isCompositionRecord(arm.payload)) return false;
+            } else if (arm.payload != .void) {
+                return false;
+            }
+        }
         return true;
+    }
+
+    fn recordOf(self: *Emitter, ref: TypeRef) ?*const sidecar_mod.Struct {
+        return switch (ref) {
+            .node, .value => |name| sidecar_mod.findStruct(self.sidecar.types, name),
+            else => null,
+        };
+    }
+
+    fn isNumericRef(ref: TypeRef) bool {
+        return ref == .f64 or ref == .i64;
+    }
+
+    fn isCaretMoveRecord(self: *Emitter, ref: TypeRef) bool {
+        const record = self.recordOf(ref) orelse return false;
+        if (record.fields.len != 2) return false;
+        const caret_members = [_][]const u8{ "previous", "next", "previous_word", "next_word", "start", "end" };
+        var direction_ok = false;
+        var extend_ok = false;
+        for (record.fields) |field| {
+            if (std.mem.eql(u8, field.name, "extend")) {
+                extend_ok = field.type == .bool;
+            } else if (std.mem.eql(u8, field.name, "direction")) {
+                const members = switch (field.type) {
+                    .enum_ref => |name| (sidecar_mod.findEnum(self.sidecar.types, name) orelse return false).members,
+                    else => return false,
+                };
+                if (members.len != caret_members.len) return false;
+                outer: for (caret_members) |member| {
+                    for (members) |declared| {
+                        if (std.mem.eql(u8, declared, member)) continue :outer;
+                    }
+                    return false;
+                }
+                direction_ok = true;
+            }
+        }
+        return direction_ok and extend_ok;
+    }
+
+    fn isSelectionRecord(self: *Emitter, ref: TypeRef) bool {
+        const record = self.recordOf(ref) orelse return false;
+        if (record.fields.len != 2) return false;
+        var anchor_ok = false;
+        var focus_ok = false;
+        for (record.fields) |field| {
+            if (std.mem.eql(u8, field.name, "anchor")) anchor_ok = isNumericRef(field.type);
+            if (std.mem.eql(u8, field.name, "focus")) focus_ok = isNumericRef(field.type);
+        }
+        return anchor_ok and focus_ok;
+    }
+
+    fn isCompositionRecord(self: *Emitter, ref: TypeRef) bool {
+        const record = self.recordOf(ref) orelse return false;
+        if (record.fields.len != 2) return false;
+        var text_ok = false;
+        var cursor_ok = false;
+        for (record.fields) |field| {
+            if (std.mem.eql(u8, field.name, "text")) text_ok = field.type == .bytes;
+            if (std.mem.eql(u8, field.name, "cursor")) {
+                cursor_ok = switch (field.type) {
+                    .optional => |inner| isNumericRef(inner.*),
+                    else => false,
+                };
+            }
+        }
+        return text_ok and cursor_ok;
     }
 
     /// Declaration-order field indexes of a scroll-state record, in the
@@ -1107,6 +1230,92 @@ test "optional glue names are reserved only when the glue is emitted" {
     );
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const callHelper = enum(u8) {") != null);
+}
+
+test "UpdateResult reserves only when the cmd-returning update emits it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"update_returns_cmd\": true", "\"update_returns_cmd\": false");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"enums\": []", "\"enums\": [{\"name\": \"UpdateResult\", \"members\": [\"a\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"UpdateResult\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const UpdateResult = enum(u8) {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+}
+
+test "a helper named view_unbound refuses with a teaching" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"view_unbound\", \"params\": [], \"returns\": {\"kind\": \"bool\"}, \"arena\": false}]",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "opt-out tuple") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "a text-input-named union without the payload shapes rides the record entry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Eleven right names, wrong insert_text payload (void): the markup
+    // predicate would not bind this as text input, so dispatch must
+    // not route it to the text_input entry either.
+    var arms: std.ArrayListUnmanaged(u8) = .empty;
+    const tags = [_][]const u8{
+        "insert_text",         "delete_backward",    "delete_forward",     "delete_word_backward",
+        "delete_word_forward", "clear",              "move_caret",         "set_selection",
+        "set_composition",     "commit_composition", "cancel_composition",
+    };
+    for (tags, 0..) |tag, index| {
+        if (index > 0) try arms.appendSlice(arena, ", ");
+        const one = try std.fmt.allocPrint(arena, "{{\"name\": \"{s}\", \"payload\": {{\"kind\": \"void\"}}}}", .{tag});
+        try arms.appendSlice(arena, one);
+    }
+    const union_entry = try std.fmt.allocPrint(arena, "\"unions\": [{{\"name\": \"NotTextInput\", \"arms\": [{s}]}}]", .{arms.items});
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"unions\": []", union_entry);
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"union\", \"name\": \"NotTextInput\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_record(0,") != null);
+    // No arm may route through the text-input entry (the attestation
+    // block still references the symbol; only dispatch matters here).
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_text_input(0,") == null);
+}
+
+test "boot references every attested export so the link proves the set" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const generated = try emitFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, generated, "fn referenceAttestedExports() void {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "std.mem.doNotOptimizeAway(abi.collect);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "std.mem.doNotOptimizeAway(abi.abi_version_fn);") != null);
+    // Unwired channel entries are NOT attested and must not be
+    // referenced (their absence in the object is the valid state).
+    try testing.expect(std.mem.indexOf(u8, generated, "doNotOptimizeAway(abi.key_msg)") == null);
 }
 
 test "the shim restates the module-graph attestations" {
