@@ -940,6 +940,45 @@ test "a claimed key stays claimed when its command rebuilds the tree mid-dispatc
     } });
     try std.testing.expect(app_state.activations > 0);
     try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // The SPLIT-EVENT shape (AppKit/Windows): the claimed key_down
+    // carries no text and the committed character follows as a separate
+    // event — the claim must carry across the split, because the
+    // activation already rebuilt the tree by the time the text arrives.
+    const again = [_]canvas.Widget{
+        .{
+            .id = 4,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 96, 32),
+            .text = "Run",
+        },
+    };
+    var nodes_again: [3]canvas.WidgetLayoutNode = undefined;
+    const layout_again = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &again }, geometry.RectF.init(0, 0, 240, 120), &nodes_again);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout_again);
+    harness.runtime.views[0].canvas_widget_focused_id = 4;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = " ",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // The carry is ONE-SHOT: ordinary typing afterwards still flows.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "x",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
 }
 
 test "a widget-started composition resolves in its starting editor after focus moves" {

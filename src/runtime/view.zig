@@ -122,10 +122,14 @@ pub const ImeCommitGrace = enum { none, route_to_owner, swallow };
 /// the one focused now, so the grace and its owner pin die at blur (the
 /// target-less twin too, when the blurred view owns it).
 pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
-    if (view.canvas_widget_ime_commit_grace != .none) {
-        view.canvas_widget_ime_commit_grace = .none;
-        view.canvas_widget_ime_owner_id = 0;
-    }
+    // The owner pin clears UNCONDITIONALLY, not only when a grace is
+    // armed: an active (never-cancelled) composition's owner surviving
+    // a view blur would redirect post-refocus input to the stale editor
+    // (the text_input-prefers-owner routing). A composition does not
+    // outlive its view's focus — hosts cancel on blur, and where one
+    // does not, the pin must die here.
+    view.canvas_widget_ime_commit_grace = .none;
+    view.canvas_widget_ime_owner_id = 0;
     if (runtime.targetless_ime_commit_grace and
         runtime.targetless_ime_preedit_window == view.window_id and
         std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
@@ -471,6 +475,15 @@ pub const RuntimeView = struct {
     /// plain Escape cancel is followed by its own key_down, which
     /// disarms the grace before the user's next typing could misroute.
     canvas_widget_ime_commit_grace: ImeCommitGrace = .none,
+    /// One-shot claim carry for hosts that deliver a claimed key_down
+    /// and its committed text as SEPARATE events (AppKit, Windows —
+    /// unlike GTK's key-with-text): armed when a textless key_down was
+    /// structurally claimed by the focused widget, consumed by the very
+    /// next event. The trailing text_input then counts as claimed even
+    /// though the activation may have rebuilt the tree in between —
+    /// one physical keystroke never doubles into a command and a
+    /// literal character across the event split.
+    canvas_widget_claimed_key_grace: bool = false,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     /// True when `canvas_widget_focus_visible_id` was written by the
     /// KEYBOARD focus contract (`setCanvasWidgetFocusFromKeyboard`) —

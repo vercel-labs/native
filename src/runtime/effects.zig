@@ -2015,6 +2015,11 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     shared.reaping = true;
     shared.mutex.unlock();
     const exit = transport.reapEnding();
+    // Every session end is also a cheap moment to settle earlier
+    // surrendered reaps whose children have since died — with the
+    // spawn-entry and teardown polls, a recovered child is reaped at
+    // the next pty activity of any kind.
+    pty_transport.reapSurrendered();
     // A spawn whose exec probe timed out unresolved carries its status
     // pipe here: the failure byte (written before the child's _exit) is
     // readable exactly now, so a late exec failure still reports

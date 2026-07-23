@@ -92,6 +92,7 @@ pub const Model = struct {
     session: *grid.Session,
     phase: Phase = .starting,
     exit_code: i32 = 0,
+    exit_signal: i32 = 0,
     exit_reason: native_sdk.EffectExitReason = .exited,
     cols: u16 = 80,
     rows: u16 = 24,
@@ -206,13 +207,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             .exit => {
                 model.phase = if (event.reason == .rejected or event.reason == .spawn_failed) .failed else .ended;
                 model.exit_code = event.code;
+                model.exit_signal = event.signal;
                 model.exit_reason = event.reason;
                 model.dropped_writes = event.dropped_writes;
-                // The child is gone: bytes still queued can never land, so
-                // drop them rather than spin retrying against a dead key
-                // (a restart resets these anyway).
+                // The child is gone: bytes still queued can never land —
+                // drop them COUNTED (they are outbound loss like any
+                // other), and drop retained emulator replies too, or the
+                // frame pump would retry flushing them against the dead
+                // key until restart.
+                model.outbound_dropped += model.outbound_len;
                 model.outbound_head = 0;
                 model.outbound_len = 0;
+                model.session.clearResponses();
             },
             // Write-admission verdicts are journal-only (replay
             // machinery); the engine never delivers one as an event.
@@ -557,11 +563,13 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
     // encoding an Alt-F escape here too would double the input (the
     // child would see both). On macOS, Option composes; everywhere else
     // Alt is Meta (ESC prefix, no composed text) — EXCEPT Ctrl+Alt
-    // together, which Windows uses to represent AltGr: that combination
-    // composes text (AltGr+Q commits `@` through the text channel), so
-    // encoding it as a Ctrl+Alt chord would send wrong bytes AND
-    // shadow the composed character.
-    const altgr = event.modifiers.control and event.modifiers.alt and builtin.os.tag != .macos;
+    // together ON WINDOWS, which is how that host represents AltGr:
+    // the combination composes text there (AltGr+Q commits `@` through
+    // the text channel), so encoding it as a chord would send wrong
+    // bytes AND shadow the composed character. Linux keeps Ctrl+Alt as
+    // a genuine chord — its AltGr is a distinct modifier that never
+    // reports as ctrl+alt, so Ctrl+Alt+C must still encode.
+    const altgr = event.modifiers.control and event.modifiers.alt and builtin.os.tag == .windows;
     const alt_is_chord = event.modifiers.alt and builtin.os.tag != .macos;
     const chorded = (event.modifiers.control or event.modifiers.super or alt_is_chord) and !altgr;
     if (!chorded) return null;
@@ -663,8 +671,9 @@ fn statusView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
     // vanish silently.
     const replies_dropped = model.session.responses_dropped;
     const outbound_dropped = model.outbound_dropped;
-    const tally = if (replies_dropped > 0 or outbound_dropped > 0)
-        ui.fmt("{d} batches / {d} bytes - {d} replies, {d} outbound dropped", .{ model.output_batches, model.output_bytes, replies_dropped, outbound_dropped })
+    const writes_dropped = model.dropped_writes;
+    const tally = if (replies_dropped > 0 or outbound_dropped > 0 or writes_dropped > 0)
+        ui.fmt("{d} batches / {d} bytes - {d} replies, {d} outbound, {d} writes dropped", .{ model.output_batches, model.output_bytes, replies_dropped, outbound_dropped, writes_dropped })
     else
         ui.fmt("{d} batches / {d} bytes", .{ model.output_batches, model.output_bytes });
     return ui.row(.{ .height = status_height, .padding = 6, .gap = 12, .cross = .center }, .{
@@ -684,7 +693,11 @@ fn statusText(ui: *TerminalUi, model: *const Model) []const u8 {
             ui.fmt("copied {d} bytes", .{model.copied_bytes})
         else
             "cmd+shift+space selects - cmd+arrows scroll",
-        .ended => ui.fmt("exited ({d}) - cmd+R restarts", .{model.exit_code}),
+        .ended => switch (model.exit_reason) {
+            .signaled => ui.fmt("ended by signal {d} - cmd+R restarts", .{model.exit_signal}),
+            .cancelled => "cancelled - cmd+R restarts",
+            else => ui.fmt("exited ({d}) - cmd+R restarts", .{model.exit_code}),
+        },
         .failed => "shell failed to start - cmd+R retries",
     };
 }

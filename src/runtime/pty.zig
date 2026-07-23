@@ -261,17 +261,34 @@ pub const Pty = struct {
     pub fn reapEnding(self: Pty) Exit {
         if (!supported) return .{ .code = -1, .signal = 0 };
         if (self.reap()) |exit| return exit;
-        // Still running: hang it up, then escalate.
+        // Still running: hang it up, then escalate. The grace windows
+        // are MONOTONIC DEADLINES, not sleep counts: `usleep` returns
+        // early on EINTR, so counting iterations would let an
+        // embedder's frequent non-restarting signals collapse the
+        // windows and SIGKILL a child that would have exited cleanly
+        // within the documented grace. (A missing clock — not expected
+        // on macOS/Linux — degrades to iteration counting rather than
+        // spinning forever.)
         _ = c.kill(-self.pid, sighup);
         _ = c.kill(self.pid, sighup);
-        var waited_us: usize = 0;
-        while (waited_us < 500_000) : (waited_us += 10_000) {
+        const start_ns = clock.monotonicNanoseconds();
+        const clock_ok = start_ns != 0;
+        var iterations: usize = 0;
+        var killed = false;
+        while (true) : (iterations += 1) {
+            const elapsed_ns = if (clock_ok) clock.monotonicNanoseconds() -% start_ns else iterations * 10 * std.time.ns_per_ms;
+            if (elapsed_ns >= 500 * std.time.ns_per_ms) break;
             _ = c.usleep(10_000);
             if (self.reap()) |exit| return exit;
-            if (waited_us == 200_000) {
+            if (!killed and elapsed_ns >= 200 * std.time.ns_per_ms) {
+                killed = true;
                 _ = c.kill(-self.pid, sigkill);
                 _ = c.kill(self.pid, sigkill);
             }
+        }
+        if (!killed) {
+            _ = c.kill(-self.pid, sigkill);
+            _ = c.kill(self.pid, sigkill);
         }
         // SIGKILL cannot be caught — but a child stuck in UNINTERRUPTIBLE
         // kernel I/O (a stalled mount, a wedged device) does not die
@@ -284,9 +301,15 @@ pub const Pty = struct {
         // (WNOHANG), so a child that dies when its mount recovers is
         // reaped then rather than zombieing for the process's life.
         // Nothing signals the pid after this (`reaping` stays
-        // published).
-        waited_us = 0;
-        while (waited_us < 5_000_000) : (waited_us += 20_000) {
+        // published). SIGKILL is irrevocable, so the reported signaled
+        // end is EVENTUALLY TRUE — the child dies the moment its
+        // syscall returns — and the surrendered list keeps re-polling
+        // for the reap. The same monotonic-deadline rule as above.
+        const surrender_start_ns = clock.monotonicNanoseconds();
+        var surrender_iterations: usize = 0;
+        while (true) : (surrender_iterations += 1) {
+            const elapsed_ns = if (clock_ok) clock.monotonicNanoseconds() -% surrender_start_ns else surrender_iterations * 20 * std.time.ns_per_ms;
+            if (elapsed_ns >= 5 * std.time.ns_per_s) break;
             if (self.reap()) |exit| return exit;
             _ = c.usleep(20_000);
         }

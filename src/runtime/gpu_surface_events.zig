@@ -521,10 +521,23 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // keystroke would double into a command AND a literal space
             // through `on_text`.
             const committed_text_claimed = blk: {
-                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    break :blk targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
+                // Consume the split-event claim carry first: hosts that
+                // deliver the claimed key_down and its committed text as
+                // SEPARATE events would otherwise recompute the claim
+                // against a tree the activation already rebuilt (see
+                // `canvas_widget_claimed_key_grace`).
+                const split_claim = self.views[index].canvas_widget_claimed_key_grace;
+                self.views[index].canvas_widget_claimed_key_grace = false;
+                if (split_claim and input_event.kind == .text_input) break :blk true;
+                const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                // Arm the carry when this claimed key_down brought no
+                // text of its own — its committed character may follow
+                // as a separate event.
+                if (claimed and input_event.kind == .key_down and input_event.text.len == 0) {
+                    self.views[index].canvas_widget_claimed_key_grace = true;
                 }
-                break :blk false;
+                break :blk claimed;
             };
             // The refresh batch stays open across the app dispatches
             // below: a click's pointer-up used to emit once for the
