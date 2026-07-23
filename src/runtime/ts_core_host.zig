@@ -1380,14 +1380,15 @@ pub fn TsCoreHost(comptime core: type) type {
                 },
                 // The wire carries the app's f64. In-window offsets pass
                 // through (the engine clamps to the duration itself); a
-                // finite offset PAST the exact-integer window saturates
+                // FINITE offset PAST the exact-integer window saturates
                 // just below it — still beyond every real duration, so
                 // the engine's clamp lands it at the end, exactly what
-                // an oversized forward seek asks for. Only NaN and
-                // negatives (not millisecond offsets at all) seek to 0.
+                // an oversized forward seek asks for. Non-finite values
+                // and negatives are not millisecond offsets at all (the
+                // literal validation rejects them) and seek to 0.
                 3 => fx.seekVideo(if (value >= 0 and value <= 9007199254740992.0)
                     @intFromFloat(value)
-                else if (value > 9007199254740992.0)
+                else if (value > 9007199254740992.0 and std.math.isFinite(value))
                     runtime_effects.max_effect_video_scalar_exclusive - 1
                 else
                     0),

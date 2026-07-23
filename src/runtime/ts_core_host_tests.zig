@@ -249,6 +249,7 @@ const mini_core = struct {
             height: f64,
         },
         vseek_far, // 70: video_ctl seek "clip" 1e16ms (past the exact window)
+        vseek_inf, // 71: video_ctl seek "clip" Infinity (not an offset at all)
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -537,6 +538,7 @@ const mini_core = struct {
             .vstop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 2, 0) },
             .vseek_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 45_000) },
             .vseek_far => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 1e16) },
+            .vseek_inf => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, std.math.inf(f64)) },
             .vvol_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 4, 0.25) },
             .vmute_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 5, 1) },
             .vloop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 6, 1) },
@@ -1839,6 +1841,12 @@ test "video_ctl verbs drive the engine channel, gated by the wire key" {
     // to the duration once one is known) - never a rewind to zero.
     Host.dispatch(fx, .vseek_far);
     try std.testing.expectEqual(effects_mod.max_effect_video_scalar_exclusive - 1, fx.videoSnapshot().position_ms);
+
+    // Infinity is not a millisecond offset at all (the literal
+    // validation rejects non-finite offsets): it seeks to 0 like NaN
+    // and negatives, never to the end.
+    Host.dispatch(fx, .vseek_inf);
+    try std.testing.expectEqual(@as(u64, 0), fx.videoSnapshot().position_ms);
 
     Host.dispatch(fx, .vvol_it);
     try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);
