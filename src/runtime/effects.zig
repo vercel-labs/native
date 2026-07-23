@@ -4261,6 +4261,12 @@ pub fn Effects(comptime Msg: type) type {
         /// Undelivered pty completions (stamped output backlogs + staged
         /// exits), mirrored atomically for `hasPending`.
         pty_pending_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+        /// Pty staging/outbound block pairs LEAKED by retirement because
+        /// the io thread never proved completion (`io_done`) — the
+        /// abandoned-thread deferred-ownership rule in `retirePtySlot`.
+        /// A bounded diagnostic: nonzero only after a join-deadline
+        /// abandon, one per retired session.
+        pty_blocks_leaked: usize = 0,
         /// Scratch a delivered output batch is copied into so the
         /// event's byte slice stays valid while `update` runs.
         pty_drain_scratch: [max_effect_pty_chunk_bytes]u8 = undefined,
@@ -5466,38 +5472,69 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDivergence;
             }
-            // Fed pty results still awaiting delivery: the recorder
-            // journals every result at its live DELIVERY — inside a
-            // dispatched event that follows it in the stream — so a
-            // journal that ends with a fed result still queued was
-            // truncated past its consuming event. Succeeding here would
-            // silently omit a recorded delivery. Regenerating staged
-            // rejections are exempt: the live run could also end with
-            // one staged (it journals nothing until delivery), and the
-            // replayed dispatch restaged it identically.
-            var undelivered_pty: usize = 0;
+            // Journaled environment deliveries never consumed settle by
+            // the clock's rule: the recording's app drained them through
+            // a channel this replay's app no longer has.
+            if (self.replay_env_len > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} journaled environment record(s) were never consumed - the replayed app drains fewer env deliveries than the recording did (a removed env channel?)\n",
+                        .{self.replay_env_len},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
+            // Fed results still awaiting delivery — EVERY kind, not one
+            // family: the recorder journals every result at its live
+            // DELIVERY (inside a dispatched event that follows it in the
+            // stream), so a journal that ends with a fed result still
+            // queued was truncated past its consuming event, whatever
+            // the result's family. Succeeding here would silently omit
+            // a recorded delivery. Under replay the executor is the
+            // parking fake, so the completion queue can hold ONLY fed
+            // entries; the staged rings are checked with their
+            // regenerating rejections exempt — the live run could also
+            // end with one staged (it journals nothing until delivery),
+            // and the replayed dispatch restaged it identically. (The
+            // lossy pending ring is deliberately not swept: its entries
+            // are regenerating rejections, or feed fallbacks that only
+            // arise once the queue itself was full — which the sweep
+            // above already reports.)
+            var undelivered: usize = 0;
             {
                 self.queue_mutex.lock();
                 defer self.queue_mutex.unlock();
-                var index: usize = 0;
-                while (index < self.queue_len) : (index += 1) {
-                    const entry = &self.queue[(self.queue_head + index) % max_effect_queue_entries];
-                    if (entry.kind == .pty) undelivered_pty += 1;
-                }
+                undelivered += self.queue_len;
             }
             {
                 const storage = self.pendingPtyStorage();
                 var index: usize = 0;
                 while (index < self.pending_pty_len) : (index += 1) {
                     const entry = &storage[(self.pending_pty_head + index) % storage.len];
-                    if (!entry.regenerates) undelivered_pty += 1;
+                    if (!entry.regenerates) undelivered += 1;
                 }
             }
-            if (undelivered_pty > 0) {
+            {
+                const storage = self.pendingChannelStorage();
+                var index: usize = 0;
+                while (index < self.pending_channel_len) : (index += 1) {
+                    const entry = &storage[(self.pending_channel_head + index) % storage.len];
+                    if (!entry.regenerates) undelivered += 1;
+                }
+            }
+            {
+                const storage = self.pendingImageStorage();
+                var index: usize = 0;
+                while (index < self.pending_image_len) : (index += 1) {
+                    const entry = &storage[(self.pending_image_head + index) % storage.len];
+                    if (!entry.regenerates) undelivered += 1;
+                }
+            }
+            if (undelivered > 0) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(
-                        "replay diverged: {d} fed pty result(s) were never delivered - the journal ends before the event that consumed them live (truncated or hand-edited?)\n",
-                        .{undelivered_pty},
+                        "replay diverged: {d} fed result(s) were never delivered - the journal ends before the event that consumed them live (truncated or hand-edited?)\n",
+                        .{undelivered},
                     );
                 }
                 return error.ReplayDivergence;
@@ -9922,7 +9959,7 @@ pub fn Effects(comptime Msg: type) type {
         /// accumulates the bytes plus their newline into the collected
         /// output (truncating over the collect bound with the flag set,
         /// exactly like a real child that printed that line).
-        pub fn feedLine(self: *Self, key: u64, bytes: []const u8) error{EffectNotFound}!void {
+        pub fn feedLine(self: *Self, key: u64, bytes: []const u8) error{ EffectNotFound, EffectQueueFull }!void {
             const slot_index = self.findActiveFakeSlot(key, .spawn) orelse blk: {
                 const fetch_index = self.findActiveFakeSlot(key, .fetch) orelse return error.EffectNotFound;
                 if (self.slots[fetch_index].fetch_response_mode != .stream) return error.EffectNotFound;
@@ -9934,7 +9971,14 @@ pub fn Effects(comptime Msg: type) type {
                 appendCollected(slot, "\n");
                 return;
             }
-            self.produceLine(slot, @intCast(slot_index), slot.generation, bytes, false);
+            // A full queue reports loudly — never the live drop
+            // accounting: a fed line IS a journaled delivery, and the
+            // replay pump answers `EffectQueueFull` by draining through
+            // a `.wake` dispatch and feeding once more (the channel and
+            // pty feeds' back-pressure contract).
+            if (!self.produceLine(slot, @intCast(slot_index), slot.generation, bytes, false, true)) {
+                return error.EffectQueueFull;
+            }
         }
 
         /// Feed synthetic stderr bytes to the fake `.collect` effect with
@@ -10868,6 +10912,11 @@ pub fn Effects(comptime Msg: type) type {
                     // default backing.
                     if (staging) |st| self.channel_storage_allocator.destroy(st);
                     if (outbound) |ob| self.channel_storage_allocator.destroy(ob);
+                } else if (staging != null or outbound != null) {
+                    // Diagnostic tally of deferred-ownership leaks (one
+                    // per abandoned-thread retirement): tests pin the
+                    // free/leak correspondence through it.
+                    self.pty_blocks_leaked += 1;
                 }
             }
             if (comptime pty_transport.supported) {
@@ -12183,7 +12232,7 @@ pub fn Effects(comptime Msg: type) type {
         /// (a raised `max_line_bytes`) ride a per-line heap allocation
         /// the drain retires; if that allocation fails the line degrades
         /// to the inline bound, truncated and flagged — never silent.
-        fn produceLine(self: *Self, slot: *Slot, slot_index: u16, generation: u32, bytes: []const u8, truncated: bool) void {
+        fn produceLine(self: *Self, slot: *Slot, slot_index: u16, generation: u32, bytes: []const u8, truncated: bool, fed: bool) bool {
             var len = @min(bytes.len, slot.line_limit);
             var entry: Entry = .{
                 .kind = .line,
@@ -12207,12 +12256,21 @@ pub fn Effects(comptime Msg: type) type {
             entry.line_len = @intCast(len);
             if (self.enqueue(&entry)) {
                 slot.dropped_pending = 0;
-            } else {
-                if (entry.heap_line) |heap| self.allocator.free(heap);
+                self.wakeHost();
+                return true;
+            }
+            if (entry.heap_line) |heap| self.allocator.free(heap);
+            if (!fed) {
+                // Live back-pressure: the drop is counted and the next
+                // delivered line carries it — the journaled truth.
                 slot.dropped_pending +|= 1;
                 slot.dropped_total +|= 1;
+                self.wakeHost();
             }
-            self.wakeHost();
+            // A FED line counts nothing: the caller reports the full
+            // queue loudly instead (a recorded delivery silently
+            // becoming a drop would diverge from the journal).
+            return false;
         }
 
         /// `produceLine` for a real spawn's blocking task: entry
@@ -12803,7 +12861,7 @@ pub fn Effects(comptime Msg: type) type {
                     error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
                 };
                 if (byte == '\n') {
-                    self.produceLine(slot, slot_index, generation, line_buffer[0..line_len], truncated);
+                    _ = self.produceLine(slot, slot_index, generation, line_buffer[0..line_len], truncated, false);
                     line_len = 0;
                     truncated = false;
                 } else if (line_len < limit) {
@@ -12814,7 +12872,7 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             if (line_len > 0 or truncated) {
-                self.produceLine(slot, slot_index, generation, line_buffer[0..line_len], truncated);
+                _ = self.produceLine(slot, slot_index, generation, line_buffer[0..line_len], truncated, false);
             }
         }
 

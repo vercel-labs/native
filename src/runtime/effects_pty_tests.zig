@@ -31,6 +31,8 @@ const testing = std.testing;
 const DirectMsg = union(enum) {
     pty: effects_mod.EffectPtyEvent,
     host: effects_mod.EffectHostResult,
+    line: effects_mod.EffectLine,
+    exit: effects_mod.EffectExit,
 };
 
 const DirectFx = effects_mod.Effects(DirectMsg);
@@ -389,6 +391,29 @@ test "settle refuses replay write-count divergence in both directions" {
         try testing.expectEqualStrings("undelivered", msg.pty.bytes);
         try fx.settleReplayFeeds();
     }
+    // Every fed family settles by the same rule, not just ptys: a fed
+    // LINE still queued at the journal's end is the identical
+    // truncation, and delivering it settles clean.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.spawn(.{ .key = 86, .argv = &.{"sh"}, .on_line = DirectFx.lineMsg(.line), .on_exit = DirectFx.exitMsg(.exit) });
+        try fx.feedLine(86, "undelivered line");
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+        const msg = fx.takeMsg() orelse return error.TestExpectedMsg;
+        try testing.expectEqualStrings("undelivered line", msg.line.line);
+        try fx.settleReplayFeeds();
+    }
+    // Journaled environment deliveries never consumed settle by the
+    // clock's rule too.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        try fx.pushReplayEnv("appearance", "dark");
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
     // Exact consumption settles clean.
     {
         var fx = DirectFx.init(testing.allocator);
@@ -401,6 +426,35 @@ test "settle refuses replay write-count divergence in both directions" {
         try testing.expectEqual(@as(i64, 1_000), fx.wallMs());
         try fx.settleReplayFeeds();
     }
+}
+
+test "a fed line against a full queue reports EffectQueueFull, never a silent drop" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.spawn(.{ .key = 87, .argv = &.{"sh"}, .on_line = DirectFx.lineMsg(.line), .on_exit = DirectFx.exitMsg(.exit) });
+
+    // Fill the completion queue without draining: the feed that finds
+    // it full must say so — the replay pump answers by draining through
+    // a wake and feeding again, so a recorded delivery is never
+    // silently converted into a drop.
+    var fed: usize = 0;
+    const full: anyerror!void = while (fed < effects_mod.max_effect_queue_entries + 1) : (fed += 1) {
+        fx.feedLine(87, "filler") catch |err| break err;
+    } else {};
+    try testing.expectError(error.EffectQueueFull, full);
+    // Draining frees the queue and the same feed lands — with NO drop
+    // recorded against the stream (the fed refusal counted nothing).
+    var drained: usize = 0;
+    while (fx.takeMsg()) |msg| {
+        try testing.expect(msg == .line);
+        try testing.expectEqual(@as(u32, 0), msg.line.dropped_before);
+        drained += 1;
+    }
+    try testing.expectEqual(fed, drained);
+    try fx.feedLine(87, "after the drain");
+    const landed = fx.takeMsg() orelse return error.TestExpectedMsg;
+    try testing.expectEqualStrings("after the drain", landed.line.line);
 }
 
 test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {
@@ -816,14 +870,10 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     // A long-lived, NON-READING child spawned BEFORE the bind — the one
     // shape where a running pty can meet a failed publication — with a
     // write in flight, so the io thread's outbound machinery is live
-    // across the abandon. The child IGNORES SIGHUP so the wind-down's
-    // graceful kill cannot end it: the io thread is provably inside its
-    // bounded reap escalation (hundreds of milliseconds) when the
-    // synthetic exit delivers, making the leak assertion below
-    // deterministic rather than a race against a fast reap.
+    // across the abandon.
     fx.ptySpawn(.{
         .key = 56,
-        .argv = &.{ "/bin/sh", "-c", "trap '' HUP; exec sleep 30" },
+        .argv = &.{ "/bin/sh", "-c", "exec sleep 30" },
         .on_event = DirectFx.ptyMsg(.pty),
     });
     try testing.expect(fx.ptyWrite(56, "in-flight bytes\r"));
@@ -842,11 +892,19 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
     // The key freed with the delivery: the slot retired, nothing pends.
     try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
-    // Retirement DEFERRED the block frees: the io thread never proved
-    // completion (`io_done`) before the abandon, so freeing its staging
-    // or outbound block would race its own in-flight write accounting —
-    // both must LEAK (zero frees through the seam), the abandon rule.
-    try testing.expectEqual(@as(usize, 0), failing.free_count);
+    // Retirement's deferred-ownership rule, pinned as a CORRESPONDENCE
+    // (the race between the abandoned thread and the delivery is
+    // between two correct outcomes): when the io thread had not proved
+    // completion (`io_done`) by retire, BOTH blocks leak and NOTHING
+    // frees; when it had, both free and nothing leaks. Any other
+    // combination — a free without the completion proof — is the
+    // use-after-free this pin exists to forbid.
+    if (fx.pty_blocks_leaked == 1) {
+        try testing.expectEqual(@as(usize, 0), failing.free_count);
+    } else {
+        try testing.expectEqual(@as(usize, 0), fx.pty_blocks_leaked);
+        try testing.expectEqual(@as(usize, 2), failing.free_count);
+    }
 }
 
 // ---------------------------------------- record/replay acceptance

@@ -60,11 +60,12 @@ pub const Session = struct {
     responses_dropped: u32 = 0,
     /// Cached viewport plain text (see `refreshScreenText`): the grid's
     /// accessibility surface and the fingerprint's cell-state coverage.
-    /// Sized for the clamped cell budget at worst-case UTF-8 plus row
-    /// separators; a longer render (never produced by the clamp) keeps
-    /// its prefix.
-    screen_text: [32 * 1024]u8 = undefined,
-    screen_text_len: usize = 0,
+    /// Heap-owned and EXACT — each refresh keeps the renderer's whole
+    /// allocation, so the semantic text is never truncated (or cut
+    /// mid-scalar) by an intermediate buffer: what paints is what
+    /// assistive tech reads and what the fingerprint hashes. Empty
+    /// means "unknown", never "same as before".
+    screen_text: []const u8 = &.{},
     /// Keyboard-selection state: the anchor stays put, the head moves.
     select_anchor: ?CellPos = null,
     select_head: CellPos = .{},
@@ -142,6 +143,7 @@ pub const Session = struct {
         session.stream.deinit();
         session.term.deinit(gpa);
         gpa.free(session.response_buffer);
+        if (session.screen_text.len > 0) gpa.free(session.screen_text);
         gpa.destroy(session);
     }
 
@@ -268,15 +270,28 @@ pub const Session = struct {
 
     /// Scroll the viewport into history (negative = toward the top).
     pub fn scrollLines(session: *Session, delta: isize) void {
-        session.term.screens.active.pages.scroll(.{ .delta_row = delta });
+        session.scrollTracked(.{ .delta_row = delta });
     }
 
     pub fn scrollToBottom(session: *Session) void {
-        session.term.screens.active.pages.scroll(.{ .active = {} });
+        session.scrollTracked(.{ .active = {} });
     }
 
     pub fn scrollToTop(session: *Session) void {
-        session.term.screens.active.pages.scroll(.{ .top = {} });
+        session.scrollTracked(.{ .top = {} });
+    }
+
+    /// Every scroll goes through here: a scroll that actually MOVED the
+    /// viewport changes what the screen shows, so the cached semantic
+    /// text refreshes with it — scrollback browsing must read (to
+    /// assistive tech) and fingerprint as the rows it paints, never the
+    /// bottom viewport it left. The offset compare keeps the common
+    /// no-op (`scrollToBottom` before typing while already pinned) from
+    /// re-rendering the screen text every keystroke.
+    fn scrollTracked(session: *Session, behavior: vt.PageList.Scroll) void {
+        const before = session.scrollbar().offset;
+        session.term.screens.active.pages.scroll(behavior);
+        if (session.scrollbar().offset != before) session.refreshScreenText();
     }
 
     /// Rows of history above the viewport (0 = pinned to the live
@@ -350,11 +365,14 @@ pub const Session = struct {
     }
 
     /// The selected text, caller-owned (freed with the sentinel).
-    /// Null when nothing is selected.
-    pub fn selectionText(session: *Session, gpa: std.mem.Allocator) ?[:0]const u8 {
+    /// Null means exactly "nothing is selected" — a serialization
+    /// failure over an ACTIVE selection is an error, never a silent
+    /// null: the caller owes the user a failure signal when a copy
+    /// cannot be produced.
+    pub fn selectionText(session: *Session, gpa: std.mem.Allocator) !?[:0]const u8 {
         const screen = session.term.screens.active;
         const selection = screen.selection orelse return null;
-        return screen.selectionString(gpa, .{ .sel = selection, .trim = true }) catch null;
+        return try screen.selectionString(gpa, .{ .sel = selection, .trim = true });
     }
 
     /// The viewport as plain text — the test and automation view of the
@@ -367,19 +385,28 @@ pub const Session = struct {
     /// surface (a terminal's semantic content IS its text) and, through
     /// the a11y tree, the session-fingerprint coverage of real cell
     /// state: two screens with identical byte counters but different
-    /// cells must never fingerprint alike. Called wherever cells change
-    /// (output feeds, resizes, the restart reset).
+    /// cells must never fingerprint alike. Called wherever the visible
+    /// screen changes (output feeds, resizes, the restart reset, and
+    /// scrolls that moved the viewport).
     pub fn refreshScreenText(session: *Session) void {
-        const text = session.term.plainString(session.gpa) catch return;
-        defer session.gpa.free(text);
-        const take = @min(text.len, session.screen_text.len);
-        @memcpy(session.screen_text[0..take], text[0..take]);
-        session.screen_text_len = take;
+        const text = session.term.plainString(session.gpa) catch {
+            // Unknown beats stale: a screen we could not render must
+            // not keep reading (to assistive tech) or fingerprinting as
+            // the previous one — the emulator and the painted grid have
+            // already advanced. Empty is the loud degraded state (the
+            // view falls back to its static label, and any checkpoint
+            // over it diverges rather than false-verifying).
+            if (session.screen_text.len > 0) session.gpa.free(session.screen_text);
+            session.screen_text = &.{};
+            return;
+        };
+        if (session.screen_text.len > 0) session.gpa.free(session.screen_text);
+        session.screen_text = text;
     }
 
     /// The cached viewport text (see `refreshScreenText`).
     pub fn screenText(session: *const Session) []const u8 {
-        return session.screen_text[0..session.screen_text_len];
+        return session.screen_text;
     }
 };
 

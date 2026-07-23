@@ -109,6 +109,11 @@ pub const Model = struct {
     selecting: bool = false,
     /// Copy feedback for the status line, cleared by the next copy.
     copied_bytes: u64 = 0,
+    /// The last copy FAILED (selection serialization or the clipboard
+    /// write) with a selection active: the status line says so and the
+    /// selection stays live for a retry. Cleared by the next copy
+    /// attempt and by a restart.
+    copy_failed: bool = false,
     /// Delivered output accounting for the status line (and the
     /// replay fingerprint: byte totals pin the fed stream).
     output_batches: u64 = 0,
@@ -178,6 +183,7 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // The copy feedback belonged to the session that ended — the new
     // shell's status line must not claim its predecessor's clipboard.
     model.copied_bytes = 0;
+    model.copy_failed = false;
     // Drop any bytes still queued for the session that just ended — a
     // restarted shell must not receive the dead one's unsent keystrokes.
     model.outbound_head = 0;
@@ -273,7 +279,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
         },
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
-            if (result.outcome != .ok) model.copied_bytes = 0;
+            if (result.outcome != .ok) {
+                // The write itself failed after a successful read: same
+                // user story as a serialization failure — loud, never a
+                // silent no-op the user pastes stale content after.
+                model.copied_bytes = 0;
+                model.copy_failed = true;
+            }
         },
         .chrome_changed => |chrome| {
             model.chrome_leading = chrome.insets.left;
@@ -408,7 +420,16 @@ pub fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
 }
 
 fn copySelection(model: *Model, fx: *Fx) void {
-    const text = model.session.selectionText(model.session.gpa) orelse return;
+    model.copy_failed = false;
+    const text = (model.session.selectionText(model.session.gpa) catch {
+        // Serialization failed with a selection ACTIVE: keep the
+        // selection for a retry and say so in the status — a copy that
+        // silently does nothing would leave the user pasting stale
+        // clipboard content.
+        model.copy_failed = true;
+        model.copied_bytes = 0;
+        return;
+    }) orelse return;
     defer model.session.gpa.free(text);
     model.copied_bytes = text.len;
     fx.writeClipboard(.{
@@ -714,11 +735,14 @@ fn statusView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
 
 fn statusText(ui: *TerminalUi, model: *const Model) []const u8 {
     if (model.selecting) {
+        if (model.copy_failed) return "copy failed - selection kept, enter retries";
         return "selecting - arrows move, shift extends, B block, enter copies, esc cancels";
     }
     return switch (model.phase) {
         .starting => "starting shell",
-        .live => if (model.copied_bytes > 0)
+        .live => if (model.copy_failed)
+            "copy failed"
+        else if (model.copied_bytes > 0)
             ui.fmt("copied {d} bytes", .{model.copied_bytes})
         else
             "cmd+shift+space selects - cmd+arrows scroll",

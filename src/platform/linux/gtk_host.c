@@ -243,6 +243,14 @@ typedef struct native_sdk_gtk_native_view {
      * matching release is swallowed too (no orphaned pointer_up). */
     native_sdk_gtk_drag_region_t *drag_regions;
     size_t drag_region_count;
+    /* Keys whose composition-consumed key_down was suppressed (see
+     * native_sdk_gpu_key_pressed): the matching key_up is swallowed too,
+     * so the runtime never sees an orphan release — the drag-region
+     * claimed-press discipline, applied to composition keys. Zero means
+     * an empty slot; bounded rollover, and an overflowed press falls
+     * back to emitting its release (activation paths ignore a release
+     * without its press, so the fallback is hygiene, not correctness). */
+    guint gpu_suppressed_keys[8];
     int gpu_drag_claimed_press;
 } native_sdk_gtk_native_view_t;
 
@@ -1444,7 +1452,17 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
          * synchronous IMs (the commit/cancel handlers ran inside the filter
          * call, clearing the preedit had_preedit captured) and asynchronous
          * ones (the preedit is still visible while the key is consumed). */
-        if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) return TRUE;
+        if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) {
+            /* Remember the key so its release is swallowed too — a
+             * key_up without its key_down would be an orphan event. */
+            for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keys); i++) {
+                if (view->gpu_suppressed_keys[i] == 0) {
+                    view->gpu_suppressed_keys[i] = keyval;
+                    break;
+                }
+            }
+            return TRUE;
+        }
         /* Consumed with no composition anywhere in sight (the everyday
          * GtkIMContextSimple commit of a plain printable): committed text
          * and preedit updates already flowed through the commit /
@@ -1465,6 +1483,14 @@ static void native_sdk_gpu_key_released(GtkEventControllerKey *controller, guint
     if (!view) return;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     if (view->gpu_im_context && event) (void)gtk_im_context_filter_keypress(view->gpu_im_context, event);
+    /* A composition-consumed key whose key_down was suppressed swallows
+     * its release too (see gpu_suppressed_keys). */
+    for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keys); i++) {
+        if (view->gpu_suppressed_keys[i] == keyval) {
+            view->gpu_suppressed_keys[i] = 0;
+            return;
+        }
+    }
     (void)native_sdk_gpu_key_event(view, keyval, state, NATIVE_SDK_GTK_GPU_INPUT_KEY_UP, 0);
 }
 

@@ -67,7 +67,7 @@ test "keyboard selection selects real text, line and block alike" {
     session.beginSelection(false);
     session.moveSelection(0, -2, false);
     session.moveSelection(4, 0, true);
-    const text = session.selectionText(testing.allocator) orelse return error.TestExpectedSelection;
+    const text = (try session.selectionText(testing.allocator)) orelse return error.TestExpectedSelection;
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("alpha", text);
 
@@ -77,7 +77,7 @@ test "keyboard selection selects real text, line and block alike" {
     session.moveSelection(0, -2, false);
     session.toggleSelectionBlock();
     session.moveSelection(1, 1, true);
-    const block = session.selectionText(testing.allocator) orelse return error.TestExpectedSelection;
+    const block = (try session.selectionText(testing.allocator)) orelse return error.TestExpectedSelection;
     defer testing.allocator.free(block);
     try testing.expect(std.mem.indexOf(u8, block, "al") != null);
     try testing.expect(std.mem.indexOf(u8, block, "ga") != null);
@@ -1055,6 +1055,51 @@ test "a restarted shell starts its refused-write tally at zero" {
     } });
     try testing.expectEqual(app.Phase.starting, app_state.model.phase);
     try testing.expectEqual(@as(u32, 0), app_state.model.dropped_writes);
+}
+
+test "scrolling into history refreshes the semantic viewport text" {
+    const session = try createSession(20, 4);
+    defer session.destroy();
+    // Ten numbered rows through a four-row viewport: six rows of
+    // scrollback above the live screen.
+    var row: usize = 0;
+    while (row < 10) : (row += 1) {
+        var buf: [16]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "row{d}\r\n", .{row}) catch unreachable;
+        session.feed(line);
+    }
+    session.refreshScreenText();
+    const bottom = try testing.allocator.dupe(u8, session.screenText());
+    defer testing.allocator.free(bottom);
+    try testing.expect(std.mem.indexOf(u8, bottom, "row9") != null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "row0") == null);
+
+    // Scrolling to the top MOVES the viewport: what assistive tech
+    // reads (and what the fingerprint hashes) must be the historical
+    // rows now painted, never the bottom viewport left behind.
+    session.scrollToTop();
+    const top = session.screenText();
+    try testing.expect(std.mem.indexOf(u8, top, "row0") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "row9") == null);
+}
+
+test "a failed selection serialization is an error, never a silent no-selection" {
+    const session = try createSession(20, 4);
+    defer session.destroy();
+    session.feed("select me\r\n");
+    session.beginSelection(false);
+    session.moveSelection(5, 0, true);
+
+    // Nothing selected reads as null...
+    session.clearSelection();
+    try testing.expectEqual(@as(?[:0]const u8, null), try session.selectionText(testing.allocator));
+
+    // ...but an ACTIVE selection whose serialization cannot allocate is
+    // an ERROR the caller must surface (the app keeps the selection and
+    // reports the failed copy), never a silent "nothing selected".
+    session.beginSelection(false);
+    session.moveSelection(5, 0, true);
+    try testing.expectError(error.OutOfMemory, session.selectionText(std.testing.failing_allocator));
 }
 
 test "the session fingerprint covers real cells, not just byte counters" {

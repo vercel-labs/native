@@ -357,7 +357,7 @@ test "a cancel that races the natural exit still reports cancelled and drops lin
     try std.testing.expectEqual(effects_mod.EffectExitReason.cancelled, h.app_state.model.exit_reason.?);
 }
 
-test "queue overflow drops lines loudly and truncates over-long lines" {
+test "queue overflow refuses fed lines loudly and truncates over-long lines" {
     var h = try Harness.create();
     defer h.destroy();
     const fx = &h.app_state.effects;
@@ -367,22 +367,26 @@ test "queue overflow drops lines loudly and truncates over-long lines" {
     test_stdin = null;
     try h.app_state.dispatch(&h.harness.runtime, 1, .start);
 
-    // Fill the queue, then push three more lines that must drop.
+    // Fill the queue, then push more: a FED line against a full queue
+    // reports `EffectQueueFull` — never the live drop accounting, which
+    // would silently convert a journaled delivery into a drop under
+    // session replay (the live worker path keeps its counted drops; the
+    // replay pump answers this error by draining and feeding again).
     var index: usize = 0;
     while (index < effects_mod.max_effect_queue_entries) : (index += 1) {
         try fx.feedLine(stream_key, "fits");
     }
-    try fx.feedLine(stream_key, "dropped 1");
-    try fx.feedLine(stream_key, "dropped 2");
-    try fx.feedLine(stream_key, "dropped 3");
+    try std.testing.expectError(error.EffectQueueFull, fx.feedLine(stream_key, "refused 1"));
+    try std.testing.expectError(error.EffectQueueFull, fx.feedLine(stream_key, "refused 2"));
 
     try h.drainWakes();
     try std.testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_before_total);
 
-    // The next delivered line carries the drop count; nothing is silent.
+    // Refusals counted nothing: the next delivered line reports zero
+    // drops before it.
     try fx.feedLine(stream_key, "after the storm");
     try h.drainWakes();
-    try std.testing.expectEqual(@as(u32, 3), h.app_state.model.dropped_before_total);
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.dropped_before_total);
 
     // Over-long lines arrive truncated and flagged.
     const long_line = [_]u8{'x'} ** (effects_mod.max_effect_line_bytes + 100);
@@ -390,10 +394,11 @@ test "queue overflow drops lines loudly and truncates over-long lines" {
     try h.drainWakes();
     try std.testing.expectEqual(@as(usize, 1), h.app_state.model.truncated_count);
 
-    // The exit reports the lifetime drop total.
+    // The exit's lifetime drop total stays zero — nothing was dropped,
+    // only refused.
     try fx.feedExit(stream_key, 0);
     try h.drainWakes();
-    try std.testing.expectEqual(@as(u32, 3), h.app_state.model.exit_dropped_lines);
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.exit_dropped_lines);
 }
 
 test "a raised per-spawn line bound delivers long lines intact and truncates at the override" {

@@ -2710,8 +2710,14 @@ static void gpuSurfaceCharInput(Host *host, NativeView &view, WPARAM wparam) {
         wide.push_back(unit);
     }
     /* Control/alt chords produce control characters or menu accelerators,
-     * not text; mirror the GTK path, which skips text for modified keys. */
-    if (keyDown(VK_CONTROL) || keyDown(VK_MENU) || keyDown(VK_LWIN) || keyDown(VK_RWIN)) return;
+     * not text; mirror the GTK path, which skips text for modified keys.
+     * EXCEPT AltGr: Windows raises Ctrl+Alt together for it, and an
+     * AltGr-composed printable (AltGr+Q -> "@" on German layouts) IS
+     * committed text — the one chord whose WM_CHAR must flow, or those
+     * layouts lose the character entirely. Win alone still gates. */
+    const bool altgr = keyDown(VK_CONTROL) && keyDown(VK_MENU);
+    if (!altgr && (keyDown(VK_CONTROL) || keyDown(VK_MENU))) return;
+    if (keyDown(VK_LWIN) || keyDown(VK_RWIN)) return;
     const std::string text = narrow(wide);
     if (text.empty()) return;
     emitGpuSurfaceInput(host, view, kGpuInputTextInput, view.gpu_pointer_x, view.gpu_pointer_y, 0, 0, 0, "", text.c_str(), gpuModifierFlags());
