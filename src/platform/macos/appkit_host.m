@@ -965,6 +965,26 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     [self.host scheduleFrame];
 }
 
+// Crossing displays changes the backing scale and titlebar chrome
+// geometry without a windowDidResize: — re-emit the resize chain like
+// windowDidBecomeKey: does so the runtime sees the new screen's metrics
+// immediately instead of at the next key-window change.
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+    [self.host emitResizeForWindowId:self.windowId];
+    [self.host emitDeferredResizeForWindowId:self.windowId];
+    [self.host scheduleFrame];
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
+    (void)notification;
+    [self.host emitWindowFrameForWindowId:self.windowId open:YES];
+    [self.host emitResizeForWindowId:self.windowId];
+    [self.host emitDeferredResizeForWindowId:self.windowId];
+    [self.host scheduleFrame];
+}
+
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     (void)notification;
     [self.host emitWindowFrameForWindowId:self.windowId open:YES];
@@ -8895,7 +8915,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
-    NSRect frame = window.frame;
+    // Emit the CONTENT rect, not the window frame: windows are created
+    // with initWithContentRect:, the runtime's shellBoundsForWindow
+    // treats this size as the layout viewport, and the state store
+    // round-trips it back into initWithContentRect:. Emitting the outer
+    // frame makes shell views a titlebar taller than the content area
+    // (clipping the bottom) and makes restored windows grow by one
+    // titlebar per launch.
+    NSRect frame = [window contentRectForFrameRect:window.frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
