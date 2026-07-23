@@ -256,8 +256,18 @@ fn canonicalSpelling(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]
     // native roots and separators (drive and UNC spellings included),
     // so two spellings of one root land on one prefix.
     var components = std.fs.path.componentIterator(path);
-    var base: []const u8 = if (components.root()) |root|
-        try arena.dupe(u8, root)
+    const root = components.root();
+    if (root != null and !std.fs.path.isAbsolute(path)) {
+        // A drive-RELATIVE spelling (C:foo) names a file under that
+        // drive's own working directory, which this process cannot
+        // resolve portably; folding it under the drive root would
+        // manufacture false aliases against drive-absolute spellings.
+        // Keep it lexical — the existence-based nets and rename landing
+        // still guard the writes.
+        return std.fs.path.resolve(arena, &.{path});
+    }
+    var base: []const u8 = if (root) |prefix|
+        try arena.dupe(u8, prefix)
     else blk: {
         const len = std.Io.Dir.cwd().realPath(io, &buffer) catch break :blk try arena.dupe(u8, ".");
         break :blk try arena.dupe(u8, buffer[0..len]);

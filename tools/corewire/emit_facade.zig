@@ -784,6 +784,9 @@ const FacadeEmitter = struct {
             \\// bits(v) = ~bits(-1 - v). The sign paths stay separate statements
             \\// end to end.
             \\function nscfI64(value: number): Uint8Array {
+            \\  if (value !== Math.floor(value) || value > 9007199254740991 || value < -9007199254740991) {
+            \\    throw { kind: "nscf_contract", teaching: asciiBytes("an integer slot carries a non-integer or out-of-range value — the i64 encoding has no honest bytes for it; keep integer slots whole and within +-(2^53 - 1)") } as NscfContractError;
+            \\  }
             \\  const bits = new Uint8Array(64);
             \\  for (let i = 0; i < 64; i++) {
             \\    bits[i] = 0;
