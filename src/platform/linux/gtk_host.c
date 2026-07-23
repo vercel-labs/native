@@ -246,11 +246,23 @@ typedef struct native_sdk_gtk_native_view {
     /* Keys whose composition-consumed key_down was suppressed (see
      * native_sdk_gpu_key_pressed): the matching key_up is swallowed too,
      * so the runtime never sees an orphan release — the drag-region
-     * claimed-press discipline, applied to composition keys. Zero means
-     * an empty slot; bounded rollover, and an overflowed press falls
-     * back to emitting its release (activation paths ignore a release
-     * without its press, so the fallback is hygiene, not correctness). */
-    guint gpu_suppressed_keys[8];
+     * claimed-press discipline, applied to composition keys. Tracked by
+     * PHYSICAL KEYCODE, never keyval: releasing Shift before the key
+     * changes the keyval between press and release (Shift+A records A,
+     * the release reads a) while the keycode names the same key both
+     * ways. Zero means an empty slot; bounded rollover, and an
+     * overflowed press falls back to emitting its release (activation
+     * paths ignore a release without its press, so the fallback is
+     * hygiene, not correctness). */
+    guint gpu_suppressed_keycodes[8];
+    /* A plain (no converted commit) composition cancel was just emitted
+     * and its resolving key's own key_down is being suppressed: the
+     * runtime's cancel-to-commit grace armed by that cancel expects the
+     * key_down as its disarm, so the suppression emits a synthetic
+     * duplicate cancel instead — a no-op everywhere except the grace
+     * probe it disarms. Cleared when a converted commit's text_input
+     * follows the cancel (the text itself consumes the grace). */
+    int gpu_cancel_disarm_pending;
     int gpu_drag_claimed_press;
 } native_sdk_gtk_native_view_t;
 
@@ -929,6 +941,9 @@ static void native_sdk_gpu_im_commit(GtkIMContext *context, const char *text, gp
         native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
     }
     native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_TEXT_INPUT, text, 0, 0);
+    /* The converted commit's trailing text_input consumes the runtime's
+     * cancel grace itself; no synthetic disarm is owed. */
+    view->gpu_cancel_disarm_pending = 0;
 }
 
 /* IM context preedit (composition) changed. Mirrors AppKit's setMarkedText:
@@ -947,6 +962,11 @@ static void native_sdk_gpu_im_preedit_changed(GtkIMContext *context, gpointer da
         if (native_sdk_gpu_surface_has_preedit(view)) {
             native_sdk_gpu_surface_clear_preedit(view);
             native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
+            /* A PLAIN cancel (no converted commit follows within this
+             * filter pass): the resolving key's suppressed key_down owes
+             * the runtime's cancel grace its disarm (see
+             * gpu_cancel_disarm_pending). */
+            view->gpu_cancel_disarm_pending = 1;
         }
         return;
     }
@@ -1437,7 +1457,6 @@ static gboolean native_sdk_gpu_key_event(native_sdk_gtk_native_view_t *view, gui
 }
 
 static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
-    (void)keycode;
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return FALSE;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
@@ -1453,25 +1472,35 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
          * call, clearing the preedit had_preedit captured) and asynchronous
          * ones (the preedit is still visible while the key is consumed). */
         if (had_preedit || native_sdk_gpu_surface_has_preedit(view)) {
-            /* Remember the key so its release is swallowed too — a
-             * key_up without its key_down would be an orphan event.
-             * DEDUPLICATED: autorepeat delivers many suppressed
-             * key_downs for one held key but only one final release, so
-             * a repeat must not stack entries a later ordinary release
-             * of the same key would then be eaten by. */
-            size_t free_slot = G_N_ELEMENTS(view->gpu_suppressed_keys);
+            /* Remember the key — by PHYSICAL KEYCODE — so its release is
+             * swallowed too: a key_up without its key_down would be an
+             * orphan event, and the keyval would rename between press
+             * and release if Shift lifts first. DEDUPLICATED: autorepeat
+             * delivers many suppressed key_downs for one held key but
+             * only one final release, so a repeat must not stack entries
+             * a later ordinary release would then be eaten by. */
+            size_t free_slot = G_N_ELEMENTS(view->gpu_suppressed_keycodes);
             gboolean recorded = FALSE;
-            for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keys); i++) {
-                if (view->gpu_suppressed_keys[i] == keyval) {
+            for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keycodes); i++) {
+                if (view->gpu_suppressed_keycodes[i] == keycode) {
                     recorded = TRUE;
                     break;
                 }
-                if (view->gpu_suppressed_keys[i] == 0 && free_slot == G_N_ELEMENTS(view->gpu_suppressed_keys)) {
+                if (view->gpu_suppressed_keycodes[i] == 0 && free_slot == G_N_ELEMENTS(view->gpu_suppressed_keycodes)) {
                     free_slot = i;
                 }
             }
-            if (!recorded && free_slot < G_N_ELEMENTS(view->gpu_suppressed_keys)) {
-                view->gpu_suppressed_keys[free_slot] = keyval;
+            if (!recorded && free_slot < G_N_ELEMENTS(view->gpu_suppressed_keycodes)) {
+                view->gpu_suppressed_keycodes[free_slot] = keycode;
+            }
+            /* A plain cancel armed the runtime's cancel-to-commit grace
+             * expecting THIS key_down as its disarm: suppression owes it
+             * a synthetic duplicate cancel instead (a no-op everywhere
+             * but the grace probe), or the next ordinary text_input
+             * would be mistaken for a converted commit. */
+            if (view->gpu_cancel_disarm_pending) {
+                view->gpu_cancel_disarm_pending = 0;
+                native_sdk_emit_gpu_surface_text_input(view, NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION, "", 0, 0);
             }
             return TRUE;
         }
@@ -1490,16 +1519,16 @@ static gboolean native_sdk_gpu_key_pressed(GtkEventControllerKey *controller, gu
 }
 
 static void native_sdk_gpu_key_released(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
-    (void)keycode;
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     if (view->gpu_im_context && event) (void)gtk_im_context_filter_keypress(view->gpu_im_context, event);
     /* A composition-consumed key whose key_down was suppressed swallows
-     * its release too (see gpu_suppressed_keys). */
-    for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keys); i++) {
-        if (view->gpu_suppressed_keys[i] == keyval) {
-            view->gpu_suppressed_keys[i] = 0;
+     * its release too (see gpu_suppressed_keycodes; matched by physical
+     * keycode so a modifier lifted mid-hold cannot rename the key). */
+    for (size_t i = 0; i < G_N_ELEMENTS(view->gpu_suppressed_keycodes); i++) {
+        if (view->gpu_suppressed_keycodes[i] == keycode) {
+            view->gpu_suppressed_keycodes[i] = 0;
             return;
         }
     }
@@ -1528,7 +1557,8 @@ static void native_sdk_gpu_focus_leave(GtkEventControllerFocus *controller, gpoi
     /* Pending suppressed releases die with the focus: their key_ups go
      * to whichever surface focuses next (or nowhere), and a stale entry
      * here would eat the same key's legitimate release after refocus. */
-    memset(view->gpu_suppressed_keys, 0, sizeof(view->gpu_suppressed_keys));
+    memset(view->gpu_suppressed_keycodes, 0, sizeof(view->gpu_suppressed_keycodes));
+    view->gpu_cancel_disarm_pending = 0;
 }
 
 static void native_sdk_setup_gpu_surface_view(native_sdk_gtk_native_view_t *view) {

@@ -1156,6 +1156,73 @@ test "scrollback chords pause while a selection is armed" {
     try testing.expect(app_state.model.session.scrollbar().offset != before);
 }
 
+test "a selection outlives the copy until the clipboard confirms" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    app_state.model.session.feed("copy me");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "space",
+        .modifiers = .{ .primary = true, .shift = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "arrowleft",
+        .modifiers = .{ .shift = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    // The write is in flight: the selection must still stand — a failed
+    // result needs something to retry.
+    try testing.expect(app_state.model.selecting);
+    try testing.expect(app_state.model.session.selectionActive());
+
+    // A FAILED write keeps it and reports; a retry that succeeds clears.
+    try app_state.effects.feedClipboardResult(2, .rejected, "");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try testing.expect(app_state.model.copy_failed);
+    try testing.expect(app_state.model.selecting);
+    try testing.expect(app_state.model.session.selectionActive());
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try app_state.effects.feedClipboardResult(2, .ok, "");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try testing.expect(!app_state.model.copy_failed);
+    try testing.expect(!app_state.model.selecting);
+    try testing.expect(!app_state.model.session.selectionActive());
+}
+
+test "a selection anchors at the live cursor, not the last painted snapshot" {
+    const session = try createSession(40, 6);
+    defer session.destroy();
+    // Output moves the cursor with NO paint in between: the anchor must
+    // be the cell the cursor actually occupies (a stale render snapshot
+    // would anchor at the origin).
+    session.feed("hello");
+    session.beginSelection(false);
+    try testing.expectEqual(@as(u16, 5), session.select_anchor.?.x);
+    try testing.expectEqual(@as(u16, 0), session.select_anchor.?.y);
+}
+
 test "a copy over a vanished emulator range reports failure, never a quiet no-op" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

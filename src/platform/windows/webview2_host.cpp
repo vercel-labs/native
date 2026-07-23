@@ -450,11 +450,13 @@ struct NativeView {
     double gpu_pointer_x = 0;
     double gpu_pointer_y = 0;
     WCHAR gpu_pending_high_surrogate = 0;
-    /* One-shot: the WM_KEYDOWN just dispatched a registered shortcut, so
-     * the already-translated WM_CHAR trailing it is the SAME keystroke
-     * and must not also type (AltGr raises Ctrl+Alt, so an AltGr chord
-     * that matches a ctrl+alt accelerator would otherwise both fire the
-     * accelerator and insert its composed character). */
+    /* The WM_KEYDOWN just dispatched a registered shortcut, so every
+     * already-translated WM_CHAR trailing it belongs to the SAME
+     * keystroke and must not also type (AltGr raises Ctrl+Alt, so an
+     * AltGr chord that matches a ctrl+alt accelerator would otherwise
+     * both fire the accelerator and insert its composed text). Holds
+     * across the whole translated burst; the next WM_KEYDOWN or
+     * WM_KEYUP disarms it. */
     bool gpu_shortcut_ate_char = false;
     /* UTF-8 preedit last sent as ime_set_composition; empty = no active
      * composition. Mirrors gpu_preedit_text in the GTK host and markedText
@@ -2700,13 +2702,12 @@ static std::string gpuSurfaceKeyName(WPARAM wparam) {
 
 static void gpuSurfaceCharInput(Host *host, NativeView &view, WPARAM wparam) {
     /* A keystroke a registered shortcut consumed never ALSO types: the
-     * message loop translated its WM_CHAR before the accelerator could
-     * refuse it. One-shot — consumed by the first translated unit and
-     * re-disarmed at the next WM_KEYDOWN either way. */
-    if (view.gpu_shortcut_ate_char) {
-        view.gpu_shortcut_ate_char = false;
-        return;
-    }
+     * message loop translated its WM_CHAR(s) before the accelerator
+     * could refuse them. The latch holds for the WHOLE translated burst
+     * — one keystroke can post several UTF-16 units (ligature layouts,
+     * surrogate pairs) — and is bounded by the message sequence, not a
+     * count: the next WM_KEYDOWN or WM_KEYUP disarms it. */
+    if (view.gpu_shortcut_ate_char) return;
     const WCHAR unit = (WCHAR)wparam;
     std::wstring wide;
     if (unit >= 0xD800 && unit <= 0xDBFF) {
@@ -2948,6 +2949,9 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         }
         case WM_KEYUP:
         case WM_SYSKEYUP: {
+            /* The shortcut keystroke's translated burst ended with its
+             * release: disarm the char latch (see gpuSurfaceCharInput). */
+            view->gpu_shortcut_ate_char = false;
             const std::string key = gpuSurfaceKeyName(wparam);
             if (!key.empty()) {
                 emitGpuSurfaceInput(host, *view, kGpuInputKeyUp, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, key.c_str(), "", gpuModifierFlags());

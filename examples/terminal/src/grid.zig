@@ -310,9 +310,22 @@ pub const Session = struct {
     /// existing one). `block` selects a rectangle; otherwise the
     /// selection flows line-wise like every text surface.
     pub fn beginSelection(session: *Session, block: bool) void {
-        const cursor = session.render.cursor.viewport orelse vt.RenderState.Cursor.Viewport{ .x = 0, .y = 0, .wide_tail = false };
-        session.select_anchor = .{ .x = @intCast(cursor.x), .y = @intCast(cursor.y) };
-        session.select_head = session.select_anchor.?;
+        // Anchor from LIVE terminal state, never the last painted
+        // snapshot: output that moved the cursor since the previous
+        // paint (or a session that has not painted yet) must anchor at
+        // the cell the cursor actually occupies. A cursor scrolled out
+        // of the viewport anchors at the origin, the render snapshot's
+        // own fallback.
+        const screen = session.term.screens.active;
+        const anchor: CellPos = blk: {
+            if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {
+                const coord = point.coord();
+                break :blk .{ .x = @intCast(coord.x), .y = @intCast(coord.y) };
+            }
+            break :blk .{ .x = 0, .y = 0 };
+        };
+        session.select_anchor = anchor;
+        session.select_head = anchor;
         session.select_block = block;
         session.applySelection();
     }

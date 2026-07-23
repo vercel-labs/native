@@ -279,10 +279,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
         },
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
-            if (result.outcome != .ok) {
-                // The write itself failed after a successful read: same
-                // user story as a serialization failure — loud, never a
-                // silent no-op the user pastes stale content after.
+            if (result.outcome == .ok) {
+                // Confirmed on the clipboard: the selection's job is
+                // done, and only NOW does it clear — a failed write
+                // needs it still standing to retry.
+                model.selecting = false;
+                model.session.clearSelection();
+            } else {
+                // The write failed after a successful read: same user
+                // story as a serialization failure — loud, the
+                // selection kept, never a silent no-op the user pastes
+                // stale content after.
                 model.copied_bytes = 0;
                 model.copy_failed = true;
             }
@@ -447,8 +454,10 @@ fn copySelection(model: *Model, fx: *Fx) void {
         .text = text,
         .on_result = Fx.clipboardMsg(.clipboard),
     });
-    model.selecting = false;
-    model.session.clearSelection();
+    // The selection stays armed until the clipboard CONFIRMS: clearing
+    // it now would leave a failed write nothing to retry — the promised
+    // keep-on-failure needs the selection still standing when the
+    // result lands (the `.clipboard` arm clears it on success).
 }
 
 // ------------------------------------------------------------- keyboard
