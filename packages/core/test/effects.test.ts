@@ -532,15 +532,16 @@ test("v2 effects: wire bytes through the real dispatch cycle", { skip: !hasZig, 
 // ------------------------------------------------------------------ streams
 
 // The streaming ops end to end: spawn line/collect records (argv elements,
-// stdin, the no-line sentinel) and the audio play/ctl records — each
-// asserted against the exact wire layout rt.zig documents, through the real
-// dispatch cycle.
+// stdin, the no-line sentinel), the audio play/ctl records, and the video
+// load/ctl records — each asserted against the exact wire layout rt.zig
+// documents, through the real dispatch cycle.
 const coreStreams = `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
 export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
-export interface Model { readonly lines: number; readonly out: Uint8Array; readonly code: number; readonly errs: number; readonly pos: number; }
+export interface Model { readonly lines: number; readonly out: Uint8Array; readonly code: number; readonly errs: number; readonly pos: number; readonly vpos: number; }
 
 export type Msg =
   | { readonly kind: "sample" }
@@ -549,14 +550,18 @@ export type Msg =
   | { readonly kind: "play" }
   | { readonly kind: "stream" }
   | { readonly kind: "drive" }
+  | { readonly kind: "vload" }
+  | { readonly kind: "vstream" }
+  | { readonly kind: "vdrive" }
   | { readonly kind: "line"; readonly text: Uint8Array }
   | { readonly kind: "done"; readonly code: number }
   | { readonly kind: "sampled"; readonly code: number; readonly output: Uint8Array }
   | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "video_evt"; readonly state: VideoState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
   | { readonly kind: "failed"; readonly why: Uint8Array };
 
 export function initialModel(): Model {
-  return { lines: 0, out: new Uint8Array(0), code: -1, errs: 0, pos: 0 };
+  return { lines: 0, out: new Uint8Array(0), code: -1, errs: 0, pos: 0, vpos: 0 };
 }
 
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
@@ -567,10 +572,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "play": return [model, Cmd.audioPlay("track", { path: asciiBytes("a.mp3") }, { event: "audio_evt" })];
     case "stream": return [model, Cmd.audioPlay("track", { url: asciiBytes("https://c.test/a.mp3"), cachePath: asciiBytes("cache/a"), expectedBytes: 4096 }, { event: "audio_evt" })];
     case "drive": return [model, Cmd.batch([Cmd.audioPause("track"), Cmd.audioSeek("track", 45000), Cmd.audioSetVolume("track", 0.25), Cmd.audioStop("track")])];
+    case "vload": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4"), url: asciiBytes("https://c.test/clip.mp4") }, { event: "video_evt" })];
+    case "vstream": return [model, Cmd.videoLoad("clip", { surface: 5, url: asciiBytes("https://c.test/clip.mp4"), autoplay: false, loop: true, muted: true }, { event: "video_evt" })];
+    case "vdrive": return [model, Cmd.batch([Cmd.videoPlay("clip"), Cmd.videoSeek("clip", 45000), Cmd.videoSetVolume("clip", 0.25), Cmd.videoSetMuted("clip", true), Cmd.videoSetLoop("clip", true), Cmd.videoStop("clip")])];
     case "line": return { ...model, lines: model.lines + 1, out: msg.text };
     case "done": return { ...model, code: msg.code };
     case "sampled": return { ...model, code: msg.code, out: msg.output };
     case "audio_evt": return { ...model, pos: msg.positionMs };
+    case "video_evt": return { ...model, vpos: msg.positionMs };
     case "failed": return { ...model, errs: model.errs + 1 };
   }
 }
@@ -603,7 +612,7 @@ fn expectLong(bytes: []const u8, at: *usize, expected: []const u8) !void {
     at.* += 4 + expected.len;
 }
 
-test "spawn and audio wire records match rt.zig's documented layout" {
+test "spawn, audio, and video wire records match rt.zig's documented layout" {
     var log: std.ArrayList(u8) = .empty;
     defer log.deinit(std.testing.allocator);
 
@@ -701,6 +710,52 @@ test "spawn and audio wire records match rt.zig's documented layout" {
         try std.testing.expectEqualStrings("track", record[2..7]);
         try std.testing.expectEqual(verb, record[7]);
         try std.testing.expectEqual(value, @as(f64, @bitCast(std.mem.readInt(u64, record[8..16], .little))));
+    }
+
+    // video_load, path + url: [0x17][key][event_tag][surface f64 LE]
+    // [path][url][flags u8] — flags bit0 = autoplay (the default, on).
+    const vload = dispatch(.vload, &log);
+    try std.testing.expectEqual(@as(u8, 0x17), vload[0]);
+    try std.testing.expectEqual(@as(u8, 4), vload[1]);
+    try std.testing.expectEqualStrings("clip", vload[2..6]);
+    try std.testing.expectEqual(tagOf("video_evt"), vload[6]);
+    try std.testing.expectEqual(@as(f64, 5), @as(f64, @bitCast(std.mem.readInt(u64, vload[7..15], .little))));
+    at = 15;
+    try expectLong(vload, &at, "clip.mp4");
+    try expectLong(vload, &at, "https://c.test/clip.mp4");
+    try std.testing.expectEqual(@as(u8, 0b001), vload[at]);
+    try std.testing.expectEqual(vload.len, at + 1);
+
+    // video_load, url-only with every option flipped: autoplay off,
+    // loop and muted on — flags 0b110 (bit1 = loop, bit2 = muted).
+    const vstream = dispatch(.vstream, &log);
+    try std.testing.expectEqual(@as(u8, 0x17), vstream[0]);
+    try std.testing.expectEqual(@as(f64, 5), @as(f64, @bitCast(std.mem.readInt(u64, vstream[7..15], .little))));
+    at = 15;
+    try expectLong(vstream, &at, "");
+    try expectLong(vstream, &at, "https://c.test/clip.mp4");
+    try std.testing.expectEqual(@as(u8, 0b110), vstream[at]);
+    try std.testing.expectEqual(vstream.len, at + 1);
+
+    // The event arm round-trips as a plain Msg (the seven-field record).
+    _ = dispatch(.{ .video_evt = .{ .state = .position, .positionMs = 2500, .durationMs = 12000, .playing = true, .buffering = false, .width = 1920, .height = 1080 } }, &log);
+    try std.testing.expectEqual(@as(@TypeOf(g_model.vpos), 2500), g_model.vpos);
+
+    // video_ctl batch: play(0), seek(3, 45000), volume(4, 0.25),
+    // muted(5, 1), loop(6, 1), stop(2) — verb bytes in declaration
+    // order, values f64 LE (the boolean switches ride as 0/1).
+    const vdrive = dispatch(.vdrive, &log);
+    const vctl_len = 2 + 4 + 1 + 8; // op + key + verb + value
+    try std.testing.expectEqual(@as(usize, vctl_len * 6), vdrive.len);
+    const vverbs = [_]u8{ 0, 3, 4, 5, 6, 2 };
+    const vvalues = [_]f64{ 0, 45000, 0.25, 1, 1, 0 };
+    for (vverbs, vvalues, 0..) |verb, value, i| {
+        const record = vdrive[i * vctl_len ..][0..vctl_len];
+        try std.testing.expectEqual(@as(u8, 0x18), record[0]);
+        try std.testing.expectEqual(@as(u8, 4), record[1]);
+        try std.testing.expectEqualStrings("clip", record[2..6]);
+        try std.testing.expectEqual(verb, record[6]);
+        try std.testing.expectEqual(value, @as(f64, @bitCast(std.mem.readInt(u64, record[7..15], .little))));
     }
 }
 `;

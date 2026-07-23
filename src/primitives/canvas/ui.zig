@@ -420,6 +420,20 @@ pub fn Ui(comptime Msg: type) type {
         /// and the seam stays untyped (`anyopaque` document pointers)
         /// so the builder core never imports the markup engine.
         markup_fragment_host: ?MarkupFragmentHost = null,
+        /// Live video playback state for the house transport chrome:
+        /// the app loop stamps the channel's snapshot here before each
+        /// build, so `video` renders honest play/pause, elapsed, and
+        /// seek state without the model carrying any of it. Defaults
+        /// (inactive) outside an app loop, where the chrome renders
+        /// disabled.
+        video_state: VideoPlaybackState = .{},
+        /// The `<video src>` declaration this build recorded (see
+        /// `video`): last-wins, mirroring `loadVideo`'s replace
+        /// semantics — one player is the whole playback surface. The
+        /// app loop reads it after the build and reconciles it into the
+        /// video channel; null means no src-bearing video was declared
+        /// (surface-only chrome declares nothing).
+        video_declaration: ?VideoDeclaration = null,
 
         pub const ElementOptions = struct {
             /// Sibling-scoped identity: the widget id hashes the parent
@@ -1770,6 +1784,189 @@ pub fn Ui(comptime Msg: type) type {
         /// image: definite width/height or flex grow (no intrinsic size).
         pub fn mediaSurface(self: *Self, options: ElementOptions) Node {
             return self.el(.media_surface, options, .{});
+        }
+
+        /// The live playback state the house video chrome renders (see
+        /// `Ui.video_state`): what the video channel has honestly
+        /// reported, never what the model believes.
+        pub const VideoPlaybackState = struct {
+            active: bool = false,
+            playing: bool = false,
+            buffering: bool = false,
+            /// The playback reached its non-looping natural end: the
+            /// player is retired, so seeking is dead (the scrub
+            /// disables) while Play stays live — the runtime restarts
+            /// the playback from the start on it.
+            completed: bool = false,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+        };
+
+        /// One build's recorded `<video src>` declaration (see
+        /// `Ui.video_declaration`): the source string plus the flags
+        /// that shape a fresh load. `src` is arena-copied by `video`,
+        /// so it outlives the build exactly as long as the tree does.
+        pub const VideoDeclaration = struct {
+            src: []const u8 = "",
+            controls: bool = false,
+            autoplay: bool = true,
+            loop: bool = false,
+            muted: bool = false,
+        };
+
+        pub const VideoOptions = struct {
+            /// Playback source: an app-assets path or an http(s) URL —
+            /// the `loadVideo` cascade's resolution order. Empty
+            /// declares nothing: the element is surface-only chrome
+            /// over whatever playback the app loaded itself.
+            src: []const u8 = "",
+            /// Compose the house transport chrome (play/pause, elapsed,
+            /// seek slider, duration) under the playback surface.
+            controls: bool = false,
+            /// Start playing as soon as the load lands (the fresh
+            /// load's behavior; `loadVideo`'s default).
+            autoplay: bool = true,
+            /// Wrap from the natural end back to zero and keep playing.
+            loop: bool = false,
+            /// Start with the audio track muted.
+            muted: bool = false,
+            key: ?UiKey = null,
+            global_key: ?UiKey = null,
+            /// Definite surface width/height (same contract as
+            /// `ElementOptions.width`/`height`); the surface has no
+            /// intrinsic size, so size it definitely or flex `grow`.
+            width: f32 = 0,
+            height: f32 = 0,
+            grow: f32 = 0,
+            /// Accessible name of the playback surface (the image
+            /// leaf's alt-equivalent label rule).
+            label: []const u8 = "",
+        };
+
+        /// The video playback element (markup `<video>`): a leaf
+        /// compositing the app's SINGLE video playback — decoded
+        /// platform-side into the framework-owned playback surface
+        /// (`canvas.video_playback_surface_id`) — with optional house
+        /// transport chrome, all from existing widgets. A nonempty
+        /// `src` RECORDS the declaration on the builder (last-wins,
+        /// mirroring `loadVideo`'s replace semantics); the app loop
+        /// reconciles it into the video channel after the build, so
+        /// declaring the element IS the playback. The chrome carries no
+        /// app Msgs: its controls are stamped with `video_control`
+        /// verbs the runtime consumes directly.
+        pub fn video(self: *Self, options: VideoOptions) Node {
+            if (options.src.len > 0) {
+                const stored_src = self.arena.dupe(u8, options.src) catch {
+                    self.failed = true;
+                    return self.el(.column, .{}, .{});
+                };
+                self.video_declaration = .{
+                    .src = stored_src,
+                    .controls = options.controls,
+                    .autoplay = options.autoplay,
+                    .loop = options.loop,
+                    .muted = options.muted,
+                };
+            }
+            if (!options.controls) {
+                // Surface-only: the simplest tree — the media surface
+                // itself carries the sizing and identity.
+                return self.el(.media_surface, .{
+                    .key = options.key,
+                    .global_key = options.global_key,
+                    .image = canvas.video_playback_surface_id,
+                    .width = options.width,
+                    .height = options.height,
+                    .grow = options.grow,
+                    .semantics = .{ .label = options.label },
+                }, .{});
+            }
+            // The surface absorbs the element's height above the
+            // transport bar; the column carries the declared sizing.
+            const surface = self.el(.media_surface, .{
+                .image = canvas.video_playback_surface_id,
+                .grow = 1,
+                .semantics = .{ .label = options.label },
+            }, .{});
+            const state = self.video_state;
+            // The transport bar, styled like the house now-playing bar:
+            // one sm ghost icon button whose glyph follows playback
+            // state, fixed clip-overflow time columns (a stamp like
+            // "1:22" must never ellipsize into "1…"), and a growing
+            // seek slider. Runtime-consumed: `video_control` verbs
+            // instead of app Msgs.
+            var toggle_button = self.el(.button, .{
+                .variant = .ghost,
+                .size = .sm,
+                .icon = if (state.playing) "pause" else "play",
+                .disabled = !state.active,
+                .semantics = .{ .label = if (state.playing) "Pause" else "Play" },
+            }, .{});
+            toggle_button.widget.video_control = .toggle;
+            const elapsed = self.text(.{
+                .size = .sm,
+                .width = 46,
+                .wrap = false,
+                .overflow = .clip,
+                .style_tokens = .{ .foreground = .text_muted },
+            }, self.formatVideoTime(state.position_ms));
+            const fraction: f32 = if (state.duration_ms == 0)
+                0
+            else
+                @floatCast(@as(f64, @floatFromInt(state.position_ms)) / @as(f64, @floatFromInt(state.duration_ms)));
+            var scrub = self.el(.slider, .{
+                .grow = 1,
+                .value = fraction,
+                // A completed playback's player is retired: a seek
+                // would refuse and the thumb spring back, so the
+                // scrub disables — Play (which restarts) is the live
+                // affordance.
+                .disabled = !state.active or state.completed,
+                .semantics = .{ .label = "Seek" },
+            }, .{});
+            scrub.widget.video_control = .scrub;
+            const duration = self.text(.{
+                .size = .sm,
+                .width = 46,
+                .wrap = false,
+                .overflow = .clip,
+                .style_tokens = .{ .foreground = .text_muted },
+            }, self.formatVideoTime(state.duration_ms));
+            const controls_row = self.el(.row, .{
+                .padding = 8,
+                .gap = 8,
+                .cross = .center,
+                .style_tokens = .{ .background = .surface },
+            }, .{ toggle_button, elapsed, scrub, duration });
+            var wrap = self.el(.column, .{
+                .key = options.key,
+                .global_key = options.global_key,
+                .width = options.width,
+                .height = options.height,
+                .grow = options.grow,
+                .gap = 0,
+            }, .{ surface, controls_row });
+            // The controls-bearing form keeps the bare surface's
+            // no-intrinsic-size contract: the transport bar must never
+            // size the element (an unsized <video controls> in a hug
+            // container would otherwise render as a controls-only
+            // strip), and it clips away entirely when the layout grants
+            // the element nothing.
+            wrap.widget.layout.zero_intrinsic = true;
+            wrap.widget.layout.clip_content = true;
+            return wrap;
+        }
+
+        /// A playback time readout: h:mm:ss at an hour and beyond,
+        /// m:ss below it — the fixed-format stamp the chrome's clipped
+        /// time columns render.
+        fn formatVideoTime(self: *Self, ms: u64) []const u8 {
+            const total_seconds = ms / 1000;
+            const seconds = total_seconds % 60;
+            const minutes = (total_seconds / 60) % 60;
+            const hours = total_seconds / 3600;
+            if (hours > 0) return self.fmt("{d}:{d:0>2}:{d:0>2}", .{ hours, minutes, seconds });
+            return self.fmt("{d}:{d:0>2}", .{ minutes, seconds });
         }
 
         /// A built-in vector icon leaf: `name` is one of

@@ -74,6 +74,9 @@ const mini_core = struct {
     /// The image outcome states the mixed-rejection tests observe,
     /// shuffled off the engine order like the other two.
     pub const ImageState = enum { rejected, loaded };
+    /// The video event state union, scrambled against the engine's
+    /// `EffectVideoEventKind` for the same by-NAME pin.
+    pub const VideoState = enum { completed, loaded, rejected, position, failed };
 
     pub const Model = struct {
         polling: bool,
@@ -112,6 +115,18 @@ const mini_core = struct {
         // Rejection delivery order probe: one mark per rejection Msg
         // ('S' spawn, 'I' image, 'C' channel), in dispatch order.
         order: []const u8,
+        // Video stream mirrors.
+        video_state: VideoState,
+        v_pos: f64,
+        v_dur: f64,
+        v_playing: bool,
+        v_buffering: bool,
+        v_w: f64,
+        v_h: f64,
+        video_events: i64,
+        // Second-arm mirrors (the replaced-load straggler probe).
+        video2_state: VideoState,
+        video2_events: i64,
     };
 
     pub const Msg = union(enum) {
@@ -201,6 +216,40 @@ const mini_core = struct {
         // channel_open 7 -> chan_evt2] while image id 7 holds the raw key
         mix_dup_then_engine, // 55: batch [channel_open 41 -> chan_evt2
         // (bridge dup), channel_open 7 -> chan_evt (engine cross-family)]
+        vload, // 56: video_load "clip" (surface 5, local path, autoplay)
+        vload_url, // 57: video_load "clip" (url, autoplay off, loop + muted)
+        video_evt: struct { // 58: the seven-field video event arm (the
+            // emitted shape — payload fields keep their TS names)
+            state: VideoState,
+            positionMs: f64,
+            durationMs: f64,
+            playing: bool,
+            buffering: bool,
+            width: f64,
+            height: f64,
+        },
+        vplay_it, // 59: video_ctl play "clip"
+        vpause_it, // 60: video_ctl pause "clip"
+        vstop_it, // 61: video_ctl stop "clip"
+        vseek_it, // 62: video_ctl seek "clip" 45000ms
+        vvol_it, // 63: video_ctl volume "clip" 0.25
+        vmute_it, // 64: video_ctl muted "clip" 1
+        vloop_it, // 65: video_ctl loop "clip" 1
+        vctl_stray, // 66: video_ctl pause "other" (key gate no-op)
+        vload_bad, // 67: video_load "bad" with surface 0 (bridge-refused)
+        vload2, // 68: video_load "clip2" routed to video_evt2
+        video_evt2: struct { // 69: a second video event arm so a
+            // replaced load's straggling terminal stays distinguishable
+            state: VideoState,
+            positionMs: f64,
+            durationMs: f64,
+            playing: bool,
+            buffering: bool,
+            width: f64,
+            height: f64,
+        },
+        vseek_far, // 70: video_ctl seek "clip" 1e16ms (past the exact window)
+        vseek_inf, // 71: video_ctl seek "clip" Infinity (not an offset at all)
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -245,6 +294,16 @@ const mini_core = struct {
                 .img_state = .loaded,
                 .img_events = 0,
                 .order = "",
+                .video_state = .rejected,
+                .v_pos = -1,
+                .v_dur = -1,
+                .v_playing = false,
+                .v_buffering = false,
+                .v_w = -1,
+                .v_h = -1,
+                .video_events = 0,
+                .video2_state = .rejected,
+                .video2_events = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -459,6 +518,41 @@ const mini_core = struct {
                 @memcpy(out[first.len..], second);
                 return .{ .model = model, .cmd = out };
             },
+            // flags bit0 = autoplay, bit1 = loop, bit2 = muted.
+            .vload => return .{ .model = model, .cmd = cmdVideoLoad("clip", 58, 5, "media/clip.mp4", "", 0b001) },
+            .vload_url => return .{ .model = model, .cmd = cmdVideoLoad("clip", 58, 5, "", "https://cdn.test/clip.mp4", 0b110) },
+            .video_evt => |event| {
+                const out = frameCreate(model.*);
+                out.video_state = event.state;
+                out.v_pos = event.positionMs;
+                out.v_dur = event.durationMs;
+                out.v_playing = event.playing;
+                out.v_buffering = event.buffering;
+                out.v_w = event.width;
+                out.v_h = event.height;
+                out.video_events = model.video_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .vplay_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 0, 0) },
+            .vpause_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 1, 0) },
+            .vstop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 2, 0) },
+            .vseek_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 45_000) },
+            .vseek_far => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, 1e16) },
+            .vseek_inf => return .{ .model = model, .cmd = cmdVideoCtl("clip", 3, std.math.inf(f64)) },
+            .vvol_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 4, 0.25) },
+            .vmute_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 5, 1) },
+            .vloop_it => return .{ .model = model, .cmd = cmdVideoCtl("clip", 6, 1) },
+            .vctl_stray => return .{ .model = model, .cmd = cmdVideoCtl("other", 1, 0) },
+            // Surface 0 is the engine's own refusal class: the bridge
+            // must reject WITHOUT re-routing the single entry.
+            .vload_bad => return .{ .model = model, .cmd = cmdVideoLoad("bad", 58, 0, "media/x.mp4", "", 0b001) },
+            .vload2 => return .{ .model = model, .cmd = cmdVideoLoad("clip2", 69, 5, "media/clip2.mp4", "", 0b001) },
+            .video_evt2 => |event| {
+                const out = frameCreate(model.*);
+                out.video2_state = event.state;
+                out.video2_events = model.video2_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -663,6 +757,31 @@ const mini_core = struct {
     fn cmdAudioCtl(key: []const u8, verb: u8, value: f64) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8);
         out[0] = 0x0F;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = verb;
+        std.mem.writeInt(u64, out[2 + key.len + 1 ..][0..8], @bitCast(value), .little);
+        return out;
+    }
+
+    fn cmdVideoLoad(key: []const u8, event_tag: u8, surface: f64, video_path: []const u8, url: []const u8, flags: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8 + 4 + video_path.len + 4 + url.len + 1);
+        out[0] = 0x17;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var off: usize = 2 + key.len;
+        out[off] = event_tag;
+        std.mem.writeInt(u64, out[off + 1 ..][0..8], @bitCast(surface), .little);
+        off += 9;
+        off = writeLongBytes(out, off, video_path);
+        off = writeLongBytes(out, off, url);
+        out[off] = flags;
+        return out;
+    }
+
+    fn cmdVideoCtl(key: []const u8, verb: u8, value: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8);
+        out[0] = 0x18;
         out[1] = @intCast(key.len);
         @memcpy(out[2..][0..key.len], key);
         out[2 + key.len] = verb;
@@ -1551,6 +1670,254 @@ test "a replacing audio_play re-keys the stream and the url source decodes whole
     try std.testing.expectEqual(mini_core.AudioState.failed, Host.model().audio_state);
     Host.dispatch(fx, .pause_it);
     try std.testing.expect(!fx.audioSnapshot().playing);
+}
+
+// ------------------------------------------------------- video stream
+
+test "video_load decodes whole and events route the seven-field arm by name" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    const request = fx.pendingVideo().?;
+    // The engine key is the video namespace with the load's event tag
+    // (video_evt = 58) in the low byte — the per-load routing stamp.
+    try std.testing.expectEqual(ts_core_host.videoKeyForTag(58), request.key);
+    try std.testing.expectEqual(@as(u64, 5), request.surface);
+    try std.testing.expectEqualStrings("media/clip.mp4", request.path);
+    try std.testing.expectEqualStrings("", request.url);
+    try std.testing.expect(request.playing); // autoplay flag
+    try std.testing.expect(!request.looping);
+    try std.testing.expect(!request.muted);
+
+    // The loaded acknowledgment routes the event arm with the decoded
+    // dimensions; the state member is matched by NAME (the mini core
+    // scrambles its declaration order on purpose).
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);
+    try std.testing.expectEqual(@as(f64, 12_000), Host.model().v_dur);
+    try std.testing.expectEqual(@as(f64, 1920), Host.model().v_w);
+    try std.testing.expectEqual(@as(f64, 1080), Host.model().v_h);
+    try std.testing.expect(Host.model().v_playing);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().video_events);
+
+    // Position ticks keep flowing through the same non-retiring entry,
+    // the buffering flag riding along.
+    try fx.feedVideoEvent(.position, 1_500, 12_000, true, false, 0, 0);
+    try fx.feedVideoEvent(.position, 2_000, 12_000, true, true, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.position, Host.model().video_state);
+    try std.testing.expectEqual(@as(f64, 2_000), Host.model().v_pos);
+    try std.testing.expect(Host.model().v_buffering);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().video_events);
+
+    // completed does NOT close the stream (apps start the next clip
+    // from it); the entry keeps routing.
+    try fx.feedVideoEvent(.completed, 12_000, 12_000, false, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.completed, Host.model().video_state);
+    try std.testing.expect(!Host.model().v_playing);
+    try std.testing.expectEqual(@as(i64, 4), Host.model().video_events);
+
+    // A replacing video_load re-keys the stream in place and the url
+    // record's option flags decode whole (autoplay off, loop + muted).
+    Host.dispatch(fx, .vload_url);
+    const replaced = fx.pendingVideo().?;
+    try std.testing.expectEqualStrings("", replaced.path);
+    try std.testing.expectEqualStrings("https://cdn.test/clip.mp4", replaced.url);
+    try std.testing.expect(!replaced.playing);
+    try std.testing.expect(replaced.looping);
+    try std.testing.expect(replaced.muted);
+}
+
+test "a stale wire key's verbs never touch a playback the bridge did not load" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The bridge opens a stream, then a load the bridge never issued
+    // (a declarative element's) replaces the single engine player.
+    Host.dispatch(fx, .vload);
+    fx.loadVideo(.{
+        .key = 424_242,
+        .surface = 5,
+        .path = "media/declared.mp4",
+    });
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try std.testing.expectEqual(@as(u64, 424_242), fx.videoSnapshot().key);
+
+    // The stale entry's transport verbs no-op: pausing, seeking, or
+    // muting through the old wire key must not mutate someone else's
+    // playback.
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    Host.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 0), fx.videoSnapshot().position_ms);
+    Host.dispatch(fx, .vmute_it);
+    try std.testing.expect(!fx.videoSnapshot().muted);
+
+    // Volume is gated too while a FOREIGN playback is live: its
+    // volume is not this key's to move.
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 1.0), fx.videoSnapshot().volume);
+
+    // Stop retires the entry and cancels the entry's OWN stream, but
+    // the playback on the channel — someone else's — survives.
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(fx.videoSnapshot().active);
+    try std.testing.expect(fx.videoSnapshot().playing);
+}
+
+test "volume set after a failed load is remembered for the retry" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The load fails and resets the channel; the handler sets the
+    // volume before retrying. Volume is a remembered preference the
+    // next load re-applies, and with the channel idle there is no
+    // other caller's playback to protect — the command must land.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expect(!fx.videoSnapshot().active);
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.videoSnapshot().volume);
+    Host.dispatch(fx, .vload);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);
+}
+
+test "stop cancels the stream: staged terminals never outlive it" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The batch shape: a load whose terminal stages synchronously,
+    // then stop closes the stream in the same cycle. `Cmd.videoStop`'s
+    // wire contract is the stream's CANCEL — no events for the key
+    // after this — so the stop drops the staged `.failed` inside the
+    // engine with the player, and the next drain has nothing to say.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(!fx.videoSnapshot().active);
+
+    // A load reusing the SAME event tag before the drain: the stopped
+    // stream's cancelled terminal must not resurface through the
+    // reopened tag — the cancel already removed it at the stop.
+    Host.dispatch(fx, .vload);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video_events), 0), Host.model().video_events);
+
+    // The fresh load's own events flow.
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video_events), 1), Host.model().video_events);
+}
+
+test "a rejected video_load keeps the live stream's routing and key gate" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 1920, 1080);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video_state);
+
+    // An invalid replacement is refused before it can re-route the
+    // single entry: the rejection reaches the app through the refused
+    // record's own event arm...
+    Host.dispatch(fx, .vload_bad);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.rejected, Host.model().video_state);
+    // ...while the surviving playback keeps its stream, its routing,
+    // and its wire-key gate: events still deliver, and the ORIGINAL
+    // key still drives the transport (a re-keyed entry would answer
+    // to the refused key instead).
+    try std.testing.expect(fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.position, 1_000, 12_000, true, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.position, Host.model().video_state);
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+}
+
+test "a replaced load's straggling terminal routes its own arm, not the replacement's" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // Open stream A and let its terminal stage: the fed `.failed`
+    // carries A's key (the arm tag rides the low byte), and it is
+    // still awaiting its drain when the replacing load re-keys the
+    // bridge entry.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.dispatch(fx, .vload2);
+
+    // The drain delivers A's terminal to A's arm (video_evt) and B's
+    // stream keeps its own arm (video_evt2) — routing by the mutable
+    // entry's tag would have handed A's failure to B.
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.failed, Host.model().video_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video2_events), 0), Host.model().video2_events);
+
+    try fx.feedVideoEvent(.loaded, 0, 8_000, true, false, 640, 360);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.VideoState.loaded, Host.model().video2_state);
+    try std.testing.expectEqual(@as(@TypeOf(Host.model().video2_events), 1), Host.model().video2_events);
+}
+
+test "video_ctl verbs drive the engine channel, gated by the wire key" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .vload);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    // A verb aimed at a key that is not the open stream is a no-op.
+    Host.dispatch(fx, .vctl_stray);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    Host.dispatch(fx, .vpause_it);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    Host.dispatch(fx, .vplay_it);
+    try std.testing.expect(fx.videoSnapshot().playing);
+
+    Host.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 45_000), fx.videoSnapshot().position_ms);
+
+    // A finite offset past the exact-integer window is still a forward
+    // seek: it saturates just below the window (the engine clamps it
+    // to the duration once one is known) - never a rewind to zero.
+    Host.dispatch(fx, .vseek_far);
+    try std.testing.expectEqual(effects_mod.max_effect_video_scalar_exclusive - 1, fx.videoSnapshot().position_ms);
+
+    // Infinity is not a millisecond offset at all (the literal
+    // validation rejects non-finite offsets): it seeks to 0 like NaN
+    // and negatives, never to the end.
+    Host.dispatch(fx, .vseek_inf);
+    try std.testing.expectEqual(@as(u64, 0), fx.videoSnapshot().position_ms);
+
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);
+
+    Host.dispatch(fx, .vmute_it);
+    try std.testing.expect(fx.videoSnapshot().muted);
+    Host.dispatch(fx, .vloop_it);
+    try std.testing.expect(fx.videoSnapshot().looping);
+
+    // stop closes the stream: the channel idles, the entry retires,
+    // and a straggler feed finds nothing.
+    Host.dispatch(fx, .vstop_it);
+    try std.testing.expect(!fx.videoSnapshot().active);
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoEvent(.position, 5_000, 12_000, true, false, 0, 0));
 }
 
 test "boot commits the model before any effects and performBoot fires the boot command once" {

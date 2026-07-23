@@ -226,6 +226,21 @@ pub const RegisteredImage = struct {
     height: usize = 0,
 };
 
+/// Type-erased handle to the runtime's media-surface texture channels,
+/// bound onto the effects channel (`bindMediaSurfaces`) so `loadVideo`
+/// can claim the surface a `<video>` widget binds and hand its frame
+/// sink to the platform decoder — without reaching for the runtime.
+/// Constructed by `Runtime.mediaSurfaceBinding()`. `acquire_fn` is
+/// loop-thread-only (it claims runtime-owned channel state) and answers
+/// the copyable `platform.VideoFrameSink` the decoder pushes through;
+/// `release_fn` ends the claim named by a previously acquired sink
+/// (idempotent — the sink carries its claim generation).
+pub const MediaSurfaceBinding = struct {
+    context: *anyopaque,
+    acquire_fn: *const fn (context: *anyopaque, surface_id: u64) anyerror!platform.VideoFrameSink,
+    release_fn: *const fn (context: *anyopaque, sink: platform.VideoFrameSink) void,
+};
+
 /// Type-erased handle to the runtime's window verbs, bound onto the
 /// effects channel (`bindWindowActions`) so `update` can drive REAL OS
 /// window actions — the seam behind app-drawn close/minimize controls
@@ -624,6 +639,70 @@ pub const EffectAudio = struct {
 pub const EffectAudioSource = enum(u8) {
     local,
     cache,
+    stream,
+};
+
+/// Longest video source string (path or url) `loadVideo` accepts,
+/// mirroring the platform bound. Longer strings deliver exactly one
+/// `.rejected` video event Msg.
+pub const max_effect_video_path_bytes: usize = platform.max_video_path_bytes;
+
+/// Upper bound (exclusive) for every video scalar the channel delivers
+/// — position, duration, width, height: the exact-integer window every
+/// delivery tier can carry (the TS tier rides these through f64, whose
+/// exact integers end at 2^53). Platform video events clamp into the
+/// window at the delivery boundary (`takeVideoMsg`), whatever a host or
+/// embedder reports — the engine-side guarantee behind session replay's
+/// damage gate: a recorded video scalar at or past this bound can only
+/// be a damaged or hand-edited journal, never an honest readout.
+pub const max_effect_video_scalar_exclusive: u64 = 1 << 53;
+
+/// How a video event Msg came to be — the audio vocabulary plus the
+/// stream's decoded dimensions on `loaded`. `loaded` acknowledges a
+/// successful `loadVideo` with the platform player's duration readout
+/// (an estimate, exactly like audio's) and the stream's pixel
+/// dimensions; `position` ticks at the platform's coarse honest cadence
+/// (~500ms) only while playing, carrying the stream's `buffering` flag;
+/// `completed` fires exactly once when a NON-LOOPING video reaches its
+/// natural end (a looping playback wraps and keeps ticking — it never
+/// completes); `failed` reports a load/decode/device failure or a
+/// platform without video playback — always a Msg, never a crash and
+/// never silence; `rejected` reports a command the effects layer
+/// refused before the platform was asked (an empty or oversized source,
+/// a non-http(s) url, an invalid surface id). Pixels never ride these
+/// events: decoded frames flow platform-side into the media-surface
+/// texture channel the load named.
+pub const EffectVideoEventKind = enum(u8) {
+    loaded,
+    position,
+    completed,
+    failed,
+    rejected,
+};
+
+/// Payload for `on_event` Msg constructors of video effects. Positions
+/// and durations are milliseconds; `playing`/`buffering` carry the
+/// audio payload's exact semantics; `width`/`height` are the stream's
+/// decoded pixel dimensions (delivered on `.loaded`, 0 elsewhere — the
+/// channel mirrors keep them for the snapshot). All fields are plain
+/// data — safe to store in the model.
+pub const EffectVideo = struct {
+    key: u64,
+    kind: EffectVideoEventKind,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    playing: bool = false,
+    buffering: bool = false,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Where the active video playback's bytes come from — the resolved end
+/// of the `loadVideo` source cascade (local file, then network stream).
+/// Exposed in the snapshot and the fake executor's request so tests and
+/// automation can pin the resolution order.
+pub const EffectVideoSource = enum(u8) {
+    local,
     stream,
 };
 
@@ -1390,12 +1469,40 @@ pub const EffectResultKind = enum(u8) {
     /// store to resolve it. `dropped_pending` rides the shared
     /// `dropped` field; the cumulative total gets its own field.
     channel = 12,
+    /// One video playback event (`EffectVideo`), journaled verbatim at
+    /// the delivery boundary exactly like `.audio` — the Msg source
+    /// under replay, while the platform's own `.video` events stay
+    /// inert. Kind codes are append-only and never repack; the code
+    /// value rides the journal, so a change here moves the format
+    /// fingerprint.
+    video = 13,
+    /// One `loadVideo` cascade resolution (`EffectVideoSource`),
+    /// journaled at the load itself — Msg-less engine truth like
+    /// `.clock` and `.env` records, handler or no handler. The
+    /// recording host's filesystem decides whether a local path plays
+    /// or falls through to the url, and the replay-side fake executor
+    /// cannot re-run that probe (replay routinely runs on a machine
+    /// without the assets), so the record is what steers the replayed
+    /// `source` and initial `buffering` mirrors
+    /// (`applyReplayVideoSource`). Kind codes are append-only and
+    /// never repack; the code value rides the journal, so a change
+    /// here moves the format fingerprint.
+    video_load = 14,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
 /// Bounded like everything else: more reads per drain window than this
 /// is a runaway loop, not a session shape.
 pub const max_effect_replay_clock_entries: usize = 64;
+
+/// Inline capacity of the replayed video cascade-resolution queue
+/// (`Effects.pushReplayVideoSource`). Records precede the event whose
+/// dispatch consumes them, so the queue holds at most one dispatch's
+/// loads — and loads per dispatch are unbounded by contract (the
+/// rejection-burst rule), so a burst past this spills to the heap
+/// instead of refusing: each record is one recorded resolution owed to
+/// exactly one replayed load.
+pub const max_effect_replay_video_source_entries: usize = 64;
 
 /// Journaled launch-env deliveries buffered for replay (the `.env`
 /// record feed). Bounded like the clock queue: more launch variables
@@ -1467,6 +1574,34 @@ pub const EffectResultRecord = struct {
     /// occupancy's cumulative drop total.
     channel_kind: EffectChannelEventKind = .data,
     channel_dropped_total: u32 = 0,
+    /// `.video` records: the delivered video event, verbatim — the
+    /// audio record fields' twin, plus the stream dimensions the
+    /// `.loaded` acknowledgment carries.
+    video_kind: EffectVideoEventKind = .position,
+    video_position_ms: u64 = 0,
+    video_duration_ms: u64 = 0,
+    video_playing: bool = false,
+    video_buffering: bool = false,
+    video_width: u64 = 0,
+    video_height: u64 = 0,
+    /// `.video` records: the identity of the LOAD that produced the
+    /// event (`VideoChannel.token`). The public key alone cannot name
+    /// a playback — replace semantics reuse app keys — and replay
+    /// re-mints the same deterministic token sequence, so this is how
+    /// `feedVideoRecord` routes each journaled delivery to the load
+    /// that owned it live, never to a same-key replacement. Zero on
+    /// `.rejected` records: a refused load never minted a token (and
+    /// those records regenerate under replay anyway).
+    video_token: u64 = 0,
+    /// `.video_load` records: the source the recording host's cascade
+    /// resolved (see the kind's doc).
+    video_source: EffectVideoSource = .local,
+    /// `.video` records: whether the delivery dispatched a Msg (a
+    /// handler was bound). Replay validates the replayed handler
+    /// presence against it at feed time — a record whose Msg the
+    /// replayed timeline could not dispatch (or would dispatch where
+    /// none was) is divergence, not a silent consume.
+    video_handled: bool = false,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -1694,6 +1829,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
         pub const ChannelMsgFn = *const fn (event: EffectChannelEvent) Msg;
@@ -1776,6 +1912,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn audioMsg(comptime tag: std.meta.Tag(Msg)) AudioMsgFn {
             return struct {
                 fn make(event: EffectAudio) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_event` of video playback:
+        /// `videoMsg(.video_event)` builds
+        /// `Msg{ .video_event = event }` — the variant's payload type
+        /// must be `native_sdk.EffectVideo`.
+        pub fn videoMsg(comptime tag: std.meta.Tag(Msg)) VideoMsgFn {
+            return struct {
+                fn make(event: EffectVideo) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -2329,6 +2477,148 @@ pub fn Effects(comptime Msg: type) type {
             volume: f32,
         };
 
+        pub const LoadVideoOptions = struct {
+            /// Caller-chosen identity, stored in the model and echoed in
+            /// every event for this playback. Video keys are their own
+            /// namespace (like audio and timer keys); a new `loadVideo`
+            /// replaces the previous playback outright — one player is
+            /// the whole surface.
+            key: u64,
+            /// The media-surface texture channel decoded frames feed:
+            /// the SAME model-owned u64 a `<video>` (or
+            /// `<media-surface>`) widget binds. 0 and ids in the
+            /// reserved texture namespace
+            /// (`canvas.media_surface_image_id_bit`) are refused with
+            /// one `.rejected` event, mirroring
+            /// `acquireMediaSurfaceProducer`.
+            surface: u64,
+            /// Local file path, tried FIRST — the audio cascade's rule:
+            /// a present-but-missing file falls through to `url` when
+            /// one is given; every other local failure is terminal.
+            /// Bounded by `max_effect_video_path_bytes`.
+            path: []const u8 = "",
+            /// http(s) source, tried when the local path is absent or
+            /// missing: progressive streaming, playable before the
+            /// download finishes. Empty means local-only. Non-http(s)
+            /// schemes are rejected before the platform is asked — the
+            /// image loader's scheme check.
+            url: []const u8 = "",
+            /// Start playing as soon as the load lands. False loads
+            /// paused at position zero — `playVideo` starts it (the
+            /// poster-frame shape: the first decoded frame reaches the
+            /// surface either way).
+            autoplay: bool = true,
+            /// Wrap from the natural end back to zero and keep playing.
+            /// A looping playback never delivers `.completed`.
+            loop: bool = false,
+            /// Start with the audio track muted (a reversible switch,
+            /// independent of the remembered volume).
+            muted: bool = false,
+            /// Msg constructor every playback event flows through (see
+            /// `videoMsg`). Without one, playback still runs — frames
+            /// reach the surface; the app just hears nothing back.
+            on_event: ?VideoMsgFn = null,
+        };
+
+        /// The single video playback channel — one player is the whole
+        /// platform surface, mirroring `AudioChannel` exactly: a
+        /// platform service arm, no `max_effects` slots, keys in their
+        /// own namespace, mirrors tracking what the app has been told
+        /// (commands optimistically, platform events authoritatively).
+        /// The channel additionally owns the media-surface claim for
+        /// the playback's surface: `sink` is the frame conduit handed
+        /// to the platform decoder, released on stop/replace/failure so
+        /// the surface becomes claimable again (the runtime keeps the
+        /// last adopted frame either way).
+        const VideoChannel = struct {
+            active: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            /// This load's identity on the platform seam: minted from
+            /// `video_token_seq` at load, passed to the platform, and
+            /// echoed in every `.video` event it emits — how
+            /// `takeVideoMsg` swallows a replaced playback's queued
+            /// stragglers instead of applying them to the replacement.
+            /// Deterministic under replay (one increment per replayed
+            /// load dispatch).
+            token: u64 = 0,
+            surface_id: u64 = 0,
+            on_event: ?VideoMsgFn = null,
+            playing: bool = false,
+            /// Latched by a non-looping `.completed` apply: real hosts
+            /// retire the platform player at the natural end
+            /// (retire-before-emit), so any later transport meets an
+            /// absent player. The fake executor has no player to be
+            /// absent — this flag is how it models the same refusals
+            /// (a post-completion seek keeps the terminal position,
+            /// live and replayed alike). A fresh load resets it with
+            /// the rest of the channel.
+            completed: bool = false,
+            source: EffectVideoSource = .local,
+            buffering: bool = false,
+            looping: bool = false,
+            muted: bool = false,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+            width: u64 = 0,
+            height: u64 = 0,
+            volume: f32 = 1.0,
+            /// The live media-surface claim (real executor only): a
+            /// zeroed sink means no claim is held. Fake channels never
+            /// claim — replay stays producer-free by construction.
+            sink: platform.VideoFrameSink = .{},
+            path_buffer: [max_effect_video_path_bytes]u8 = undefined,
+            path_len: usize = 0,
+            url_buffer: [max_effect_video_path_bytes]u8 = undefined,
+            url_len: usize = 0,
+
+            fn path(channel: *const VideoChannel) []const u8 {
+                return channel.path_buffer[0..channel.path_len];
+            }
+
+            fn url(channel: *const VideoChannel) []const u8 {
+                return channel.url_buffer[0..channel.url_len];
+            }
+        };
+
+        /// Video playback state the automation snapshot exposes: honest
+        /// — it reports what the platform has told us.
+        pub const VideoSnapshot = struct {
+            active: bool = false,
+            key: u64 = 0,
+            surface: u64 = 0,
+            playing: bool = false,
+            buffering: bool = false,
+            /// A non-looping natural end was reached and the platform
+            /// player retired (`VideoChannel.completed`): play and
+            /// seek refuse from here — the resume path is
+            /// `restartVideo` (or a fresh load).
+            completed: bool = false,
+            looping: bool = false,
+            muted: bool = false,
+            source: EffectVideoSource = .local,
+            position_ms: u64 = 0,
+            duration_ms: u64 = 0,
+            width: u64 = 0,
+            height: u64 = 0,
+            volume: f32 = 1.0,
+        };
+
+        /// A recorded video playback request, exposed by the fake
+        /// executor for test assertions. The strings borrow the
+        /// channel's storage — valid until the next `loadVideo`.
+        pub const VideoRequest = struct {
+            key: u64,
+            surface: u64,
+            path: []const u8,
+            url: []const u8,
+            playing: bool,
+            looping: bool,
+            muted: bool,
+            position_ms: u64,
+            volume: f32,
+        };
+
         /// `draining`: the worker is done and the terminal entry is
         /// queued, but the slot still owns a heap buffer (a fetch's body
         /// or a collect spawn's stdout) until the drain delivers (and
@@ -2443,6 +2733,14 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            /// The audio entry's shape for the video channel, staged
+            /// in the non-lossy `pending_videos` (see `PendingVideo`)
+            /// and taking this union shape only at drain time.
+            /// `resolve` marks fed events (fake executor / replay)
+            /// that update the live channel's mirrors at delivery; the
+            /// handler is captured at stage time either way (the
+            /// `PendingVideo` doc has the replay ordering argument).
+            video: struct { event: EffectVideo, video_fn: ?VideoMsgFn, resolve: bool, token: u64 = 0 },
             /// Loop-thread image terminals (rejections, fake cancels,
             /// feed fallbacks) — always payload-free, fully formed at
             /// enqueue. `regenerates` is true only for pre-executor
@@ -2492,6 +2790,12 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    // Video events never enter the ring (they stage in
+                    // the non-lossy `pending_videos`): a loop-side
+                    // `.rejected`/`.failed` is its load's only
+                    // terminal and a fed event is one recorded
+                    // delivery — eviction would silently break both.
+                    .video => unreachable,
                     // EffectHostResult carries none: its terminals are
                     // one-per-request by construction.
                     .host => {},
@@ -2523,6 +2827,7 @@ pub fn Effects(comptime Msg: type) type {
                     .audio => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
+                    .video => unreachable,
                     .image => unreachable,
                     .channel => unreachable,
                     .staged => unreachable,
@@ -2550,12 +2855,83 @@ pub fn Effects(comptime Msg: type) type {
             regenerates: bool,
         };
 
+        /// One loop-side video event awaiting drain — non-lossy like
+        /// `PendingImage` and `PendingChannel`, and for the same
+        /// contract: a loop-side `.rejected` or `.failed` is its
+        /// `loadVideo` call's ONLY terminal, refusals are unbounded
+        /// per dispatch, and `EffectVideo` carries no drop counter
+        /// that could make an eviction visible (the ring's audio
+        /// eviction rationale — "the next position tick supersedes a
+        /// lost one" — never covers a terminal). Fed events (fake
+        /// executor / session replay) stage here too: each fed record
+        /// is one recorded delivery, owed exactly once. `video_fn` is
+        /// captured at STAGE time for fed events as well as loop-side
+        /// terminals: any fed record corresponds to a delivery that
+        /// really ran at record time, and under replay the journaled
+        /// platform `.video` event that follows the record in the
+        /// file may apply a channel-resetting terminal before this
+        /// delivery runs — delivery-time capture would find the
+        /// handler already cleared and drop a Msg the recording
+        /// delivered.
+        const PendingVideo = struct {
+            seq: u64,
+            event: EffectVideo,
+            video_fn: ?VideoMsgFn,
+            resolve: bool,
+            /// The load token of the playback this entry belongs to,
+            /// captured at stage time (`VideoChannel.token`): resolve
+            /// applies mirrors only while the LIVE channel still IS
+            /// that load — the public key alone cannot tell two loads
+            /// under the same app key apart, and a stale entry
+            /// resolving against a same-key replacement would reset
+            /// it.
+            token: u64 = 0,
+        };
+
+        /// Replay-side identity of a video load the replayed timeline
+        /// has already replaced or stopped: enough to deliver its still
+        /// outstanding journaled terminal (a synchronous `.failed` the
+        /// recording host refused inside the very dispatch that then
+        /// replaced or stopped the playback drains AFTER that dispatch,
+        /// so its record feeds when the channel has moved on). Parked
+        /// by `loadVideo`/`stopVideo` under replay only, consumed by
+        /// `feedVideoRecord` on token match, and swept at the next
+        /// drain-pass boundary (`drainBoundary`) once its window has
+        /// provably closed — so a long replayed playlist parks and
+        /// releases one entry per clip instead of accumulating them
+        /// for the whole session.
+        const RetiredVideo = struct {
+            key: u64,
+            token: u64,
+            video_fn: ?VideoMsgFn,
+            /// `drain_pass_seq` at park time — the sweep's age stamp
+            /// (see `drainBoundary` for why one pass boundary is
+            /// enough).
+            parked_pass: u64 = 0,
+        };
+
+        /// One journaled `.video_load` cascade resolution awaiting the
+        /// replayed load that will consume it (see
+        /// `pushReplayVideoSource`). The key rides along as the
+        /// cross-check: the reminted token sequence pairs records with
+        /// loads by POSITION, and the journaled key proves the load at
+        /// that position is the same load the recording issued.
+        const ReplayVideoSource = struct {
+            key: u64,
+            token: u64,
+            source: EffectVideoSource,
+            /// The recording's load refused synchronously — its live
+            /// channel reset before `loadVideo` returned, and the
+            /// replayed fake load must reset at the same instant.
+            failed: bool,
+        };
+
         /// One loop-side channel `.rejected` terminal awaiting drain —
         /// the channel twin of `PendingImage`, non-lossy for the same
         /// contract (exactly one terminal per refused open, no drop
         /// counter that could make an eviction visible, unbounded per
         /// dispatch). Shares the `pending_seq` stamp so the drain
-        /// merges all three loop-side stages in enqueue order.
+        /// merges all the loop-side stages in enqueue order.
         const PendingChannel = struct {
             seq: u64,
             event: EffectChannelEvent,
@@ -3008,6 +3384,13 @@ pub fn Effects(comptime Msg: type) type {
         /// alongside the services so `update` can register fetched
         /// pixels synchronously (loop-thread only, not an effect).
         images: ?ImageRegistryBinding = null,
+        /// The runtime's media-surface texture channels, bound by
+        /// `UiApp` alongside the services so `loadVideo` can claim the
+        /// surface a video widget binds and hand its frame sink to the
+        /// platform decoder (loop-thread only). Null means no texture
+        /// channel host: real video loads fail loudly with one
+        /// `.failed` event.
+        media_surfaces: ?MediaSurfaceBinding = null,
         /// The runtime's window verbs (close/minimize by label), bound
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
@@ -3118,6 +3501,11 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        /// The single video playback channel (see `VideoChannel`).
+        video: VideoChannel = .{},
+        /// Monotonic per-load video token mint (see
+        /// `VideoChannel.token`). Loop-thread only.
+        video_token_seq: u64 = 0,
         /// Fixed external-source channel table (see
         /// `max_effect_channels`): long-lived keyed occupancies beside
         /// the effect slots. Loop-thread only — the thread-shared half
@@ -3173,6 +3561,37 @@ pub fn Effects(comptime Msg: type) type {
         pending_channel_spill: []PendingChannel = &.{},
         pending_channel_head: usize = 0,
         pending_channel_len: usize = 0,
+        /// Loop-thread-only video-event stage (see `PendingVideo` for
+        /// the non-lossy contract) — the image stage's storage
+        /// discipline exactly: inline until a burst outgrows it,
+        /// geometric spill after, freed when it drains empty and at
+        /// `deinit`.
+        pending_videos: [max_effect_pending_images_inline]PendingVideo = undefined,
+        pending_video_spill: []PendingVideo = &.{},
+        pending_video_head: usize = 0,
+        pending_video_len: usize = 0,
+        /// Replay-only retired-load identities (see `RetiredVideo`) —
+        /// the image stage's storage discipline: inline until a session
+        /// outgrows it, geometric spill after, freed at `deinit`.
+        retired_videos: [max_effect_pending_images_inline]RetiredVideo = undefined,
+        retired_video_spill: []RetiredVideo = &.{},
+        retired_video_len: usize = 0,
+        /// Journaled `.video_load` cascade resolutions awaiting their
+        /// replayed loads (see `pushReplayVideoSource`). Loop-thread
+        /// only; inline until a burst outgrows it, geometric spill
+        /// after (freed when the queue empties, and at `deinit`) — the
+        /// pending stages' storage discipline.
+        replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
+        replay_video_source_spill: []ReplayVideoSource = &.{},
+        replay_video_source_len: usize = 0,
+        /// A journaled cascade resolution paired against a different
+        /// key than it named (see `takeReplayVideoSource`) — latched
+        /// for `finishReplay`, which turns it into the divergence
+        /// refusal the void-returning `loadVideo` cannot raise itself.
+        replay_video_diverged: bool = false,
+        /// Drain-pass counter (incremented in `drainBoundary`): the
+        /// retired-video sweep's clock. Loop-thread only.
+        drain_pass_seq: u64 = 0,
         /// Loop-thread-only caller-staged Msg stage (see
         /// `PendingStaged` for the non-lossy contract) — the image
         /// stage's storage discipline exactly: inline until a burst
@@ -3267,6 +3686,13 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            // Stop the platform video player (best effort), release the
+            // media-surface claim, and clear the channel.
+            if (self.video.active and !self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
+            self.releaseVideoSink();
+            self.video = .{};
             // Close every external-source channel FIRST among the
             // loop-side teardowns: clearing `open` under each shared
             // mutex fences the app's posting threads off this struct
@@ -3578,6 +4004,25 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_channel_head = 0;
             self.pending_channel_len = 0;
+            // And undrained staged video events.
+            if (self.pending_video_spill.len > 0) {
+                self.allocator.free(self.pending_video_spill);
+                self.pending_video_spill = &.{};
+            }
+            self.pending_video_head = 0;
+            self.pending_video_len = 0;
+            // And the replay-side retired-load identities.
+            if (self.retired_video_spill.len > 0) {
+                self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = &.{};
+            }
+            self.retired_video_len = 0;
+            // And the queued replayed cascade resolutions.
+            if (self.replay_video_source_spill.len > 0) {
+                self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = &.{};
+            }
+            self.replay_video_source_len = 0;
             // And undrained caller-staged Msgs.
             if (self.pending_staged_spill.len > 0) {
                 self.allocator.free(self.pending_staged_spill);
@@ -3828,6 +4273,13 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Point the drain's result reporting at a session recorder.
         /// Loop-thread only; the first bind sticks.
+        /// Bind the runtime's media-surface texture channels
+        /// (`Runtime.mediaSurfaceBinding()`), so `loadVideo` can claim
+        /// the surface a video widget binds. Loop-thread only.
+        pub fn bindMediaSurfaces(self: *Self, binding: MediaSurfaceBinding) void {
+            self.media_surfaces = binding;
+        }
+
         pub fn bindJournal(self: *Self, binding: EffectJournal) void {
             if (self.journal == null) self.journal = binding;
         }
@@ -3854,6 +4306,44 @@ pub fn Effects(comptime Msg: type) type {
         pub fn armReplay(self: *Self) void {
             self.executor = .fake;
             self.replay = true;
+        }
+
+        /// End-of-journal consistency check (the `.finish` replay
+        /// control): every journaled video cascade resolution must have
+        /// been consumed by the load it named, and none may have paired
+        /// against a different key. A leftover or mismatched record
+        /// means the replayed updates issued different loads than the
+        /// recording — divergence, not success.
+        pub fn finishReplay(self: *Self) error{ReplayVideoDivergence}!void {
+            if (self.replay_video_diverged) return error.ReplayVideoDivergence;
+            if (self.replay_video_source_len > 0) {
+                std.debug.print(
+                    "session replay: {d} journaled video load resolution(s) were never consumed by a replayed load - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                    .{self.replay_video_source_len},
+                );
+                return error.ReplayVideoDivergence;
+            }
+            // Every FED record is one recorded delivery, and the event
+            // during whose dispatch it delivered live sits AFTER it in
+            // the journal — so a fed entry still staged when the
+            // journal ends was never consumed by the stream that
+            // recorded it: the file is truncated or hand-edited (or
+            // the replayed updates issued different effects).
+            // Regenerated loop-side answers (resolve = false) may
+            // honestly outlive the last drain — a recording can end
+            // before the wake that would have delivered them, on both
+            // timelines symmetrically.
+            var offset: usize = 0;
+            const storage = self.pendingVideoStorage();
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const entry = storage[(self.pending_video_head + offset) % storage.len];
+                if (!entry.resolve) continue;
+                std.debug.print(
+                    "session replay: a journaled video result for key {d} was never delivered - the recording's own delivering event follows every record, so the journal is truncated or hand-edited (or the replayed updates issued different effects)\n",
+                    .{entry.event.key},
+                );
+                return error.ReplayVideoDivergence;
+            }
         }
 
         /// Report one delivered result to the bound session recorder.
@@ -5636,6 +6126,794 @@ pub fn Effects(comptime Msg: type) type {
             } });
         }
 
+        /// Load a video source into the app's single video player,
+        /// claim the media-surface texture channel its frames feed, and
+        /// (with `autoplay`) start playing — replacing whatever played
+        /// before, the audio channel's replace semantics extended to
+        /// the surface claim: the previous playback's platform player
+        /// stops and its claim is released before the new one lands.
+        /// Sources resolve in the audio cascade's fixed, honest order:
+        /// the LOCAL `path` first; when it is absent (or the file is
+        /// missing) the http(s) `url`, streaming progressively. TEA all
+        /// the way down for TRANSPORT: every report — the load
+        /// acknowledgment with real dimensions and duration, coarse
+        /// position ticks (carrying the stream's honest `buffering`
+        /// flag), the one completion at a non-looping natural end,
+        /// failures — arrives as an `on_event` Msg (payload
+        /// `EffectVideo`) through the ordinary update path. PIXELS
+        /// never enter this channel: decoded frames flow platform-side
+        /// through the claimed surface's frame sink into the
+        /// compositor, presentation-only by construction. Never fails
+        /// from the caller's view: an invalid request (no source,
+        /// oversized strings, a non-http(s) url, an invalid surface id)
+        /// delivers one `.rejected` event; a platform without video
+        /// playback, an unclaimable surface, an unreadable file with no
+        /// url fallback, or a network failure delivers one `.failed`
+        /// event — never a crash, never silence. The video key is its
+        /// own namespace (like audio keys) and identifies the playback
+        /// in every event; it consumes no `max_effects` slots.
+        /// The deterministic loop-side validation `loadVideo` refuses
+        /// with — pure and public so a caller-side validator (the TS
+        /// bridge) can refuse the SAME shapes before committing its own
+        /// routing state, staging its own rejection Msg instead of the
+        /// engine's (`stageLoopMsg`, the channel-admission precedent).
+        /// One source of truth: `loadVideo` consults exactly this.
+        pub fn videoLoadRejected(options: LoadVideoOptions) bool {
+            // The same surface ids `acquireMediaSurfaceProducer`
+            // refuses, refused before any claim: 0 is the no-surface
+            // sentinel, the high bit is the derived-texture namespace.
+            const surface_invalid = options.surface == 0 or
+                (options.surface & canvas.media_surface_image_id_bit) != 0;
+            if (surface_invalid or
+                (options.path.len == 0 and options.url.len == 0) or
+                options.path.len > max_effect_video_path_bytes or
+                options.url.len > max_effect_video_path_bytes) return true;
+            if (options.url.len > 0) {
+                // The image loader's scheme check: http(s) only, before
+                // the platform is asked.
+                if (std.Uri.parse(options.url)) |uri| {
+                    const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+                        std.ascii.eqlIgnoreCase(uri.scheme, "https");
+                    if (!scheme_ok) return true;
+                } else |_| {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        pub fn loadVideo(self: *Self, options: LoadVideoOptions) void {
+            if (videoLoadRejected(options)) {
+                self.deliverLoopVideo(.{ .key = options.key, .kind = .rejected }, options.on_event, 0);
+                return;
+            }
+            // Replace semantics: end the previous playback whole —
+            // platform player stopped, surface claim released — before
+            // the new channel state lands.
+            if (self.video.active and !self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
+            // Under replay the outgoing load may still be owed one
+            // journaled terminal (see `RetiredVideo`), so its identity
+            // is parked before the replacement overwrites it.
+            self.parkRetiredVideo();
+            self.releaseVideoSink();
+            const volume = self.video.volume;
+            self.video_token_seq += 1;
+            self.video = .{
+                .active = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .token = self.video_token_seq,
+                .surface_id = options.surface,
+                .on_event = options.on_event,
+                // Optimistic command mirror; the platform's events are
+                // the authority from the `.loaded` acknowledgment on.
+                .playing = options.autoplay,
+                // The fake executor cannot resolve the cascade, so it
+                // records the requested shape: URL-only requests read
+                // as streams, anything with a local path as local.
+                .source = if (options.path.len == 0) .stream else .local,
+                .looping = options.loop,
+                .muted = options.muted,
+                .volume = volume,
+            };
+            @memcpy(self.video.path_buffer[0..options.path.len], options.path);
+            self.video.path_len = options.path.len;
+            @memcpy(self.video.url_buffer[0..options.url.len], options.url);
+            self.video.url_len = options.url.len;
+            if (self.video.fake) {
+                // Under replay the recorded cascade resolution stands
+                // in for the local-file probe this fake cannot run.
+                if (self.replay) self.takeReplayVideoSource();
+                return;
+            }
+            const services = self.services orelse return self.failVideoLoad();
+            // Claim the texture channel first: a surface another
+            // producer holds (or a host with no channels left) fails
+            // loudly before the platform decodes anything toward it.
+            const binding = self.media_surfaces orelse return self.failVideoLoad();
+            const sink = binding.acquire_fn(binding.context, options.surface) catch
+                return self.failVideoLoad();
+            self.video.sink = sink;
+            // The source cascade, the audio rule verbatim: a missing
+            // local file is the ONE local failure that falls through to
+            // the url — everything else is terminal, because retrying a
+            // different source would mask the real problem.
+            resolve: {
+                if (options.path.len > 0) {
+                    if (services.videoLoad(options.path, self.video.token, sink)) |_| {
+                        self.video.source = .local;
+                        break :resolve;
+                    } else |err| {
+                        if (err != error.VideoSourceNotFound or options.url.len == 0) {
+                            return self.failVideoLoad();
+                        }
+                    }
+                }
+                services.videoLoadUrl(options.url, self.video.token, sink) catch return self.failVideoLoad();
+                self.video.source = .stream;
+                // A fresh stream has no bytes yet: when the load will
+                // PLAY, buffering starts true optimistically and the
+                // platform's events are the authority from there. A
+                // paused load (`autoplay = false`) is paused, not
+                // buffering — the flag means an un-paused stream
+                // waiting for bytes, and the wait only starts with
+                // play. `playing` holds the autoplay intent here.
+                self.video.buffering = self.video.playing;
+            }
+            // Options that shape the fresh player (a load resets the
+            // platform side, so defaults need no call). Best effort,
+            // like the remembered audio volume.
+            if (options.loop) services.videoSetLoop(true) catch {};
+            if (options.muted) services.videoSetMuted(true) catch {};
+            if (volume != 1.0) services.videoSetVolume(volume) catch {};
+            if (options.autoplay) services.videoPlay() catch return self.failVideoLoad();
+            // Journal the cascade's resolution for replay — Msg-less
+            // engine truth, journaled handler or no handler (the
+            // `.video_load` kind's doc has the full story). EVERY exit
+            // of the real path journals exactly one such record
+            // (`failVideoLoad` covers the refusals), so the replayed
+            // loads and the journaled records form a bijection replay
+            // can verify: extras and absences are both divergence.
+            self.journalNote(.{
+                .kind = .video_load,
+                .key = options.key,
+                .video_kind = .loaded,
+                .video_token = self.video.token,
+                .video_source = self.video.source,
+            });
+        }
+
+        /// Start or resume the loaded playback (the poster-frame
+        /// counterpart of `autoplay = false`, and un-pause). Idle
+        /// channels no-op; a player the platform can no longer start
+        /// delivers one `.failed` event instead of silence.
+        pub fn playVideo(self: *Self) void {
+            if (!self.video.active) return;
+            if (self.video.fake and self.video.completed) {
+                // The live hosts retire the player at a non-looping
+                // natural end, so play meets an absent player there:
+                // one `.failed` terminal and the channel resets before
+                // playVideo returns (`failVideoChannel`). The fake
+                // models the same refusal — a snapshot an update reads
+                // right after its own play must answer the same on
+                // every executor. Under replay the journaled terminal
+                // delivers itself, so the reset just parks the
+                // identity it routes by.
+                if (self.replay) {
+                    self.parkRetiredVideo();
+                    self.video = .{ .volume = self.video.volume };
+                } else {
+                    self.failVideoChannel();
+                }
+                return;
+            }
+            self.video.playing = true;
+            if (self.video.fake) return;
+            const services = self.services orelse return self.failVideoChannel();
+            services.videoPlay() catch return self.failVideoChannel();
+        }
+
+        /// Restart the current playback from the start: a fresh load
+        /// of the channel's own remembered source with autoplay,
+        /// keeping the key, surface claim, handler, and the loop and
+        /// mute flags. THE resume path after a non-looping natural
+        /// end — the platform player was retired there, so play and
+        /// seek refuse — and the house transport's Play goes through
+        /// here when the completion latch is set. Idle channels no-op
+        /// (nothing to restart). An ordinary load in every other
+        /// respect: it journals its cascade resolution, replaces the
+        /// player whole, and delivers a fresh `.loaded`
+        /// acknowledgment.
+        pub fn restartVideo(self: *Self) void {
+            if (!self.video.active) return;
+            // Copies, not slices: loadVideo writes the channel's own
+            // source buffers, and the options must not alias them.
+            var path_buffer: [max_effect_video_path_bytes]u8 = undefined;
+            var url_buffer: [max_effect_video_path_bytes]u8 = undefined;
+            const path_len = self.video.path_len;
+            const url_len = self.video.url_len;
+            @memcpy(path_buffer[0..path_len], self.video.path());
+            @memcpy(url_buffer[0..url_len], self.video.url());
+            self.loadVideo(.{
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .path = path_buffer[0..path_len],
+                .url = url_buffer[0..url_len],
+                .autoplay = true,
+                .loop = self.video.looping,
+                .muted = self.video.muted,
+                .on_event = self.video.on_event,
+            });
+        }
+
+        /// Pause the current playback in place; the surface keeps its
+        /// last adopted frame. Idle channels no-op; no event echoes —
+        /// the caller commanded it, so the caller knows.
+        pub fn pauseVideo(self: *Self) void {
+            if (!self.video.active) return;
+            self.video.playing = false;
+            // Buffering is an un-paused stream's wait for bytes; the
+            // pause ends the wait by definition. The command mirror
+            // clears it here because a conforming host emits no pause
+            // acknowledgment that could (pause's no-event contract).
+            self.video.buffering = false;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoPause() catch {};
+        }
+
+        /// `stopVideo` plus the stream CANCEL the TS wire promises:
+        /// the stopped stream's staged-but-undrained answers — a
+        /// synchronous terminal from the very batch that stops it —
+        /// are removed, so no event for the stream ever reaches the
+        /// app after this call (`Cmd.videoStop`: "no events for the
+        /// key after this"). The stream is identified by its TOKEN
+        /// (`videoMintedToken` at the adapter's own load), not the
+        /// public key: the key is caller-controlled and shared by
+        /// every load routed through one event arm, and a REPLACED
+        /// predecessor under the same key still speaks its owed
+        /// terminal — only stop cancels. The PLAYER stops only while
+        /// the channel still plays that stream: a playback some other
+        /// caller loaded since (a declarative element) must survive a
+        /// stale stream's stop untouched. The Zig-native `stopVideo`
+        /// keeps every staged answer instead (one terminal per load,
+        /// never silence); an adapter whose public stop is the
+        /// stream's cancel goes through here. A cancelled answer never
+        /// journals, so replay regenerates and cancels the same
+        /// entries and the timelines stay identical.
+        pub fn stopVideoCancel(self: *Self, token: u64) void {
+            self.cancelPendingVideo(token);
+            if (self.video.active and self.video.token == token) self.stopVideo();
+        }
+
+        /// Remove every staged entry belonging to load `token` — the
+        /// cancel behind `stopVideoCancel`. Surviving entries keep
+        /// their relative (seq) order. Loop-side rejections carry
+        /// token 0 (a refused load never minted one) and are never
+        /// cancelled — they answer commands, not streams.
+        fn cancelPendingVideo(self: *Self, token: u64) void {
+            if (token == 0) return;
+            const storage = self.pendingVideoStorage();
+            var kept: usize = 0;
+            var offset: usize = 0;
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const from = (self.pending_video_head + offset) % storage.len;
+                const entry = storage[from];
+                if (entry.token == token) continue;
+                const to = (self.pending_video_head + kept) % storage.len;
+                storage[to] = entry;
+                kept += 1;
+            }
+            self.pending_video_len = kept;
+            if (kept == 0) {
+                self.pending_video_head = 0;
+                if (self.pending_video_spill.len > 0) {
+                    self.allocator.free(self.pending_video_spill);
+                    self.pending_video_spill = &.{};
+                }
+            }
+        }
+
+        /// Stop playback, release the player AND the surface claim. No
+        /// event echoes; the channel goes idle, later platform
+        /// stragglers are swallowed, and the surface keeps its last
+        /// adopted frame until another producer claims it.
+        pub fn stopVideo(self: *Self) void {
+            if (!self.video.active) return;
+            const fake = self.video.fake;
+            // Under replay the stopped load may still be owed one
+            // journaled terminal (see `RetiredVideo`).
+            self.parkRetiredVideo();
+            self.releaseVideoSink();
+            const volume = self.video.volume;
+            self.video = .{ .volume = volume };
+            if (fake) return;
+            const services = self.services orelse return;
+            services.videoStop() catch {};
+        }
+
+        /// Jump the current playback to `position_ms` (the platform
+        /// clamps to the duration; a paused seek still pushes the
+        /// sought frame, so scrubbing is visible). Idle channels no-op;
+        /// no event echoes — the next position tick reports from the
+        /// new position.
+        pub fn seekVideo(self: *Self, position_ms: u64) void {
+            if (!self.video.active) return;
+            const clamped = if (self.video.duration_ms > 0)
+                @min(position_ms, self.video.duration_ms)
+            else
+                position_ms;
+            // The mirror's gate is the DETERMINISTIC completion latch,
+            // identical on every executor: a completed non-looping
+            // playback's player is retired, its seek refuses, and the
+            // mirror must keep the terminal position — live, fake, and
+            // replayed alike. A residual platform verdict beyond that
+            // (no shipping host refuses a seek on a live player) is
+            // fire-and-forget: journaling per-seek outcomes would buy
+            // nothing, and gating the mirror on it would let an exotic
+            // host's answer diverge replay's mirrors from the
+            // recording's.
+            if (self.video.completed) return;
+            self.video.position_ms = clamped;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSeek(position_ms) catch {};
+        }
+
+        /// Set playback volume, clamped to 0.0—1.0 and remembered
+        /// across loads — the audio volume contract. Independent of
+        /// mute.
+        pub fn setVideoVolume(self: *Self, volume: f32) void {
+            const clamped = std.math.clamp(volume, 0.0, 1.0);
+            self.video.volume = clamped;
+            if (!self.video.active or self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetVolume(clamped) catch {};
+        }
+
+        /// Mute or unmute the playback's audio track without touching
+        /// the remembered volume. Idle channels no-op (a fresh load's
+        /// `muted` option is the way to start muted).
+        pub fn setVideoMuted(self: *Self, muted: bool) void {
+            if (!self.video.active) return;
+            self.video.muted = muted;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetMuted(muted) catch {};
+        }
+
+        /// Enable or disable looping on the current playback. Idle
+        /// channels no-op (a fresh load's `loop` option covers the
+        /// start-looping case). A looping playback never delivers
+        /// `.completed`.
+        pub fn setVideoLoop(self: *Self, loop: bool) void {
+            if (!self.video.active) return;
+            self.video.looping = loop;
+            if (self.video.fake) return;
+            const services = self.services orelse return;
+            services.videoSetLoop(loop) catch {};
+        }
+
+        /// Route a platform video event back into an `on_event` Msg for
+        /// the active channel, updating the playback mirrors on the
+        /// way. Null when the channel is idle (a straggler after
+        /// `stopVideo`) or has no handler. Loop-thread only; called by
+        /// `UiApp.handleEvent` for `.video` platform events.
+        pub fn takeVideoMsg(self: *Self, platform_event: platform.VideoEvent) ?Msg {
+            // Identity gate, before anything else: an event whose token
+            // is not the CURRENT load's belongs to a playback this
+            // channel already replaced or stopped — a terminal queued
+            // by the old player must neither reset the replacement nor
+            // route through its handler (`VideoChannel.token`). Under
+            // replay the same gate keeps the mirrors honest: the re-run
+            // loads mint the same deterministic token sequence, so
+            // stale recorded events are swallowed exactly as they were
+            // live.
+            if (!self.video.active or platform_event.token != self.video.token) return null;
+            // Scalars clamp into the exact-integer delivery window here
+            // (`max_effect_video_scalar_exclusive`), once, for the live
+            // Msg, the mirrors, the journaled record, AND the replayed
+            // steering below — so live and replay derive identical
+            // state from the same platform event, and no journaled
+            // record can carry a value replay's damage gate refuses.
+            // The macOS host clamps CMTimes host-side already; this
+            // makes the bound true for every host.
+            const position_ms = clampVideoScalar(platform_event.position_ms);
+            const duration_ms = clampVideoScalar(platform_event.duration_ms);
+            const width = clampVideoScalar(platform_event.width);
+            const height = clampVideoScalar(platform_event.height);
+            const kind: EffectVideoEventKind = switch (platform_event.kind) {
+                .loaded => .loaded,
+                .position => .position,
+                .completed => .completed,
+                .failed => .failed,
+            };
+            // Under replay the journaled effect records are the Msg
+            // source (fed through `feedVideoEvent`); the replayed
+            // platform `.video` events must not double-deliver. They DO
+            // still steer the channel mirrors — unlike audio, a video
+            // playback routinely runs with NO Msg handler (the house
+            // chrome renders straight from these mirrors, and a
+            // handler-less delivery journals no effect record).
+            // TIMING: at record time this event's Msg dispatched
+            // SYNCHRONOUSLY inside this very event's dispatch, and the
+            // journal's contiguity invariant puts its effect record
+            // immediately before this event — so if the head of the
+            // video stage is a fed entry, it IS this event's recorded
+            // delivery and must dispatch NOW, not at the next drain: an
+            // update that loads the next clip from a `completed`
+            // handler has to run before the next recorded event (the
+            // new clip's `.loaded`) replays, or that event would be
+            // swallowed against the old token.
+            if (self.replay) {
+                // Captured BEFORE the apply: a terminal event resets
+                // the channel, and the missing-record check below needs
+                // the handler that was bound when this event dispatched.
+                const event_handler = self.video.on_event;
+                const resolved = self.applyVideoEvent(.{
+                    .key = 0,
+                    .kind = kind,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
+                    .playing = platform_event.playing,
+                    .buffering = platform_event.buffering,
+                    .width = width,
+                    .height = height,
+                });
+                // Only a FED entry (a recorded delivery) pairs with a
+                // platform event — and only THIS load's (the token
+                // gate, against the event's token: a terminal apply
+                // above may have reset the channel). The entry pairs
+                // from ANY stage position: live, the event's Msg
+                // dispatched synchronously, jumping the loop-side
+                // stage entirely, so a regenerating rejection staged
+                // earlier in the same dispatch (which keeps its own
+                // drain-time order) must not block it — head-only
+                // pairing would reverse the recorded Msg order.
+                if (self.takePendingVideoMatching(platform_event.token)) |entry| {
+                    // The record was journaled FROM this very event at
+                    // record time, so its payload must equal what the
+                    // event resolves to now — a record whose scalars
+                    // or kind were altered around an intact identity
+                    // is a hand-edited journal, and delivering it
+                    // would hand the app a Msg the mirrors (steered by
+                    // the event) contradict.
+                    if (resolved == null or !std.meta.eql(entry.event, resolved.?)) {
+                        std.debug.print(
+                            "session replay: the journaled video result for key {d} does not match the platform event that delivered it live - the recorder journals every delivery verbatim, so the journal is damaged or hand-edited\n",
+                            .{entry.event.key},
+                        );
+                        self.replay_video_diverged = true;
+                        return null;
+                    }
+                    const event_fn = entry.video_fn orelse return null;
+                    return event_fn(entry.event);
+                }
+                if (event_handler != null) {
+                    // A handler was bound when this recorded event
+                    // dispatched, so the recording delivered a Msg and
+                    // journaled its record immediately before this
+                    // event — a missing record is a truncated or
+                    // hand-edited journal, and returning silently
+                    // would drop a Msg the recording dispatched.
+                    std.debug.print(
+                        "session replay: a recorded video event arrived with no journaled result before it - the recorder journals every handled delivery, so the journal is truncated or hand-edited\n",
+                        .{},
+                    );
+                    self.replay_video_diverged = true;
+                }
+                return null;
+            }
+            const video_fn = self.video.on_event;
+            const event = self.applyVideoEvent(.{
+                .key = 0,
+                .kind = kind,
+                .position_ms = position_ms,
+                .duration_ms = duration_ms,
+                .playing = platform_event.playing,
+                .buffering = platform_event.buffering,
+                .width = width,
+                .height = height,
+            }) orelse return null;
+            const event_fn = video_fn orelse return null;
+            // The token rides the platform event, not the channel: a
+            // terminal apply above resets the channel, and the record
+            // must still name the load that produced the delivery
+            // (`EffectResultRecord.video_token`).
+            self.journalNote(.{
+                .kind = .video,
+                .key = event.key,
+                .video_kind = event.kind,
+                .video_position_ms = event.position_ms,
+                .video_duration_ms = event.duration_ms,
+                .video_playing = event.playing,
+                .video_buffering = event.buffering,
+                .video_width = event.width,
+                .video_height = event.height,
+                .video_token = platform_event.token,
+                // Past the handler gate above by construction.
+                .video_handled = true,
+            });
+            return event_fn(event);
+        }
+
+        /// The CURRENT playback's load identity (`VideoChannel.token`;
+        /// 0 when idle) — how the declarative reconciler proves the
+        /// playback it is about to stop or mutate is the one IT
+        /// started: the public key alone is caller-controlled, and a
+        /// manual load could collide with the reconciler's derived
+        /// key.
+        pub fn videoOwnerToken(self: *const Self) u64 {
+            return if (self.video.active) self.video.token else 0;
+        }
+
+        /// The most recently MINTED load identity — valid right after
+        /// `loadVideo` returns even when a synchronous refusal already
+        /// reset the channel (where `videoOwnerToken` reads 0). How an
+        /// adapter remembers which stream its own load opened, so its
+        /// later verbs can prove the playback on the channel is still
+        /// that stream (rejected loads never mint, and adapters
+        /// pre-validate rejections before committing routing state).
+        pub fn videoMintedToken(self: *const Self) u64 {
+            return self.video_token_seq;
+        }
+
+        /// The video playback state mirrors, for the automation
+        /// snapshot.
+        pub fn videoSnapshot(self: *const Self) VideoSnapshot {
+            return .{
+                .active = self.video.active,
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .playing = self.video.playing,
+                .buffering = self.video.buffering,
+                .completed = self.video.completed,
+                .looping = self.video.looping,
+                .muted = self.video.muted,
+                .source = self.video.source,
+                .position_ms = self.video.position_ms,
+                .duration_ms = self.video.duration_ms,
+                .width = self.video.width,
+                .height = self.video.height,
+                .volume = self.video.volume,
+            };
+        }
+
+        /// Fake executor: the recorded playback request on the single
+        /// video channel, or null when nothing was asked to play.
+        pub fn pendingVideo(self: *const Self) ?VideoRequest {
+            if (!self.video.active) return null;
+            return .{
+                .key = self.video.key,
+                .surface = self.video.surface_id,
+                .path = self.video.path(),
+                .url = self.video.url(),
+                .playing = self.video.playing,
+                .looping = self.video.looping,
+                .muted = self.video.muted,
+                .position_ms = self.video.position_ms,
+                .volume = self.video.volume,
+            };
+        }
+
+        /// Fake executor convenience: feed one video event to the
+        /// CURRENT playback as the platform would deliver it — the
+        /// whole journal shape in one signature (dimensions ride only
+        /// `.loaded` from real hosts; other kinds pass 0). Fails when
+        /// no playback is active to receive it. Session replay never
+        /// calls this: a journaled record names the load that produced
+        /// it, and `feedVideoRecord` routes by that identity.
+        pub fn feedVideoEvent(self: *Self, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
+            if (!self.video.active) return error.EffectNotFound;
+            return self.feedVideoRecord(self.video.key, self.video.token, self.video.on_event != null, kind, position_ms, duration_ms, playing, buffering, width, height);
+        }
+
+        /// Session replay: feed one journaled video record, routed by
+        /// the JOURNALED identity exactly as live delivery routed it —
+        /// the record's token names the load that produced the event
+        /// (`EffectResultRecord.video_token`; app keys are reused by
+        /// replace semantics and cannot tell two loads apart), and the
+        /// replayed dispatches re-mint the same deterministic token
+        /// sequence. A token naming the CURRENT playback resolves
+        /// against the live channel at drain time (mirrors updated,
+        /// handler from the channel), mirroring `takeVideoMsg`. A token
+        /// naming a load the replayed timeline already replaced or
+        /// stopped — a synchronous terminal the recording host refused
+        /// inside the very dispatch that then moved on — delivers the
+        /// journaled shape verbatim through the handler that load
+        /// registered (`RetiredVideo`), leaving the live channel alone:
+        /// binding it to the current playback would misattribute the
+        /// Msg and reset a replacement the recording kept playing.
+        /// Fails when the token matches neither (the replayed updates
+        /// issued different loads than the recording).
+        pub fn feedVideoRecord(self: *Self, key: u64, token: u64, handled: bool, kind: EffectVideoEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool, width: u64, height: u64) !void {
+            // Handler captured NOW, not at delivery: a fed event is one
+            // recorded delivery, and under replay the platform `.video`
+            // event that follows this record in the journal can apply a
+            // channel-resetting terminal before the drain delivers this
+            // entry (see `PendingVideo`).
+            var video_fn: ?VideoMsgFn = undefined;
+            if (self.video.active and self.video.token == token) {
+                // The reminted token pairs by position; the journaled
+                // key proves the load at that position is the load the
+                // recording issued. A mismatch is divergence, not a
+                // delivery.
+                if (self.video.key != key) return error.EffectNotFound;
+                video_fn = self.video.on_event;
+            } else if (self.takeRetiredVideo(token)) |retired| {
+                if (retired.key != key) return error.EffectNotFound;
+                video_fn = retired.video_fn;
+            } else {
+                return error.EffectNotFound;
+            }
+            // The record says whether the delivery dispatched a Msg
+            // live; the replayed load's handler presence must agree —
+            // a consumed record whose Msg silently vanished (or a Msg
+            // live never dispatched) is divergence, not a delivery.
+            if (handled != (video_fn != null)) return error.EffectNotFound;
+            self.stagePendingVideo(.{
+                .seq = self.nextPendingSeq(),
+                .event = .{
+                    .key = key,
+                    .kind = kind,
+                    .position_ms = position_ms,
+                    .duration_ms = duration_ms,
+                    .playing = playing,
+                    .buffering = buffering,
+                    .width = width,
+                    .height = height,
+                },
+                .video_fn = video_fn,
+                .resolve = true,
+                .token = token,
+            });
+        }
+
+        /// Session replay: queue a journaled `.video_load` cascade
+        /// resolution — the source the RECORDING host's filesystem
+        /// decided (a missing local file falls through to the url),
+        /// which the replay-side fake load cannot probe. The record
+        /// precedes the event whose dispatch issued the load (the
+        /// journal's ordering invariant), so it queues here and the
+        /// replayed `loadVideo` consumes it by token — the minted
+        /// sequence is deterministic, so each entry pairs with exactly
+        /// the load that journaled it, and a load whose cascade failed
+        /// live (no record) simply finds no entry.
+        pub fn pushReplayVideoSource(self: *Self, key: u64, token: u64, source: EffectVideoSource, failed: bool) void {
+            const storage = self.replayVideoSourceStorage();
+            if (self.replay_video_source_len == storage.len) {
+                // Loads per dispatch are unbounded by contract, so the
+                // queue grows rather than refusing — the pending
+                // stages' discipline, loud on allocation failure for
+                // the same stranded-consumer reason.
+                const grown = self.allocator.alloc(ReplayVideoSource, storage.len * 2) catch
+                    @panic("effects: out of memory queueing a replayed video cascade resolution - each record is one recorded load's resolution and must never be dropped");
+                @memcpy(grown[0..self.replay_video_source_len], storage[0..self.replay_video_source_len]);
+                if (self.replay_video_source_spill.len > 0) self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = grown;
+            }
+            const active = self.replayVideoSourceStorage();
+            active[self.replay_video_source_len] = .{ .key = key, .token = token, .source = source, .failed = failed };
+            self.replay_video_source_len += 1;
+        }
+
+        /// The cascade-resolution queue's current backing storage.
+        fn replayVideoSourceStorage(self: *Self) []ReplayVideoSource {
+            if (self.replay_video_source_spill.len > 0) return self.replay_video_source_spill;
+            return &self.replay_video_sources;
+        }
+
+        /// Consume the queued cascade resolution for the load just
+        /// minted, if the recording journaled one — the replayed fake
+        /// load's stand-in for the local-file probe. Entries for
+        /// already-minted tokens can never match again (tokens are
+        /// unique and monotone), so the scan drops them on the way —
+        /// the queue self-cleans.
+        fn takeReplayVideoSource(self: *Self) void {
+            const storage = self.replayVideoSourceStorage();
+            var index: usize = 0;
+            var matched = false;
+            while (index < self.replay_video_source_len) {
+                const entry = storage[index];
+                if (entry.token < self.video.token) {
+                    // A record whose load position has already passed:
+                    // the replayed timeline never issued the load that
+                    // journaled it. Divergence, consumed (it can never
+                    // pair) and latched for `finishReplay`.
+                    std.debug.print(
+                        "session replay: the journaled video load for key {d} (position {d}) was never issued by the replayed updates - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                        .{ entry.key, entry.token },
+                    );
+                    self.replay_video_diverged = true;
+                    self.replay_video_source_len -= 1;
+                    storage[index] = storage[self.replay_video_source_len];
+                    continue;
+                }
+                if (entry.token == self.video.token) {
+                    // The resolution must be one this load's request
+                    // could have produced: `.local` needs a local path
+                    // and `.stream` needs a url — a journaled source
+                    // the cascade could never have selected is a
+                    // hand-edited journal, and applying it would
+                    // expose an impossible snapshot state.
+                    const source_possible = switch (entry.source) {
+                        .local => self.video.path_len > 0,
+                        .stream => self.video.url_len > 0,
+                    };
+                    if (!source_possible) {
+                        std.debug.print(
+                            "session replay: the journaled video load for key {d} resolved to .{s}, which its request shape cannot select - the journal is damaged or hand-edited\n",
+                            .{ entry.key, @tagName(entry.source) },
+                        );
+                        self.replay_video_diverged = true;
+                        self.replay_video_source_len -= 1;
+                        storage[index] = storage[self.replay_video_source_len];
+                        matched = true;
+                        break;
+                    }
+                    if (entry.key != self.video.key) {
+                        // The load at this position is not the load the
+                        // recording issued: the replayed updates
+                        // diverged. Latched for `finishReplay` (this is
+                        // the live `loadVideo` API — no error channel)
+                        // and consumed; it can never pair honestly.
+                        std.debug.print(
+                            "session replay: the journaled video load at this position carries key {d} but the replayed dispatch loaded key {d} - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                            .{ entry.key, self.video.key },
+                        );
+                        self.replay_video_diverged = true;
+                        self.replay_video_source_len -= 1;
+                        storage[index] = storage[self.replay_video_source_len];
+                        matched = true;
+                        break;
+                    }
+                    self.video.source = entry.source;
+                    // The live cascade starts an autoplaying fresh
+                    // stream buffering optimistically (`loadVideo`);
+                    // the fake load could not know it resolved to a
+                    // stream. `playing` holds the autoplay intent, as
+                    // it does live at this point.
+                    if (entry.source == .stream and self.video.playing) self.video.buffering = true;
+                    self.replay_video_source_len -= 1;
+                    storage[index] = storage[self.replay_video_source_len];
+                    matched = true;
+                    if (entry.failed) {
+                        // The recording's load refused synchronously:
+                        // its channel reset before `loadVideo`
+                        // returned, so the fake resets NOW — the
+                        // snapshot an update reads inside this very
+                        // dispatch must match the recording's. The
+                        // identity parks for the journaled `.failed`
+                        // terminal, which delivers at its recorded
+                        // drain.
+                        self.parkRetiredVideo();
+                        self.video = .{ .volume = self.video.volume };
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            if (!matched and !self.replay_video_diverged) {
+                // Every non-rejected recorded load journaled a record
+                // that feeds before its dispatch, so a replayed load
+                // with no record at its position is a load the
+                // recording never issued. Divergence, latched for
+                // `finishReplay` (this is the live `loadVideo` API —
+                // no error channel).
+                std.debug.print(
+                    "session replay: the replayed dispatch loaded video key {d} (position {d}) but the recording journaled no load there - the replayed updates issued different loads than the recording (nondeterminism outside the effect boundary?)\n",
+                    .{ self.video.key, self.video.token },
+                );
+                self.replay_video_diverged = true;
+            }
+            if (self.replay_video_source_len == 0 and self.replay_video_source_spill.len > 0) {
+                self.allocator.free(self.replay_video_source_spill);
+                self.replay_video_source_spill = &.{};
+            }
+        }
+
         /// Number of effects currently in flight (running slots).
         pub fn activeCount(self: *Self) usize {
             self.reclaimSlots();
@@ -5656,6 +6934,7 @@ pub fn Effects(comptime Msg: type) type {
             return self.pending_exit_len > 0 or
                 self.pending_image_len > 0 or
                 self.pending_channel_len > 0 or
+                self.pending_video_len > 0 or
                 self.pending_staged_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.queue_count.load(.seq_cst) > 0;
@@ -5697,6 +6976,11 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            // Advance the pass clock and release replay-side retired
+            // video identities whose window closed (`sweepRetiredVideos`
+            // has the full argument). Cheap and empty outside replay.
+            self.drain_pass_seq += 1;
+            self.sweepRetiredVideos();
             // Drain the channel wake coalescers BEFORE snapshotting the
             // post order — `adoptMediaSurfaceFrames`' clear-before-
             // sample placement, matched exactly (it clears each slot's
@@ -5848,6 +7132,68 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_playing = event.playing,
                                 .audio_buffering = event.buffering,
                                 .audio_bands = event.bands,
+                            });
+                            return event_fn(event);
+                        },
+                        .video => |entry| {
+                            var event = entry.event;
+                            const video_fn = entry.video_fn;
+                            if (entry.resolve) {
+                                // Fed events move the live channel's
+                                // mirrors at delivery exactly like a
+                                // platform event — but only while the
+                                // live channel is still THE playback
+                                // the feed captured. A stale fed event
+                                // (its playback was replaced before
+                                // the drain, or a replayed platform
+                                // `.failed` already applied this
+                                // terminal and reset the channel)
+                                // delivers its staged values verbatim
+                                // — they ARE the resolved event from
+                                // stage time — through the handler
+                                // captured at feed time
+                                // (`PendingVideo`), and leaves the
+                                // live channel alone: applying a
+                                // replaced stream's terminal would
+                                // reset the replacement.
+                                if (self.video.active and self.video.token == entry.token) {
+                                    if (self.applyVideoEvent(event)) |resolved| event = resolved;
+                                }
+                            } else {
+                                // Loop-side terminals journal BEFORE
+                                // the handler gate — the image arm's
+                                // rule: a handler-less declarative
+                                // playback's synchronous `.failed` is
+                                // executor truth, and its record is
+                                // what replays the channel reset. Only
+                                // the Msg depends on the handler.
+                                self.journalNote(.{
+                                    .kind = .video,
+                                    .key = event.key,
+                                    .video_kind = event.kind,
+                                    .video_position_ms = event.position_ms,
+                                    .video_duration_ms = event.duration_ms,
+                                    .video_playing = event.playing,
+                                    .video_buffering = event.buffering,
+                                    .video_width = event.width,
+                                    .video_height = event.height,
+                                    .video_token = entry.token,
+                                    .video_handled = entry.video_fn != null,
+                                });
+                            }
+                            const event_fn = video_fn orelse continue;
+                            if (entry.resolve) self.journalNote(.{
+                                .kind = .video,
+                                .key = event.key,
+                                .video_kind = event.kind,
+                                .video_position_ms = event.position_ms,
+                                .video_duration_ms = event.duration_ms,
+                                .video_playing = event.playing,
+                                .video_buffering = event.buffering,
+                                .video_width = event.width,
+                                .video_height = event.height,
+                                .video_token = entry.token,
+                                .video_handled = true,
                             });
                             return event_fn(event);
                         },
@@ -7476,6 +8822,134 @@ pub fn Effects(comptime Msg: type) type {
             self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = audio_fn, .resolve = false } });
         }
 
+        /// Update the video channel mirrors from one event and stamp
+        /// the channel's key into it — `applyAudioEvent` for the video
+        /// channel, plus the dimension mirrors the `.loaded`
+        /// acknowledgment carries. Null when the channel is idle (a
+        /// platform straggler after `stopVideo` is swallowed rather
+        /// than misattributed). `.completed` pins position to the
+        /// duration; `.failed`/`.rejected` release the surface claim
+        /// and reset the channel (nothing is left to resume).
+        /// One video scalar into the exact-integer delivery window
+        /// (see `max_effect_video_scalar_exclusive`).
+        fn clampVideoScalar(value: u64) u64 {
+            return @min(value, max_effect_video_scalar_exclusive - 1);
+        }
+
+        fn applyVideoEvent(self: *Self, event: EffectVideo) ?EffectVideo {
+            if (!self.video.active) return null;
+            var resolved = event;
+            resolved.key = self.video.key;
+            switch (resolved.kind) {
+                .loaded, .position => {
+                    self.video.position_ms = resolved.position_ms;
+                    if (resolved.duration_ms > 0) self.video.duration_ms = resolved.duration_ms;
+                    if (resolved.width > 0) self.video.width = resolved.width;
+                    if (resolved.height > 0) self.video.height = resolved.height;
+                    self.video.playing = resolved.playing;
+                    self.video.buffering = resolved.buffering;
+                },
+                .completed => {
+                    if (resolved.duration_ms > 0) self.video.duration_ms = resolved.duration_ms;
+                    resolved.position_ms = self.video.duration_ms;
+                    resolved.playing = false;
+                    resolved.buffering = false;
+                    self.video.position_ms = self.video.duration_ms;
+                    self.video.playing = false;
+                    self.video.buffering = false;
+                    // The natural end retired the platform player
+                    // (retire-before-emit); the fake transport refuses
+                    // from here like the live one (`VideoChannel.completed`).
+                    self.video.completed = true;
+                },
+                .failed, .rejected => {
+                    resolved.playing = false;
+                    resolved.buffering = false;
+                    self.releaseVideoSink();
+                    self.video = .{ .volume = self.video.volume };
+                },
+            }
+            return resolved;
+        }
+
+        /// A synchronous refusal (the claim, load, or play errored, or
+        /// no services/binding are bound): silence whatever the
+        /// platform may have installed (best effort — a load that
+        /// succeeded before a later step refused would otherwise keep
+        /// its player decoding while this channel forgets it, and the
+        /// inactive channel would skip it at teardown too), release
+        /// whatever was claimed, reset the channel, and deliver one
+        /// `.failed` event on the next drain — the honest degrade for
+        /// hosts without video playback.
+        /// A synchronous `loadVideo` refusal: journal this load's
+        /// `.video_load` record FIRST — every non-rejected load
+        /// journals exactly one, resolved or refused, which is what
+        /// lets replay pair every replayed load with a record and
+        /// refuse extras — then degrade through `failVideoChannel`.
+        /// The record's `video_kind` carries the outcome (`.failed`
+        /// here): the live channel resets before `loadVideo` returns,
+        /// so the replayed fake load must reset at the same instant
+        /// (`takeReplayVideoSource`) — a snapshot an update reads
+        /// inside the very dispatch must match the recording's. The
+        /// `.failed` terminal Msg still journals separately, at its
+        /// drain.
+        fn failVideoLoad(self: *Self) void {
+            self.journalNote(.{
+                .kind = .video_load,
+                .key = self.video.key,
+                .video_kind = .failed,
+                .video_token = self.video.token,
+                .video_source = self.video.source,
+            });
+            self.failVideoChannel();
+        }
+
+        fn failVideoChannel(self: *Self) void {
+            const key = self.video.key;
+            const token = self.video.token;
+            const on_event = self.video.on_event;
+            if (!self.video.fake) {
+                if (self.services) |services| services.videoStop() catch {};
+            }
+            self.releaseVideoSink();
+            self.video = .{ .volume = self.video.volume };
+            self.deliverLoopVideo(.{ .key = key, .kind = .failed }, on_event, token);
+        }
+
+        /// Stage a video event Msg produced on the loop thread
+        /// (rejections and synchronous failures) for the next drain —
+        /// through the non-lossy video stage, never the ring: each is
+        /// its load call's only terminal (`PendingVideo`). Handler-less
+        /// terminals stage too (the image arm's rule): a declarative
+        /// playback binds no Msg, but its synchronous `.failed` must
+        /// still journal — the record is what replays the channel
+        /// reset — and the staged delivery's wake is what re-renders
+        /// the house chrome from the reset mirrors.
+        /// `token` is the failing load's identity for the journal
+        /// (`EffectResultRecord.video_token`) — passed explicitly
+        /// because `failVideoChannel` resets the channel before staging
+        /// (reading `self.video.token` here would read 0); a rejected
+        /// load passes 0 honestly, it never minted one.
+        fn deliverLoopVideo(self: *Self, event: EffectVideo, video_fn: ?VideoMsgFn, token: u64) void {
+            self.stagePendingVideo(.{
+                .seq = self.nextPendingSeq(),
+                .event = event,
+                .video_fn = video_fn,
+                .resolve = false,
+                .token = token,
+            });
+        }
+
+        /// Release the channel's media-surface claim, if one is held.
+        /// Idempotent; the runtime keeps the last adopted frame.
+        fn releaseVideoSink(self: *Self) void {
+            if (self.video.sink.push_fn == null) return;
+            const sink = self.video.sink;
+            self.video.sink = .{};
+            const binding = self.media_surfaces orelse return;
+            binding.release_fn(binding.context, sink);
+        }
+
         fn effectTimerPlatformId(slot_index: usize) u64 {
             return effect_timer_platform_id_base + @as(u64, slot_index);
         }
@@ -7641,6 +9115,172 @@ pub fn Effects(comptime Msg: type) type {
             return entry;
         }
 
+        /// The video-event stage's current backing storage —
+        /// `pendingImageStorage`'s twin.
+        fn pendingVideoStorage(self: *Self) []PendingVideo {
+            if (self.pending_video_spill.len > 0) return self.pending_video_spill;
+            return &self.pending_videos;
+        }
+
+        /// Stage one loop-side video event for the next drain — never
+        /// dropping one (`stagePendingImage`'s discipline and growth
+        /// story: each staged terminal is one load call's only answer
+        /// and each fed event one recorded delivery, loud refusal on
+        /// allocation failure for the same stranded-issuer reason).
+        /// Stamps are monotonic here (no fed entry ever carries an
+        /// older stamp — video has no park to inherit one from), so
+        /// staging appends.
+        fn stagePendingVideo(self: *Self, entry: PendingVideo) void {
+            const storage = self.pendingVideoStorage();
+            if (self.pending_video_len == storage.len) {
+                const grown = self.allocator.alloc(PendingVideo, storage.len * 2) catch
+                    @panic("effects: out of memory staging a video event - each staged terminal is one loadVideo call's only answer and must never be dropped");
+                for (grown[0..self.pending_video_len], 0..) |*slot, index| {
+                    slot.* = storage[(self.pending_video_head + index) % storage.len];
+                }
+                if (self.pending_video_spill.len > 0) self.allocator.free(self.pending_video_spill);
+                self.pending_video_spill = grown;
+                self.pending_video_head = 0;
+            }
+            const active = self.pendingVideoStorage();
+            active[(self.pending_video_head + self.pending_video_len) % active.len] = entry;
+            self.pending_video_len += 1;
+            self.wakeHost();
+        }
+
+        /// Park the CURRENT playback's identity for replay routing
+        /// (see `RetiredVideo`) — called by `loadVideo` and `stopVideo`
+        /// with the outgoing channel still in `self.video`, before the
+        /// replacement (or the reset) overwrites it. Replay-only: live
+        /// and plain-fake sessions never feed by retired identity, so
+        /// they park nothing. Growth is the image stage's discipline —
+        /// never dropping an entry (a lost identity would strand a
+        /// journaled delivery), loud refusal on allocation failure.
+        fn parkRetiredVideo(self: *Self) void {
+            if (!self.replay or !self.video.active) return;
+            const storage = self.retiredVideoStorage();
+            if (self.retired_video_len == storage.len) {
+                const grown = self.allocator.alloc(RetiredVideo, storage.len * 2) catch
+                    @panic("effects: out of memory parking a replayed video load's identity - a journaled delivery routed by it would be stranded");
+                @memcpy(grown[0..self.retired_video_len], storage[0..self.retired_video_len]);
+                if (self.retired_video_spill.len > 0) self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = grown;
+            }
+            const active = self.retiredVideoStorage();
+            active[self.retired_video_len] = .{
+                .key = self.video.key,
+                .token = self.video.token,
+                .video_fn = self.video.on_event,
+                .parked_pass = self.drain_pass_seq,
+            };
+            self.retired_video_len += 1;
+        }
+
+        /// The retired-load list's current backing storage.
+        fn retiredVideoStorage(self: *Self) []RetiredVideo {
+            if (self.retired_video_spill.len > 0) return self.retired_video_spill;
+            return &self.retired_videos;
+        }
+
+        /// Consume the retired-load entry with this token, if one is
+        /// parked. Tokens are unique per load, so removal order does
+        /// not matter (swap-remove); the spill releases when the list
+        /// empties, like the pending stages.
+        fn takeRetiredVideo(self: *Self, token: u64) ?RetiredVideo {
+            const storage = self.retiredVideoStorage();
+            for (storage[0..self.retired_video_len], 0..) |entry, index| {
+                if (entry.token != token) continue;
+                self.retired_video_len -= 1;
+                storage[index] = storage[self.retired_video_len];
+                if (self.retired_video_len == 0 and self.retired_video_spill.len > 0) {
+                    self.allocator.free(self.retired_video_spill);
+                    self.retired_video_spill = &.{};
+                }
+                return entry;
+            }
+            return null;
+        }
+
+        /// Release retired-load entries whose delivery window has
+        /// closed — called from `drainBoundary` after the pass counter
+        /// advances. WHY one boundary suffices: a retired load's only
+        /// post-retirement delivery is the ≤1 loop-staged terminal
+        /// pending when it was retired, and live that terminal drains
+        /// at the FIRST pass after staging, so the journal places its
+        /// record before that pass's event. Drain passes run only
+        /// during wake and frame dispatches — the same journaled
+        /// events replay re-dispatches — and no such event exists
+        /// between the retirement and that first pass. Replay feeds
+        /// records in file order between dispatches, so by the time
+        /// any pass counted PAST the parking one begins, the entry's
+        /// record (if the recording produced one) has already fed and
+        /// consumed it; whatever remains at an older stamp can never
+        /// be referenced again.
+        fn sweepRetiredVideos(self: *Self) void {
+            const storage = self.retiredVideoStorage();
+            var index: usize = 0;
+            while (index < self.retired_video_len) {
+                if (storage[index].parked_pass < self.drain_pass_seq) {
+                    self.retired_video_len -= 1;
+                    storage[index] = storage[self.retired_video_len];
+                    continue;
+                }
+                index += 1;
+            }
+            if (self.retired_video_len == 0 and self.retired_video_spill.len > 0) {
+                self.allocator.free(self.retired_video_spill);
+                self.retired_video_spill = &.{};
+            }
+        }
+
+        /// Remove and return the earliest FED entry belonging to
+        /// `token`, wherever it sits in the stage (see the replay
+        /// pairing in `takeVideoMsg`). Later entries shift down one
+        /// slot; their relative order — the drain's seq order — is
+        /// untouched. Null when no fed entry names the token.
+        fn takePendingVideoMatching(self: *Self, token: u64) ?PendingVideo {
+            const storage = self.pendingVideoStorage();
+            var offset: usize = 0;
+            while (offset < self.pending_video_len) : (offset += 1) {
+                const index = (self.pending_video_head + offset) % storage.len;
+                const entry = storage[index];
+                if (!entry.resolve or entry.token != token) continue;
+                var hole = offset;
+                while (hole + 1 < self.pending_video_len) : (hole += 1) {
+                    const to = (self.pending_video_head + hole) % storage.len;
+                    const from = (self.pending_video_head + hole + 1) % storage.len;
+                    storage[to] = storage[from];
+                }
+                self.pending_video_len -= 1;
+                if (self.pending_video_len == 0) {
+                    self.pending_video_head = 0;
+                    if (self.pending_video_spill.len > 0) {
+                        self.allocator.free(self.pending_video_spill);
+                        self.pending_video_spill = &.{};
+                    }
+                }
+                return entry;
+            }
+            return null;
+        }
+
+        /// Pop the video stage's head — `takePendingImage`'s twin,
+        /// spill released when the stage drains empty.
+        fn takePendingVideo(self: *Self) PendingVideo {
+            const storage = self.pendingVideoStorage();
+            const entry = storage[self.pending_video_head];
+            self.pending_video_head = (self.pending_video_head + 1) % storage.len;
+            self.pending_video_len -= 1;
+            if (self.pending_video_len == 0) {
+                self.pending_video_head = 0;
+                if (self.pending_video_spill.len > 0) {
+                    self.allocator.free(self.pending_video_spill);
+                    self.pending_video_spill = &.{};
+                }
+            }
+            return entry;
+        }
+
         /// The channel-terminal stage's current backing storage —
         /// `pendingImageStorage`'s twin.
         fn pendingChannelStorage(self: *Self) []PendingChannel {
@@ -7793,14 +9433,27 @@ pub fn Effects(comptime Msg: type) type {
                 self.pendingChannelStorage()[self.pending_channel_head].seq
             else
                 no_seq;
+            const video_seq: u64 = if (self.pending_video_len > 0)
+                self.pendingVideoStorage()[self.pending_video_head].seq
+            else
+                no_seq;
             const staged_seq: u64 = if (self.pending_staged_len > 0)
                 self.pendingStagedStorage()[self.pending_staged_head].seq
             else
                 no_seq;
-            const min_seq = @min(@min(ring_seq, staged_seq), @min(image_seq, channel_seq_head));
+            const min_seq = @min(@min(@min(ring_seq, staged_seq), video_seq), @min(image_seq, channel_seq_head));
             if (min_seq == no_seq or min_seq >= before) return null;
             if (min_seq == staged_seq) {
                 return .{ .staged = self.takePendingStaged().msg };
+            }
+            if (min_seq == video_seq) {
+                const staged = self.takePendingVideo();
+                return .{ .video = .{
+                    .event = staged.event,
+                    .video_fn = staged.video_fn,
+                    .resolve = staged.resolve,
+                    .token = staged.token,
+                } };
             }
             if (min_seq == image_seq) {
                 const staged = self.takePendingImage();

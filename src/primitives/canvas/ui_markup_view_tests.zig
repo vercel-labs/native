@@ -2677,6 +2677,161 @@ test "image leaf misuse fails the build with the teaching messages" {
     }
 }
 
+// ---------------------------------------------- video playback element
+
+pub const VideoElementMsg = union(enum) { refresh };
+
+pub const VideoElementModel = struct {
+    clip: []const u8 = "assets/clips/intro.mp4",
+    count: usize = 3,
+};
+
+pub const video_markup_source =
+    \\<column>
+    \\  <video src="{clip}" controls autoplay loop muted width="320" height="180" label="Trailer"/>
+    \\</column>
+;
+
+pub const video_plain_markup_source =
+    \\<column>
+    \\  <video src="assets/clips/intro.mp4" width="320" height="180" label="Trailer"/>
+    \\</column>
+;
+
+pub const VideoElementUi = canvas.Ui(VideoElementMsg);
+
+/// The hand-written equivalent of the video markup: `ui.video` with the
+/// same options, the parity baseline the compiled suite shares.
+pub fn handVideoElementView(ui: *VideoElementUi, model: *const VideoElementModel) VideoElementUi.Node {
+    return ui.column(.{}, .{
+        ui.video(.{
+            .src = model.clip,
+            .controls = true,
+            .autoplay = true,
+            .loop = true,
+            .muted = true,
+            .width = 320,
+            .height = 180,
+            .label = "Trailer",
+        }),
+    });
+}
+
+/// The first widget in the tree carrying the given video-control verb,
+/// or null: how tests find the house chrome's runtime-consumed controls.
+pub fn findVideoControl(widget: canvas.Widget, verb: canvas.VideoControlVerb) ?canvas.Widget {
+    if (widget.video_control == verb) return widget;
+    for (widget.children) |child| {
+        if (findVideoControl(child, verb)) |found| return found;
+    }
+    return null;
+}
+
+test "the video element lowers to the playback surface with house chrome and records the declaration" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const VideoMarkup = markup_view.MarkupView(VideoElementModel, VideoElementMsg);
+    const model = VideoElementModel{};
+
+    var view = try VideoMarkup.init(arena, video_markup_source);
+    var markup_ui = VideoElementUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = VideoElementUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handVideoElementView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+
+    // With controls the element is a column: the playback surface bound
+    // to the framework-owned playback id, then the transport row whose
+    // controls carry the runtime-consumed verbs.
+    const video_root = markup_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.column, video_root.kind);
+    const surface = video_root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, surface.image_id);
+    try testing.expectEqualStrings("Trailer", surface.semantics.label);
+    const toggle = findVideoControl(markup_tree.root, .toggle) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.button, toggle.kind);
+    // The chrome renders the channel snapshot; outside an app loop the
+    // default state is inactive, so the transport is disabled at the
+    // play glyph.
+    try testing.expect(toggle.state.disabled);
+    try testing.expectEqualStrings("play", toggle.icon);
+    const scrub = findVideoControl(markup_tree.root, .scrub) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.slider, scrub.kind);
+    try testing.expect(scrub.state.disabled);
+
+    // The build recorded the declaration for the app loop's reconcile.
+    const declaration = markup_ui.video_declaration orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("assets/clips/intro.mp4", declaration.src);
+    try testing.expect(declaration.controls);
+    try testing.expect(declaration.autoplay);
+    try testing.expect(declaration.loop);
+    try testing.expect(declaration.muted);
+
+    // Without controls the element is the surface itself: no chrome
+    // anywhere in the tree.
+    var plain_view = try VideoMarkup.init(arena, video_plain_markup_source);
+    var plain_ui = VideoElementUi.init(arena);
+    const plain_tree = try plain_ui.finalize(try plain_view.build(&plain_ui, &model));
+    const plain_surface = plain_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, plain_surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, plain_surface.image_id);
+    try testing.expect(findVideoControl(plain_tree.root, .toggle) == null);
+    try testing.expect(findVideoControl(plain_tree.root, .scrub) == null);
+    try testing.expect(plain_ui.video_declaration != null);
+}
+
+test "video misuse fails the build with the teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = VideoElementModel{};
+    const VideoMarkup = markup_view.MarkupView(VideoElementModel, VideoElementMsg);
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            // A leaf like image and icon: nested content would silently
+            // vanish (the compiled engine rejects the same construct as
+            // a compile error).
+            .source = "<row>\n  <video src=\"a.mp4\"><text>Caption</text></video>\n</row>",
+            .message = canvas.ui_markup.video_children_message,
+        },
+        .{
+            // The closed attribute set teaches its vocabulary.
+            .source = "<row>\n  <video src=\"a.mp4\" gap=\"4\"/>\n</row>",
+            .message = canvas.ui_markup.video_attr_message,
+        },
+        .{
+            // A bound src must produce the source STRING (count is a
+            // number).
+            .source = "<row>\n  <video src=\"{count}\"/>\n</row>",
+            .message = canvas.ui_markup.video_src_message,
+        },
+        .{
+            // The flags are video-scoped: anywhere else they would be
+            // silently inert.
+            .source = "<row>\n  <panel controls=\"true\"/>\n</row>",
+            .message = canvas.ui_markup.video_flag_element_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try VideoMarkup.init(arena, case.source);
+        var ui = VideoElementUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
+}
+
 // ------------------------------------- text alignment and grid columns
 
 pub const AlignMsg = union(enum) { refresh };

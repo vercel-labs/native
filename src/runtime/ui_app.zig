@@ -690,6 +690,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             window_id: platform.WindowId = 0,
             on_close: ?MsgT = null,
             installed: bool = false,
+            /// The `<video src>` declaration the in-flight build pass
+            /// recorded (arena-borrowed; consumed by
+            /// `rebuildWindowSlot` immediately after the pass succeeds
+            /// and the tree installs — a failed layout's declaration
+            /// never reaches the reconciler).
+            pending_video_declaration: ?Ui.VideoDeclaration = null,
             canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
             /// The device scale of THIS window's surface, adopted from
             /// its own frame and resize events. Secondary windows can sit
@@ -930,6 +936,80 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// slots drops the excess to estimate-only math with a debug
         /// warning.
         virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = [_]canvas.VirtualExtentTable{.{}} ** canvas.max_virtual_windows,
+        /// The `<video src>` declaration the LAST main-canvas build
+        /// recorded (`Ui.video_declaration`), captured by the build pass
+        /// for the post-rebuild reconcile; the src slice lives in that
+        /// build's arena, valid until the next rebuild.
+        video_build_declaration: ?VideoBuildDeclaration = null,
+        /// The in-flight rebuild's capture, committed into
+        /// `video_build_declaration` only once the rebuild INSTALLS
+        /// (the `self.tree` assignment): a build that fails after the
+        /// capture never mounted, and the retained tree on the glass
+        /// still shows the old declaration — a later reconcile (a
+        /// secondary window's close) acting on the unmounted build's
+        /// capture would stop or replace a playback the presented tree
+        /// still declares. Seeded from the committed value at each
+        /// rebuild's start, so a failed rebuild changes nothing.
+        video_build_staged: ?VideoBuildDeclaration = null,
+        video_build_staged_src_buffer: [1024]u8 = undefined,
+        /// The load identity of the playback the declarative
+        /// reconciler started (`Effects.videoOwnerToken` right after
+        /// its own loadVideo; 0 = owns nothing): the ownership proof
+        /// for the stop and flag-delta paths. The derived key alone
+        /// is not one — it is a pure function of the source string,
+        /// and a manual load could carry the same key.
+        video_declared_token: u64 = 0,
+        /// Recursion bound for the post-reconcile chrome repass in
+        /// `rebuild` (see the call site): the repass reconciles an
+        /// unchanged declaration, so the mirrors are already a fixed
+        /// point — this guard just makes one level a hard guarantee.
+        video_chrome_repass: bool = false,
+        /// Backing bytes for `video_build_declaration.src`, copied out
+        /// of the build arena at capture (the slot captures' rule): the
+        /// declaration outlives the pass that recorded it — a later
+        /// FAILED rebuild resets the arena it would otherwise borrow
+        /// from, and the reconcile can run from a window close before
+        /// the next successful build.
+        video_build_src_buffer: [1024]u8 = undefined,
+        /// The video mirrors as the LAST main-canvas build rendered
+        /// them (stamped at build time, before the post-build reconcile
+        /// can move them): `drainEffects` compares against the live
+        /// snapshot so a Msg-less mirror move — a handler-less
+        /// declarative playback's synchronous failure delivering its
+        /// staged terminal — still re-renders the house chrome instead
+        /// of leaving controls painted for a playback that is gone.
+        video_rendered_snapshot: Effects.VideoSnapshot = .{},
+        /// Applied declarative-video state: whether a declared src owns
+        /// the playback right now, the src it loaded (so an unchanged
+        /// declaration never reloads — loadVideo replaces the playback
+        /// whole), and the applied loop/muted flags for delta updates.
+        video_declared: bool = false,
+        video_declared_src_buffer: [1024]u8 = undefined,
+        video_declared_src_len: usize = 0,
+        video_declared_loop: bool = false,
+        video_declared_muted: bool = false,
+        /// The last declared src the video loader REFUSED (see
+        /// `applyVideoDeclaration`): remembered so an unchanged bad
+        /// declaration is taught once, not re-attempted every rebuild —
+        /// and kept OUT of the applied-src tracking above, so the
+        /// playback the reconciler actually owns stays stoppable.
+        video_refused_src_buffer: [1024]u8 = undefined,
+        video_refused_src_len: usize = 0,
+        /// The `<video src>` declarations SECONDARY windows' builds
+        /// recorded, one retained entry per declaring window, copied
+        /// out of the slot arenas (slot builds and the main build
+        /// interleave, so a borrowed slice could die under the
+        /// reconciler). `Ui.video` promises that declaring the element
+        /// IS the playback in every window's tree; the main canvas
+        /// build wins when it declares (one player, one owner), and
+        /// among slots the current owner keeps the player until it
+        /// stops declaring or closes — at which point the next
+        /// RETAINED declaration promotes immediately, no rebuild
+        /// required (`slotVideoDeclaration`).
+        video_slot_declarations: [max_ui_windows]SlotVideoDeclaration = @splat(.{}),
+        /// The slot window currently owning the declarative playback
+        /// (0 while none does).
+        video_slot_owner: platform.WindowId = 0,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -1094,6 +1174,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
+            self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
@@ -1176,8 +1257,35 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    // `.video` records feed the whole journaled shape —
+                    // dimensions included — routed by the journaled
+                    // load identity (`video_token`), so replay delivers
+                    // the identical Msg stream with NO producer and NO
+                    // platform player behind it, even when the record's
+                    // load was replaced or stopped by the very dispatch
+                    // that produced it (see `feedVideoRecord`).
+                    .video => try self.effects.feedVideoRecord(
+                        record.key,
+                        record.video_token,
+                        record.video_handled,
+                        record.video_kind,
+                        record.video_position_ms,
+                        record.video_duration_ms,
+                        record.video_playing,
+                        record.video_buffering,
+                        record.video_width,
+                        record.video_height,
+                    ),
+                    // `.video_load` records carry the recording host's
+                    // cascade resolution — which source the load
+                    // actually played — because the replayed fake load
+                    // cannot probe the filesystem. Queued, not applied:
+                    // the record precedes the event whose dispatch
+                    // issues the load (see `pushReplayVideoSource`).
+                    .video_load => self.effects.pushReplayVideoSource(record.key, record.video_token, record.video_source, record.video_kind == .failed),
                     .timer => {},
                 },
+                .finish => try self.effects.finishReplay(),
             }
         }
 
@@ -1245,6 +1353,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (dispatched) {
                 try self.rebuild(runtime, self.canvas_window_id);
                 try self.rebuildWindowSlots(runtime);
+            } else if (self.installed and
+                !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
+            {
+                // A drained Msg-less video terminal (a handler-less
+                // declarative playback's synchronous failure) moved
+                // the mirrors after the last build rendered them:
+                // re-render the chrome so its controls never keep
+                // advertising a playback that is gone.
+                try self.rebuild(runtime, self.canvas_window_id);
+                try self.rebuildWindowSlots(runtime);
             }
         }
 
@@ -1264,6 +1382,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             runtime.audio_duration_ms = audio.duration_ms;
             runtime.audio_spectrum_bands = audio.spectrum_bands;
             runtime.audio_spectrum_events = audio.spectrum_events;
+            self.publishVideoState(runtime);
+        }
+
+        /// The video channel's mirror publication, riding every
+        /// `publishAudioState` call site — the same "wherever a
+        /// dispatch or drain may have moved playback" contract, one
+        /// seam instead of two at each site.
+        fn publishVideoState(self: *Self, runtime: *Runtime) void {
+            const video = self.effects.videoSnapshot();
+            runtime.video_active = video.active;
+            runtime.video_key = video.key;
+            runtime.video_surface_id = video.surface;
+            runtime.video_playing = video.playing;
+            runtime.video_buffering = video.buffering;
+            runtime.video_looping = video.looping;
+            runtime.video_muted = video.muted;
+            runtime.video_source = video.source;
+            runtime.video_position_ms = video.position_ms;
+            runtime.video_duration_ms = video.duration_ms;
+            runtime.video_width = video.width;
+            runtime.video_height = video.height;
         }
 
         /// The design tokens for the next rebuild: the model-derived
@@ -1394,6 +1533,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             var tokens = runtime.tokensWithTextMeasure(self.effectiveTokens());
+            // Stamp the mirrors this build renders BEFORE building:
+            // the post-build reconcile (`applyVideoDeclaration`) can
+            // move them, and `drainEffects` uses the stamp to know the
+            // published chrome no longer matches (see
+            // `video_rendered_snapshot`).
+            self.video_rendered_snapshot = self.effects.videoSnapshot();
             const next_index = self.contextMenuRebuildIndex(null, self.arena_index);
             // Widget layout is inset by the runtime's viewport chrome
             // (safe areas + keyboard on mobile, zero on desktop); the
@@ -1413,6 +1558,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             errdefer if (live_tree_reset) {
                 self.tree = null;
             };
+            // Seed the staged video capture from the committed one, so
+            // a pass that fails before capturing (or an over-long
+            // declaration) leaves the committed state untouched.
+            self.stageVideoDeclarationFromCommitted();
             var built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             // Window-control clearance is a one-retry pass like the
             // virtual-window coverage retry inside the build: only when
@@ -1445,6 +1594,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.tree = tree;
             self.arena_index = next_index;
             live_tree_reset = false;
+            // The build INSTALLED: its video declaration now speaks
+            // for what the glass shows.
+            self.commitStagedVideoDeclaration();
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
@@ -1455,6 +1607,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.scheduleLayoutTweens(runtime, window_id);
             self.applyWebPanes(runtime, window_id, layout);
             self.applyStatusItem(runtime);
+            self.applyVideoDeclaration(runtime);
+            // The reconcile can move the playback this very build
+            // rendered (a src change loading an autoplaying
+            // replacement): the just-installed chrome would advertise
+            // the OLD transport state until a platform event arrived,
+            // and its control would act on the new one — Play on the
+            // label, pause in effect. One repass renders the chrome
+            // from the moved mirrors; it reconciles the SAME
+            // declaration (unchanged src reloads nothing), so the
+            // mirrors are a fixed point and the repass ends the
+            // recursion — the guard makes that a hard bound.
+            if (!self.video_chrome_repass and
+                !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
+            {
+                self.video_chrome_repass = true;
+                defer self.video_chrome_repass = false;
+                try self.rebuild(runtime, window_id);
+                return;
+            }
             self.applyWindows(runtime);
             self.applyChromeSelection();
             self.applyChromeNavigation();
@@ -1463,6 +1634,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         const BuiltLayout = struct {
             tree: Ui.Tree,
             layout: canvas.WidgetLayoutTree,
+        };
+
+        /// One build's `<video src>` declaration as the reconcile
+        /// consumes it (`Ui.VideoDeclaration` minus the chrome flag,
+        /// which is a view concern). The src slice borrows the build
+        /// arena — valid until the next rebuild, longer than the
+        /// reconcile needs.
+        const VideoBuildDeclaration = struct {
+            src: []const u8,
+            autoplay: bool,
+            loop: bool,
+            muted: bool,
         };
 
         /// One view-build + flex-layout pass of `rebuild`, including the
@@ -1493,6 +1676,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != null or pin.arena_index != next_index else true);
                 _ = self.arenas[next_index].reset(.retain_capacity);
                 var ui = Ui.init(self.arenas[next_index].allocator());
+                // The house video chrome renders the channel's honest
+                // snapshot, stamped before the view fn runs — the model
+                // carries none of it.
+                ui.video_state = self.uiVideoState();
                 ui.virtual_window_context = @ptrCast(&window_source);
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
                 ui.virtual_extent_context = @ptrCast(self);
@@ -1530,6 +1717,30 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 };
                 runtime.frame_profile.end(.layout, layout_begin);
 
+                // Capture the build's `<video src>` declaration for the
+                // post-rebuild reconcile (last pass wins — each pass
+                // resets the arena and re-records), COPIED out of the
+                // build arena (`video_build_staged_src_buffer`):
+                // borrowing the arena would dangle after a later failed
+                // rebuild reset it. STAGED, not committed: the rebuild
+                // commits at install (`commitStagedVideoDeclaration`),
+                // so a build that fails downstream never speaks for the
+                // tree still on the glass. Over-long sources are not
+                // tracked and keep the previous capture — the slot
+                // captures' rule (`captureSlotVideoDeclaration`).
+                if (ui.video_declaration) |declaration| {
+                    if (declaration.src.len > 0 and declaration.src.len <= self.video_build_staged_src_buffer.len) {
+                        @memcpy(self.video_build_staged_src_buffer[0..declaration.src.len], declaration.src);
+                        self.video_build_staged = .{
+                            .src = self.video_build_staged_src_buffer[0..declaration.src.len],
+                            .autoplay = declaration.autoplay,
+                            .loop = declaration.loop,
+                            .muted = declaration.muted,
+                        };
+                    }
+                } else {
+                    self.video_build_staged = null;
+                }
                 self.rememberVirtualWindows(&ui);
                 // Measure the mounted rows of every variable-extent
                 // list against the fresh layout and patch the retained
@@ -2044,6 +2255,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) void {
             const window_id = self.window_slots[index].window_id;
             self.releaseContextMenuSnapshotForWindow(window_id);
+            // The reconcile-closed window's video declaration dies with
+            // it, exactly as in `handleWindowClosed`.
+            self.captureSlotVideoDeclaration(window_id, null);
+            self.applyVideoDeclaration(runtime);
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
@@ -2119,6 +2334,78 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
             }
+            // Reconcile the video declaration THIS build recorded or
+            // withdrew (a no-op when nothing changed — the reconciler
+            // diffs the applied src), captured only now that the tree
+            // really installed. The main rebuild already ran it, but
+            // slot builds run after, so a slot-declared video must not
+            // wait a cycle to load.
+            self.captureSlotVideoDeclaration(slot.window_id, slot.pending_video_declaration);
+            const rendered = self.effects.videoSnapshot();
+            self.applyVideoDeclaration(runtime);
+            // The reconcile can activate (or move) the playback this
+            // slot's build rendered — a first mount of an autoplaying
+            // declaration builds its chrome from the still-inactive
+            // snapshot — so one guarded repass renders it from the
+            // moved mirrors, the main rebuild's rule: the repass
+            // reconciles an unchanged declaration, so the mirrors are
+            // a fixed point and the guard makes one level a hard
+            // bound.
+            if (!self.video_chrome_repass and !std.meta.eql(rendered, self.effects.videoSnapshot())) {
+                self.video_chrome_repass = true;
+                defer self.video_chrome_repass = false;
+                try self.rebuildWindowSlot(runtime, slot);
+            }
+        }
+
+        /// One retained secondary-window `<video src>` declaration
+        /// (see `video_slot_declarations`): the window's latest build
+        /// output, kept even while another window owns the player so
+        /// the owner's close or withdrawal promotes it without waiting
+        /// for the declaring window's next rebuild.
+        const SlotVideoDeclaration = struct {
+            used: bool = false,
+            window_id: platform.WindowId = 0,
+            src_buffer: [1024]u8 = undefined,
+            src_len: usize = 0,
+            autoplay: bool = false,
+            loop: bool = false,
+            muted: bool = false,
+        };
+
+        /// Record (or withdraw) a secondary window's `<video src>`
+        /// declaration, copied out of the slot build's arena — one
+        /// retained entry per window (the table matches the window
+        /// budget, so an upsert always finds room). Over-long and
+        /// empty sources are not tracked (`loadVideo` would reject
+        /// them, and tracking one would reload every rebuild).
+        fn captureSlotVideoDeclaration(self: *Self, window_id: platform.WindowId, declaration: ?Ui.VideoDeclaration) void {
+            if (declaration) |decl| {
+                if (decl.src.len == 0 or decl.src.len > 1024) return;
+                const entry = blk: {
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (candidate.used and candidate.window_id == window_id) break :blk candidate;
+                    }
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (!candidate.used) break :blk candidate;
+                    }
+                    return;
+                };
+                @memcpy(entry.src_buffer[0..decl.src.len], decl.src);
+                entry.src_len = decl.src.len;
+                entry.window_id = window_id;
+                entry.autoplay = decl.autoplay;
+                entry.loop = decl.loop;
+                entry.muted = decl.muted;
+                entry.used = true;
+                return;
+            }
+            for (&self.video_slot_declarations) |*candidate| {
+                if (candidate.used and candidate.window_id == window_id) {
+                    candidate.* = .{};
+                }
+            }
+            if (self.video_slot_owner == window_id) self.video_slot_owner = 0;
         }
 
         /// One view-build + flex-layout pass of `rebuildWindowSlot`,
@@ -2139,11 +2426,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != slot.window_id or pin.arena_index != next_index else true);
             _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
+            // Window views render the same honest video chrome state,
+            // and their `<video src>` declarations reconcile the channel
+            // too — `Ui.video` promises that declaring the element IS
+            // the playback in every window's tree. The main canvas
+            // build's declaration wins when both declare (one player,
+            // one owner); the capture below records this slot's claim.
+            ui.video_state = self.uiVideoState();
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
             if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
             self.armUiFragmentHost(&ui);
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
+            // The declaration is captured by `rebuildWindowSlot` AFTER
+            // the pass (and its clearance retry) succeeds and the tree
+            // installs: a build whose layout errors never displays, so
+            // its declaration must not steer the playback either.
+            slot.pending_video_declaration = ui.video_declaration;
             const layout = canvas.layoutWidgetTreeWithTokens(tree.root, bounds, tokens, &self.layout_nodes) catch |err| {
                 if (err == error.WidgetLayoutListFull) {
                     ui_app_log.warn(
@@ -2856,6 +3155,216 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
+        /// The video channel snapshot in the builder's chrome shape
+        /// (`Ui.VideoPlaybackState`), stamped onto every Ui before its
+        /// view fn runs.
+        fn uiVideoState(self: *const Self) Ui.VideoPlaybackState {
+            const snap = self.effects.videoSnapshot();
+            return .{
+                .active = snap.active,
+                .playing = snap.playing,
+                .buffering = snap.buffering,
+                .completed = snap.completed,
+                .position_ms = snap.position_ms,
+                .duration_ms = snap.duration_ms,
+            };
+        }
+
+        /// Whether a `<video src>` names an http(s) stream — the
+        /// `loadVideo` cascade's scheme split; everything else is a
+        /// local app-assets path.
+        fn videoSrcIsUrl(src: []const u8) bool {
+            return std.ascii.startsWithIgnoreCase(src, "http://") or
+                std.ascii.startsWithIgnoreCase(src, "https://");
+        }
+
+        /// Reconcile the build's `<video src>` declaration into the
+        /// video playback channel — the windows/tray pattern: presence
+        /// IS playback. A new or changed src loads (loadVideo's replace
+        /// semantics — one player is the whole surface, keyed by the
+        /// src hash so identical declarations share identity); an
+        /// unchanged src applies only loop/muted deltas; a build with
+        /// no declaration while one was applied stops the playback (the
+        /// element left the view; declarative ownership ends it).
+        /// Deterministic under replay: only fx verbs, which regenerate
+        /// from the replayed rebuilds — never a journal write of its
+        /// own.
+        /// The secondary-window declaration as the reconciler consumes
+        /// it — the current owner window's retained entry while it
+        /// still declares, otherwise the first retained declaration
+        /// PROMOTES on the spot (the previous owner closed or stopped
+        /// declaring; a mounted video in another window must not wait
+        /// for an unrelated rebuild to start). Null when no slot
+        /// declares. The src borrows the app struct's own copy, stable
+        /// across builds.
+        fn slotVideoDeclaration(self: *Self) ?VideoBuildDeclaration {
+            const entry = blk: {
+                if (self.video_slot_owner != 0) {
+                    for (&self.video_slot_declarations) |*candidate| {
+                        if (candidate.used and candidate.window_id == self.video_slot_owner) break :blk candidate;
+                    }
+                }
+                for (&self.video_slot_declarations) |*candidate| {
+                    if (candidate.used) break :blk candidate;
+                }
+                self.video_slot_owner = 0;
+                return null;
+            };
+            self.video_slot_owner = entry.window_id;
+            return .{
+                .src = entry.src_buffer[0..entry.src_len],
+                .autoplay = entry.autoplay,
+                .loop = entry.loop,
+                .muted = entry.muted,
+            };
+        }
+
+        /// Seed the in-flight rebuild's staged capture from the
+        /// committed declaration (see `video_build_staged`).
+        fn stageVideoDeclarationFromCommitted(self: *Self) void {
+            if (self.video_build_declaration) |committed| {
+                @memcpy(self.video_build_staged_src_buffer[0..committed.src.len], committed.src);
+                self.video_build_staged = .{
+                    .src = self.video_build_staged_src_buffer[0..committed.src.len],
+                    .autoplay = committed.autoplay,
+                    .loop = committed.loop,
+                    .muted = committed.muted,
+                };
+            } else {
+                self.video_build_staged = null;
+            }
+        }
+
+        /// Commit the installed build's staged capture (see
+        /// `video_build_staged`).
+        fn commitStagedVideoDeclaration(self: *Self) void {
+            if (self.video_build_staged) |staged| {
+                @memcpy(self.video_build_src_buffer[0..staged.src.len], staged.src);
+                self.video_build_declaration = .{
+                    .src = self.video_build_src_buffer[0..staged.src.len],
+                    .autoplay = staged.autoplay,
+                    .loop = staged.loop,
+                    .muted = staged.muted,
+                };
+            } else {
+                self.video_build_declaration = null;
+            }
+        }
+
+        fn applyVideoDeclaration(self: *Self, runtime: *Runtime) void {
+            const declaration = self.video_build_declaration orelse self.slotVideoDeclaration() orelse {
+                if (self.video_declared) {
+                    self.video_declared = false;
+                    const declared_key = std.hash.Wyhash.hash(0x76696465, self.video_declared_src_buffer[0..self.video_declared_src_len]) | 1;
+                    self.video_declared_src_len = 0;
+                    // Stop ONLY the playback this reconciler started:
+                    // an update handler may have replaced it with its
+                    // own load (a different key) between rebuilds, and
+                    // declarative ownership must never kill a playback
+                    // it does not own.
+                    const snapshot = self.effects.videoSnapshot();
+                    if (snapshot.active and snapshot.key == declared_key and
+                        self.effects.videoOwnerToken() == self.video_declared_token)
+                    {
+                        self.effects.stopVideo();
+                    }
+                    self.video_declared_token = 0;
+                    self.publishAudioState(runtime);
+                }
+                return;
+            };
+            // The installing rebuild can reach here before any dispatch
+            // bound the channel (first-bind-sticks, so this is free
+            // afterwards); the load below needs the platform services.
+            self.bindEffectsChannel(runtime);
+            const src = declaration.src;
+            if (src.len > self.video_declared_src_buffer.len) {
+                // Longer than the platform source bound: loadVideo
+                // would reject it; refusing to track it here keeps an
+                // over-long declaration from reloading every rebuild.
+                return;
+            }
+            const applied = self.video_declared_src_buffer[0..self.video_declared_src_len];
+            if (!self.video_declared or !std.mem.eql(u8, applied, src)) {
+                const options: Effects.LoadVideoOptions = .{
+                    // Key from the src (nonzero by construction): the
+                    // declaration IS the playback's identity.
+                    .key = std.hash.Wyhash.hash(0x76696465, src) | 1,
+                    .surface = canvas.video_playback_surface_id,
+                    .path = if (videoSrcIsUrl(src)) "" else src,
+                    .url = if (videoSrcIsUrl(src)) src else "",
+                    .autoplay = declaration.autoplay,
+                    .loop = declaration.loop,
+                    .muted = declaration.muted,
+                };
+                // Validate BEFORE committing: a source the engine's own
+                // deterministic gates refuse (a malformed URL, say)
+                // must not take over the tracked ownership — the
+                // engine keeps the CURRENT playback on a rejected
+                // load, and tracking the refused src would make a
+                // later element removal hash the refused source
+                // instead of the playback still running, stranding it
+                // forever. The refused src is remembered separately so
+                // an unchanged bad declaration is not re-attempted
+                // (and re-taught) every rebuild.
+                if (Effects.videoLoadRejected(options)) {
+                    const refused = self.video_refused_src_buffer[0..self.video_refused_src_len];
+                    if (src.len <= self.video_refused_src_buffer.len and !std.mem.eql(u8, refused, src)) {
+                        @memcpy(self.video_refused_src_buffer[0..src.len], src);
+                        self.video_refused_src_len = src.len;
+                        ui_app_log.warn(
+                            "declared <video src> was refused by the video loader (empty or over-long source, or a non-http(s) URL): the declaration is ignored and the current playback, if any, keeps running",
+                            .{},
+                        );
+                    }
+                    return;
+                }
+                self.video_refused_src_len = 0;
+                @memcpy(self.video_declared_src_buffer[0..src.len], src);
+                self.video_declared_src_len = src.len;
+                self.video_declared = true;
+                self.video_declared_loop = declaration.loop;
+                self.video_declared_muted = declaration.muted;
+                self.effects.loadVideo(options);
+                self.video_declared_token = self.effects.videoOwnerToken();
+                self.publishAudioState(runtime);
+                return;
+            }
+            // Same src: apply flag deltas in place — a reload would
+            // restart the playback the declaration did not change. Only
+            // while the declared playback still OWNS the channel: an
+            // update handler that replaced it (its own key) took the
+            // single player over, and the reconciler yields until the
+            // declaration itself changes.
+            // Ownership is the TOKEN of the load this reconciler
+            // issued, not the derived key: the key is a pure function
+            // of the source string, and an update's manual load could
+            // carry the same one — the reconciler must never stop or
+            // mutate a playback it did not start.
+            const declared_key = std.hash.Wyhash.hash(0x76696465, src) | 1;
+            const snapshot = self.effects.videoSnapshot();
+            if (!snapshot.active or snapshot.key != declared_key or
+                self.effects.videoOwnerToken() != self.video_declared_token) return;
+            var moved = false;
+            if (declaration.loop != self.video_declared_loop) {
+                self.video_declared_loop = declaration.loop;
+                self.effects.setVideoLoop(declaration.loop);
+                moved = true;
+            }
+            if (declaration.muted != self.video_declared_muted) {
+                self.video_declared_muted = declaration.muted;
+                self.effects.setVideoMuted(declaration.muted);
+                moved = true;
+            }
+            // A flag delta moves the channel mirrors without any
+            // dispatch or drain behind it, so the runtime mirror
+            // republishes here exactly like the load and removal paths
+            // — an automation snapshot taken after a <video muted> or
+            // <video loop> flip must report the new value, not the one
+            // published before the reconcile.
+            if (moved) self.publishAudioState(runtime);
+        }
+
         fn sceneFn(context: *anyopaque) anyerror!app_manifest.ShellConfig {
             const self: *Self = @ptrCast(@alignCast(context));
             return self.options.scene;
@@ -2903,6 +3412,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
+                // Platform video reports route the same way: through
+                // the effects channel into the app's `on_event` Msg,
+                // journaled at the delivery boundary. Without an app
+                // Msg the report still moved the channel mirrors, and
+                // the house `<video controls>` chrome renders those —
+                // so publish and rebuild anyway (window slots included:
+                // a secondary window's tree consumes the same
+                // snapshot), keeping the transport live with no model
+                // plumbing (position ticks arrive at the platform's
+                // coarse ~2 Hz cadence, so the extra rebuilds stay
+                // cheap).
+                .video => |video_event| if (self.effects.takeVideoMsg(video_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                } else if (self.installed) {
+                    try self.rebuildVideoChrome(runtime);
+                },
                 .effects_wake => try self.drainEffects(runtime),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
@@ -2935,6 +3460,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// next rebuild (source wins), exactly like a dismissed surface.
         fn handleWindowClosed(self: *Self, runtime: *Runtime, closed: core.WindowClosedEvent) anyerror!void {
             const index = self.windowSlotIndexByWindowId(closed.window_id) orelse return;
+            // A closed window's video declaration dies with it: withdraw
+            // its retained entry and reconcile — an owning window's
+            // playback stops (or the next retained declaration promotes
+            // in its place), a non-owner just drops out of the table.
+            self.captureSlotVideoDeclaration(closed.window_id, null);
+            self.applyVideoDeclaration(runtime);
             const on_close = self.forgetWindowSlot(index);
             if (on_close) |msg| {
                 try self.dispatch(runtime, self.canvas_window_id, msg);
@@ -3435,6 +3966,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // closes the surface.
             if (pointer_event.pointer.phase == .up) {
                 if (try self.dispatchContextMenuFallbackItem(runtime, tree, pointer_event.window_id, target.id)) return;
+                // House video chrome is runtime-consumed: a release on
+                // the transport's play/pause control drives the video
+                // channel directly (no app Msg exists to resolve), and
+                // the rebuild re-renders the chrome from the moved
+                // mirrors.
+                if (tree.findWidget(target.id)) |widget| {
+                    if (widget.video_control == .toggle) {
+                        try self.toggleVideoControl(runtime);
+                        return;
+                    }
+                }
             }
             // The click count rides the release into typed dispatch: a
             // double-click's second release resolves the target's
@@ -3444,6 +3986,48 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
+        }
+
+        /// Re-render the house video chrome from the moved channel
+        /// mirrors, everywhere it shows: the main canvas rebuilds
+        /// against ITS window (never a control event's origin window —
+        /// the main canvas label resolves only there), and the window
+        /// slots rebuild after it, so a `<video controls>` declared in
+        /// a secondary window's tree repaints too — `dispatch`'s exact
+        /// rebuild discipline, minus the Msg.
+        fn rebuildVideoChrome(self: *Self, runtime: *Runtime) anyerror!void {
+            self.publishAudioState(runtime);
+            try self.rebuild(runtime, self.canvas_window_id);
+            try self.rebuildWindowSlots(runtime);
+        }
+
+        /// Activate the house transport's play/pause control — the
+        /// runtime-consumed action both the pointer release and the
+        /// keyboard control intent (Enter/Space on the focused button)
+        /// resolve to: no app Msg exists, the video channel is driven
+        /// directly and the chrome re-renders from the moved mirrors.
+        fn toggleVideoControl(self: *Self, runtime: *Runtime) anyerror!void {
+            const snapshot = self.effects.videoSnapshot();
+            if (snapshot.playing) {
+                self.effects.pauseVideo();
+            } else if (snapshot.completed) {
+                // The natural end retired the player, so play would
+                // refuse with one `.failed` — a broken answer to a
+                // valid control. Play on a finished playback means
+                // from-the-start: a fresh load of the same source. The
+                // restart mints a fresh load identity, so declarative
+                // ownership re-captures it (`video_declared_token`) —
+                // the reconciler must keep recognizing the playback it
+                // started, or removal and flag deltas would go dead
+                // after a replay-from-end.
+                const declared = self.video_declared_token != 0 and
+                    self.effects.videoOwnerToken() == self.video_declared_token;
+                self.effects.restartVideo();
+                if (declared) self.video_declared_token = self.effects.videoOwnerToken();
+            } else {
+                self.effects.playVideo();
+            }
+            try self.rebuildVideoChrome(runtime);
         }
 
         fn disarmHold(self: *Self, runtime: *Runtime) void {
@@ -3538,7 +4122,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (tree.findWidget(target.id)) |widget| {
                     if (!widget.state.disabled) {
                         if (canvas.isWidgetTextEntry(widget)) return;
-                        if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard) != null) return;
+                        if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard)) |intent| {
+                            // Keyboard activation of the house video
+                            // transport's play/pause control drives the
+                            // channel exactly like the pointer release
+                            // — the control advertises Play/Pause to
+                            // focus and accessibility, so Enter/Space
+                            // must act, not be consumed silently.
+                            if (widget.video_control == .toggle and intent.kind == .press) {
+                                try self.toggleVideoControl(runtime);
+                            }
+                            // The seek slider's keyboard and assistive
+                            // steps land here as set_value intents —
+                            // no widget change event exists on these
+                            // paths — so the step maps its fraction
+                            // onto the duration and drives the channel,
+                            // the pointer scrub's exact rule; consuming
+                            // it silently would move the thumb
+                            // optimistically and let the next tick
+                            // snap it back.
+                            if (widget.video_control == .scrub and intent.kind == .set_value) {
+                                if (intent.value) |fraction| {
+                                    const snap = self.effects.videoSnapshot();
+                                    if (snap.duration_ms > 0) {
+                                        self.effects.seekVideo(@intFromFloat(std.math.clamp(@as(f64, fraction), 0, 1) * @as(f64, @floatFromInt(snap.duration_ms))));
+                                    }
+                                    try self.rebuildVideoChrome(runtime);
+                                }
+                            }
+                            return;
+                        }
                     }
                 }
             }
@@ -3596,6 +4209,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// on it, the same contract keyboard slider steps follow.
         fn handleWidgetChange(self: *Self, runtime: *Runtime, change_event: core.CanvasWidgetChangeEvent) anyerror!void {
             const tree = self.treeForViewLabel(change_event.view_label) orelse return;
+            // House video chrome is runtime-consumed: a change on the
+            // transport's seek slider maps its 0..1 fraction onto the
+            // playback's duration and seeks the channel directly (no
+            // app Msg exists to resolve). A duration-less playback (not
+            // loaded yet) seeks nowhere honestly.
+            if (tree.findWidget(change_event.id)) |widget| {
+                if (widget.video_control == .scrub) {
+                    const snap = self.effects.videoSnapshot();
+                    if (snap.duration_ms > 0) {
+                        const fraction: f64 = std.math.clamp(change_event.value, 0, 1);
+                        self.effects.seekVideo(@intFromFloat(fraction * @as(f64, @floatFromInt(snap.duration_ms))));
+                    }
+                    try self.rebuildVideoChrome(runtime);
+                    return;
+                }
+            }
             if (tree.msgForChange(change_event.id, change_event.value)) |msg| {
                 try self.dispatch(runtime, change_event.window_id, msg);
             }

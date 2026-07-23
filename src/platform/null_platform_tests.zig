@@ -162,6 +162,41 @@ test "null platform emits deterministic lifecycle events" {
     try std.testing.expectEqualStrings("app_shutdown", recorder.names[5]);
 }
 
+test "the videoLoadUrl seam refuses non-http(s) schemes for every caller" {
+    // The streaming contract holds at the seam, not just behind the
+    // engine's own gated loads: hosts hand the URL to their media
+    // stack whole, and AVPlayer opens file: URLs happily.
+    var null_platform = NullPlatform.init(.{});
+    null_platform.video_playback = true;
+    const services = null_platform.platform().services;
+    const sink: types.VideoFrameSink = .{};
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("file:///tmp/clip.mp4", 1, sink));
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("ftp://media.example.test/clip.mp4", 1, sink));
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("not a url", 1, sink));
+    try std.testing.expectEqual(@as(usize, 0), null_platform.video_load_url_count);
+    try services.videoLoadUrl("https://media.example.test/clip.mp4", 2, sink);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.video_load_url_count);
+}
+
+test "a refused video load retires the player it was replacing" {
+    // The macOS host stops the previous player before the file probe,
+    // so a load that then refuses leaves NO playback behind — the null
+    // platform must model the same ordering, or a replaced player
+    // keeps emitting frames and events under its old token.
+    var null_platform = NullPlatform.init(.{});
+    null_platform.video_playback = true;
+    const services = null_platform.platform().services;
+    const sink: types.VideoFrameSink = .{};
+    try services.videoLoad("a.mp4", 1, sink);
+    try services.videoPlay();
+    try std.testing.expect(null_platform.video.playing);
+    null_platform.video_local_files = false;
+    try std.testing.expectError(error.VideoSourceNotFound, services.videoLoad("b.mp4", 2, sink));
+    try std.testing.expect(!null_platform.video.loaded);
+    try std.testing.expect(null_platform.takeVideoLoaded() == null);
+    try std.testing.expect(null_platform.advanceVideo(500) == null);
+}
+
 test "null platform records loaded webview source" {
     var null_platform = NullPlatform.initWithOptions(.{}, .chromium, .{ .app_name = "Demo", .window_title = "Demo Window" });
     try null_platform.platform().services.loadWebView(WebViewSource.html("<h1>Hello</h1>"));

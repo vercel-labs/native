@@ -435,7 +435,9 @@ export type NativeSdkPlatformFeature =
   | "audio_spectrum"
   | "audioSpectrum"
   | "window_hide_on_close"
-  | "windowHideOnClose";
+  | "windowHideOnClose"
+  | "video_playback"
+  | "videoPlayback";
 
 export type NativeSdkPlatformFeatureSelector =
   | { feature: NativeSdkPlatformFeature; name?: never }

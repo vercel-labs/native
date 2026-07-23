@@ -306,6 +306,12 @@ pub const Event = union(enum) {
     /// tick, completion, failure): the ui-app layer routes it back
     /// through `Effects.takeAudioMsg` into the app's `on_event` Msg.
     audio: platform.AudioEvent,
+    /// A platform video player report (load acknowledgment with
+    /// dimensions, position tick, completion, failure): routed back
+    /// through `Effects.takeVideoMsg` into the app's `on_event` Msg.
+    /// Pixels never ride events — frames feed the media-surface
+    /// texture channel platform-side.
+    video: platform.VideoEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -335,6 +341,7 @@ pub const Event = union(enum) {
             .timer => "timer",
             .effects_wake => "effects_wake",
             .audio => "audio",
+            .video => "video",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
@@ -363,10 +370,15 @@ pub const Event = union(enum) {
 /// switches the app's effects channel into replay mode (fake executor,
 /// journaled results as the only terminal source) before the first
 /// replayed event; `.feed` delivers one journaled effect result into
-/// the stub executor's pending request with the matching key.
+/// the stub executor's pending request with the matching key; `.finish`
+/// runs the end-of-journal consistency checks — every queued record
+/// consumed by the load it named — so a structurally valid journal
+/// whose records the replayed timeline never claimed fails as
+/// divergence instead of reporting success.
 pub const ReplayControl = union(enum) {
     arm,
     feed: runtime_effects.EffectResultRecord,
+    finish,
 };
 
 pub fn App(comptime Runtime: type) type {

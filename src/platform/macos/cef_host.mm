@@ -2548,6 +2548,69 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
     return 0;
 }
 
+/* Video playback lives in the system-engine AppKit host (AVFoundation).
+ * The Chromium host reports the feature unsupported and the Zig side
+ * refuses before calling, so these exist only to satisfy the shared C
+ * ABI — each answers with its honest failure code. */
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    (void)host;
+    (void)path;
+    (void)path_len;
+    (void)token;
+    (void)push_fn;
+    (void)push_context;
+    return 2;
+}
+
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {
+    (void)host;
+    (void)url;
+    (void)url_len;
+    (void)token;
+    (void)push_fn;
+    (void)push_context;
+    return 2;
+}
+
+int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+int native_sdk_appkit_video_seek(native_sdk_appkit_host_t *host, uint64_t position_ms) {
+    (void)host;
+    (void)position_ms;
+    return 0;
+}
+
+int native_sdk_appkit_video_set_volume(native_sdk_appkit_host_t *host, double volume) {
+    (void)host;
+    (void)volume;
+    return 0;
+}
+
+int native_sdk_appkit_video_set_muted(native_sdk_appkit_host_t *host, int muted) {
+    (void)host;
+    (void)muted;
+    return 0;
+}
+
+int native_sdk_appkit_video_set_loop(native_sdk_appkit_host_t *host, int loop) {
+    (void)host;
+    (void)loop;
+    return 0;
+}
+
 void native_sdk_appkit_request_frame(native_sdk_appkit_host_t *host) {
     // The AppKit host pauses FRAME events when idle, so a cross-thread
     // frame request is how the automation arrival watcher wakes it. The

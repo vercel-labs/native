@@ -249,6 +249,38 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .video and videoScalarsDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} carries a millisecond or dimension value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                // Provenance consistency, gated BEFORE the regeneration
+                // skip below: a `.rejected` stamped onto a delivered
+                // record (nonzero token) would be skipped there and its
+                // handler Msg silently omitted from the stream.
+                if (effect.kind == .video and videoRecordProvenanceDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} claims .{s} with load token {d} - the recorder stamps token 0 exactly on loop-side rejections and a minted token on every delivery, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind), effect.video_token },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                if (effect.kind == .video and videoRecordShapeDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} claims .{s} with motion or geometry the recorder never writes on that kind - terminals deliver with playing and buffering false and no dimensions, and a completion pins position to the duration, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                if (effect.kind == .video_load and videoLoadOutcomeDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video load record for key {d} claims outcome .{s} - the recorder stamps .loaded on a resolved cascade and .failed on a refusal, nothing else, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -342,6 +374,24 @@ pub fn replaySession(
             .end => {},
         }
     }
+    // End-of-journal consistency: every fed-but-queued record must have
+    // been consumed by the load it named, and nothing the replayed
+    // timeline did may have latched a divergence
+    // (`Effects.finishReplay`). Unconditional — a recording with ZERO
+    // effect records still fails here when the replayed updates issued
+    // a load the recording never journaled. Apps without a replay hook
+    // have no armed channel to check and answer ReplayUnsupported,
+    // which is fine: nothing was fed and nothing could have latched.
+    app.replayControl(.finish) catch |err| switch (err) {
+        error.ReplayUnsupported => {},
+        else => {
+            std.debug.print(
+                "replay diverged at the journal's end: {s} - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
+                .{@errorName(err)},
+            );
+            return error.ReplayEffectDivergence;
+        },
+    };
     return report;
 }
 
@@ -405,6 +455,62 @@ fn channelRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
     return record.exit_reason != .exited;
 }
 
+/// A structurally valid u64 in a video record is not automatically an
+/// HONEST one: the engine clamps every video scalar into the
+/// exact-integer delivery window at the delivery boundary
+/// (`Effects.takeVideoMsg`, `max_effect_video_scalar_exclusive`), so no
+/// recorder can write a position, duration, or dimension at or past
+/// 2^53 whatever a host or embedder reports — and the TS delivery tier
+/// carries these scalars through the subset's exact-integer number
+/// window, where feeding a larger value would trap in the bridge's
+/// numeric widening instead of refusing the hostile file at the gate.
+fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
+    const max_exact: u64 = runtime_effects.max_effect_video_scalar_exclusive;
+    return record.video_position_ms >= max_exact or
+        record.video_duration_ms >= max_exact or
+        record.video_width >= max_exact or
+        record.video_height >= max_exact;
+}
+
+/// A `.video_load` record's `video_kind` is the load's OUTCOME, and the
+/// recorder writes exactly two values: `.loaded` on a resolved cascade
+/// and `.failed` on a synchronous refusal. Any other kind steers
+/// nothing honestly (a `.position` would leave the replayed fake load
+/// active where nothing is known), so it refuses at the gate.
+/// A `.video` record's kind and token are recorder-coupled: loop-side
+/// rejections never minted a token (they stamp 0) and every DELIVERY —
+/// position ticks, terminals, acknowledgments — carries the minted
+/// token of the load that produced it. A `.rejected` with a nonzero
+/// token would silently skip a real delivery through the regeneration
+/// gate; a delivery with token 0 could never have routed. Both are
+/// damage.
+fn videoRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
+    if (record.video_kind == .rejected) return record.video_token != 0;
+    return record.video_token == 0;
+}
+
+/// Recorder truth for a `.video` record's payload SHAPE, per kind:
+/// `.failed` and `.rejected` deliver with playing and buffering false
+/// (the terminal resolution forces the flags) and no dimensions (no
+/// failure path ever measured a frame); `.completed` pins position to
+/// the duration with the flags false. A record violating these can
+/// only be hand-edited — and a synchronously failed load's record has
+/// no platform event behind it to cross-check at the pairing, so the
+/// gate is where the impossible payload refuses.
+fn videoRecordShapeDamaged(record: journal.EffectResultRecord) bool {
+    return switch (record.video_kind) {
+        .failed, .rejected => record.video_playing or record.video_buffering or
+            record.video_width != 0 or record.video_height != 0,
+        .completed => record.video_playing or record.video_buffering or
+            record.video_position_ms != record.video_duration_ms,
+        .loaded, .position => false,
+    };
+}
+
+fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {
+    return record.video_kind != .loaded and record.video_kind != .failed;
+}
+
 fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
     if (record.image_outcome != .loaded) {
         return record.image_width != 0 or record.image_height != 0;
@@ -432,6 +538,16 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // position ticks, completions, platform failures — is an
         // external input and must be fed.
         .audio => record.audio_kind == .rejected,
+        // Video rejections are the same loop-side validation (source
+        // bounds, scheme, surface-id shape) and regenerate; failures —
+        // including a claim or platform load the recording host
+        // refused — are executor truth the replayed fake never
+        // reproduces, so they feed like every other kind.
+        .video => record.video_kind == .rejected,
+        // The cascade resolution is the recording host's filesystem
+        // truth — the replayed fake load cannot re-run the local
+        // probe, so the record must feed.
+        .video_load => false,
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,

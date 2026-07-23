@@ -399,6 +399,11 @@ pub const LinuxPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                // The video load verbs are teaching refusals (see
+                // `videoLoad`); the transport verbs stay null — the
+                // channel never activates without a successful load.
+                .video_load_fn = videoLoad,
+                .video_load_url_fn = videoLoadUrl,
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .remove_tray_fn = removeTray,
@@ -463,6 +468,13 @@ pub const LinuxPlatform = struct {
             // are macOS-only today; GTK keeps the engine's wheel
             // physics.
             .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // Video decode (a GStreamer appsink feeding the
+            // media-surface texture channel) is not implemented yet:
+            // an honest false rather than a half-implemented player.
+            // The load verbs teach and refuse (see `videoLoad`), so an
+            // app that skips the capability check still learns exactly
+            // what is missing.
+            .video_playback => false,
         };
     }
 
@@ -1402,6 +1414,26 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_gtk_audio_set_volume(self.host, volume);
+}
+
+/// The video tier's teaching refusal: the load verbs exist so a video
+/// source fails with a NAMED explanation instead of a bare
+/// unsupported-service, while the transport verbs stay null — the
+/// channel never activates without a successful load. Pure (no GTK
+/// externs), so the teaching is unit-testable on every host.
+fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    _ = context;
+    _ = path;
+    _ = token;
+    _ = sink;
+    std.debug.print("video playback is not implemented on linux yet: the GTK host has no GStreamer decode path into the media-surface texture channel - the app receives one failed video event (scope video sources to macos builds, or compose a media-surface with your own producer)\n", .{});
+    return error.UnsupportedService;
+}
+
+/// The URL twin rides the same teaching — a stream would need the same
+/// missing decode path a file does.
+fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platform_mod.VideoFrameSink) anyerror!void {
+    return videoLoad(context, url, token, sink);
 }
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {

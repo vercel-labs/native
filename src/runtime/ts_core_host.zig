@@ -209,6 +209,36 @@
 //!                  (the playback it aimed at is gone). `stop` also
 //!                  retires the bridge entry — no events for that key
 //!                  after it.
+//!   video_load  -> `fx.loadVideo` on the bridge's single video entry.
+//!                  The engine key is `videoKeyForTag` (the
+//!                  `video_key_base` namespace with the load's event
+//!                  tag in the low byte; the engine has ONE player, so
+//!                  the bridge holds one stream), non-retiring the
+//!                  audio way, gated by the wire key for verbs: every
+//!                  `EffectVideo` event (loaded/position/completed/
+//!                  failed/rejected) routes the arm of the load whose
+//!                  key it echoes —
+//!                  a seven-field record built by field NAME (state/
+//!                  positionMs/durationMs/playing/buffering/width/
+//!                  height; `state`'s enum members are matched by
+//!                  member name, so the app's declaration order is
+//!                  free) — until video_ctl `stop` (or a replacing
+//!                  video_load, which re-keys and re-routes the same
+//!                  entry) closes it. The record's surface is the
+//!                  app's own media-surface id (decoded frames flow
+//!                  platform-side into that texture channel, never
+//!                  through this bridge); an id the wire cannot carry
+//!                  exactly reaches the engine as 0, which it refuses
+//!                  with one `.rejected` event — never silent.
+//!                  `completed`/`failed`/`rejected` do NOT retire the
+//!                  entry: stop is the explicit close, audio's rule.
+//!   video_ctl   -> the engine's control verbs (`fx.playVideo`/
+//!                  `pauseVideo`/`stopVideo`/`seekVideo`/
+//!                  `setVideoVolume`/`setVideoMuted`/`setVideoLoop`),
+//!                  gated by the wire key: a verb whose key does not
+//!                  name the open stream is a no-op (the playback it
+//!                  aimed at is gone). `stop` also retires the bridge
+//!                  entry — no events for that key after it.
 //!   window_show -> `fx.showWindow(label)` — fire-and-forget, label-
 //!                  addressed like the Zig tier's verb: un-hide +
 //!                  activate (the tray "Open" consequence of the
@@ -226,8 +256,8 @@
 //!                  the err arm with "cancelled"; killing a process IS
 //!                  an observable event, so spawn's cancel stays loud),
 //!                  the delay table (`fx.cancelTimer`, silent). The
-//!                  audio stream is not cancel's to end — audio_ctl
-//!                  `stop` is its close.
+//!                  audio and video streams are not cancel's to end —
+//!                  their ctl `stop` records are their closes.
 //!
 //! THE KEYED-EFFECT DISCIPLINE is ONE rule across request, read_file,
 //! write_file, fetch, clip_read, and delay: a keyed effect REPLACES its
@@ -319,6 +349,20 @@ pub const spawn_key_base: u64 = 0x5453_5350_0000_0000;
 /// ("TSAU"). Audio keys are their own engine namespace and one player
 /// is the whole surface, so one constant key is the honest shape.
 pub const audio_key_base: u64 = 0x5453_4155_0000_0000;
+
+/// The engine-key namespace of the bridge's single video playback
+/// channel ("TSVI") — the audio key's twin, except the low byte
+/// carries the issuing load's event-arm tag: every `EffectVideo` event
+/// echoes the key of the playback that produced it, so a staged
+/// synchronous `.failed` that delivers AFTER a replacing load re-keyed
+/// the entry still routes the arm of the load it answers (the mutable
+/// entry's tag would misroute it to the replacement's arm).
+pub const video_key_base: u64 = 0x5453_5649_0000_0000;
+
+/// The engine key for a video load routed to `event_tag`'s arm.
+pub fn videoKeyForTag(event_tag: u8) u64 {
+    return video_key_base | event_tag;
+}
 
 /// The spawn wire record's "no line routing" tag sentinel (mirrors
 /// rt.zig's `spawn_no_line_tag`).
@@ -454,6 +498,28 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        /// The single video stream entry — the audio entry's exact
+        /// shape (one player is the whole engine surface). Non-retiring:
+        /// video_ctl `stop` closes it, a new video_load re-keys and
+        /// re-routes it in place.
+        const VideoEntry = struct {
+            used: bool = false,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            event_tag: u8 = 0,
+            /// The load identity this entry's own accepted load minted
+            /// (`Effects.videoMintedToken`): the proof that the
+            /// playback on the single engine channel is still THIS
+            /// stream — a load the bridge never issued (a declarative
+            /// element's) may have replaced it, and the entry's verbs
+            /// must not mutate or cancel someone else's playback.
+            token: u64 = 0,
+
+            fn wireKey(entry: *const VideoEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         /// One in-flight image load, keyed by the app's own numeric
         /// ImageId (which IS the engine key — the registry id and the
         /// effect key are one value by design). Retires on its one
@@ -492,6 +558,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
         var streams: [runtime_effects.max_effects]StreamEntry = @splat(.{});
         var audio_entry: AudioEntry = .{};
+        var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
@@ -564,6 +631,7 @@ pub fn TsCoreHost(comptime core: type) type {
             delays = @splat(.{});
             streams = @splat(.{});
             audio_entry = .{};
+            video_entry = .{};
             images = @splat(.{});
             channels = @splat(.{});
             clip_write_counter = 0;
@@ -967,6 +1035,78 @@ pub fn TsCoreHost(comptime core: type) type {
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         runChannelClose(fx, key_value);
                     },
+                    // video_load [op][key_len][key][event_tag][surface f64 LE]
+                    //            [path_len u32 LE][path][url_len u32 LE][url]
+                    //            [flags u8]
+                    0x17 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        const surface_bits = takeBytes(cmd, &at, 8);
+                        const surface: f64 = @bitCast(std.mem.readInt(u64, surface_bits[0..8], .little));
+                        const video_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const flags = takeByte(cmd, &at);
+                        const options: Fx.LoadVideoOptions = .{
+                            // The tag rides the key's low byte so every
+                            // event routes the arm of the load that
+                            // produced it (see `videoKeyForTag`).
+                            .key = videoKeyForTag(event_tag),
+                            // The wire carries the app's number; a surface
+                            // that is not an exactly-carried positive
+                            // integer (0, negatives, fractions, 2^53 and
+                            // past — the image id bound) reaches the engine
+                            // as 0, which the validation refuses with one
+                            // `.rejected` event — never silent.
+                            .surface = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface)
+                                @intFromFloat(surface)
+                            else
+                                0,
+                            .path = video_path,
+                            .url = url,
+                            .autoplay = (flags & 0x01) != 0,
+                            .loop = (flags & 0x02) != 0,
+                            .muted = (flags & 0x04) != 0,
+                            .on_event = videoEventMsg,
+                        };
+                        // A load the engine's own deterministic gates
+                        // would refuse must not commit the routing
+                        // entry: the engine keeps the CURRENT playback
+                        // on a rejected load, so re-keying first would
+                        // route the surviving stream's events and verbs
+                        // through the refused load's key and arm. Stage
+                        // the rejection to the refused arm directly
+                        // (the channel-admission precedent) and leave
+                        // the entry — and the engine — untouched.
+                        if (Fx.videoLoadRejected(options)) {
+                            fx.stageLoopMsg(msgFromTagVideo(event_tag, .{
+                                .key = videoKeyForTag(event_tag),
+                                .kind = .rejected,
+                            }));
+                        } else {
+                            // One player is the whole surface: an
+                            // accepted load re-keys and re-routes the
+                            // single entry in place, exactly as the
+                            // engine replaces its channel.
+                            video_entry.used = true;
+                            video_entry.key_len = key.len;
+                            @memcpy(video_entry.key[0..key.len], key);
+                            video_entry.event_tag = event_tag;
+                            fx.loadVideo(options);
+                            // The identity this load minted (valid even
+                            // when a synchronous refusal already reset
+                            // the channel): the entry's verbs prove
+                            // ownership against it.
+                            video_entry.token = fx.videoMintedToken();
+                        }
+                    },
+                    // video_ctl [op][key_len][key][verb u8][value f64 LE]
+                    0x18 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const verb = takeByte(cmd, &at);
+                        const value_bits = takeBytes(cmd, &at, 8);
+                        const value: f64 = @bitCast(std.mem.readInt(u64, value_bits[0..8], .little));
+                        runVideoCtl(fx, key, verb, value);
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1221,6 +1361,94 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: an audio event arrived with no open bridge stream");
             }
             return msgFromTagAudio(audio_entry.event_tag, event);
+        }
+
+        // ------------------------------------------------- video stream
+
+        /// The video_ctl record: drive the single playback channel,
+        /// gated by the wire key — a verb aimed at a key that is not
+        /// the open stream no-ops (its playback is already gone), the
+        /// same idle no-op the engine's own verbs keep. `stop` closes
+        /// the stream: the entry retires and later platform stragglers
+        /// are the engine's to swallow.
+        fn runVideoCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
+            if (!video_entry.used or !std.mem.eql(u8, video_entry.wireKey(), key)) return;
+            if (verb == 2) {
+                // `Cmd.videoStop` is the stream's CANCEL: the engine
+                // drops THIS stream's staged answers (token-scoped —
+                // even the synchronous terminal of a batch that
+                // loaded, failed, and stopped in one dispatch, and
+                // even when a later load reuses the same event tag),
+                // and stops the player only while the channel still
+                // plays this stream — a playback some other caller
+                // loaded since (a declarative element) survives
+                // untouched. A REPLACED predecessor sharing this arm
+                // keeps its own owed terminal; only stop cancels.
+                const token = video_entry.token;
+                video_entry.used = false;
+                fx.stopVideoCancel(token);
+                return;
+            }
+            // The wire key names the bridge's entry, but the single
+            // engine player may since have been replaced by a load the
+            // bridge never issued (a declarative <video>): transport
+            // verbs act only while the entry's own stream is the
+            // playback on the channel — anything else is a stale key
+            // and no-ops, the idle rule. VOLUME is the one exception
+            // with the channel IDLE: it is a remembered preference the
+            // next load re-applies (a failed load's handler routinely
+            // sets it before retrying), and with nobody's playback on
+            // the channel there is nothing to protect — a FOREIGN live
+            // playback still gates it, its volume is not this key's to
+            // move.
+            if (fx.videoOwnerToken() != video_entry.token) {
+                if (verb == 4 and fx.videoOwnerToken() == 0) {
+                    fx.setVideoVolume(@floatCast(value));
+                }
+                return;
+            }
+            switch (verb) {
+                0 => fx.playVideo(),
+                1 => fx.pauseVideo(),
+                // The wire carries the app's f64. In-window offsets pass
+                // through (the engine clamps to the duration itself); a
+                // FINITE offset PAST the exact-integer window saturates
+                // just below it — still beyond every real duration, so
+                // the engine's clamp lands it at the end, exactly what
+                // an oversized forward seek asks for. Non-finite values
+                // and negatives are not millisecond offsets at all (the
+                // literal validation rejects them) and seek to 0.
+                3 => fx.seekVideo(if (value >= 0 and value <= 9007199254740992.0)
+                    @intFromFloat(value)
+                else if (value > 9007199254740992.0 and std.math.isFinite(value))
+                    runtime_effects.max_effect_video_scalar_exclusive - 1
+                else
+                    0),
+                // The engine clamps volume to 0..1 (NaN clamps to the
+                // bound arithmetic's result deterministically).
+                4 => fx.setVideoVolume(@floatCast(value)),
+                5 => fx.setVideoMuted(value != 0),
+                6 => fx.setVideoLoop(value != 0),
+                else => @panic("ts core host: unknown video_ctl verb wire value - the core and this runtime disagree on cmd_format_version"),
+            }
+        }
+
+        /// `VideoMsgFn` for the video stream: every playback event
+        /// routes by the TAG its own key carries (`videoKeyForTag`) —
+        /// never the mutable entry's tag, which a replacing load in the
+        /// same batch may already have re-pointed at another arm while
+        /// the replaced playback's staged terminal was still awaiting
+        /// its drain (a REPLACED stream still speaks its terminal).
+        /// Stopped streams never reach here at all: video_ctl `stop`
+        /// cancels the key's staged answers inside the engine
+        /// (`stopVideoCancel`) and the engine swallows its own
+        /// post-stop stragglers, so every event arriving carries a
+        /// live stream's tag. The entry never retires here —
+        /// `completed`/`failed` streams may still speak (the app often
+        /// starts the next clip from `completed`), and video_ctl
+        /// `stop` is the explicit close.
+        fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
+            return msgFromTagVideo(@intCast(event.key & 0xFF), event);
         }
 
         /// Issue one image load. The keyed-effect discipline here is
@@ -1920,6 +2148,78 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: an audio event names a Msg tag outside the union");
+        }
+
+        /// Whether an arm payload struct is the video event record: the
+        /// seven SDK-fixed fields, matched by NAME — `state` (any enum;
+        /// its members are matched by member name at delivery),
+        /// `positionMs`/`durationMs` (numbers), `playing`/`buffering`
+        /// (booleans), `width`/`height` (numbers).
+        fn videoArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 7) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "positionMs") or std.mem.eql(u8, f.name, "durationMs") or
+                    std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height"))
+                {
+                    if (f.type != i64 and f.type != f64) ok = false;
+                } else if (std.mem.eql(u8, f.name, "playing") or std.mem.eql(u8, f.name, "buffering")) {
+                    if (f.type != bool) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine event kind, matched
+        /// by member NAME — `audioStateValue`'s twin.
+        fn videoStateValue(comptime E: type, kind: runtime_effects.EffectVideoEventKind) E {
+            const name = @tagName(kind);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: a video event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+        }
+
+        /// Build the seven-field video event arm at index `tag` from an
+        /// engine event, by field name. The millisecond and dimension
+        /// fields widen the way the subset's number model classes them
+        /// (i64 or f64).
+        fn msgFromTagVideo(tag: u8, event: runtime_effects.EffectVideo) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime videoArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = videoStateValue(f.type, event.kind);
+                            } else if (comptime std.mem.eql(u8, f.name, "positionMs")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.position_ms) else @intCast(event.position_ms);
+                            } else if (comptime std.mem.eql(u8, f.name, "durationMs")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.duration_ms) else @intCast(event.duration_ms);
+                            } else if (comptime std.mem.eql(u8, f.name, "playing")) {
+                                @field(payload, f.name) = event.playing;
+                            } else if (comptime std.mem.eql(u8, f.name, "buffering")) {
+                                @field(payload, f.name) = event.buffering;
+                            } else if (comptime std.mem.eql(u8, f.name, "width")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.width) else @intCast(event.width);
+                            } else {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.height) else @intCast(event.height);
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: a video event targets Msg arm '" ++ arm.name ++ "', which is not the seven-field video event record");
+                }
+            }
+            @panic("ts core host: a video event names a Msg tag outside the union");
         }
 
         /// The five-field image result record, matched by field name —

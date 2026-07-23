@@ -2812,13 +2812,21 @@ test "a journal referencing blobs refuses to replay without its blob store" {
     try std.testing.expectError(error.ReplayMissingBlob, result);
 }
 
-/// Zero the `image_blob_len` field of the first journaled `.loaded`
-/// image record, in place. Per `journal.encodeEffect` the v8 payload
-/// ends with image_blob_len (u64), channel_kind (u8),
-/// channel_dropped_total (u32), so the blob length lives 13 bytes from
-/// the end. Framing and every other field stay valid, so the journal
-/// reader decodes the record fine: only replay's record-consistency
-/// gate can catch the damage. Returns whether a record was damaged.
+/// Bytes of the trailer at the END of every effect payload after the
+/// image fields (see `journal.encodeEffect`): the v8 channel fields —
+/// channel_kind (1), channel_dropped_total (4) — then the video
+/// fields — video_kind (1), position (8), duration (8), playing (1),
+/// buffering (1), width (8), height (8), token (8), source (1),
+/// handled (1). The image fields the damage helpers below patch sit
+/// immediately before it.
+const effect_post_image_trailer_len: usize = 50;
+
+/// Zero the `image_blob_len` field — the last eight bytes before the
+/// post-image trailer of the effect payload, see `journal.encodeEffect`
+/// — of the first journaled `.loaded` image record, in place. Framing
+/// and every other field stay valid, so the journal reader decodes the
+/// record fine: only replay's record-consistency gate can catch the
+/// damage. Returns whether a record was damaged.
 fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
     var pos: usize = journal.preamble_len;
     while (bytes.len - pos >= 5) {
@@ -2829,7 +2837,8 @@ fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .image or record.image_outcome != .loaded or record.image_blob_len == 0) continue;
-        @memset(payload[payload.len - 13 ..][0..8], 0);
+        const end = payload.len - effect_post_image_trailer_len;
+        @memset(payload[end - 8 .. end], 0);
         return true;
     }
     return false;
@@ -2837,13 +2846,12 @@ fn zeroFirstLoadedImageBlobLen(bytes: []u8) bool {
 
 /// Overwrite the decoded-dimension fields of the first journaled image
 /// record whose outcome matches, in place — `zeroFirstLoadedImageBlobLen`'s
-/// sibling. Per `journal.encodeEffect`, the v8 effect payload ends with
+/// sibling. Per `journal.encodeEffect`, the image fields end with
 /// image_width (u64), image_height (u64), image_blob_hash (16 bytes),
-/// image_blob_len (u64), channel_kind (u8), channel_dropped_total
-/// (u32), so the dims live 45 and 37 bytes from the end.
-/// Framing and every other field stay valid: only replay's
-/// record-consistency gate can catch the damage. Returns whether a
-/// record was damaged.
+/// image_blob_len (u64) followed by the post-image trailer, so the dims
+/// live 40 and 32 bytes from the trailer's start. Framing and every
+/// other field stay valid: only replay's record-consistency gate can
+/// catch the damage. Returns whether a record was damaged.
 fn patchFirstImageDims(bytes: []u8, outcome: effects_mod.EffectImageOutcome, width: u64, height: u64) bool {
     var pos: usize = journal.preamble_len;
     while (bytes.len - pos >= 5) {
@@ -2854,8 +2862,9 @@ fn patchFirstImageDims(bytes: []u8, outcome: effects_mod.EffectImageOutcome, wid
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .image or record.image_outcome != outcome) continue;
-        std.mem.writeInt(u64, payload[payload.len - 45 ..][0..8], width, .little);
-        std.mem.writeInt(u64, payload[payload.len - 37 ..][0..8], height, .little);
+        const end = payload.len - effect_post_image_trailer_len;
+        std.mem.writeInt(u64, payload[end - 40 ..][0..8], width, .little);
+        std.mem.writeInt(u64, payload[end - 32 ..][0..8], height, .little);
         return true;
     }
     return false;

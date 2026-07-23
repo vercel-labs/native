@@ -61,5 +61,6 @@ export const componentPages: ComponentPage[] = [
   { slug: "toggle", name: "Toggle", preview: "toggle-hero", blurb: "Pressed-state toggles, toggle buttons, and groups." },
   { slug: "tooltip", name: "Tooltip", preview: "tooltip-hero", blurb: "The floating label above the control it annotates." },
   { slug: "tree", name: "Tree", preview: "tree-hero", blurb: "Disclosure tree with one roving focus set." },
+  { slug: "video", name: "Video", preview: "video-hero", blurb: "Platform-decoded playback with house transport chrome." },
   { slug: "virtual-list", name: "Virtual List", preview: "virtual-list-hero", blurb: "Windowed rows: the view builds only what's visible." },
 ];

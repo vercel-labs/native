@@ -238,6 +238,29 @@ pub const Audio = struct {
     spectrum_bands: []const u8 = &.{},
 };
 
+/// Live video playback state (the effects channel's single player), as
+/// the runtime last mirrored it — the audio snapshot's twin. The
+/// advancing `position_ms` and the `.loaded` dimensions are the
+/// automation-visible evidence a video is actually decoding; `surface`
+/// names the media-surface texture channel its frames feed. Like the
+/// media-surface texture itself, this line prints in the FULL snapshot
+/// only, never the a11y text session fingerprints hash — playback
+/// transport is journaled effect truth, not tree state, so a replay
+/// with no producer stays fingerprint-identical by construction.
+pub const Video = struct {
+    key: u64 = 0,
+    surface: u64 = 0,
+    playing: bool = false,
+    buffering: bool = false,
+    looping: bool = false,
+    muted: bool = false,
+    source: []const u8 = "local",
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
 pub const Input = struct {
     windows: []const Window,
     views: []const platform.ViewInfo = &.{},
@@ -263,6 +286,8 @@ pub const Input = struct {
     /// Live audio playback, when the app started any (null once stopped
     /// or failed — an idle player is honest, not zeroed-out noise).
     audio: ?Audio = null,
+    /// Live video playback, same contract as `audio`.
+    video: ?Video = null,
     /// The most recent degraded dispatch errors, oldest first (bounded
     /// ring; `diagnostics.dispatch_error_count` is the lifetime total).
     errors: []const DispatchError = &.{},
@@ -576,6 +601,21 @@ pub fn writeText(input: Input, writer: anytype) !void {
             try writer.print(" spectrum_bands={x}", .{audio.spectrum_bands});
         }
         try writer.print("\n", .{});
+    }
+    if (input.video) |video| {
+        try writer.print("video key={d} surface={d} state={s} source={s} position_ms={d} duration_ms={d} dimensions={d}x{d} loop={any} muted={any}\n", .{
+            video.key,
+            video.surface,
+            // The audio line's honest third state, verbatim.
+            if (video.buffering) "buffering" else if (video.playing) "playing" else "paused",
+            video.source,
+            video.position_ms,
+            video.duration_ms,
+            video.width,
+            video.height,
+            video.looping,
+            video.muted,
+        });
     }
     for (input.errors) |dispatch_error| {
         if (dispatch_error.detail_len > 0) {

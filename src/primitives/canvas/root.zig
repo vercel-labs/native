@@ -74,6 +74,21 @@ pub fn mediaSurfaceTextureImageId(surface_id: u64) ImageId {
     return surface_id | media_surface_image_id_bit;
 }
 
+/// The framework-owned media-surface id the SINGLE video playback
+/// channel feeds (`fx.loadVideo` — one player is the whole surface) and
+/// every `<video>` element composites. The `<video>` element always
+/// binds this reserved id; apps composing custom video UI from the fx
+/// vocabulary target it via `<media-surface surface={id}>` only when
+/// they manage their own surface. A valid producer id: bit 63
+/// (`media_surface_image_id_bit`) stays clear, so the id claims and
+/// composites like any app surface — it is merely reserved by
+/// convention for the declarative playback. BELOW 2^53 deliberately:
+/// surface ids ride the TS wire as f64, and a source-less `<video>`
+/// with custom controls is fed by the app's own `Cmd.videoLoad`
+/// naming exactly this id — an id outside the exact-integer window
+/// could never arrive intact.
+pub const video_playback_surface_id: u64 = 0x0001_7669_6465_6f5f;
+
 /// The media surface's deterministic id-derived placeholder color
 /// (widget_render.zig): what the reference renderer — goldens,
 /// screenshots, replay pixel marks — shows for a bound surface, live
@@ -411,6 +426,7 @@ pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetVariant = widget_model.WidgetVariant;
 pub const WidgetOverscroll = widget_model.WidgetOverscroll;
+pub const VideoControlVerb = widget_model.VideoControlVerb;
 pub const WidgetIconPlacement = widget_model.WidgetIconPlacement;
 pub const WidgetSize = widget_model.WidgetSize;
 pub const WidgetRole = widget_model.WidgetRole;

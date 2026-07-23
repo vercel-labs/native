@@ -267,6 +267,10 @@
     {
       "name": "image",
       "doc": "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). Display-only (presses fall through); size it with width/height or grow (no intrinsic size); label it for screen readers."
+    },
+    {
+      "name": "video",
+      "doc": "The video leaf: plays the app's single platform-decoded video into the framework-owned media-surface (macOS decodes with AVFoundation; hosts without a decoder deliver one explicit failed event). src declares the source — an app-assets path or an http(s) URL, resolved local-first exactly like audio; autoplay (default true), loop, and muted shape the fresh playback; controls composes the house transport chrome (play/pause, scrub bar, time readout) under the picture, and without it the element is the surface alone — compose your own controls from the video command vocabulary. Until a decoded frame arrives (and in every golden, screenshot, and replay) the surface shows its deterministic placeholder: pixels are presentation chrome, transport is the journaled truth. Size it with width/height or grow (no intrinsic size); label it for screen readers."
     }
   ],
   "structure": [
@@ -642,6 +646,52 @@
       {
         "name": "surface",
         "doc": "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing, and usable ids are nonzero values below bit 63 — the reserved media-surface texture namespace, which the producer acquire refuses."
+      }
+    ],
+    "video": [
+      {
+        "name": "src",
+        "doc": "video: the source string — an app-assets path (tried first as a local file) or an http(s) URL (streamed progressively when the local file is absent), a literal or one {binding}. Declaring it loads the app's SINGLE video player (a changed src replaces the playback whole); omit it to render the surface alone over a playback your update code drives."
+      },
+      {
+        "name": "controls",
+        "doc": "video: composes the house transport chrome under the picture — play/pause, a scrub slider, and elapsed/duration readouts, runtime-driven so the model carries no transport state. Omit it for the bare surface and compose your own controls from the video command vocabulary."
+      },
+      {
+        "name": "autoplay",
+        "doc": "video: start playing as soon as the load lands (the default). false loads paused at the first frame — the poster shape; play resumes it."
+      },
+      {
+        "name": "loop",
+        "doc": "video: wrap from the natural end back to the start and keep playing. A looping playback never delivers a completed event — it never ends."
+      },
+      {
+        "name": "muted",
+        "doc": "video: start with the audio track muted (a reversible switch, independent of the remembered volume)."
+      },
+      {
+        "name": "width",
+        "doc": "Definite width (plain number): the element is exactly this wide (no intrinsic size)."
+      },
+      {
+        "name": "height",
+        "doc": "Definite height (plain number): the element is exactly this tall (no intrinsic size)."
+      },
+      {
+        "name": "grow",
+        "doc": "Flex grow factor."
+      },
+      {
+        "name": "label",
+        "doc": "Accessible name for the picture (the image rule: unnamed video degrades to an unnamed image for screen readers; label=\"\" marks it decorative)."
+      },
+      {
+        "name": "key",
+        "doc": "Sibling-scoped identity key."
+      },
+      {
+        "name": "global-key",
+        "doc": "Parent-independent identity: ids survive reparenting between containers."
       }
     ],
     "chart": [
@@ -1056,6 +1106,10 @@
       "width": 1120,
       "height": 560
     },
+    "video": {
+      "width": 1120,
+      "height": 600
+    },
     "icon": {
       "width": 1120,
       "height": 300
@@ -1165,6 +1219,10 @@
       "height": 396
     },
     "media-surface-hero": {
+      "width": 704,
+      "height": 396
+    },
+    "video-hero": {
       "width": 704,
       "height": 396
     },

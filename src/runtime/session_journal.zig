@@ -117,8 +117,14 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// becoming per-request generations — same bytes, values a stale build
 /// could never match). Bump this ONLY for such semantics-only changes;
 /// layout changes need NO action here — the fingerprint moves on its
-/// own.
-pub const format_semantic_epoch: u32 = 1;
+/// own. Epoch 2: `.video_load` records became one-per-load (refused
+/// cascades journal one too) and replay verifies the bijection — an
+/// earlier journal's failed loads would replay as false divergence, so
+/// the identical bytes must refuse. Epoch 3: the `video_kind` field on
+/// `.video_load` records became the load's OUTCOME (`.loaded` or
+/// `.failed`, steering the replayed fake's synchronous reset) where it
+/// previously rode its default — same bytes, new meaning.
+pub const format_semantic_epoch: u32 = 3;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record
@@ -169,6 +175,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
             "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
             // gpu_surface_frame journals a deliberate SUBSET of a
             // telemetry-heavy struct (the rest is host render telemetry,
@@ -444,6 +451,7 @@ const EventTag = enum(u8) {
     context_menu_action = 22,
     widget_accessibility_action = 23,
     audio = 24,
+    video = 25,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -596,6 +604,22 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
+        },
+        // Recorded for stream fidelity like `.audio`. On replay the
+        // journaled video EFFECT records are the Msg source; the
+        // platform events steer only the channel MIRRORS (the house
+        // chrome's render state for handler-less playbacks), gated by
+        // the load token exactly as live (`Effects.takeVideoMsg`).
+        .video => |video| {
+            try cursor.writeEnum(EventTag.video);
+            try cursor.writeEnum(video.kind);
+            try cursor.writeInt(u64, video.token);
+            try cursor.writeInt(u64, video.position_ms);
+            try cursor.writeInt(u64, video.duration_ms);
+            try cursor.writeBool(video.playing);
+            try cursor.writeBool(video.buffering);
+            try cursor.writeInt(u64, video.width);
+            try cursor.writeInt(u64, video.height);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -803,6 +827,19 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
         },
+        .video => blk: {
+            const kind = try cursor.readEnum(platform.VideoEventKind);
+            break :blk .{ .video = .{
+                .kind = kind,
+                .token = try cursor.readInt(u64),
+                .position_ms = try cursor.readInt(u64),
+                .duration_ms = try cursor.readInt(u64),
+                .playing = try cursor.readBool(),
+                .buffering = try cursor.readBool(),
+                .width = try cursor.readInt(u64),
+                .height = try cursor.readInt(u64),
+            } };
+        },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
             const view_label = try cursor.readStr();
@@ -983,6 +1020,22 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     // dropped_pending rides the shared `dropped` field).
     try cursor.writeEnum(record.channel_kind);
     try cursor.writeInt(u32, record.channel_dropped_total);
+    // Video terminals — the delivered event, verbatim (fingerprint
+    // era: these fields move the format identity through reflection).
+    try cursor.writeEnum(record.video_kind);
+    try cursor.writeInt(u64, record.video_position_ms);
+    try cursor.writeInt(u64, record.video_duration_ms);
+    try cursor.writeBool(record.video_playing);
+    try cursor.writeBool(record.video_buffering);
+    try cursor.writeInt(u64, record.video_width);
+    try cursor.writeInt(u64, record.video_height);
+    // The producing load's identity, how replay routes the record
+    // (`EffectResultRecord.video_token`).
+    try cursor.writeInt(u64, record.video_token);
+    // `.video_load` records: the recording host's cascade resolution.
+    try cursor.writeEnum(record.video_source);
+    // `.video` records: whether the delivery dispatched a Msg.
+    try cursor.writeBool(record.video_handled);
     return buffer[0..cursor.len];
 }
 
@@ -1024,6 +1077,17 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     // v8: channel events.
     record.channel_kind = try cursor.readEnum(runtime_effects.EffectChannelEventKind);
     record.channel_dropped_total = try cursor.readInt(u32);
+    // Video terminals.
+    record.video_kind = try cursor.readEnum(runtime_effects.EffectVideoEventKind);
+    record.video_position_ms = try cursor.readInt(u64);
+    record.video_duration_ms = try cursor.readInt(u64);
+    record.video_playing = try cursor.readBool();
+    record.video_buffering = try cursor.readBool();
+    record.video_width = try cursor.readInt(u64);
+    record.video_height = try cursor.readInt(u64);
+    record.video_token = try cursor.readInt(u64);
+    record.video_source = try cursor.readEnum(runtime_effects.EffectVideoSource);
+    record.video_handled = try cursor.readBool();
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }
@@ -1363,6 +1427,25 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqualSlices(u8, &bands, &decoded.audio.bands);
     }
     {
+        // Video events journal the whole shape including the stream
+        // dimensions the `.loaded` acknowledgment carries.
+        const decoded = try roundTripEvent(.{ .video = .{
+            .kind = .loaded,
+            .position_ms = 0,
+            .duration_ms = 92_500,
+            .playing = true,
+            .buffering = true,
+            .width = 1280,
+            .height = 720,
+        } });
+        try testing.expectEqual(platform.VideoEventKind.loaded, decoded.video.kind);
+        try testing.expectEqual(@as(u64, 92_500), decoded.video.duration_ms);
+        try testing.expect(decoded.video.playing);
+        try testing.expect(decoded.video.buffering);
+        try testing.expectEqual(@as(u64, 1280), decoded.video.width);
+        try testing.expectEqual(@as(u64, 720), decoded.video.height);
+    }
+    {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };
         const decoded = try roundTripEvent(.{ .files_dropped = .{
             .window_id = 1,
@@ -1572,6 +1655,30 @@ test "effect codec round-trips payloads and outcomes" {
     const closed_decoded = try decodeEffect(closed_encoded);
     try testing.expectEqual(runtime_effects.EffectChannelEventKind.closed, closed_decoded.channel_kind);
     try testing.expectEqual(@as(usize, 0), closed_decoded.payload.len);
+
+    // Video effect records round-trip the whole delivered event —
+    // including the dimensions the `.loaded` acknowledgment carries —
+    // because the journaled record is replay's only Msg source.
+    const video_encoded = try encodeEffect(.{
+        .kind = .video,
+        .key = 61,
+        .video_kind = .loaded,
+        .video_position_ms = 0,
+        .video_duration_ms = 92_500,
+        .video_playing = true,
+        .video_buffering = true,
+        .video_width = 1280,
+        .video_height = 720,
+    }, &buffer);
+    const video_decoded = try decodeEffect(video_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.video, video_decoded.kind);
+    try testing.expectEqual(@as(u64, 61), video_decoded.key);
+    try testing.expectEqual(runtime_effects.EffectVideoEventKind.loaded, video_decoded.video_kind);
+    try testing.expectEqual(@as(u64, 92_500), video_decoded.video_duration_ms);
+    try testing.expect(video_decoded.video_playing);
+    try testing.expect(video_decoded.video_buffering);
+    try testing.expectEqual(@as(u64, 1280), video_decoded.video_width);
+    try testing.expectEqual(@as(u64, 720), video_decoded.video_height);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {

@@ -1155,6 +1155,7 @@ const Checker = struct {
         if (std.mem.eql(u8, node.name, "stepper")) return self.checkStepper(node);
         if (std.mem.eql(u8, node.name, "timeline-item")) return self.checkTimelineItem(node);
         if (std.mem.eql(u8, node.name, "chart")) return self.checkChart(node);
+        if (std.mem.eql(u8, node.name, "video")) return self.checkVideo(node);
         if (std.mem.eql(u8, node.name, "timeline")) {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "gap") or std.mem.eql(u8, attribute.name, "grow")) {
@@ -1367,6 +1368,43 @@ const Checker = struct {
         for (node.children) |child| {
             if (child.kind != .element or !std.mem.eql(u8, child.name, "series")) continue;
             try self.checkSeries(child);
+        }
+    }
+
+    /// `<video>`: a bound `src` must resolve to a string model field
+    /// (the playback source is text — engine parity), the flags resolve
+    /// truthy over any kind like every flag attribute (bare presence is
+    /// true and resolves nothing), and sizing/identity resolve like the
+    /// engines'.
+    fn checkVideo(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "src")) {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.string}, markup.video_src_message);
+                continue;
+            }
+            if (markup.videoFlagAttrName(attribute.name)) {
+                if (attribute.value.len == 0) continue;
+                _ = try self.attrKind(node, attribute, attribute.value);
+                continue;
+            }
+            const number_attr = std.mem.eql(u8, attribute.name, "width") or
+                std.mem.eql(u8, attribute.name, "height") or
+                std.mem.eql(u8, attribute.name, "grow");
+            if (number_attr) {
+                try self.checkClassAttr(node, attribute, .number);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "key") or std.mem.eql(u8, attribute.name, "global-key")) {
+                try self.checkKeyAttr(node, attribute);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "label")) {
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.string}, label_attr_message);
+            }
         }
     }
 

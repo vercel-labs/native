@@ -21,14 +21,14 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 67), schema.elements.len);
-    try testing.expectEqual(@as(usize, 81), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 68), schema.elements.len);
+    try testing.expectEqual(@as(usize, 85), schema.attrs.len);
     try testing.expectEqual(@as(usize, 10), schema.events.len);
     // The element table runs through the span composite (64), the
-    // bubble-reactions composite (65), the media surface (66), and the
-    // runtime-image leaf (67).
+    // bubble-reactions composite (65), the media surface (66), the
+    // runtime-image leaf (67), and the video playback composite (68).
     try testing.expectEqual(
-        @as(u64, 0x2a68661a562f0565),
+        @as(u64, 0x7dc4a24d1221eac5),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -37,10 +37,11 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // the later span additions scale (76) and underline (77), the
     // split enter-from attribute resize-origin (78), the quiet-surface
     // hover knob quiet-hover (79), the anchored-tooltip hover-intent
-    // delay tooltip-delay (80), and the media-surface producer
-    // rendezvous surface (81).
+    // delay tooltip-delay (80), the media-surface producer rendezvous
+    // surface (81), and the video element attributes controls (82),
+    // autoplay (83), loop (84), and muted (85).
     try testing.expectEqual(
-        @as(u64, 0x046479d29c4f0c5e),
+        @as(u64, 0xa9dbe926a4488dc6),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     try testing.expectEqual(

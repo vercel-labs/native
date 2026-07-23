@@ -391,6 +391,17 @@ pub const WidgetLayoutStyle = struct {
     /// into both `min_size` and `max_size`, so intrinsic content can
     /// neither shrink nor silently grow the box past it.
     max_size: geometry.SizeF = .{},
+    /// The media sizing contract for a COMPOSED container: report no
+    /// intrinsic size, exactly like the media-surface leaf it wraps
+    /// (definite width/height or flex grow size it; a hug container
+    /// gives it nothing). Chrome composed beside a zero-intrinsic
+    /// surface — a transport bar — must not leak its own intrinsic
+    /// size into the element, or an unsized element would render as a
+    /// chrome-only strip. Declared sizes stay definite (they ride the
+    /// frame and the min/max bounds, never the intrinsic measure);
+    /// pair with `clip_content` so chrome cannot paint past a box the
+    /// layout granted nothing.
+    zero_intrinsic: bool = false,
 };
 
 pub const WidgetStyle = struct {
@@ -728,6 +739,20 @@ pub const WidgetOverscroll = enum {
     rubber_band,
 };
 
+/// A house video-transport chrome role for a control the RUNTIME
+/// consumes: `Ui.video` stamps it on the chrome it composes (`.toggle`
+/// on the play/pause button, `.scrub` on the seek slider), and the app
+/// loop drives the single video playback channel from presses/changes
+/// on these widgets instead of resolving an app Msg — declarative
+/// playback needs no model plumbing to keep its transport honest.
+/// `.none` everywhere else, including every app-authored widget:
+/// builder-internal, never an `ElementOptions` channel.
+pub const VideoControlVerb = enum(u8) {
+    none,
+    toggle,
+    scrub,
+};
+
 /// Where a control sits inside a FLUSH button group (`button_group`
 /// with gap 0), stamped onto the render-time widget copy by BOTH render
 /// walks — never authored, never serialized, never retained. The stamp
@@ -895,6 +920,12 @@ pub const Widget = struct {
     /// bounded by `canvas_limits.max_canvas_widget_chart_*` budgets.
     /// `Ui.chart` downsamples long series before they land here.
     chart: chart_model.ChartData = .{},
+    /// House video-transport role (see `VideoControlVerb`): `Ui.video`
+    /// stamps `.toggle`/`.scrub` on the chrome controls it composes, and
+    /// the app loop consumes presses/changes on them by driving the
+    /// video playback channel — never by resolving an app Msg. `.none`
+    /// on every app-authored widget.
+    video_control: VideoControlVerb = .none,
     /// Render-walk stamp for flush button-group segments (see
     /// `WidgetGroupSegment`). Derived at emit time from the widget's
     /// position among its group's visible children; `.none` everywhere

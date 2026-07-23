@@ -85,6 +85,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
     .{ .name = "media-surface", .doc = "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers." },
     .{ .name = "image", .doc = "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). Display-only (presses fall through); size it with width/height or grow (no intrinsic size); label it for screen readers." },
+    .{ .name = "video", .doc = "The video leaf: plays the app's single platform-decoded video into the framework-owned media-surface (macOS decodes with AVFoundation; hosts without a decoder deliver one explicit failed event). src declares the source — an app-assets path or an http(s) URL, resolved local-first exactly like audio; autoplay (default true), loop, and muted shape the fresh playback; controls composes the house transport chrome (play/pause, scrub bar, time readout) under the picture, and without it the element is the surface alone — compose your own controls from the video command vocabulary. Until a decoded frame arrives (and in every golden, screenshot, and replay) the surface shows its deterministic placeholder: pixels are presentation chrome, transport is the journaled truth. Size it with width/height or grow (no intrinsic size); label it for screen readers." },
 };
 
 pub const structure_docs = [_]Doc{
@@ -207,6 +208,20 @@ pub const media_surface_attr_docs = [_]Doc{
     .{ .name = "surface", .doc = "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing, and usable ids are nonzero values below bit 63 — the reserved media-surface texture namespace, which the producer acquire refuses." },
 };
 
+pub const video_attr_docs = [_]Doc{
+    .{ .name = "src", .doc = "video: the source string — an app-assets path (tried first as a local file) or an http(s) URL (streamed progressively when the local file is absent), a literal or one {binding}. Declaring it loads the app's SINGLE video player (a changed src replaces the playback whole); omit it to render the surface alone over a playback your update code drives." },
+    .{ .name = "controls", .doc = "video: composes the house transport chrome under the picture — play/pause, a scrub slider, and elapsed/duration readouts, runtime-driven so the model carries no transport state. Omit it for the bare surface and compose your own controls from the video command vocabulary." },
+    .{ .name = "autoplay", .doc = "video: start playing as soon as the load lands (the default). false loads paused at the first frame — the poster shape; play resumes it." },
+    .{ .name = "loop", .doc = "video: wrap from the natural end back to the start and keep playing. A looping playback never delivers a completed event — it never ends." },
+    .{ .name = "muted", .doc = "video: start with the audio track muted (a reversible switch, independent of the remembered volume)." },
+    .{ .name = "width", .doc = "Definite width (plain number): the element is exactly this wide (no intrinsic size)." },
+    .{ .name = "height", .doc = "Definite height (plain number): the element is exactly this tall (no intrinsic size)." },
+    .{ .name = "grow", .doc = "Flex grow factor." },
+    .{ .name = "label", .doc = "Accessible name for the picture (the image rule: unnamed video degrades to an unnamed image for screen readers; label=\"\" marks it decorative)." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
+};
+
 pub const chart_attr_docs = [_]Doc{
     .{ .name = "y-min", .doc = "chart: explicit y-domain floor (a number or one {binding}); omit to derive from the data. Bars always force 0 into a derived domain." },
     .{ .name = "y-max", .doc = "chart: explicit y-domain ceiling (a number or one {binding}); omit to derive from the data." },
@@ -296,6 +311,7 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&timeline_item_attr_docs, name)) |doc| return doc;
     if (findDoc(&avatar_attr_docs, name)) |doc| return doc;
     if (findDoc(&media_surface_attr_docs, name)) |doc| return doc;
+    if (findDoc(&video_attr_docs, name)) |doc| return doc;
     if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     if (findDoc(&chart_attr_docs, name)) |doc| return doc;
     if (findDoc(&series_attr_docs, name)) |doc| return doc;

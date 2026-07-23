@@ -233,6 +233,23 @@ pub const Runtime = struct {
     /// cannot analyze: honest absence, visible as such.
     audio_spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
     audio_spectrum_events: u64 = 0,
+    /// Video playback mirrors (`UiApp.publishVideoState`) — the audio
+    /// mirrors' twin, so the automation snapshot reports the single
+    /// video channel honestly. Dimensions are the stream's decoded
+    /// pixels from the `.loaded` acknowledgment; the surface id names
+    /// which media-surface texture channel the frames feed.
+    video_active: bool = false,
+    video_key: u64 = 0,
+    video_surface_id: u64 = 0,
+    video_playing: bool = false,
+    video_buffering: bool = false,
+    video_looping: bool = false,
+    video_muted: bool = false,
+    video_source: runtime_effects.EffectVideoSource = .local,
+    video_position_ms: u64 = 0,
+    video_duration_ms: u64 = 0,
+    video_width: u64 = 0,
+    video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
     next_window_id: platform.WindowId = 2,
@@ -845,6 +862,7 @@ pub const Runtime = struct {
     pub const adoptMediaSurfaceFrames = MediaSurfaceMethods.adoptMediaSurfaceFrames;
     pub const disarmMediaSurfaceWakes = MediaSurfaceMethods.disarmMediaSurfaceWakes;
     pub const adoptedMediaSurfaceTexture = MediaSurfaceMethods.adoptedMediaSurfaceTexture;
+    pub const mediaSurfaceBinding = MediaSurfaceMethods.mediaSurfaceBinding;
     const adoptedMediaSurfaceTextures = MediaSurfaceMethods.adoptedMediaSurfaceTextures;
 
     const CanvasFontMethods = runtime_canvas_fonts.RuntimeCanvasFonts(Runtime);

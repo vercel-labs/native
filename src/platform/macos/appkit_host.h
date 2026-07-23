@@ -32,6 +32,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER = 18,
     NATIVE_SDK_APPKIT_EVENT_CONTEXT_MENU_ACTION = 19,
     NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
+    NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -52,6 +53,23 @@ typedef enum {
     NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED = 3,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM = 4,
 } native_sdk_appkit_audio_event_kind_t;
+
+/* Video player reports (EVENT_VIDEO payloads). LOADED acknowledges a
+ * successful native_sdk_appkit_video_load (or a ready URL stream) with
+ * the stream's true pixel dimensions and the decoded duration; POSITION
+ * ticks at a coarse honest cadence (~500ms) only while playing;
+ * COMPLETED fires exactly once at a non-looping video's natural end (a
+ * looping playback wraps and never completes); FAILED reports an
+ * asynchronous decode/device failure — or a network failure that killed
+ * a stream mid-flight. Pixels never ride events: decoded frames flow
+ * through the sink push handed to the load entries. Ordinals are
+ * mirrored by the Zig side (videoEventKindFromInt). */
+typedef enum {
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_LOADED = 0,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_POSITION = 1,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_COMPLETED = 2,
+    NATIVE_SDK_APPKIT_VIDEO_EVENT_FAILED = 3,
+} native_sdk_appkit_video_event_kind_t;
 
 /* How many band magnitudes every SPECTRUM report carries: 32 buckets
  * with log-spaced center frequencies covering roughly 50 Hz..16 kHz.
@@ -313,6 +331,26 @@ typedef struct {
      * the -60 dBFS analysis floor at 0 to full scale at 255). Zeros on
      * every other event kind. */
     uint8_t audio_bands[NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS];
+    /* EVENT_VIDEO payloads: the report kind
+     * (native_sdk_appkit_video_event_kind_t) plus the player's
+     * position/duration readout in milliseconds at emit time.
+     * video_playing/video_buffering carry the audio event's exact
+     * semantics (transport intent vs a stalled stream). */
+    int video_kind;
+    /* The engine-minted load token this playback echoes in every event
+     * (see the Zig seam's VideoEvent.token): how a replaced playback's
+     * queued straggler is told apart from the replacement's stream. */
+    uint64_t video_token;
+    uint64_t video_position_ms;
+    uint64_t video_duration_ms;
+    int video_playing;
+    int video_buffering;
+    /* LOADED payloads: the STREAM's decoded pixel dimensions — the
+     * honest source geometry, even when the host downscales frames to
+     * fit the sink's per-frame pixel budget. Zeros on every other
+     * event kind. */
+    uint64_t video_width;
+    uint64_t video_height;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -487,6 +525,41 @@ int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
+
+/* Where the video player delivers decoded frames: one tightly packed,
+ * row-major, straight-alpha RGBA8 frame per call (len = width * height
+ * * 4), copied before return. Returns 0 when the frame was accepted, 1
+ * when the receiving claim has been released (the host must stop
+ * pushing — its frame timer has nothing left to feed), anything else a
+ * dropped frame (latest-wins; the host keeps decoding). Always invoked
+ * on the main run loop. */
+typedef int (*native_sdk_appkit_video_sink_push_t)(void *context, size_t width, size_t height, const uint8_t *pixels, size_t len);
+
+/* The app's single video player (AVPlayer + AVPlayerItemVideoOutput).
+ * Load replaces whatever was loaded before, paused at position zero;
+ * returns 0 on success, 1 when the file is missing/unreadable, 2 when
+ * it cannot be decoded. A successful load is followed by one
+ * EVENT_VIDEO/LOADED on the run loop carrying the stream's dimensions
+ * and the decoded duration; decoded frames flow through push_fn.
+ * Play/pause/stop/seek/set_volume/set_muted/set_loop return 1 when
+ * applied, 0 when there is no loaded player to apply to (stop, pause,
+ * and the setters treat that as a harmless no-op on the Zig side).
+ * All entries are loop-thread only. */
+int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+/* URL sources on the same single player: progressive AVPlayer streaming
+ * (playable as soon as enough bytes arrive, never download-then-play;
+ * no cache layer). Returns 2 when the URL cannot even be parsed, 0 for
+ * a started stream. Async failures (unreachable host, mid-stream
+ * network loss, undecodable payload) arrive as one EVENT_VIDEO/FAILED
+ * on the run loop. Loop-thread only. */
+int native_sdk_appkit_video_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context);
+int native_sdk_appkit_video_play(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_pause(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_stop(native_sdk_appkit_host_t *host);
+int native_sdk_appkit_video_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
+int native_sdk_appkit_video_set_volume(native_sdk_appkit_host_t *host, double volume);
+int native_sdk_appkit_video_set_muted(native_sdk_appkit_host_t *host, int muted);
+int native_sdk_appkit_video_set_loop(native_sdk_appkit_host_t *host, int loop);
 /* Thread-safe: nudges the main run loop to emit a WAKE event. May be
  * called from any thread (worker threads streaming effect results). */
 void native_sdk_appkit_wake(native_sdk_appkit_host_t *host);

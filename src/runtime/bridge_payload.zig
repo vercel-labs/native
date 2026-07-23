@@ -117,6 +117,7 @@ pub fn platformFeatureFromString(value: []const u8) ?platform.PlatformFeature {
     if (std.mem.eql(u8, value, "audioStreaming")) return .audio_streaming;
     if (std.mem.eql(u8, value, "audioSpectrum")) return .audio_spectrum;
     if (std.mem.eql(u8, value, "windowHideOnClose")) return .window_hide_on_close;
+    if (std.mem.eql(u8, value, "videoPlayback")) return .video_playback;
     return null;
 }
 

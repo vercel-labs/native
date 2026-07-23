@@ -283,6 +283,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 // Series inside a chart are consumed by buildChart.
                 comptime fail(node, markup.series_parent_message);
             }
+            if (comptime std.mem.eql(u8, node.name, "video")) {
+                return buildVideo(node, entries, ui, model, scope);
+            }
             if (comptime std.mem.eql(u8, node.name, "context-menu")) {
                 // Direct context-menu children are consumed by their host
                 // element below; one reaching here is misplaced.
@@ -1232,6 +1235,72 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             return series;
         }
 
+        // ---------------------------------------------------------- video
+
+        /// Comptime mirror of the interpreter's `buildVideo`: the leaf
+        /// shape and the closed attribute set resolve at comptime with
+        /// the interpreter's messages; the src string, flags, and
+        /// sizing evaluate at runtime and lower through `Ui.video`.
+        fn buildVideo(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype) Ui.Node {
+            comptime {
+                if (node.children.len > 0) fail(node.children[0], markup.video_children_message);
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "kind")) continue;
+                    const known = std.mem.eql(u8, attribute.name, "src") or
+                        markup.videoFlagAttrName(attribute.name) or
+                        std.mem.eql(u8, attribute.name, "width") or
+                        std.mem.eql(u8, attribute.name, "height") or
+                        std.mem.eql(u8, attribute.name, "grow") or
+                        std.mem.eql(u8, attribute.name, "label") or
+                        std.mem.eql(u8, attribute.name, "key") or
+                        std.mem.eql(u8, attribute.name, "global-key");
+                    if (!known) fail(node, markup.video_attr_message);
+                }
+            }
+            var options: Ui.VideoOptions = .{};
+            if (comptime (node.attr("src") != null)) {
+                options.src = stringAttr(node, entries, comptime node.attr("src").?, ui, model, scope, markup.video_src_message);
+            }
+            if (comptime (node.attr("controls") != null)) {
+                options.controls = videoFlagValue(node, entries, comptime node.attr("controls").?, ui, model, scope);
+            }
+            if (comptime (node.attr("autoplay") != null)) {
+                options.autoplay = videoFlagValue(node, entries, comptime node.attr("autoplay").?, ui, model, scope);
+            }
+            if (comptime (node.attr("loop") != null)) {
+                options.loop = videoFlagValue(node, entries, comptime node.attr("loop").?, ui, model, scope);
+            }
+            if (comptime (node.attr("muted") != null)) {
+                options.muted = videoFlagValue(node, entries, comptime node.attr("muted").?, ui, model, scope);
+            }
+            if (comptime (node.attr("width") != null)) {
+                options.width = floatAttr(node, entries, comptime node.attr("width").?, ui, model, scope);
+            }
+            if (comptime (node.attr("height") != null)) {
+                options.height = floatAttr(node, entries, comptime node.attr("height").?, ui, model, scope);
+            }
+            if (comptime (node.attr("grow") != null)) {
+                options.grow = floatAttr(node, entries, comptime node.attr("grow").?, ui, model, scope);
+            }
+            if (comptime (node.attr("label") != null)) {
+                options.label = stringAttr(node, entries, comptime node.attr("label").?, ui, model, scope, "label expects text");
+            }
+            if (comptime (node.attr("key") != null)) {
+                options.key = attrKey(node, entries, comptime node.attr("key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            if (comptime (node.attr("global-key") != null)) {
+                options.global_key = attrKey(node, entries, comptime node.attr("global-key").?, ui, model, scope, "keys must be integers or strings");
+            }
+            return ui.video(options);
+        }
+
+        /// One video flag's value (interpreter parity): bare presence
+        /// declares true, a valued flag evaluates truthy.
+        fn videoFlagValue(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) bool {
+            if (comptime (raw.len == 0)) return true;
+            return evalExpr(node, entries, raw, ui, model, scope).truthy();
+        }
+
         /// Resolve a chart `x-labels` binding through the same sources
         /// `for each` accepts, requiring a string element type at
         /// comptime — the label twin of `chartValuesItems`.
@@ -1606,6 +1675,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     applyImageAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime std.mem.eql(u8, attribute.name, "surface")) {
                     applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime markup.videoFlagAttrName(attribute.name)) {
+                    // The video element's flags, video-scoped (its own
+                    // build consumed them): anywhere else they would be
+                    // silently inert (interpreter and validator parity).
+                    comptime fail(node, markup.video_flag_element_message);
                 } else if (comptime std.mem.eql(u8, attribute.name, "name")) {
                     // Consumed by the icon branch in buildElement; a
                     // compile error on any other element (interpreter and

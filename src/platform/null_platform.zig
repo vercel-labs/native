@@ -209,6 +209,59 @@ pub const max_null_audio_cached_urls: usize = 8;
 /// (not a local file and not a fake-cache hit) — completing a streamed
 /// track flips its URL into the fake cache, so the next `audioLoadUrl`
 /// of the same URL resolves `.cache` deterministically.
+/// Metadata table entries for the fake video player (see
+/// `setVideoMeta`): a loaded source whose tail matches `suffix` reports
+/// `duration_ms` and `width`x`height`. A table instead of real decoding
+/// keeps tests hermetic — no video files, no codecs, still honest
+/// dimensions and durations.
+pub const max_null_video_metas: usize = 8;
+
+pub const NullVideoMeta = struct {
+    suffix: [128]u8 = undefined,
+    suffix_len: usize = 0,
+    duration_ms: u64 = 0,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Every loaded video source without a table entry reports these.
+pub const default_null_video_duration_ms: u64 = 60_000;
+pub const default_null_video_width: u64 = 640;
+pub const default_null_video_height: u64 = 360;
+
+/// The fake video player's whole state: what a deterministic host would
+/// know. Position never advances on its own — tests move it explicitly
+/// with `advanceVideo`, mirroring `advanceAudio`. Frames never decode on
+/// their own either: tests push synthetic RGBA8 through the captured
+/// sink with `pushVideoFrame`, standing in for a real decode callback.
+/// A looping player wraps at the end instead of completing.
+pub const NullVideo = struct {
+    loaded: bool = false,
+    /// The engine-minted load token this playback echoes in every
+    /// event it emits (the real hosts' contract — see
+    /// `platform.VideoEvent.token`).
+    token: u64 = 0,
+    playing: bool = false,
+    streaming: bool = false,
+    looping: bool = false,
+    muted: bool = false,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    width: u64 = 0,
+    height: u64 = 0,
+    volume: f32 = 1.0,
+    /// The frame sink the last load handed over — where a real host's
+    /// decode callback would push pixels. Kept across pause (a paused
+    /// player keeps its claim); cleared by stop.
+    sink: types.VideoFrameSink = .{},
+    path_storage: [types.max_video_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+
+    pub fn path(self: *const NullVideo) []const u8 {
+        return self.path_storage[0..self.path_len];
+    }
+};
+
 pub const NullAudio = struct {
     loaded: bool = false,
     playing: bool = false,
@@ -568,6 +621,36 @@ pub const NullPlatform = struct {
     audio_stop_count: usize = 0,
     audio_seek_count: usize = 0,
     audio_volume_count: usize = 0,
+    /// Whether this modeled host has a video decoder. On by default (the
+    /// fake below stands in for AVFoundation); tests modelling a staged
+    /// host (Windows/Linux today) set it false BEFORE `platform()` so
+    /// every video service fn is absent, exactly like the real hosts.
+    video_playback: bool = true,
+    /// Whether the modeled filesystem holds the local video files apps
+    /// name in `videoLoad`. On by default; false models the
+    /// assets-absent machine: every local load answers
+    /// `error.VideoSourceNotFound`, which is what sends the source
+    /// cascade to the URL.
+    video_local_files: bool = true,
+    /// The deterministic fake video player: services mutate it, tests
+    /// read it and synthesize the events a live host would deliver
+    /// (`takeVideoLoaded`, `advanceVideo`), and push synthetic frames
+    /// through its captured sink (`pushVideoFrame`).
+    video: NullVideo = .{},
+    /// A `.loaded` acknowledgment waiting to be taken — set by a
+    /// successful video load, consumed by `takeVideoLoaded`.
+    video_loaded_pending: bool = false,
+    video_metas: [max_null_video_metas]NullVideoMeta = [_]NullVideoMeta{.{}} ** max_null_video_metas,
+    video_meta_count: usize = 0,
+    video_load_count: usize = 0,
+    video_load_url_count: usize = 0,
+    video_play_count: usize = 0,
+    video_pause_count: usize = 0,
+    video_stop_count: usize = 0,
+    video_seek_count: usize = 0,
+    video_volume_count: usize = 0,
+    video_muted_count: usize = 0,
+    video_loop_count: usize = 0,
     /// Pending cross-thread wake requests. Incremented atomically because
     /// `wake_fn` is the one service worker threads call; tests and the
     /// embed host drain it on their own thread via `takeWake` and then
@@ -761,6 +844,15 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .video_load_fn = if (self.video_playback) videoLoad else null,
+                .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
+                .video_play_fn = if (self.video_playback) videoPlay else null,
+                .video_pause_fn = if (self.video_playback) videoPause else null,
+                .video_stop_fn = if (self.video_playback) videoStop else null,
+                .video_seek_fn = if (self.video_playback) videoSeek else null,
+                .video_set_volume_fn = if (self.video_playback) videoSetVolume else null,
+                .video_set_muted_fn = if (self.video_playback) videoSetMuted else null,
+                .video_set_loop_fn = if (self.video_playback) videoSetLoop else null,
                 .wake_fn = wakeService,
                 .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrameService,
@@ -816,6 +908,7 @@ pub const NullPlatform = struct {
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
+            .video_playback => self.video_playback,
         };
     }
 
@@ -1710,6 +1803,232 @@ pub const NullPlatform = struct {
         self.audio = .{ .volume = self.audio.volume };
         self.audio_loaded_pending = false;
         return .{ .audio = .{ .kind = .failed } };
+    }
+
+    fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_load_count += 1;
+        // Retire the previous player FIRST — the macOS host's ordering
+        // (videoStop before the file probe): a load that then refuses
+        // must not leave the replaced playback emitting frames and
+        // events under its old token.
+        const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
+        if (path.len > self.video.path_storage.len) return error.VideoPathTooLarge;
+        // Model the assets-absent machine: the local file is not there,
+        // exactly the synchronous refusal a real host's open gives.
+        if (!self.video_local_files) return error.VideoSourceNotFound;
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
+        @memcpy(self.video.path_storage[0..path.len], path);
+        self.video.path_len = path.len;
+        self.video.loaded = true;
+        self.applyVideoMeta(path);
+        self.video_loaded_pending = true;
+    }
+
+    fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_load_url_count += 1;
+        // Retire-first, `videoLoad`'s ordering.
+        const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
+        if (url.len > self.video.path_storage.len) return error.VideoPathTooLarge;
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
+        @memcpy(self.video.path_storage[0..url.len], url);
+        self.video.path_len = url.len;
+        self.video.loaded = true;
+        self.video.streaming = true;
+        self.applyVideoMeta(url);
+        self.video_loaded_pending = true;
+    }
+
+    fn videoPlay(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_play_count += 1;
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        self.video.playing = true;
+    }
+
+    fn videoPause(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_pause_count += 1;
+        self.video.playing = false;
+    }
+
+    fn videoStop(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_stop_count += 1;
+        self.video = .{ .volume = self.video.volume };
+        self.video_loaded_pending = false;
+    }
+
+    fn videoSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_seek_count += 1;
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        self.video.position_ms = @min(position_ms, self.video.duration_ms);
+    }
+
+    fn videoSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_volume_count += 1;
+        self.video.volume = volume;
+    }
+
+    fn videoSetMuted(context: ?*anyopaque, muted: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_muted_count += 1;
+        self.video.muted = muted;
+    }
+
+    fn videoSetLoop(context: ?*anyopaque, loop: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_loop_count += 1;
+        self.video.looping = loop;
+    }
+
+    fn applyVideoMeta(self: *NullPlatform, source: []const u8) void {
+        for (self.video_metas[0..self.video_meta_count]) |entry| {
+            const suffix = entry.suffix[0..entry.suffix_len];
+            if (suffix.len <= source.len and std.mem.eql(u8, source[source.len - suffix.len ..], suffix)) {
+                self.video.duration_ms = entry.duration_ms;
+                self.video.width = entry.width;
+                self.video.height = entry.height;
+                return;
+            }
+        }
+        self.video.duration_ms = default_null_video_duration_ms;
+        self.video.width = default_null_video_width;
+        self.video.height = default_null_video_height;
+    }
+
+    /// Test helper: register duration and dimensions for any loaded
+    /// video source ending in `suffix`. Sources without a match report
+    /// the `default_null_video_*` values.
+    pub fn setVideoMeta(self: *NullPlatform, suffix: []const u8, duration_ms: u64, width: u64, height: u64) !void {
+        if (suffix.len == 0 or suffix.len > 128) return error.InvalidVideoOptions;
+        if (self.video_meta_count >= max_null_video_metas) return error.InvalidVideoOptions;
+        var entry = &self.video_metas[self.video_meta_count];
+        @memcpy(entry.suffix[0..suffix.len], suffix);
+        entry.suffix_len = suffix.len;
+        entry.duration_ms = duration_ms;
+        entry.width = width;
+        entry.height = height;
+        self.video_meta_count += 1;
+    }
+
+    /// Consume the pending video `.loaded` acknowledgment — the platform
+    /// event a live host delivers after a successful load, carrying the
+    /// stream's dimensions and the player's duration readout. Dispatch
+    /// it through the runtime, like `takeAudioLoaded`.
+    pub fn takeVideoLoaded(self: *NullPlatform) ?Event {
+        if (!self.video_loaded_pending) return null;
+        self.video_loaded_pending = false;
+        return .{ .video = .{
+            .kind = .loaded,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = self.video.playing,
+            .width = self.video.width,
+            .height = self.video.height,
+        } };
+    }
+
+    /// Test helper: advance fake playback by `delta_ms` and synthesize
+    /// the event a live host's position timer would deliver — a
+    /// `.position` tick, or `.completed` when a non-looping video
+    /// reaches its end. A non-looping completion unloads the player
+    /// (retire-before-emit, the live hosts' teardown): a later
+    /// `videoPlay`/`videoSeek` refuses exactly as it would against a
+    /// torn-down AVPlayer, and no second completion can ever emit. A
+    /// LOOPING player wraps past the end and keeps ticking: no
+    /// completion, because the playback never ends. Returns null when
+    /// nothing is loaded or playing; position never advances on its own.
+    pub fn advanceVideo(self: *NullPlatform, delta_ms: u64) ?Event {
+        if (!self.video.loaded or !self.video.playing) return null;
+        // Widened, not saturated: a hostile or fuzzing advance past
+        // u64 completes (or wraps EXACTLY, for a looping player)
+        // instead of trapping — saturating before the loop modulo
+        // would land the wrapped position on the wrong residue.
+        const advanced = @as(u128, self.video.position_ms) + delta_ms;
+        if (advanced >= self.video.duration_ms and self.video.duration_ms > 0) {
+            if (self.video.looping) {
+                self.video.position_ms = @intCast(advanced % self.video.duration_ms);
+                return .{ .video = .{
+                    .kind = .position,
+                    .token = self.video.token,
+                    .position_ms = self.video.position_ms,
+                    .duration_ms = self.video.duration_ms,
+                    .playing = true,
+                } };
+            }
+            const token = self.video.token;
+            const duration_ms = self.video.duration_ms;
+            self.video = .{ .volume = self.video.volume };
+            self.video_loaded_pending = false;
+            return .{ .video = .{
+                .kind = .completed,
+                .token = token,
+                .position_ms = duration_ms,
+                .duration_ms = duration_ms,
+                .playing = false,
+            } };
+        }
+        // Below the duration, so it fits u64 again by construction —
+        // except under a zero duration (no end to reach), where the
+        // readout saturates like a real clock display would.
+        self.video.position_ms = if (advanced > std.math.maxInt(u64))
+            std.math.maxInt(u64)
+        else
+            @intCast(advanced);
+        return .{ .video = .{
+            .kind = .position,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = true,
+        } };
+    }
+
+    /// Test helper: synthesize a mid-stream stall — the `.position`
+    /// event a live host's tick delivers while the stream waits for
+    /// network bytes. Only a streaming playback can stall; local files
+    /// never buffer, so anything else answers null.
+    pub fn stallVideo(self: *NullPlatform) ?Event {
+        if (!self.video.loaded or !self.video.playing or !self.video.streaming) return null;
+        return .{ .video = .{
+            .kind = .position,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = true,
+            .buffering = true,
+        } };
+    }
+
+    /// Test helper: synthesize an asynchronous decode/device failure,
+    /// the `.failed` event a live host would deliver. Unloads the
+    /// player like a real failure would.
+    pub fn failVideo(self: *NullPlatform) ?Event {
+        if (!self.video.loaded) return null;
+        const token = self.video.token;
+        self.video = .{ .volume = self.video.volume };
+        self.video_loaded_pending = false;
+        return .{ .video = .{ .kind = .failed, .token = token } };
+    }
+
+    /// Test helper: push one synthetic RGBA8 frame through the sink the
+    /// last load captured — the deterministic stand-in for a real
+    /// host's decode callback delivering a converted CVPixelBuffer.
+    /// Errors surface exactly as a real producer push would
+    /// (`error.MediaSurfaceReleased` after the claim ended,
+    /// `error.InvalidVideoOptions` when nothing is loaded).
+    pub fn pushVideoFrame(self: *NullPlatform, width: usize, height: usize, rgba8: []const u8) anyerror!void {
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        return self.video.sink.push(width, height, rgba8);
     }
 
     fn wakeService(context: ?*anyopaque) anyerror!void {
