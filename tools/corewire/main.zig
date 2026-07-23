@@ -80,9 +80,10 @@ pub fn main(init: std.process.Init) !void {
     // identities beyond spelling (symlinks, hard links) stay the
     // caller's responsibility.
     const input_resolved = try std.fs.path.resolve(arena, &.{input});
-    // The staging spellings join the checked set: outputs land by
-    // rename from `<path>.corewire-tmp`, so those names are claimed by
-    // this invocation exactly like the outputs themselves.
+    // The staging PREFIX spellings join the checked set: outputs land
+    // by rename from exclusively-created `<path>.corewire-tmp.<nonce>`
+    // files, and a sidecar sitting on the prefix spelling is close
+    // enough to a claimed name to refuse outright.
     const paths = [_]?[]const u8{
         out_path,
         facade_path,
@@ -207,18 +208,40 @@ fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, 
     if (std.fs.path.dirname(out)) |dir| {
         std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
     }
-    // Write-then-rename: the rename replaces the destination's
-    // DIRECTORY ENTRY and never writes through it, so even an alias the
-    // preflight cannot see (a hard link to the sidecar carries the same
-    // canonical path only for the entry itself) can never have shared
-    // content truncated — the other names keep the old file.
+    // Write-then-rename, through a staging file this invocation CREATES
+    // EXCLUSIVELY under a unique name: exclusive creation can never
+    // truncate an existing entry (whatever it links to), the unique
+    // suffix keeps concurrent invocations off each other's bytes, and
+    // the rename replaces the destination's directory entry without
+    // writing through it — so no alias of the destination can lose
+    // shared content.
     const arena = init.arena.allocator();
-    const temp_path = try std.fmt.allocPrint(arena, "{s}.corewire-tmp", .{out});
-    std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = temp_path, .data = data }) catch |err| {
-        try stderr.print("corewire: cannot write {s}: {t}\n", .{ temp_path, err });
+    var nonce: [8]u8 = undefined;
+    init.io.random(&nonce);
+    const temp_path = try std.fmt.allocPrint(arena, "{s}.corewire-tmp.{x}", .{ out, &nonce });
+    const staging = std.Io.Dir.cwd().createFile(init.io, temp_path, .{ .exclusive = true }) catch |err| {
+        try stderr.print("corewire: cannot stage {s}: {t}\n", .{ temp_path, err });
         try stderr.flush();
         std.process.exit(1);
     };
+    var write_failed = false;
+    {
+        defer staging.close(init.io);
+        var buffer: [4096]u8 = undefined;
+        var writer = staging.writerStreaming(init.io, &buffer);
+        writer.interface.writeAll(data) catch {
+            write_failed = true;
+        };
+        if (!write_failed) writer.interface.flush() catch {
+            write_failed = true;
+        };
+    }
+    if (write_failed) {
+        std.Io.Dir.cwd().deleteFile(init.io, temp_path) catch {};
+        try stderr.print("corewire: cannot write {s}\n", .{temp_path});
+        try stderr.flush();
+        std.process.exit(1);
+    }
     std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), out, init.io) catch |err| {
         std.Io.Dir.cwd().deleteFile(init.io, temp_path) catch {};
         try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });

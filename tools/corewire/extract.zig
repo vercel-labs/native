@@ -174,11 +174,17 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             "    \"unions\": [\n      " ++ unions ++ "\n    ]\n  }";
 
         // Deterministic synthesized identity: the fixture has no real
-        // compile behind it, so hash the entry path and the reflected
-        // surface (a fixture edit moves both values; re-runs reproduce
-        // them exactly).
-        const surface = types_json ++ msg_arms ++ helpers;
-        const source_hash = std.hash.Wyhash.hash(0x5eed_c0de, entry);
+        // compile behind it, so hash the entry path and the COMPLETE
+        // reflected surface — types, arms, helpers, unbound lists,
+        // channel wiring, entry-shape flags, and the export set — so
+        // any contract-visible fixture edit moves both values, and
+        // re-runs reproduce them exactly.
+        const surface = types_json ++ msg_arms ++ helpers ++
+            model_unbound ++ msg_unbound ++ env_msgs ++ appearance ++ chrome ++
+            abi_exports ++ boolJson(init_returns_cmd) ++ boolJson(update_returns_cmd) ++
+            boolJson(has_subscriptions) ++ boolJson(has_command) ++ boolJson(has_frame) ++
+            boolJson(has_key) ++ boolJson(has_pinch);
+        const source_hash = std.hash.Wyhash.hash(0x5eed_c0de, entry ++ surface);
         const build_id = std.hash.Wyhash.hash(0xb11d1d00, entry ++ surface);
 
         return "{\n" ++
