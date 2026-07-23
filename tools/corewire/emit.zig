@@ -121,6 +121,21 @@ const Emitter = struct {
             "update",        "commitModelRoot", "sidecar_build_id", "sidecar_abi_version",
             "deterministic", "async_free",      "snapshotModel",    "referenceAttestedExports",
         });
+        // Parameter and local names the generated bodies bind: a
+        // module-level type under any of them would be shadowed, which
+        // the compiler refuses.
+        try reserved.appendSlice(self.arena, &.{
+            "T",       "n",          "model",     "msg",      "payload",  "encoded",
+            "cmd_ptr", "cmd_len",    "subs_ptr",  "subs_len", "snap_ptr", "snap_len",
+            "out",     "out_ptr",    "out_len",   "tag",      "tag_name", "name",
+            "frame",   "key",        "pinch",     "value",    "self",     "index",
+            "args",    "args_tuple", "allocator", "fields",   "next",     "helper_args",
+        });
+        for (self.sidecar.model_helpers) |helper| {
+            for (helper.params, 0..) |_, param_index| {
+                try reserved.append(self.arena, try std.fmt.allocPrint(self.arena, "p{d}", .{param_index}));
+            }
+        }
         // The host layer wires channels by PROBING these declaration
         // names (`@hasDecl` — export presence IS the wiring decision),
         // so they are off limits even when the channel is absent: a

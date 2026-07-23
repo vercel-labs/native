@@ -67,12 +67,15 @@ pub fn emitFacade(arena: std.mem.Allocator, sidecar: Sidecar, diags: *sidecar_mo
 /// TypeScript reserved words a declaration may not take (no quoting
 /// escape exists on that side, unlike Zig's @"..." names).
 const ts_reserved_words = [_][]const u8{
-    "break",     "case",     "catch",  "class",   "const",  "continue",   "debugger",  "default",
-    "delete",    "do",       "else",   "enum",    "export", "extends",    "false",     "finally",
-    "for",       "function", "if",     "import",  "in",     "instanceof", "new",       "null",
-    "return",    "super",    "switch", "this",    "throw",  "true",       "try",       "typeof",
-    "var",       "void",     "while",  "with",    "let",    "static",     "yield",     "await",
-    "interface", "type",     "number", "boolean", "string", "object",     "undefined",
+    "break",     "case",     "catch",     "class",   "const",     "continue",   "debugger",  "default",
+    "delete",    "do",       "else",      "enum",    "export",    "extends",    "false",     "finally",
+    "for",       "function", "if",        "import",  "in",        "instanceof", "new",       "null",
+    "return",    "super",    "switch",    "this",    "throw",     "true",       "try",       "typeof",
+    "var",       "void",     "while",     "with",    "let",       "static",     "yield",     "await",
+    "interface", "type",     "number",    "boolean", "string",    "object",     "undefined",
+    // Strict-mode reservations (modules are always strict).
+    "implements",
+    "package",   "private",  "protected", "public",  "arguments", "eval",
 };
 
 const FacadeEmitter = struct {
@@ -82,6 +85,19 @@ const FacadeEmitter = struct {
     out: std.ArrayListUnmanaged(u8),
     inlined: []const []const u8 = &.{},
     sample_ordinal: usize = 0,
+
+    /// The projection's spelling for a table name: the compile profile
+    /// designates the root exports `Model` and `Msg` by exact name (the
+    /// root's commit machinery and dispatch wiring key on them), so the
+    /// facade DECLARES its roots under those spellings whatever the
+    /// contract calls them, and aliases the contract names for
+    /// reference fidelity. TypeScript type names never reach the host's
+    /// reflection surface, so this renames nothing observable.
+    fn spellName(self: *FacadeEmitter, name: []const u8) []const u8 {
+        if (std.mem.eql(u8, name, self.sidecar.model)) return "Model";
+        if (std.mem.eql(u8, name, self.sidecar.msg.name)) return "Msg";
+        return name;
+    }
 
     fn print(self: *FacadeEmitter, comptime fmt: []const u8, args: anytype) Error!void {
         const text = try std.fmt.allocPrint(self.arena, fmt, args);
@@ -94,6 +110,7 @@ const FacadeEmitter = struct {
 
     fn run(self: *FacadeEmitter) Error!void {
         try self.validateNames();
+        self.validateOptionalDepth();
         if (self.diags.hasErrors()) return;
         self.inlined = try emit_mod.inlinedTableNames(self.arena, self.sidecar);
         try self.header();
@@ -190,6 +207,48 @@ const FacadeEmitter = struct {
         }
     }
 
+    /// TypeScript's null carries exactly one absence level, so a nested
+    /// optional has no faithful projection (its own source language
+    /// cannot author one either: `T | null | null` collapses).
+    fn validateOptionalDepth(self: *FacadeEmitter) void {
+        for (self.sidecar.types.structs, 0..) |entry, index| {
+            for (entry.fields, 0..) |field, field_index| {
+                self.flagNestedOptional(field.type, false, pathText(self.arena, "types.structs[{d}].fields[{d}].type", .{ index, field_index }));
+            }
+        }
+        for (self.sidecar.types.unions, 0..) |entry, index| {
+            for (entry.arms, 0..) |arm, arm_index| {
+                self.flagNestedOptional(arm.payload, false, pathText(self.arena, "types.unions[{d}].arms[{d}].payload", .{ index, arm_index }));
+            }
+        }
+        for (self.sidecar.model_helpers, 0..) |helper, index| {
+            self.flagNestedOptional(helper.returns, false, pathText(self.arena, "model_helpers[{d}].returns", .{index}));
+            for (helper.params, 0..) |param, param_index| {
+                self.flagNestedOptional(param, false, pathText(self.arena, "model_helpers[{d}].params[{d}]", .{ index, param_index }));
+            }
+        }
+        for (self.sidecar.msg.arms, 0..) |arm, index| {
+            switch (arm.payload) {
+                .scalar => |ref| self.flagNestedOptional(ref, false, pathText(self.arena, "msg.arms[{d}].payload.type", .{index})),
+                else => {},
+            }
+        }
+    }
+
+    fn flagNestedOptional(self: *FacadeEmitter, ref: TypeRef, inside_optional: bool, at: []const u8) void {
+        switch (ref) {
+            .optional => |inner| {
+                if (inside_optional) {
+                    self.diags.flag(at, "a nested optional has no TypeScript projection — one null carries one absence level, and the source language cannot author a second; flatten the state in the core source", .{});
+                    return;
+                }
+                self.flagNestedOptional(inner.*, true, at);
+            },
+            .slice => |elem| self.flagNestedOptional(elem.*, false, at),
+            else => {},
+        }
+    }
+
     // ------------------------------------------------------- sections
 
     fn header(self: *FacadeEmitter) Error!void {
@@ -235,21 +294,21 @@ const FacadeEmitter = struct {
         const model = sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model).?;
         try self.structInterface(model);
         if (!std.mem.eql(u8, self.sidecar.model, "Model")) {
-            try self.print("\n/// The entry vocabulary's spelling for the root state type.\nexport type Model = {s};\n", .{self.sidecar.model});
+            try self.print("\n/// The contract's own spelling for the root state type (the\n/// declaration takes the profile's designated export name).\nexport type {s} = Model;\n", .{self.sidecar.model});
         }
 
-        try self.print("\nexport type {s} =", .{self.sidecar.msg.name});
+        try self.raw("\nexport type Msg =");
         for (self.sidecar.msg.arms) |arm| {
             try self.print("\n  | {s}", .{try self.msgArmTypeLiteral(arm)});
         }
         try self.raw(";\n");
         if (!std.mem.eql(u8, self.sidecar.msg.name, "Msg")) {
-            try self.print("\n/// The entry vocabulary's spelling for the message union.\nexport type Msg = {s};\n", .{self.sidecar.msg.name});
+            try self.print("\n/// The contract's own spelling for the message union (the\n/// declaration takes the profile's designated export name).\nexport type {s} = Msg;\n", .{self.sidecar.msg.name});
         }
     }
 
     fn structInterface(self: *FacadeEmitter, entry: *const sidecar_mod.Struct) Error!void {
-        try self.print("\nexport interface {s} {{", .{entry.name});
+        try self.print("\nexport interface {s} {{", .{self.spellName(entry.name)});
         for (entry.fields) |field| {
             try self.print("\n  readonly {s}: {s};", .{ try tsProp(self.arena, field.name), try self.spellRef(field.type, entry.name, field.name) });
         }
@@ -316,13 +375,28 @@ const FacadeEmitter = struct {
             },
             // Reference storage is a layout fact of the host mirror;
             // TypeScript sees the record value either way.
-            .node, .value => |name| self.arena.dupe(u8, name),
-            .enum_ref, .union_ref => |name| self.arena.dupe(u8, name),
+            .node, .value => |name| self.arena.dupe(u8, self.spellName(name)),
+            .enum_ref, .union_ref => |name| self.arena.dupe(u8, self.spellName(name)),
         };
     }
 
     fn unboundDecl(self: *FacadeEmitter) Error!void {
-        if (self.sidecar.model_unbound.len == 0 and self.sidecar.msg.unbound.len == 0) return;
+        // Only names this module DECLARES may ride the list: message
+        // arms and model fields. An unbound HELPER stays in the sidecar
+        // fact (helpers are mode-forwarded and the facade declares
+        // none), so listing it here would name nothing the checker can
+        // resolve.
+        const model = sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model).?;
+        var field_unbound: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (self.sidecar.model_unbound) |name| {
+            for (model.fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) {
+                    try field_unbound.append(self.arena, name);
+                    break;
+                }
+            }
+        }
+        if (field_unbound.items.len == 0 and self.sidecar.msg.unbound.len == 0) return;
         try self.raw(
             \\
             \\// The unbound-list declaration, carried by the generator from the
@@ -336,7 +410,7 @@ const FacadeEmitter = struct {
         for (self.sidecar.msg.unbound) |name| {
             try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
         }
-        for (self.sidecar.model_unbound) |name| {
+        for (field_unbound.items) |name| {
             try self.print("  \"{s}\",\n", .{tsString(self.arena, name)});
         }
         try self.raw("] as const;\n");
@@ -352,15 +426,15 @@ const FacadeEmitter = struct {
         try self.zeroValue(&zero, .{ .value = self.sidecar.model }, 1);
         try self.print(
             \\
-            \\export function initialModel(): {s} {{
+            \\export function initialModel(): Model {{
             \\  return {s};
             \\}}
             \\
-            \\export function update(model: {s}, msg: {s}): {s} {{
+            \\export function update(model: Model, msg: Msg): Model {{
             \\  return model;
             \\}}
             \\
-        , .{ self.sidecar.model, zero.items, self.sidecar.model, self.sidecar.msg.name, self.sidecar.model });
+        , .{zero.items});
     }
 
     fn constants(self: *FacadeEmitter) Error!void {
@@ -383,7 +457,7 @@ const FacadeEmitter = struct {
     }
 
     fn msgConstructors(self: *FacadeEmitter) Error!void {
-        const msg = self.sidecar.msg.name;
+        const msg = "Msg";
         try self.raw("\n// One typed constructor per message arm (the dispatch-table\n// projection): the host names arms by wire tag, this side by name.\n");
         for (self.sidecar.msg.arms) |arm| {
             switch (arm.payload) {
@@ -429,11 +503,11 @@ const FacadeEmitter = struct {
             \\/// varied numbers, present optionals, two-element sequences) for
             \\/// proving the snapshot encoding against the host's canonical
             \\/// encoder.
-            \\export function nsc_core_sample_model(): {s} {{
+            \\export function nsc_core_sample_model(): Model {{
             \\  return {s};
             \\}}
             \\
-        , .{ self.sidecar.model, sample.items });
+        , .{sample.items});
     }
 
     fn indentText(self: *FacadeEmitter, depth: usize) Error![]const u8 {
@@ -784,14 +858,14 @@ const FacadeEmitter = struct {
             \\/// a parameter: module state lives in the model, and a snapshot
             \\/// entry is not a view helper, so it must not join the model's
             \\/// binding surface.
-            \\export function nsc_core_model_snapshot(snapshotFormat: number, model: {s}): Uint8Array {{
+            \\export function nsc_core_model_snapshot(snapshotFormat: number, model: Model): Uint8Array {{
             \\  if (snapshotFormat !== nsc_core_snapshot_format) {{
             \\    throw {{ kind: "nscf_contract", teaching: asciiBytes("this facade encodes snapshot format {d}; re-generate the caller or the facade so both speak one generation") }} as NscfContractError;
             \\  }}
             \\  return nscfEncode{s}(model);
             \\}}
             \\
-        , .{ self.sidecar.model, self.sidecar.abi.snapshot_format, self.sidecar.model });
+        , .{ self.sidecar.abi.snapshot_format, self.sidecar.model });
     }
 
     fn encoderNameFor(self: *FacadeEmitter, name: []const u8) Error![]const u8 {
@@ -799,7 +873,7 @@ const FacadeEmitter = struct {
     }
 
     fn structEncoder(self: *FacadeEmitter, entry: *const sidecar_mod.Struct) Error!void {
-        try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n  const parts: Uint8Array[] = [...nscfNoParts()];\n", .{ try self.encoderNameFor(entry.name), entry.name });
+        try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n  const parts: Uint8Array[] = [...nscfNoParts()];\n", .{ try self.encoderNameFor(entry.name), self.spellName(entry.name) });
         for (entry.fields, 0..) |field, index| {
             // Temp names seed per field: every statement shares one
             // function scope, and optional/slice nesting takes the +1
@@ -810,7 +884,7 @@ const FacadeEmitter = struct {
     }
 
     fn unionEncoder(self: *FacadeEmitter, entry: *const sidecar_mod.Union) Error!void {
-        try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n", .{ try self.encoderNameFor(entry.name), entry.name });
+        try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n", .{ try self.encoderNameFor(entry.name), self.spellName(entry.name) });
         for (entry.arms, 0..) |arm, index| {
             try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte({d})];\n", .{ tsString(self.arena, arm.name), index });
             if (arm.payload != .void) {
@@ -848,6 +922,10 @@ const FacadeEmitter = struct {
         }
     }
 };
+
+fn pathText(arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) []const u8 {
+    return std.fmt.allocPrint(arena, fmt, args) catch "";
+}
 
 fn armPayloadRef(arm: sidecar_mod.UnionArm) ?TypeRef {
     return if (arm.payload == .void) null else arm.payload;
@@ -1007,6 +1085,71 @@ test "composite slice elements parenthesize in the projection" {
     );
     const generated = try facadeFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "readonly label: readonly (number | null)[];") != null);
+}
+
+test "renamed roots declare under the profile's designated spellings" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"Model\"", "\"State\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"slot\": \"Model.count\"", "\"slot\": \"State.count\"");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"name\": \"Msg\"", "\"name\": \"Event\"");
+    const generated = try facadeFromJson(arena, source);
+    // The root commit machinery and dispatch wiring key on the exact
+    // exports; the contract's own names ride as aliases.
+    try testing.expect(std.mem.indexOf(u8, generated, "export interface Model {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export type State = Model;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export type Msg =") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export type Event = Msg;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export function initialModel(): Model {") != null);
+}
+
+test "unbound helper names stay out of the facade's viewUnbound list" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"summary\", \"params\": [], \"returns\": {\"kind\": \"bytes\"}, \"arena\": false}]",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "\"model_unbound\": []", "\"model_unbound\": [\"summary\", \"count\"]");
+    const generated = try facadeFromJson(arena, source);
+    // The facade declares no helpers, so the checker could resolve
+    // "summary" to nothing; the field entry rides, the helper's stays a
+    // sidecar fact.
+    try testing.expect(std.mem.indexOf(u8, generated, "\"count\",") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "\"summary\",") == null);
+}
+
+test "nested optionals refuse in the projection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"f64\"}}}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "one absence level") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "strict-mode reserved words cannot declare" {
+    try testing.expect(!isTsIdentifier("implements"));
+    try testing.expect(!isTsIdentifier("private"));
+    try testing.expect(!isTsIdentifier("arguments"));
+    try testing.expect(isTsIdentifier("implementation"));
 }
 
 test "number_bytes fields in the reserved nsc space refuse" {
