@@ -82,8 +82,12 @@ pub fn mediaSurfaceTextureImageId(surface_id: u64) ImageId {
 /// they manage their own surface. A valid producer id: bit 63
 /// (`media_surface_image_id_bit`) stays clear, so the id claims and
 /// composites like any app surface — it is merely reserved by
-/// convention for the declarative playback.
-pub const video_playback_surface_id: u64 = 0x7669_6465_6f5f_0001;
+/// convention for the declarative playback. BELOW 2^53 deliberately:
+/// surface ids ride the TS wire as f64, and a source-less `<video>`
+/// with custom controls is fed by the app's own `Cmd.videoLoad`
+/// naming exactly this id — an id outside the exact-integer window
+/// could never arrive intact.
+pub const video_playback_surface_id: u64 = 0x0001_7669_6465_6f5f;
 
 /// The media surface's deterministic id-derived placeholder color
 /// (widget_render.zig): what the reference renderer — goldens,

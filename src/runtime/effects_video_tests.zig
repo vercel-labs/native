@@ -370,6 +370,20 @@ fn solidFrame(rgba: [4]u8) [16]u8 {
 
 // ------------------------------------------------------------ fake executor
 
+test "the reserved video surface id survives the f64 wire" {
+    // The TS tier names surfaces in f64 (Cmd.videoLoad), and a
+    // source-less <video> with custom controls is fed by the app's own
+    // load naming exactly this id — so it must sit inside the
+    // exact-integer window, clear of the derived-texture namespace,
+    // and round-trip the wire unchanged.
+    const id = @import("canvas").video_playback_surface_id;
+    try std.testing.expect(id >= 1);
+    try std.testing.expect(id < (1 << 53));
+    try std.testing.expect(id & @import("canvas").media_surface_image_id_bit == 0);
+    const wire: f64 = @floatFromInt(id);
+    try std.testing.expectEqual(id, @as(u64, @intFromFloat(wire)));
+}
+
 test "fake executor records the load request and feeds events back as msgs" {
     var h = try Harness.create();
     defer h.destroy();
