@@ -891,12 +891,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hover_msg_view_label_len: usize = 0,
         hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
         hover_msg_chain_len: usize = 0,
+        /// Capture SLOT per mirror chain position (`hover_msg_slot_none`
+        /// = no capture): containment is per LISTENER, so when an outer
+        /// listener unbinds while an inner one stands, the retained
+        /// entry keeps its slot — and its captured leave — while only
+        /// the departed id's edges dispatch. Slots decouple capture
+        /// ownership from chain position so retained entries never need
+        /// their captures moved or re-taken.
+        hover_msg_slots: [canvas.max_widget_depth]u8 = undefined,
+        hover_msg_slot_used: [canvas.max_widget_depth]bool = [_]bool{false} ** canvas.max_widget_depth,
+        /// Captured leave Msgs BY SLOT (see `hover_msg_slots`).
         hover_msg_leave_msgs: [canvas.max_widget_depth]?MsgT = undefined,
-        /// Per-slot arenas owning the captured leave Msgs' payload
-        /// bytes (see `capturedHoverLeaveMsg`): reset when the slot
-        /// re-captures, freed at deinit. Arena-backed so a payload of
-        /// any size can be owned — a fixed budget would turn a large
-        /// `ui.fmt` payload into a silently unpaired leave.
+        /// Per-SLOT arenas owning the captured leave Msgs' payload
+        /// bytes (see `captureHoverLeave`): reset when the slot
+        /// releases or re-captures, freed at deinit. Arena-backed so a
+        /// payload of any size can be owned — a fixed budget would turn
+        /// a large `ui.fmt` payload into a silently unpaired leave.
         hover_msg_leave_arenas: [canvas.max_widget_depth]std.heap.ArenaAllocator = undefined,
         /// Re-entrancy guard for `drainHoverMsgs`: the drain's own
         /// dispatches must not drain recursively through `dispatch`'s
@@ -4147,33 +4157,58 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// delivers on the next event's drain.
         const hover_msg_drain_passes: usize = 64;
 
-        /// Capture a leave Msg for later delivery: a DEEP copy whose
-        /// payload slices live in the slot's own arena (any size — a
-        /// budget here would turn a large payload into an unpaired
-        /// leave). Null only when the payload cannot be owned at all: a
-        /// non-slice pointer shape only a Zig view could construct, or
-        /// allocation failure; those degrade with a debug note, and
-        /// delivery falls back to the live tree while the element
-        /// stands.
-        fn capturedHoverLeaveMsg(self: *Self, position: usize, msg: MsgT) ?MsgT {
-            _ = self.hover_msg_leave_arenas[position].reset(.free_all);
-            return deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[position].allocator()) catch {
+        /// The "no capture slot" sentinel in `hover_msg_slots` (the slot
+        /// space is `canvas.max_widget_depth`, far below it).
+        const hover_msg_slot_none: u8 = 0xFF;
+
+        /// Capture a leave Msg for later delivery into `slot`: a DEEP
+        /// copy whose payload slices live in the slot's own arena (any
+        /// size — a budget here would turn a large payload into an
+        /// unpaired leave). Allocation failure PROPAGATES so the caller
+        /// can defer the enter instead of dispatching one whose paired
+        /// leave is already lost; the one non-transient refusal — a
+        /// payload shape that cannot be owned (a single-item pointer
+        /// only a Zig view could construct) — degrades to an empty
+        /// capture with a debug note, and delivery falls back to the
+        /// live tree while the element stands.
+        fn captureHoverLeave(self: *Self, slot: u8, msg: MsgT) error{OutOfMemory}!void {
+            _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+            self.hover_msg_leave_msgs[slot] = deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[slot].allocator()) catch |err| {
                 // A refused capture holds no bytes either: the partial
-                // copy is released with the arena before the fallback.
-                _ = self.hover_msg_leave_arenas[position].reset(.free_all);
-                ui_app_log.debug("hover-leave capture skipped: the payload cannot be owned (a single-item pointer shape, or allocation failed) - an unmount-driven leave for this element resolves from the live tree or degrades to silence", .{});
-                return null;
+                // copy is released with the arena before the verdict.
+                _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+                self.hover_msg_leave_msgs[slot] = null;
+                switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.HoverCapturePayloadUnsupported => {
+                        ui_app_log.debug("hover-leave capture skipped: the payload holds a single-item pointer no copy can own - the leave resolves from the live tree while the element stands, and an unmount-driven leave degrades to silence", .{});
+                        return;
+                    },
+                }
             };
         }
 
-        /// Release a delivered capture's bytes: reset the slot arena and
-        /// clear the slot. Runs once the captured Msg was CONSUMED
-        /// (dispatch is synchronous), so a retired slot never retains a
-        /// large payload copy until some later hover happens to reuse
-        /// its depth.
-        fn releaseHoverLeaveCapture(self: *Self, position: usize) void {
-            self.hover_msg_leave_msgs[position] = null;
-            _ = self.hover_msg_leave_arenas[position].reset(.free_all);
+        /// Claim a free capture slot. The slot space matches the chain
+        /// depth and every mirror entry holds at most one slot, so a
+        /// free slot always exists for an entering listener.
+        fn claimHoverSlot(self: *Self) u8 {
+            for (&self.hover_msg_slot_used, 0..) |*used, slot| {
+                if (used.*) continue;
+                used.* = true;
+                return @intCast(slot);
+            }
+            unreachable;
+        }
+
+        /// Release a slot: reset its arena (the captured Msg was already
+        /// consumed — dispatch is synchronous) and free it, so a retired
+        /// slot never retains a large payload copy until some later
+        /// hover happens to reuse it.
+        fn releaseHoverSlot(self: *Self, slot: u8) void {
+            if (slot == hover_msg_slot_none) return;
+            self.hover_msg_leave_msgs[slot] = null;
+            _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+            self.hover_msg_slot_used[slot] = false;
         }
 
         /// Recursively copy a Msg value so it owns every byte it
@@ -4181,11 +4216,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// `allocator` (element-wise, so nested slices copy too), and
         /// payload shapes that cannot be owned (single-item pointers,
         /// untagged unions) refuse rather than alias.
-        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator) anyerror!T {
+        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator) error{ OutOfMemory, HoverCapturePayloadUnsupported }!T {
             return switch (@typeInfo(T)) {
                 .void, .int, .float, .bool, .@"enum", .vector, .error_set => value,
                 .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator) else null,
-                .error_union => |info| if (value) |payload| try deepCopyMsgValue(info.payload, payload, allocator) else |err| err,
+                .error_union => |info| if (value) |payload| @as(T, try deepCopyMsgValue(info.payload, payload, allocator)) else |err| @as(T, err),
                 .array => |info| blk: {
                     var out: T = undefined;
                     for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
@@ -4300,48 +4335,84 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             const same_view = standing_window == self.hover_msg_window_id and
                 std.mem.eql(u8, standing_label, self.hoverMsgViewLabel());
-            var prefix: usize = 0;
-            if (same_view) {
-                while (prefix < standing_len and prefix < self.hover_msg_chain_len and
-                    standing_chain[prefix] == self.hover_msg_chain[prefix]) : (prefix += 1)
-                {}
+            const mirror_len = self.hover_msg_chain_len;
+
+            // The diff is a SET diff over listener ids, not a positional
+            // one: containment is per listener, so an outer listener
+            // unbinding (or binding) while an inner one stands must
+            // dispatch edges for the changed id ONLY — the retained
+            // entry keeps standing, its capture untouched in its slot.
+            // A view change retains nothing (one pointer, one view).
+            var retained_slots: [canvas.max_widget_depth]u8 = undefined;
+            var entering_at: [canvas.max_widget_depth]bool = undefined;
+            var entering_any = false;
+            var identical = same_view and standing_len == mirror_len;
+            for (standing_chain[0..standing_len], 0..) |id, position| {
+                var slot: u8 = hover_msg_slot_none;
+                var retained = false;
+                if (same_view) {
+                    for (self.hover_msg_chain[0..mirror_len], 0..) |mirror_id, mirror_position| {
+                        if (mirror_id != id) continue;
+                        slot = self.hover_msg_slots[mirror_position];
+                        retained = true;
+                        if (mirror_position != position) identical = false;
+                        break;
+                    }
+                }
+                retained_slots[position] = slot;
+                entering_at[position] = !retained;
+                if (!retained) {
+                    entering_any = true;
+                    identical = false;
+                }
             }
-            if (same_view and prefix == standing_len and prefix == self.hover_msg_chain_len) return false;
+            if (identical) return false;
 
             // A transiently unavailable handler tree (a failed rebuild
             // cleared it) must not consume entering edges as silence:
             // defer the whole step — the chains still differ, so the
-            // next drain retries once the tree is back. Pure-leave
-            // transitions keep flowing: their Msgs are captures, not
-            // tree lookups.
-            const entering = standing_len > prefix;
-            if (entering and self.treeForViewLabel(standing_label) == null) return false;
+            // next drain retries once the tree is back. Pure-leave and
+            // reorder-only transitions keep flowing: their Msgs are
+            // captures, not tree lookups.
+            if (entering_any and self.treeForViewLabel(standing_label) == null) return false;
 
-            // The leaves this pass owes: their captured Msgs own their
-            // payload bytes (see `capturedHoverLeaveMsg`), so the
+            // The leaves this pass owes — mirror ids absent from the
+            // standing chain — innermost-first. Their captured Msgs own
+            // their payload bytes (see `captureHoverLeave`), so the
             // rebuilds the dispatches below perform cannot invalidate
             // them. Ids and the OLD view identity ride along so a
-            // capture that could not be owned (over budget) can still
-            // resolve from the live tree while its element stands.
+            // capture that could not be owned can still resolve from
+            // the live tree while its element stands.
             const leave_window = self.hover_msg_window_id;
             var leave_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined;
             const leave_label_len = self.hover_msg_view_label_len;
             @memcpy(leave_label_storage[0..leave_label_len], self.hover_msg_view_label_storage[0..leave_label_len]);
             var leave_ids: [canvas.max_widget_depth]canvas.ObjectId = undefined;
-            var leave_msgs: [canvas.max_widget_depth]?MsgT = undefined;
+            var leave_slots: [canvas.max_widget_depth]u8 = undefined;
             var leave_count: usize = 0;
-            var index = self.hover_msg_chain_len;
-            while (index > prefix) {
+            var index = mirror_len;
+            while (index > 0) {
                 index -= 1;
-                leave_ids[leave_count] = self.hover_msg_chain[index];
-                leave_msgs[leave_count] = self.hover_msg_leave_msgs[index];
+                const id = self.hover_msg_chain[index];
+                const still_standing = same_view and blk: {
+                    for (standing_chain[0..standing_len]) |candidate| {
+                        if (candidate == id) break :blk true;
+                    }
+                    break :blk false;
+                };
+                if (still_standing) continue;
+                leave_ids[leave_count] = id;
+                leave_slots[leave_count] = self.hover_msg_slots[index];
                 leave_count += 1;
             }
 
             // Commit the mirror before dispatching so a mid-dispatch
-            // error can never re-deliver the same edges. The identity
-            // rewrite only runs on a view CHANGE — when the view stood,
-            // `standing_label` aliases the mirror's own storage.
+            // error can never re-deliver the same edges: standing ids in
+            // standing order, retained entries keeping their slots,
+            // entering entries slotless until their enter actually
+            // dispatches below. The identity rewrite only runs on a view
+            // CHANGE — when the view stood, `standing_label` was copied
+            // from the mirror's own storage.
             if (!same_view) {
                 self.hover_msg_window_id = standing_window;
                 const label_len = @min(standing_label.len, self.hover_msg_view_label_storage.len);
@@ -4349,37 +4420,40 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.hover_msg_view_label_len = label_len;
             }
             @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
+            @memcpy(self.hover_msg_slots[0..standing_len], retained_slots[0..standing_len]);
             self.hover_msg_chain_len = standing_len;
-            const retired_len = prefix + leave_count;
-            for (prefix..standing_len) |position| self.hover_msg_leave_msgs[position] = null;
 
             // Deliver: leaves innermost-first, then enters
-            // outermost-first. Each dispatch degrades PER EDGE — an
-            // error is remembered and the remaining edges still
-            // deliver (the mirror is already committed, so an aborted
-            // batch could never be retried; one failed rebuild must
-            // not swallow its siblings' edges) — and the first error
-            // propagates after the batch, into the same degraded
-            // handling every event handler gets.
+            // outermost-first; retained ids dispatch nothing. Each
+            // dispatch degrades PER EDGE — an error is remembered and
+            // the remaining edges still deliver (the mirror is already
+            // committed, so an aborted batch could never be retried;
+            // one failed rebuild must not swallow its siblings' edges)
+            // — and the first error propagates after the batch, into
+            // the same degraded handling every event handler gets.
             var first_error: ?anyerror = null;
-            for (leave_msgs[0..leave_count], leave_ids[0..leave_count]) |maybe_msg, id| {
+            for (leave_ids[0..leave_count], leave_slots[0..leave_count]) |id, slot| {
                 // The capture wins (leave answers what enter announced);
                 // an unowned capture falls back to the live tree while
                 // its element still stands there.
-                const msg = maybe_msg orelse blk: {
+                const captured: ?MsgT = if (slot == hover_msg_slot_none) null else self.hover_msg_leave_msgs[slot];
+                const msg = captured orelse blk: {
                     const live = self.treeForViewLabel(leave_label_storage[0..leave_label_len]) orelse break :blk null;
                     break :blk live.msgFor(id, .hover_leave);
-                } orelse continue;
+                } orelse {
+                    self.releaseHoverSlot(slot);
+                    continue;
+                };
                 self.dispatch(runtime, leave_window, msg) catch |err| {
                     if (first_error == null) first_error = err;
                 };
+                // The leave Msg was consumed synchronously: its slot
+                // releases now instead of holding a payload copy until
+                // some later hover reuses it.
+                self.releaseHoverSlot(slot);
             }
-            // Every leave Msg above was consumed synchronously: retired
-            // slots release their captured payload bytes now instead of
-            // holding them until some later hover reuses the depth;
-            // entering slots reset again as they re-capture below.
-            for (prefix..retired_len) |position| self.releaseHoverLeaveCapture(position);
-            for (standing_chain[prefix..standing_len], prefix..) |id, position| {
+            for (standing_chain[0..standing_len], 0..) |id, position| {
+                if (!entering_at[position]) continue;
                 // Resolve from the LIVE tree per edge: an earlier edge
                 // in this batch may have rebuilt the view (payload
                 // bytes are only promised for their own dispatch), and
@@ -4390,17 +4464,29 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // an enter whose own handler unmounts the element still
                 // has its leave to deliver.
                 const live = self.treeForViewLabel(standing_label) orelse {
-                    // A failed rebuild cleared the tree mid-batch: keep
-                    // the not-yet-entered tail OUT of the mirror so the
-                    // next drain retries it once the tree returns (the
+                    // A failed rebuild cleared the tree mid-batch: drop
+                    // the not-yet-entered ids from the mirror so the
+                    // next drain retries them once the tree returns (the
                     // entering-with-no-tree deferral above then holds
                     // the line instead of consuming enters as silence).
-                    self.hover_msg_chain_len = position;
+                    self.unwindHoverEnters(&entering_at, position);
                     break;
                 };
                 const enter_msg = live.msgFor(id, .hover_enter);
                 if (live.msgFor(id, .hover_leave)) |leave_msg| {
-                    self.hover_msg_leave_msgs[position] = self.capturedHoverLeaveMsg(position, leave_msg);
+                    const slot = self.claimHoverSlot();
+                    self.captureHoverLeave(slot, leave_msg) catch {
+                        // Out of memory: an enter whose paired leave
+                        // cannot be owned must not dispatch — defer this
+                        // id and the rest of the entering tail to the
+                        // next drain instead of breaking the pairing
+                        // guarantee.
+                        self.releaseHoverSlot(slot);
+                        self.unwindHoverEnters(&entering_at, position);
+                        if (first_error == null) first_error = error.OutOfMemory;
+                        break;
+                    };
+                    self.hover_msg_slots[position] = slot;
                 }
                 if (enter_msg) |msg| {
                     self.dispatch(runtime, standing_window, msg) catch |err| {
@@ -4410,6 +4496,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (first_error) |err| return err;
             return true;
+        }
+
+        /// Drop the not-yet-entered entering ids (positions >= `from`
+        /// with `entering_at` set) from the committed mirror, compacting
+        /// ids and slots in lockstep: the standing chain still carries
+        /// them, so a later drain — once the tree (or memory) is back —
+        /// sees them as entering again and retries. Their positions hold
+        /// no capture slots yet, so nothing needs releasing.
+        fn unwindHoverEnters(self: *Self, entering_at: *const [canvas.max_widget_depth]bool, from: usize) void {
+            var kept: usize = 0;
+            for (0..self.hover_msg_chain_len) |position| {
+                if (position >= from and entering_at[position]) continue;
+                self.hover_msg_chain[kept] = self.hover_msg_chain[position];
+                self.hover_msg_slots[kept] = self.hover_msg_slots[position];
+                kept += 1;
+            }
+            self.hover_msg_chain_len = kept;
         }
 
         /// Re-render the house video chrome from the moved channel

@@ -423,35 +423,28 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (point) |value| {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
-                // move to this point would produce. The hover-Msg chain
-                // re-resolves from the same raw hit — content sliding
-                // out from under a stationary pointer fires the same
-                // leave a real move off it would — but only while a
-                // hover-capable pointer is live: on touch, the stored
-                // position is a lifted finger's last contact, and a
-                // fling must never hover what slides under it.
+                // move to this point would produce.
                 const raw = layout.hitTestWithTokens(value, self.widget_tokens);
                 const hit = layout.hoverTargetForHit(raw);
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
-                if (self.canvas_widget_hover_pointer_live) {
-                    // The chain re-hits at the PROVEN pointer's own
-                    // anchor, never the passed point: the passed point
-                    // follows `canvas_last_pointer_position`, which any
-                    // device updates — a touch drag must not steer the
-                    // mouse's containment. On single-pointer hosts the
-                    // two are the same position.
-                    self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
-                } else {
-                    self.pruneCanvasWidgetHoverMsgChain();
-                }
+            } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
+                next_hovered_id = 0;
+                next_cursor = .arrow;
+            }
+            // The hover-Msg chain re-resolves whenever a hover-capable
+            // pointer stands, at that pointer's OWN anchor — content
+            // sliding out from under it fires the same leave a real
+            // move off it would, on the wheel path and the point-blind
+            // paths (kinetic, drivers, keyboard) alike. Never the
+            // passed point: that follows `canvas_last_pointer_position`,
+            // which any device updates — a touch drag must not steer
+            // the mouse's containment (on single-pointer hosts the two
+            // agree). Without a proven pointer, entries survive by id
+            // until their widgets leave the tree — the wash's rule.
+            if (self.canvas_widget_hover_pointer_live) {
+                self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
             } else {
-                if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
-                    next_hovered_id = 0;
-                    next_cursor = .arrow;
-                }
-                // No trustworthy position: like the wash, entries
-                // survive by id until their widgets leave the tree.
                 self.pruneCanvasWidgetHoverMsgChain();
             }
 

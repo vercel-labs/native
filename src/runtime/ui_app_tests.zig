@@ -5597,6 +5597,7 @@ const HoverModel = struct {
     log: [24]HoverEntry = undefined,
     log_len: usize = 0,
     show_vanish: bool = true,
+    outer_bound: bool = true,
 
     fn push(model: *HoverModel, entry: HoverEntry) void {
         if (model.log_len >= model.log.len) return;
@@ -5616,6 +5617,7 @@ const HoverMsg = union(enum) {
     row_leave: u32,
     vanish_enter,
     vanish_leave,
+    unbind_outer,
 };
 
 const HoverApp = ui_app_model.UiApp(HoverModel, HoverMsg);
@@ -5633,6 +5635,7 @@ fn hoverUpdate(model: *HoverModel, msg: HoverMsg) void {
             model.show_vanish = false;
         },
         .vanish_leave => model.push(.vanish_leave),
+        .unbind_outer => model.outer_bound = false,
     }
 }
 
@@ -5649,7 +5652,10 @@ fn hoverView(ui: *HoverApp.Ui, model: *const HoverModel) HoverApp.Ui.Node {
             ui.text(.{}, "Row two"),
         }),
     });
-    const outer = ui.panel(.{ .height = 120, .on_hover_enter = .outer_enter, .on_hover_leave = .outer_leave }, .{rows});
+    const outer = if (model.outer_bound)
+        ui.panel(.{ .height = 120, .on_hover_enter = .outer_enter, .on_hover_leave = .outer_leave }, .{rows})
+    else
+        ui.panel(.{ .height = 120 }, .{rows});
     if (model.show_vanish) {
         return ui.column(.{ .gap = 0 }, .{
             outer,
@@ -5754,6 +5760,42 @@ test "hover msgs dispatch containment edges: nested listeners, cancel, and coale
         .y = 60,
     } });
     try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+}
+
+test "unbinding an outer listener leaves it alone: the standing inner row never flickers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Inside row one: panel and row both stand.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A rebuild removes only the PANEL's hover bindings: the panel's
+    // leave dispatches, and the row — whose containment never changed —
+    // dispatches NOTHING (per-listener containment, not a positional
+    // chain).
+    try app_state.dispatch(&harness.runtime, 1, .unbind_outer);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave });
+
+    // The row's own exit still delivers its captured leave.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave, .{ .row_leave = 1 } });
 }
 
 test "hover enter that unmounts its element still delivers the captured leave" {
