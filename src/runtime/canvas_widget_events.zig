@@ -381,30 +381,44 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // the routed raw target for downs, empty on cancel (the
             // pointer left the view — the window-leave edge). Wheel
             // keeps the standing chain; the scroll reconcile re-derives
-            // it from the post-scroll tree.
+            // it from the post-scroll tree. Down/drag/up advance the
+            // chain only while a hover-capable pointer is live (a prior
+            // hover-phase move) — touch input arrives as bare
+            // down/drag/up sequences, so a tap or a scrub can never
+            // synthesize hover, while a mouse (whose presence the
+            // hover phase already proved) keeps full fidelity through
+            // clicks and drags.
             switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
-                    self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                    if (pointer_event.pointer.phase == .hover) self.views[index].canvas_widget_hover_pointer_live = true;
+                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                    }
                 },
                 .down => {
                     next_hovered_id = hover_target_id;
                     next_pressed_id = target_id;
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
-                    self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
+                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
+                    }
                 },
                 .up => {
                     next_hovered_id = hit_target_id;
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
-                    self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                    }
                 },
                 .cancel => {
                     next_hovered_id = 0;
                     next_pressed_id = 0;
                     next_cursor = .arrow;
                     self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                    self.views[index].canvas_widget_hover_pointer_live = false;
                 },
                 .wheel => {},
             }

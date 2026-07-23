@@ -5889,3 +5889,161 @@ test "hover msgs re-resolve when content scrolls under a stationary pointer" {
     } });
     try std.testing.expectEqualSlices(HoverEntry, &.{ .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 3 } }, app_state.model.entries());
 }
+
+test "touch-shaped input (down/up/drag without hover) never synthesizes hover msgs" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // A tap (down/up) and a scrub (drag) over a listening row — the
+    // touch input shape, which never includes a hover-phase move —
+    // dispatch no hover Msgs and leave no standing containment: touch
+    // cannot hover, mechanically.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_drag, .pointer_up }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .x = 50,
+            .y = 20,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // A hover-phase move proves a hover-capable pointer; from then on
+    // clicks and drags keep full mouse fidelity.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_drag,
+        .x = 50,
+        .y = 220,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+// ------------------------------------------------ hover capture fixture
+
+const CaptureModel = struct {
+    churns: u32 = 0,
+    show_row: bool = true,
+    left_storage: [32]u8 = [_]u8{0} ** 32,
+    left_len: usize = 0,
+
+    fn leftText(model: *const CaptureModel) []const u8 {
+        return model.left_storage[0..model.left_len];
+    }
+};
+
+const CaptureMsg = union(enum) {
+    churn,
+    hide_row,
+    entered,
+    left: []const u8,
+};
+
+const CaptureApp = ui_app_model.UiApp(CaptureModel, CaptureMsg);
+
+fn captureUpdate(model: *CaptureModel, msg: CaptureMsg) void {
+    switch (msg) {
+        .churn => model.churns += 1,
+        .hide_row => model.show_row = false,
+        .entered => {},
+        .left => |text| {
+            const len = @min(text.len, model.left_storage.len);
+            @memcpy(model.left_storage[0..len], text[0..len]);
+            model.left_len = len;
+        },
+    }
+}
+
+/// The leave Msg's payload is a `ui.fmt` slice — build-arena bytes that
+/// the arena pair recycles two builds later. The capture must own them.
+fn captureView(ui: *CaptureApp.Ui, model: *const CaptureModel) CaptureApp.Ui.Node {
+    if (!model.show_row) {
+        return ui.column(.{ .gap = 0 }, .{ui.text(.{}, ui.fmt("churn {d}", .{model.churns}))});
+    }
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left = ui.fmt("left-after-{d}-churns", .{model.churns}) },
+        }, .{ui.text(.{}, "Capture row")}),
+        ui.text(.{}, ui.fmt("churn {d}", .{model.churns})),
+    });
+}
+
+fn captureCommand(name: []const u8) ?CaptureMsg {
+    if (std.mem.eql(u8, name, "capture.churn")) return .churn;
+    if (std.mem.eql(u8, name, "capture.hide")) return .hide_row;
+    return null;
+}
+
+fn captureOptions() CaptureApp.Options {
+    return .{
+        .name = "ui-app-hover-capture",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = captureUpdate,
+        .view = captureView,
+        .on_command = captureCommand,
+    };
+}
+
+test "a captured hover-leave msg owns its arena payload across rebuilds and unmount" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter the row: its leave Msg carries a `ui.fmt` payload built in
+    // THIS build's arena.
+    try hoverMove(harness, app, 50, 20);
+
+    // Churn rebuilds until the arena pair has recycled the bytes the
+    // enter-time payload lived in. The capture deep-copied them, and the
+    // enter-time value is the contract — later rebuilds bind a payload
+    // naming their own churn count, but leave answers what enter
+    // announced.
+    for (0..3) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.churn", .window_id = 1 } });
+    }
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.churns);
+
+    // Unmount the row under the stationary pointer: the captured leave
+    // dispatches with the enter-time bytes, intact.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}

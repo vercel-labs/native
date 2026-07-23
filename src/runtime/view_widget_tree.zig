@@ -424,14 +424,21 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
                 // move to this point would produce. The hover-Msg chain
-                // re-resolves from the same raw hit, so content sliding
+                // re-resolves from the same raw hit — content sliding
                 // out from under a stationary pointer fires the same
-                // leave a real move off it would.
+                // leave a real move off it would — but only while a
+                // hover-capable pointer is live: on touch, the stored
+                // position is a lifted finger's last contact, and a
+                // fling must never hover what slides under it.
                 const raw = layout.hitTestWithTokens(value, self.widget_tokens);
                 const hit = layout.hoverTargetForHit(raw);
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
-                self.setCanvasWidgetHoverMsgChainForHit(raw);
+                if (self.canvas_widget_hover_pointer_live) {
+                    self.setCanvasWidgetHoverMsgChainForHit(raw);
+                } else {
+                    self.pruneCanvasWidgetHoverMsgChain();
+                }
             } else {
                 if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
                     next_hovered_id = 0;

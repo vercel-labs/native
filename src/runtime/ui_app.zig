@@ -877,16 +877,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// this mirror is the dispatch bookkeeping, and the diff
         /// between the two is exactly the enter/leave Msgs owed. One
         /// pointer, one standing mirror (the hold-arming shape). Leave
-        /// Msgs are captured BY VALUE when their enter dispatches (the
-        /// context-menu snapshot precedent), so a widget unmounted
-        /// mid-hover still delivers the paired leave the live tree can
-        /// no longer resolve — no enter without its eventual leave.
+        /// Msgs are captured when their enter dispatches (the
+        /// context-menu snapshot's capture-at-presentation rule), so a
+        /// widget unmounted mid-hover still delivers the paired leave
+        /// the live tree can no longer resolve — no enter without its
+        /// eventual leave. Captures are DEEP copies: payload slices are
+        /// duplicated into the slot's own bytes below, because a
+        /// standing hover outlives the build-arena pair's two-build
+        /// lifetime and a by-value capture of a `ui.fmt` payload would
+        /// dangle into a reset arena.
         hover_msg_window_id: platform.WindowId = 1,
         hover_msg_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         hover_msg_view_label_len: usize = 0,
         hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
         hover_msg_chain_len: usize = 0,
         hover_msg_leave_msgs: [canvas.max_widget_depth]?MsgT = undefined,
+        /// Per-slot backing bytes for the captured leave Msgs' payload
+        /// slices (see `capturedHoverLeaveMsg`).
+        hover_msg_leave_storage: [canvas.max_widget_depth][hover_msg_capture_bytes]u8 = undefined,
         /// Context-menu presentation fallback state: the widget whose
         /// declared menu is mounted as an anchored canvas surface because
         /// the platform could not present it natively. Set by
@@ -3389,13 +3397,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
-            try handleRuntimeEvent(self, runtime, event_value);
             // Hover enter/leave delivery rides the tail of EVERY
             // runtime event: the standing chain moves during pointer
             // routing, scroll reconciles (wheel, kinetic, drivers,
             // keyboard), dismissals, and any rebuild the dispatches
             // above performed — one drain seam catches them all, and
             // replay re-runs the same events through the same seam.
+            // The drain runs on the handler's ERROR path too (the
+            // degraded-error doctrine): a failing handler must not
+            // strand edges the event already produced — a closed
+            // window's leave, a failed rebuild's prune — until some
+            // later event happens by.
+            handleRuntimeEvent(self, runtime, event_value) catch |err| {
+                self.drainHoverMsgs(runtime) catch {};
+                return err;
+            };
             try self.drainHoverMsgs(runtime);
         }
 
@@ -4026,6 +4042,62 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// residue delivers on the next event's drain.
         const hover_msg_drain_passes: usize = 4;
 
+        /// Deep-copy budget for ONE captured hover-leave Msg: the
+        /// capture duplicates every payload slice into the slot's own
+        /// bytes, because a standing hover outlives the build-arena
+        /// pair's two-build lifetime. Message payloads are small by
+        /// doctrine (ids, names, fmt strings); a payload the budget
+        /// cannot hold simply fails the capture, and an unmount-driven
+        /// leave for it degrades to silence with a debug note instead
+        /// of ever reading freed bytes.
+        const hover_msg_capture_bytes: usize = 1024;
+
+        /// Capture a leave Msg for later delivery: a DEEP copy whose
+        /// payload slices live in the slot's backing bytes. Null when
+        /// the payload cannot be owned (over budget, or a non-slice
+        /// pointer payload only a Zig view could construct).
+        fn capturedHoverLeaveMsg(self: *Self, position: usize, msg: MsgT) ?MsgT {
+            var fba = std.heap.FixedBufferAllocator.init(&self.hover_msg_leave_storage[position]);
+            return deepCopyMsgValue(MsgT, msg, fba.allocator()) catch {
+                ui_app_log.debug("hover-leave capture skipped: payload cannot be owned within {d} bytes - an unmount-driven leave for this element will not dispatch", .{hover_msg_capture_bytes});
+                return null;
+            };
+        }
+
+        /// Recursively copy a Msg value so it owns every byte it
+        /// references: scalars ride through, slices are duplicated into
+        /// `allocator` (element-wise, so nested slices copy too), and
+        /// payload shapes that cannot be owned (single-item pointers,
+        /// untagged unions) refuse rather than alias.
+        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator) anyerror!T {
+            return switch (@typeInfo(T)) {
+                .void, .int, .float, .bool, .@"enum" => value,
+                .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator) else null,
+                .array => |info| blk: {
+                    var out: T = undefined;
+                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
+                    break :blk out;
+                },
+                .@"struct" => |info| blk: {
+                    var out = value;
+                    inline for (info.fields) |field| {
+                        @field(out, field.name) = try deepCopyMsgValue(field.type, @field(value, field.name), allocator);
+                    }
+                    break :blk out;
+                },
+                .@"union" => |info| if (comptime info.tag_type == null) error.HoverCapturePayloadUnsupported else switch (value) {
+                    inline else => |payload, tag| @unionInit(T, @tagName(tag), try deepCopyMsgValue(@TypeOf(payload), payload, allocator)),
+                },
+                .pointer => |info| blk: {
+                    if (info.size != .slice or info.sentinel_ptr != null) return error.HoverCapturePayloadUnsupported;
+                    const out = try allocator.alloc(info.child, value.len);
+                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
+                    break :blk out;
+                },
+                else => error.HoverCapturePayloadUnsupported,
+            };
+        }
+
         fn hoverMsgViewLabel(self: *const Self) []const u8 {
             return self.hover_msg_view_label_storage[0..self.hover_msg_view_label_len];
         }
@@ -4095,29 +4167,34 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (same_view and prefix == standing_len and prefix == self.hover_msg_chain_len) return false;
 
-            // Capture everything this pass dispatches BEFORE committing
-            // the mirror: the dispatches below rebuild the tree, which
-            // moves the runtime's standing chains under us.
+            // A transiently unavailable handler tree (a failed rebuild
+            // cleared it) must not consume entering edges as silence:
+            // defer the whole step — the chains still differ, so the
+            // next drain retries once the tree is back. Pure-leave
+            // transitions keep flowing: their Msgs are captures, not
+            // tree lookups.
+            const entering = standing_len > prefix;
+            if (entering and self.treeForViewLabel(standing_label) == null) return false;
+
+            // The leaves this pass owes: their captured Msgs own their
+            // payload bytes (see `capturedHoverLeaveMsg`), so the
+            // rebuilds the dispatches below perform cannot invalidate
+            // them. Ids and the OLD view identity ride along so a
+            // capture that could not be owned (over budget) can still
+            // resolve from the live tree while its element stands.
             const leave_window = self.hover_msg_window_id;
+            var leave_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined;
+            const leave_label_len = self.hover_msg_view_label_len;
+            @memcpy(leave_label_storage[0..leave_label_len], self.hover_msg_view_label_storage[0..leave_label_len]);
+            var leave_ids: [canvas.max_widget_depth]canvas.ObjectId = undefined;
             var leave_msgs: [canvas.max_widget_depth]?MsgT = undefined;
             var leave_count: usize = 0;
             var index = self.hover_msg_chain_len;
             while (index > prefix) {
                 index -= 1;
+                leave_ids[leave_count] = self.hover_msg_chain[index];
                 leave_msgs[leave_count] = self.hover_msg_leave_msgs[index];
                 leave_count += 1;
-            }
-
-            // Enter Msgs (and the leave captures their eventual exits
-            // will dispatch) resolve against the live tree at the
-            // transition — the context-menu snapshot rule: leave
-            // answers what enter announced, whatever rebuilds do to
-            // the binding in between.
-            const tree = self.treeForViewLabel(standing_label);
-            var enter_msgs: [canvas.max_widget_depth]?MsgT = undefined;
-            for (standing_chain[prefix..standing_len], prefix..) |id, position| {
-                enter_msgs[position] = if (tree) |value| value.msgFor(id, .hover_enter) else null;
-                self.hover_msg_leave_msgs[position] = if (tree) |value| value.msgFor(id, .hover_leave) else null;
             }
 
             // Commit the mirror before dispatching so a mid-dispatch
@@ -4132,13 +4209,51 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
             self.hover_msg_chain_len = standing_len;
+            for (prefix..standing_len) |position| self.hover_msg_leave_msgs[position] = null;
 
-            for (leave_msgs[0..leave_count]) |maybe_msg| {
-                if (maybe_msg) |msg| try self.dispatch(runtime, leave_window, msg);
+            // Deliver: leaves innermost-first, then enters
+            // outermost-first. Each dispatch degrades PER EDGE — an
+            // error is remembered and the remaining edges still
+            // deliver (the mirror is already committed, so an aborted
+            // batch could never be retried; one failed rebuild must
+            // not swallow its siblings' edges) — and the first error
+            // propagates after the batch, into the same degraded
+            // handling every event handler gets.
+            var first_error: ?anyerror = null;
+            for (leave_msgs[0..leave_count], leave_ids[0..leave_count]) |maybe_msg, id| {
+                // The capture wins (leave answers what enter announced);
+                // an unowned capture falls back to the live tree while
+                // its element still stands there.
+                const msg = maybe_msg orelse blk: {
+                    const live = self.treeForViewLabel(leave_label_storage[0..leave_label_len]) orelse break :blk null;
+                    break :blk live.msgFor(id, .hover_leave);
+                } orelse continue;
+                self.dispatch(runtime, leave_window, msg) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
             }
-            for (enter_msgs[prefix..standing_len]) |maybe_msg| {
-                if (maybe_msg) |msg| try self.dispatch(runtime, standing_window, msg);
+            for (standing_chain[prefix..standing_len], prefix..) |id, position| {
+                // Resolve from the LIVE tree per edge: an earlier edge
+                // in this batch may have rebuilt the view (payload
+                // bytes are only promised for their own dispatch), and
+                // its update may even have unmounted this element — a
+                // vanished handler then dispatches no enter and owes no
+                // leave. The paired leave is captured BEFORE the enter
+                // dispatches, from the same tree that resolved it, so
+                // an enter whose own handler unmounts the element still
+                // has its leave to deliver.
+                const live = self.treeForViewLabel(standing_label) orelse break;
+                const enter_msg = live.msgFor(id, .hover_enter);
+                if (live.msgFor(id, .hover_leave)) |leave_msg| {
+                    self.hover_msg_leave_msgs[position] = self.capturedHoverLeaveMsg(position, leave_msg);
+                }
+                if (enter_msg) |msg| {
+                    self.dispatch(runtime, standing_window, msg) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                }
             }
+            if (first_error) |err| return err;
             return true;
         }
 
