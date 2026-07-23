@@ -1820,14 +1820,19 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
         ) void {
             if (key.len > 0 and findPty(key) != null) {
-                fx.stageLoopMsg(msgFromTagPty(event_tag, key, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // The rejection is STAGED (delivered a later frame), so it
+                // carries an empty key — the wire key points into this
+                // dispatch's command buffer and the frame arena, both gone
+                // by delivery; a self-contained Msg is the staging rule.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, "", .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
             const index = freePtyIndex() orelse {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
-                // vocabulary for every refusal, never a crash.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, key, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // vocabulary for every refusal, never a crash. Staged, so
+                // the key is empty (self-contained across the frame reset).
+                fx.stageLoopMsg(msgFromTagPty(event_tag, "", .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];
@@ -2655,9 +2660,15 @@ pub fn TsCoreHost(comptime core: type) type {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_writes) else @intCast(event.dropped_writes);
                             } else if (comptime std.mem.eql(u8, f.name, "key")) {
                                 // The app's own session key, copied into the
-                                // frame arena like every routed payload. Two
-                                // sessions sharing one event arm are told
-                                // apart by this field — never the engine key.
+                                // frame arena like every routed payload — valid
+                                // because a live event routes and delivers
+                                // within one frame. Two sessions sharing one
+                                // event arm are told apart by this field, never
+                                // the engine key. A STAGED rejection (issued
+                                // now, delivered a later frame) must NOT reach
+                                // this copy: it passes an empty wire key so the
+                                // Msg is self-contained across the frame reset,
+                                // the bytes field's rule.
                                 if (wire_key.len == 0) {
                                     @field(payload, f.name) = "";
                                 } else {

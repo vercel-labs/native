@@ -6231,6 +6231,21 @@ pub fn Effects(comptime Msg: type) type {
             // the feed boundary rather than trusting the caller.
             const norm_signal: i32 = if (reason == .signaled) signal else 0;
             const norm_code: i32 = if (reason == .exited) code else effect_error_exit_code;
+            // The contract is a BICONDITIONAL: `.signaled` also REQUIRES a
+            // nonzero signal (replay's gate treats `signaled != (signal !=
+            // 0)` as damage). The live io loop never sets `.signaled`
+            // without a real signal, so a signaled feed carrying zero is
+            // malformed and cannot map to any recordable exit — refuse it
+            // loudly rather than journal a record replay would reject.
+            if (reason == .signaled and norm_signal == 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay refused: pty record for key {d} feeds a .signaled exit with signal 0 - a signaled end names its fatal signal (the live transport never reports zero), so the journal is damaged or hand-edited; re-record the session\n",
+                        .{key},
+                    );
+                }
+                return error.ReplayDamagedRecord;
+            }
             if (slot.park_state == .terminated) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(

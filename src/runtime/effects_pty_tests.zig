@@ -165,6 +165,26 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
 }
 
+test "a signaled exit carries its signal; a signaled feed with no signal is refused" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    // The contract is a biconditional: `.signaled` REQUIRES a nonzero
+    // signal (and a signal is meaningful ONLY on `.signaled`). A feed
+    // that names `.signaled` with signal 0 could never come from the live
+    // transport and would journal a record replay's damage gate refuses —
+    // so the feed boundary refuses it loudly, before it can be recorded.
+    fx.ptySpawn(.{ .key = 51, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    try testing.expectError(error.ReplayDamagedRecord, fx.feedPtyExit(51, -1, 0, .signaled, 0));
+    // The slot is untouched by the refusal: a well-formed signaled exit
+    // then delivers, carrying its signal and the -1 code sentinel.
+    try fx.feedPtyExit(51, -1, 9, .signaled, 0);
+    const exit = try expectExit(&fx, 51, .signaled);
+    try testing.expectEqual(@as(i32, 9), exit.signal);
+    try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
+}
+
 test "a fake pty refuses a second feed after its exit is queued" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
