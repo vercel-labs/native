@@ -6305,3 +6305,83 @@ test "a failed publication defers enters but never withholds captured leaves" {
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
 }
+
+// -------------------------------------------- over-aligned payload probe
+
+const AlignedModel = struct {
+    bytes: [64]u8 align(64) = [_]u8{'a'} ** 64,
+    show_row: bool = true,
+    left_len: usize = 0,
+
+    fn payload(model: *const AlignedModel) []align(64) const u8 {
+        return @alignCast(model.bytes[0..8]);
+    }
+};
+
+const AlignedMsg = union(enum) {
+    entered,
+    left: []align(64) const u8,
+    hide,
+};
+
+/// Markup-free on purpose: the runtime markup interpreter's coercion
+/// vocabulary is plain `[]const u8`, so the over-aligned payload rides a
+/// builder-only app — which is exactly where such a payload can exist.
+const AlignedApp = ui_app_model.UiAppWithFeatures(AlignedModel, AlignedMsg, .{ .runtime_markup = false });
+
+fn alignedUpdate(model: *AlignedModel, msg: AlignedMsg) void {
+    switch (msg) {
+        .entered => {},
+        .left => |bytes| model.left_len = bytes.len,
+        .hide => model.show_row = false,
+    }
+}
+
+fn alignedView(ui: *AlignedApp.Ui, model: *const AlignedModel) AlignedApp.Ui.Node {
+    if (!model.show_row) return ui.column(.{}, .{ui.text(.{}, "empty")});
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left = model.payload() },
+        }, .{ui.text(.{}, "Aligned row")}),
+    });
+}
+
+fn alignedOptions() AlignedApp.Options {
+    return .{
+        .name = "ui-app-hover-aligned",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = alignedUpdate,
+        .view = alignedView,
+    };
+}
+
+test "an over-aligned slice leave payload captures, survives unmount, and delivers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The capture deep-copies a `[]align(64) const u8` payload (the
+    // alignment-preserving allocation path), and the unmount-driven
+    // leave delivers it.
+    try hoverMove(harness, app, 50, 20);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqual(@as(usize, 8), app_state.model.left_len);
+}

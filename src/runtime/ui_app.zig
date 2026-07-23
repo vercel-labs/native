@@ -899,32 +899,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// ownership from chain position so retained entries never need
         /// their captures moved or re-taken.
         hover_msg_slots: [canvas.max_widget_depth]u8 = undefined,
-        hover_msg_slot_used: [canvas.max_widget_depth]bool = [_]bool{false} ** canvas.max_widget_depth,
+        hover_msg_slot_used: [hover_msg_slot_count]bool = [_]bool{false} ** hover_msg_slot_count,
         /// Captured leave Msgs BY SLOT (see `hover_msg_slots`).
-        hover_msg_leave_msgs: [canvas.max_widget_depth]?MsgT = undefined,
+        hover_msg_leave_msgs: [hover_msg_slot_count]?MsgT = undefined,
         /// Per-SLOT arenas owning the captured leave Msgs' payload
         /// bytes (see `captureHoverLeave`): reset when the slot
         /// releases or re-captures, freed at deinit. Arena-backed so a
         /// payload of any size can be owned — a fixed budget would turn
         /// a large `ui.fmt` payload into a silently unpaired leave.
-        hover_msg_leave_arenas: [canvas.max_widget_depth]std.heap.ArenaAllocator = undefined,
+        hover_msg_leave_arenas: [hover_msg_slot_count]std.heap.ArenaAllocator = undefined,
         /// Re-entrancy guard for `drainHoverMsgs`: the drain's own
         /// dispatches must not drain recursively through `dispatch`'s
         /// tail.
         hover_msg_draining: bool = false,
         /// Handler-tree currency for hover-Msg delivery — the shared
-        /// invariant over every rebuild/error seam: `trees_current`
-        /// holds while the LAST rebuild attempt (main tree or window
-        /// slots) fully succeeded, so a failed build — or a failed
-        /// publication that left `self.tree` pointing at a build the
-        /// runtime never adopted — defers entering edges instead of
-        /// resolving them through a stale tree or consuming them as
-        /// absent. `build_generation` ticks on every successful
-        /// rebuild, so standing captures refresh exactly when handler
-        /// bindings can have moved and never otherwise. Captured leaves
-        /// dispatch regardless: their Msgs are owned bytes, not tree
-        /// lookups.
-        trees_current: bool = true,
+        /// invariant over every rebuild/error seam, PER TREE FAMILY: a
+        /// flag holds while its last rebuild attempt fully succeeded,
+        /// so a failed build — or a failed publication that left a
+        /// tree pointing at a build the runtime never adopted — defers
+        /// entering edges into that tree instead of resolving them
+        /// through a stale handler table or consuming them as absent.
+        /// Two flags because the families recover independently: a
+        /// main-only rebuild (a resize, a frame path) must never
+        /// restore currency for a secondary-window tree whose
+        /// publication failed — only a clean pass over the slots does.
+        /// `build_generation` ticks on every successful rebuild, so
+        /// standing captures refresh exactly when handler bindings can
+        /// have moved and never otherwise. Captured leaves dispatch
+        /// regardless: their Msgs are owned bytes, not tree lookups.
+        main_tree_current: bool = true,
+        slot_trees_current: bool = true,
         build_generation: u64 = 0,
         /// The `build_generation` the mirror's captures were last
         /// refreshed against.
@@ -1113,8 +1117,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         /// One arena per hover-capture slot, over the backing allocator.
-        fn hoverMsgLeaveArenasInit(backing: std.mem.Allocator) [canvas.max_widget_depth]std.heap.ArenaAllocator {
-            var arenas: [canvas.max_widget_depth]std.heap.ArenaAllocator = undefined;
+        fn hoverMsgLeaveArenasInit(backing: std.mem.Allocator) [hover_msg_slot_count]std.heap.ArenaAllocator {
+            var arenas: [hover_msg_slot_count]std.heap.ArenaAllocator = undefined;
             for (&arenas) |*arena| arena.* = std.heap.ArenaAllocator.init(backing);
             return arenas;
         }
@@ -1637,15 +1641,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.rebuildTree(runtime, window_id) catch |err| {
-                // The handler trees may now disagree with the runtime's
-                // retained state (a failed build, or a failed
-                // publication after `self.tree` already moved): flag
-                // them stale so hover-Msg delivery defers entering
-                // edges until a rebuild lands (see `trees_current`).
-                self.trees_current = false;
+                // The main handler tree may now disagree with the
+                // runtime's retained state (a failed build, or a failed
+                // publication after `self.tree` already moved): flag it
+                // stale so hover-Msg delivery defers entering edges
+                // until a rebuild lands (see `main_tree_current`).
+                self.main_tree_current = false;
                 return err;
             };
-            self.trees_current = true;
+            self.main_tree_current = true;
             self.build_generation +%= 1;
         }
 
@@ -2423,17 +2427,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
                 self.rebuildWindowSlot(runtime, slot) catch |err| {
-                    // Same staleness flag as `rebuild`: a slot tree that
-                    // failed to build or publish defers hover enters
-                    // into it (see `trees_current`).
-                    self.trees_current = false;
+                    // Same staleness contract as `rebuild`: a slot tree
+                    // that failed to build or publish defers hover
+                    // enters into it (see `slot_trees_current`).
+                    self.slot_trees_current = false;
                     return err;
                 };
             }
-            // Slot success moves handler bindings (captures must
-            // refresh) but never RESTORES currency — only a successful
-            // main rebuild does that, since slot-only paths can run
-            // while the main tree is still the stale one.
+            // A clean pass over EVERY installed slot is what restores
+            // the slot family's currency; the main flag stays whatever
+            // the main rebuild left it.
+            self.slot_trees_current = true;
             self.build_generation +%= 1;
         }
 
@@ -4199,8 +4203,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// delivers on the next event's drain.
         const hover_msg_drain_passes: usize = 64;
 
+        /// The currency flag governing hover-Msg resolution through the
+        /// handler tree behind `view_label` (see `main_tree_current`):
+        /// the main canvas keys on the main flag, every secondary
+        /// window on the slot family's.
+        fn hoverTreeCurrentFor(self: *const Self, view_label: []const u8) bool {
+            if (std.mem.eql(u8, view_label, self.options.canvas_label)) return self.main_tree_current;
+            return self.slot_trees_current;
+        }
+
+        /// One capture slot per possible mirror entry PLUS one spare:
+        /// a capture refresh copies into a fresh slot before releasing
+        /// the old one, so a failed allocation can never destroy the
+        /// still-valid capture it was replacing.
+        const hover_msg_slot_count: usize = canvas.max_widget_depth + 1;
+
         /// The "no capture slot" sentinel in `hover_msg_slots` (the slot
-        /// space is `canvas.max_widget_depth`, far below it).
+        /// space is `hover_msg_slot_count`, far below it).
         const hover_msg_slot_none: u8 = 0xFF;
 
         /// Capture a leave Msg for later delivery into `slot`: a DEEP
@@ -4280,12 +4299,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .pointer => |info| blk: {
                     if (info.size != .slice) return error.HoverCapturePayloadUnsupported;
-                    if (comptime std.meta.sentinel(T)) |sentinel| {
-                        const out = try allocator.allocSentinel(info.child, sentinel, value.len);
-                        for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
-                        break :blk out;
-                    }
-                    const out = try allocator.alloc(info.child, value.len);
+                    // The copy preserves the slice type's OWN alignment
+                    // and sentinel, so over-aligned payloads
+                    // (`[]align(64) const u8`) and sentinel slices
+                    // type-check and round-trip.
+                    const alignment: ?std.mem.Alignment = comptime align_blk: {
+                        const declared = info.alignment orelse break :align_blk null;
+                        if (declared == @alignOf(info.child)) break :align_blk null;
+                        break :align_blk std.mem.Alignment.fromByteUnits(declared);
+                    };
+                    const out = try allocator.allocWithOptions(info.child, value.len, alignment, comptime std.meta.sentinel(T));
                     for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
                     break :blk out;
                 },
@@ -4390,23 +4413,29 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // unbinding never un-promises it). Runs before the settled
             // fast path below, which compares ids and would never see a
             // binding-only change.
-            if (mirror_len > 0 and self.trees_current and self.hover_msg_captured_generation != self.build_generation) {
+            if (mirror_len > 0 and self.hoverTreeCurrentFor(self.hoverMsgViewLabel()) and self.hover_msg_captured_generation != self.build_generation) {
                 if (self.treeForViewLabel(self.hoverMsgViewLabel())) |mirror_tree| {
                     var refreshed = true;
                     for (0..mirror_len) |position| {
                         const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
-                        var slot = self.hover_msg_slots[position];
-                        const fresh_slot = slot == hover_msg_slot_none;
-                        if (fresh_slot) slot = self.claimHoverSlot();
-                        self.captureHoverLeave(slot, leave_msg) catch {
-                            // Transient (allocation): retry on the next
-                            // drain — the generation stays behind so
-                            // this refresh runs again.
-                            if (fresh_slot) self.releaseHoverSlot(slot);
+                        // Copy-then-swap: the replacement lands in a
+                        // FRESH slot (the spare guarantees one is free)
+                        // and the old capture releases only after it
+                        // succeeded — a failed allocation must never
+                        // destroy the still-valid capture it was
+                        // refreshing.
+                        const fresh = self.claimHoverSlot();
+                        self.captureHoverLeave(fresh, leave_msg) catch {
+                            // Transient (allocation): keep the old
+                            // capture and retry on the next drain — the
+                            // generation stays behind so this refresh
+                            // runs again.
+                            self.releaseHoverSlot(fresh);
                             refreshed = false;
                             continue;
                         };
-                        self.hover_msg_slots[position] = slot;
+                        self.releaseHoverSlot(self.hover_msg_slots[position]);
+                        self.hover_msg_slots[position] = fresh;
                     }
                     if (refreshed) self.hover_msg_captured_generation = self.build_generation;
                 }
@@ -4444,7 +4473,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (identical) return false;
 
             // Entering edges resolve through the DESTINATION view's
-            // handler tree, and only a CURRENT one (`trees_current`): a
+            // handler tree, and only a CURRENT one (`hoverTreeCurrentFor`): a
             // failed rebuild may have cleared it, or — worse — left a
             // tree standing whose build the runtime never adopted, and
             // resolving through that dispatches stale handlers or
@@ -4455,7 +4484,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // below — their Msgs are owned captures, not tree lookups,
             // and a broken destination must never withhold them.
             const destination_ready = !entering_any or
-                (self.trees_current and self.treeForViewLabel(standing_label) != null);
+                (self.hoverTreeCurrentFor(standing_label) and self.treeForViewLabel(standing_label) != null);
             if (!destination_ready) {
                 var any_leaving = false;
                 for (self.hover_msg_chain[0..mirror_len]) |id| {
@@ -4542,7 +4571,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // its element still stands there.
                 const captured: ?MsgT = if (slot == hover_msg_slot_none) null else self.hover_msg_leave_msgs[slot];
                 const msg = captured orelse blk: {
-                    if (!self.trees_current) break :blk null;
+                    if (!self.hoverTreeCurrentFor(leave_label_storage[0..leave_label_len])) break :blk null;
                     const live = self.treeForViewLabel(leave_label_storage[0..leave_label_len]) orelse break :blk null;
                     break :blk live.msgFor(id, .hover_leave);
                 } orelse {
@@ -4560,8 +4589,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (standing_chain[0..standing_len], 0..) |id, position| {
                 if (!destination_ready) break;
                 if (!entering_at[position]) continue;
-                if (!self.trees_current) {
-                    // An earlier edge's failed rebuild left the trees
+                if (!self.hoverTreeCurrentFor(standing_label)) {
+                    // An earlier edge's failed rebuild left this tree
                     // stale mid-batch: the same deferral as above — drop
                     // the unentered tail from the mirror and retry after
                     // a rebuild lands.
