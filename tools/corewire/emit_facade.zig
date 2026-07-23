@@ -110,10 +110,10 @@ const FacadeEmitter = struct {
     }
 
     fn run(self: *FacadeEmitter) Error!void {
+        self.inlined = try emit_mod.inlinedTableNames(self.arena, self.sidecar);
         try self.validateNames();
         self.validateOptionalDepth();
         if (self.diags.hasErrors()) return;
-        self.inlined = try emit_mod.inlinedTableNames(self.arena, self.sidecar);
         try self.header();
         try self.typeMirrors();
         try self.unboundDecl();
@@ -175,6 +175,44 @@ const FacadeEmitter = struct {
                     }
                 },
                 else => {},
+            }
+        }
+        // Flattened arm fields share the object with the `kind`
+        // discriminator: a number_bytes field or a synthesized inline
+        // record field spelled "kind" would declare the discriminator
+        // twice. Named record payloads ride a `value` member and stay
+        // unaffected.
+        for (self.sidecar.msg.arms) |arm| {
+            switch (arm.payload) {
+                .number_bytes => |desc| {
+                    for ([_][]const u8{ desc.number_field, desc.bytes_field }) |field_name| {
+                        if (std.mem.eql(u8, field_name, "kind")) {
+                            self.diags.flag("msg.arms", "arm \"{s}\" flattens a field spelled \"kind\" beside the message discriminator of the same name; rename the field in the core source", .{arm.name});
+                        }
+                    }
+                },
+                .record => {
+                    if (self.synthesizedRecordOf(recordPayloadRef(arm.payload), self.sidecar.msg.name, arm.name)) |record| {
+                        for (record.fields) |field| {
+                            if (std.mem.eql(u8, field.name, "kind")) {
+                                self.diags.flag("msg.arms", "arm \"{s}\" flattens a field spelled \"kind\" beside the message discriminator of the same name; rename the field in the core source", .{arm.name});
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        for (self.sidecar.types.unions) |entry| {
+            for (entry.arms) |arm| {
+                if (arm.payload == .void) continue;
+                if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
+                    for (record.fields) |field| {
+                        if (std.mem.eql(u8, field.name, "kind")) {
+                            self.diags.flag("types.unions", "arm \"{s}\" of \"{s}\" flattens a field spelled \"kind\" beside the arm discriminator of the same name; rename the field in the core source", .{ arm.name, entry.name });
+                        }
+                    }
+                }
             }
         }
         for (self.sidecar.types.enums) |entry| {
@@ -1024,6 +1062,14 @@ const FacadeEmitter = struct {
     }
 };
 
+/// A msg record payload as the TypeRef shape synthesizedRecordOf reads.
+fn recordPayloadRef(payload: sidecar_mod.Payload) TypeRef {
+    return switch (payload) {
+        .record => |name| .{ .value = name },
+        else => unreachable,
+    };
+}
+
 fn pathText(arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.allocPrint(arena, fmt, args) catch "";
 }
@@ -1067,10 +1113,23 @@ fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
 }
 
 /// Escape a name into a TS double-quoted string literal (arm names ride
-/// string literals in the kind-tagged union).
+/// string literals in the kind-tagged union). The scanner's line
+/// terminators are LF, CR, LS (U+2028), and PS (U+2029) — all escaped
+/// here (NEL U+0085 is ordinary text to the scanner); quotes and
+/// backslashes escape byte-for-byte.
 fn tsString(arena: std.mem.Allocator, text: []const u8) []const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    for (text) |char| {
+    var index: usize = 0;
+    while (index < text.len) {
+        const char = text[index];
+        if (char == 0xe2 and index + 2 < text.len and text[index + 1] == 0x80 and
+            (text[index + 2] == 0xa8 or text[index + 2] == 0xa9))
+        {
+            const escape: []const u8 = if (text[index + 2] == 0xa8) "\\u2028" else "\\u2029";
+            out.appendSlice(arena, escape) catch return text;
+            index += 3;
+            continue;
+        }
         switch (char) {
             '"' => out.appendSlice(arena, "\\\"") catch return text,
             '\\' => out.appendSlice(arena, "\\\\") catch return text,
@@ -1079,6 +1138,7 @@ fn tsString(arena: std.mem.Allocator, text: []const u8) []const u8 {
             '\t' => out.appendSlice(arena, "\\t") catch return text,
             else => out.append(arena, char) catch return text,
         }
+        index += 1;
     }
     return out.items;
 }
@@ -1328,6 +1388,69 @@ test "strict-mode reserved words cannot declare" {
     try testing.expect(!isTsIdentifier("private"));
     try testing.expect(!isTsIdentifier("arguments"));
     try testing.expect(isTsIdentifier("implementation"));
+}
+
+test "a flattened field spelled kind refuses against the discriminator" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // number_bytes flattens its two fields beside `kind`.
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"number_bytes\", \"number_field\": \"kind\", \"number_class\": \"f64\", \"bytes_field\": \"body\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "beside the message discriminator") != null) found = true;
+    }
+    try testing.expect(found);
+
+    // A synthesized inline record flattens too; a named payload would
+    // ride a `value` member and stay unaffected.
+    var record_source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Msg_loaded\", \"fields\": [{\"name\": \"kind\", \"type\": {\"kind\": \"f64\"}}, {\"name\": \"ok\", \"type\": {\"kind\": \"bool\"}}]},");
+    record_source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        record_source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"loaded\", \"payload\": {\"kind\": \"record\", \"name\": \"Msg_loaded\"}}",
+    );
+    var record_diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const record_parsed = try sidecar_mod.read(arena, record_source, &record_diags);
+    try testing.expectError(error.Refused, emitFacade(arena, record_parsed, &record_diags));
+}
+
+test "TS line terminators escape inside emitted string literals" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Enum members ride string literals; LS (U+2028) and PS (U+2029)
+    // would end the literal at scan time unescaped.
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"enums\": []",
+        "\"enums\": [{\"name\": \"Mode\", \"members\": [\"a\\u2028b\", \"c\\u2029d\"]}]",
+    );
+    const wired = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"Mode\"}}",
+    );
+    const generated = try facadeFromJson(arena, wired);
+    try testing.expect(std.mem.indexOf(u8, generated, "\"a\\u2028b\"") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "\"c\\u2029d\"") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "\xe2\x80\xa8") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "\xe2\x80\xa9") == null);
 }
 
 test "number_bytes fields in the reserved nsc space refuse" {
