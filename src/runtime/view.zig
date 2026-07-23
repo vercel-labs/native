@@ -459,14 +459,20 @@ pub const RuntimeView = struct {
     /// A hover-CAPABLE pointer is present over this view: set by
     /// hover-phase moves (a pointer floating without contact — which
     /// touch physically cannot produce; taps and drags arrive as
-    /// down/drag/up), cleared when the pointer leaves the view. This is
-    /// the mechanical touch-honesty gate for hover-Msg containment:
+    /// down/drag/up), cleared when that pointer leaves the view. This
+    /// is the mechanical touch-honesty gate for hover-Msg containment:
     /// down/drag/up phases and the scroll/adoption re-hit-tests advance
     /// the chain only while it holds, so a tap can never enter and a
     /// fling can never hover what slides under a lifted finger, while a
-    /// mouse keeps full fidelity through clicks and drags. Derived from
-    /// journaled input only, so replay reproduces it.
+    /// mouse keeps full fidelity through clicks and drags. The proof is
+    /// scoped to the pointer IDENTITY that earned it
+    /// (`canvas_widget_hover_pointer_id`): on hosts that distinguish
+    /// pointers, a touch contact's down/drag/up can never ride a
+    /// mouse's hover proof (single-pointer desktop hosts leave every id
+    /// 0, where the scope is a no-op). Derived from journaled input
+    /// only, so replay reproduces it.
     canvas_widget_hover_pointer_live: bool = false,
+    canvas_widget_hover_pointer_id: u64 = 0,
     /// Hover-intent state for ANCHORED tooltips — runtime-owned
     /// presentation chrome; the model never hears hover. `armed` is
     /// the tooltip whose trigger is hovered while its show delay runs;

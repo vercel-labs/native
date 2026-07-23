@@ -56,6 +56,13 @@ pub const WidgetPointerEvent = struct {
     /// press that started the gesture, which is how a double-click
     /// drag knows to extend by words.
     click_count: u8 = 1,
+    /// The host's pointer identity (`GpuSurfaceInputEvent.pointer_id`),
+    /// forwarded so per-pointer state can tell devices apart on hosts
+    /// that distinguish them: the hover-Msg containment gate scopes its
+    /// hover-capable-pointer proof to this id, so a touch contact can
+    /// never ride a mouse's proof. Desktop hosts with one pointer leave
+    /// it 0.
+    pointer_id: u64 = 0,
 };
 
 pub const WidgetKeyboardPhase = enum {

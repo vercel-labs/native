@@ -324,6 +324,7 @@ pub fn canvasWidgetPointerEventFromGpuInput(input_event: GpuSurfaceInputEvent) ?
         .phase = phase,
         .point = geometry.PointF.init(input_event.x, input_event.y),
         .delta = geometry.OffsetF.init(input_event.delta_x, input_event.delta_y),
+        .pointer_id = input_event.pointer_id,
     };
 }
 

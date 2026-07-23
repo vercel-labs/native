@@ -6047,3 +6047,81 @@ test "a captured hover-leave msg owns its arena payload across rebuilds and unmo
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
     try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
 }
+
+test "a direct dispatch that unmounts the hovered element delivers its leave immediately" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // A DIRECT dispatch (a command handler, an embedder, a test) that
+    // unmounts the hovered row settles the leave at its own tail — no
+    // later platform event required.
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "another pointer's contact never rides a mouse's hover proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The mouse (pointer 0) proves hover over row one.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A touch contact (another pointer id) taps row two and lifts with
+    // a cancel: on a host that distinguishes pointers, none of it moves
+    // the mouse's standing containment.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up, .pointer_cancel }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 7,
+            .x = 50,
+            .y = 60,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // The mouse's own departure retires it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}

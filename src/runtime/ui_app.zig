@@ -892,9 +892,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
         hover_msg_chain_len: usize = 0,
         hover_msg_leave_msgs: [canvas.max_widget_depth]?MsgT = undefined,
-        /// Per-slot backing bytes for the captured leave Msgs' payload
-        /// slices (see `capturedHoverLeaveMsg`).
-        hover_msg_leave_storage: [canvas.max_widget_depth][hover_msg_capture_bytes]u8 = undefined,
+        /// Per-slot arenas owning the captured leave Msgs' payload
+        /// bytes (see `capturedHoverLeaveMsg`): reset when the slot
+        /// re-captures, freed at deinit. Arena-backed so a payload of
+        /// any size can be owned — a fixed budget would turn a large
+        /// `ui.fmt` payload into a silently unpaired leave.
+        hover_msg_leave_arenas: [canvas.max_widget_depth]std.heap.ArenaAllocator = undefined,
+        /// Re-entrancy guard for `drainHoverMsgs`: the drain's own
+        /// dispatches must not drain recursively through `dispatch`'s
+        /// tail.
+        hover_msg_draining: bool = false,
         /// Context-menu presentation fallback state: the widget whose
         /// declared menu is mounted as an anchored canvas surface because
         /// the platform could not present it natively. Set by
@@ -1066,8 +1073,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
+                .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
                 .effects = Effects.init(backing),
             };
+        }
+
+        /// One arena per hover-capture slot, over the backing allocator.
+        fn hoverMsgLeaveArenasInit(backing: std.mem.Allocator) [canvas.max_widget_depth]std.heap.ArenaAllocator {
+            var arenas: [canvas.max_widget_depth]std.heap.ArenaAllocator = undefined;
+            for (&arenas) |*arena| arena.* = std.heap.ArenaAllocator.init(backing);
+            return arenas;
         }
 
         /// Heap-allocate the app and construct every field — the
@@ -1122,6 +1137,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
+                .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
                 .effects = Effects.init(backing),
             };
         }
@@ -1157,6 +1173,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.arenas[0].deinit();
                 slot.arenas[1].deinit();
             }
+            for (&self.hover_msg_leave_arenas) |*arena| arena.deinit();
             if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
             if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
             self.pixel_buffer = &.{};
@@ -1332,6 +1349,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.installed) return;
             try self.rebuild(runtime, self.canvas_window_id);
             try self.rebuildWindowSlots(runtime);
+            // Hover edges the rebuilds above produced (an unmounted
+            // hovered element's leave, an adoption re-hit-test's
+            // handoff) settle here too, so DIRECT dispatches — command
+            // handlers, embedders, tests — deliver them without waiting
+            // for the next platform event. The drain's own dispatches
+            // re-enter through this tail and are guarded.
+            if (!self.hover_msg_draining) try self.drainHoverMsgs(runtime);
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above (one model, every window's view derives
             // from it); `window_id` names the dispatch origin for apps
@@ -1389,6 +1413,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 try self.rebuild(runtime, self.canvas_window_id);
                 try self.rebuildWindowSlots(runtime);
             }
+            // Same tail as `dispatch`: effect-driven rebuilds settle
+            // the hover edges they produced (this path is also public —
+            // host-pumped embeds call it directly).
+            if (!self.hover_msg_draining) try self.drainHoverMsgs(runtime);
         }
 
         /// Mirror the effects channel's audio playback state into the
@@ -4037,29 +4065,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// it dispatches can rebuild the tree and move the standing
         /// chain again (an enter handler that unmounts the hovered
         /// element owes an immediate leave — the second pass delivers
-        /// it). The fixed cap keeps a flapping app (enter mounts,
-        /// leave unmounts, forever) from wedging the event loop;
-        /// residue delivers on the next event's drain.
-        const hover_msg_drain_passes: usize = 4;
-
-        /// Deep-copy budget for ONE captured hover-leave Msg: the
-        /// capture duplicates every payload slice into the slot's own
-        /// bytes, because a standing hover outlives the build-arena
-        /// pair's two-build lifetime. Message payloads are small by
-        /// doctrine (ids, names, fmt strings); a payload the budget
-        /// cannot hold simply fails the capture, and an unmount-driven
-        /// leave for it degrades to silence with a debug note instead
-        /// of ever reading freed bytes.
-        const hover_msg_capture_bytes: usize = 1024;
+        /// it). The cap exists ONLY as a flap guard (an app whose enter
+        /// mounts and whose leave unmounts, forever), sized far past
+        /// any honest cascade — even one where every enter replaces the
+        /// listener under a stationary pointer — so a finite sequence
+        /// always settles within one drain; residue past the cap
+        /// delivers on the next event's drain.
+        const hover_msg_drain_passes: usize = 64;
 
         /// Capture a leave Msg for later delivery: a DEEP copy whose
-        /// payload slices live in the slot's backing bytes. Null when
-        /// the payload cannot be owned (over budget, or a non-slice
-        /// pointer payload only a Zig view could construct).
+        /// payload slices live in the slot's own arena (any size — a
+        /// budget here would turn a large payload into an unpaired
+        /// leave). Null only when the payload cannot be owned at all: a
+        /// non-slice pointer shape only a Zig view could construct, or
+        /// allocation failure; those degrade with a debug note, and
+        /// delivery falls back to the live tree while the element
+        /// stands.
         fn capturedHoverLeaveMsg(self: *Self, position: usize, msg: MsgT) ?MsgT {
-            var fba = std.heap.FixedBufferAllocator.init(&self.hover_msg_leave_storage[position]);
-            return deepCopyMsgValue(MsgT, msg, fba.allocator()) catch {
-                ui_app_log.debug("hover-leave capture skipped: payload cannot be owned within {d} bytes - an unmount-driven leave for this element will not dispatch", .{hover_msg_capture_bytes});
+            _ = self.hover_msg_leave_arenas[position].reset(.free_all);
+            return deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[position].allocator()) catch {
+                ui_app_log.debug("hover-leave capture skipped: the payload cannot be owned (a single-item pointer shape, or allocation failed) - an unmount-driven leave for this element resolves from the live tree or degrades to silence", .{});
                 return null;
             };
         }
@@ -4112,10 +4137,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// means under a fast pointer.
         fn drainHoverMsgs(self: *Self, runtime: *Runtime) anyerror!void {
             if (!self.installed) return;
+            if (self.hover_msg_draining) return;
+            self.hover_msg_draining = true;
+            defer self.hover_msg_draining = false;
+            // A pass's error degrades WITHOUT aborting the drain: its
+            // mirror commit already happened, and the containment its
+            // dispatches moved (an enter handler that unmounted itself)
+            // still owes edges only a further pass can deliver. The
+            // first error propagates after the loop, into the same
+            // degraded handling every event handler gets.
+            var first_error: ?anyerror = null;
             var passes: usize = 0;
             while (passes < hover_msg_drain_passes) : (passes += 1) {
-                if (!try self.stepHoverMsgs(runtime)) return;
+                const progressed = self.stepHoverMsgs(runtime) catch |err| blk: {
+                    if (first_error == null) first_error = err;
+                    break :blk true;
+                };
+                if (!progressed) break;
             }
+            if (first_error) |err| return err;
         }
 
         /// One drain pass: resolve the view whose standing chain is
@@ -4144,18 +4184,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             // The standing chain and the view identity it belongs to
             // (the mirror's own view when nothing stands anywhere:
-            // its entries owe leaves against that view's tree).
+            // its entries owe leaves against that view's tree). The
+            // label is COPIED out of runtime view storage: the
+            // dispatches below can close windows and compact the view
+            // array, and a lookup through a reused label slice could
+            // resolve another view's tree.
             var standing_window: platform.WindowId = self.hover_msg_window_id;
-            var standing_label: []const u8 = self.hoverMsgViewLabel();
+            var standing_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined;
+            var standing_label_len: usize = @min(self.hover_msg_view_label_len, standing_label_storage.len);
+            @memcpy(standing_label_storage[0..standing_label_len], self.hover_msg_view_label_storage[0..standing_label_len]);
             var standing_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined;
             var standing_len: usize = 0;
             if (standing_index) |index| {
                 const view = &runtime.views[index];
                 standing_window = view.window_id;
-                standing_label = view.label;
+                standing_label_len = @min(view.label.len, standing_label_storage.len);
+                @memcpy(standing_label_storage[0..standing_label_len], view.label[0..standing_label_len]);
                 standing_len = view.canvas_widget_hover_msg_chain_len;
                 @memcpy(standing_chain[0..standing_len], view.canvas_widget_hover_msg_chain[0..standing_len]);
             }
+            const standing_label: []const u8 = standing_label_storage[0..standing_label_len];
 
             const same_view = standing_window == self.hover_msg_window_id and
                 std.mem.eql(u8, standing_label, self.hoverMsgViewLabel());

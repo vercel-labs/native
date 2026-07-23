@@ -190,6 +190,21 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
+                    // A consumed cancel is still the pointer leaving the
+                    // view (the tooltip machine's exact reading below):
+                    // the proven pointer's departure retires hover-Msg
+                    // containment too, so a window exit mid-secondary
+                    // stream never strands an entered element. The rest
+                    // of the consumed stream deliberately freezes the
+                    // chain the way it freezes the wash — a right-drag
+                    // is a menu gesture, not hovering.
+                    if (input_event.kind == .pointer_cancel and
+                        self.views[index].canvas_widget_hover_pointer_live and
+                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)
+                    {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
                 }
                 // The whole consumed stream still feeds the tooltip
                 // intent choke point: every pointer-carrying event

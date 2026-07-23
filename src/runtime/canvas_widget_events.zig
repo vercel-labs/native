@@ -388,12 +388,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // synthesize hover, while a mouse (whose presence the
             // hover phase already proved) keeps full fidelity through
             // clicks and drags.
+            // The hover-capable proof is per pointer IDENTITY: only the
+            // pointer that earned it (a hover-phase move) advances the
+            // chain through its clicks and drags, so on hosts that
+            // distinguish pointers a touch contact can never ride a
+            // mouse's proof.
+            const hover_pointer_proven = self.views[index].canvas_widget_hover_pointer_live and
+                self.views[index].canvas_widget_hover_pointer_id == pointer_event.pointer.pointer_id;
             switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
-                    if (pointer_event.pointer.phase == .hover) self.views[index].canvas_widget_hover_pointer_live = true;
-                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                    if (pointer_event.pointer.phase == .hover) {
+                        self.views[index].canvas_widget_hover_pointer_live = true;
+                        self.views[index].canvas_widget_hover_pointer_id = pointer_event.pointer.pointer_id;
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                    } else if (hover_pointer_proven) {
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                     }
                 },
@@ -401,7 +411,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_hovered_id = hover_target_id;
                     next_pressed_id = target_id;
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
-                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                    if (hover_pointer_proven) {
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
                     }
                 },
@@ -409,7 +419,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_hovered_id = hit_target_id;
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
-                    if (self.views[index].canvas_widget_hover_pointer_live) {
+                    if (hover_pointer_proven) {
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                     }
                 },
@@ -417,8 +427,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_hovered_id = 0;
                     next_pressed_id = 0;
                     next_cursor = .arrow;
-                    self.views[index].canvas_widget_hover_msg_chain_len = 0;
-                    self.views[index].canvas_widget_hover_pointer_live = false;
+                    // Only the proven pointer's departure retires the
+                    // containment (a lifted touch finger's cancel must
+                    // not clear a mouse's standing hover); a cancel
+                    // before any proof clears nothing because nothing
+                    // stands.
+                    if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
                 },
                 .wheel => {},
             }

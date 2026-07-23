@@ -745,8 +745,12 @@ pub fn Ui(comptime Msg: type) type {
             /// resolution the hover wash uses). Every dispatched
             /// enter is answered by exactly one eventual leave while
             /// the app runs; the leave Msg is captured when the enter
-            /// dispatches, so an element removed mid-hover still
-            /// delivers it.
+            /// dispatches (payload slices deep-copied into app-owned
+            /// bytes), so an element removed mid-hover still delivers
+            /// it. The one uncapturable payload shape is a single-item
+            /// pointer, which no markup can construct — a Zig view
+            /// binding one gets live-tree resolution instead, and an
+            /// unmount-driven leave for it degrades with a debug note.
             on_hover_leave: ?Msg = null,
             /// Message constructor for text edits: called with each
             /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.
