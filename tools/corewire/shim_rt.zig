@@ -13,7 +13,13 @@
 //! schema-driven — both ends derive the layout from the sidecar's type
 //! table, so no field headers or tags ride the wire):
 //!
-//!   f64                 8 bytes, IEEE 754 double, LE
+//!   f64                 8 bytes, IEEE 754 double, LE. Every NaN
+//!                       canonicalizes to the quiet pattern
+//!                       (0x7ff8000000000000): payload bits are not
+//!                       values in either source language, and engines
+//!                       may rewrite them at any store, so an encoder
+//!                       that preserved them could never be
+//!                       deterministic across producers.
 //!   i64                 8 bytes, two's complement, LE (never a bit
 //!                       reinterpretation of the f64)
 //!   bool                u8, 0 or 1
@@ -115,7 +121,8 @@ fn encodeInto(comptime T: type, value: T, allocator: std.mem.Allocator, out: *st
         },
         .float => {
             comptime std.debug.assert(T == f64);
-            try appendInt(u64, @bitCast(value), allocator, out);
+            const bits: u64 = if (std.math.isNan(value)) 0x7ff8000000000000 else @bitCast(value);
+            try appendInt(u64, bits, allocator, out);
         },
         .@"enum" => try appendInt(u32, @intCast(@intFromEnum(value)), allocator, out),
         .optional => |info| {
@@ -329,6 +336,13 @@ test "scalar encodings match the stated byte layout" {
     try testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'c' }, encodeAlloc([]const u8, "abc", a));
     const Scheme = enum(u8) { light = 0, dark = 1 };
     try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0 }, encodeAlloc(Scheme, .dark, a));
+    // Every NaN — negative, payload-bearing — encodes as the one quiet
+    // pattern; payload bits are not values.
+    const canonical_nan = [_]u8{ 0, 0, 0, 0, 0, 0, 0xf8, 0x7f };
+    try testing.expectEqualSlices(u8, &canonical_nan, encodeAlloc(f64, std.math.nan(f64), a));
+    try testing.expectEqualSlices(u8, &canonical_nan, encodeAlloc(f64, -std.math.nan(f64), a));
+    const payload_nan: f64 = @bitCast(@as(u64, 0x7ff800000000beef));
+    try testing.expectEqualSlices(u8, &canonical_nan, encodeAlloc(f64, payload_nan, a));
     try testing.expectEqualSlices(u8, &.{0}, encodeAlloc(?i64, null, a));
     try testing.expectEqualSlices(u8, &.{ 1, 5, 0, 0, 0, 0, 0, 0, 0 }, encodeAlloc(?i64, 5, a));
 }

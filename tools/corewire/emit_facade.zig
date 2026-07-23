@@ -125,6 +125,11 @@ const FacadeEmitter = struct {
             if (!isTsIdentifier(name)) {
                 self.diags.flag("types", "\"{s}\" is not a declarable TypeScript identifier, and TypeScript has no quoted-declaration escape — rename it in the core source", .{name});
             }
+            // Ambient globals the generated module leans on: a local
+            // declaration would shadow them out from under the encoders.
+            if (std.mem.eql(u8, name, "Uint8Array")) {
+                self.diags.flag("types", "\"Uint8Array\" shadows the ambient byte type every encoder in the generated facade uses; rename the type in the core source", .{});
+            }
         }
         for (self.sidecar.msg.arms) |arm| {
             if (!isIdentifierFragment(arm.name)) {
@@ -868,6 +873,16 @@ fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
     const out = arena.dupe(u8, text) catch return "";
     for (out) |*char| {
         if (char.* < 0x20 or char.* == 0x7f) char.* = ' ';
+    }
+    // U+2028/U+2029 are line terminators to a TypeScript scanner: blank
+    // their UTF-8 bytes so provenance text cannot end the comment early.
+    var index: usize = 0;
+    while (index + 2 < out.len) : (index += 1) {
+        if (out[index] == 0xe2 and out[index + 1] == 0x80 and (out[index + 2] == 0xa8 or out[index + 2] == 0xa9)) {
+            out[index] = ' ';
+            out[index + 1] = ' ';
+            out[index + 2] = ' ';
+        }
     }
     return out;
 }

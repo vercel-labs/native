@@ -357,6 +357,17 @@ fn expectScalarProbeParity(comptime facade: type) !void {
         std.mem.writeInt(u64, &expected, @bitCast(value), .little);
         try testing.expectEqualSlices(u8, &expected, encoded);
     }
+    // Non-canonical NaNs (sign, payload bits) canonicalize to the one
+    // quiet pattern in BOTH encoders — payload bits are not values.
+    const canonical_nan = [_]u8{ 0, 0, 0, 0, 0, 0, 0xf8, 0x7f };
+    const odd_nans = [_]f64{ -std.math.nan(f64), @bitCast(@as(u64, 0x7ff800000000beef)) };
+    for (odd_nans) |value| {
+        facade.rt.frameReset();
+        try testing.expectEqualSlices(u8, &canonical_nan, facade.nsc_core_probe_f64(value));
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectEqualSlices(u8, &canonical_nan, corewire_rt.encodeAlloc(f64, value, arena_state.allocator()));
+    }
     const i64_values = [_]i64{ 0, 1, -1, 255, 256, -256, 65535, -65536, 42424242, -1234567890123, 9007199254740991, -9007199254740991 };
     for (i64_values) |value| {
         facade.rt.frameReset();
