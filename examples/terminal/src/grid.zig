@@ -43,7 +43,7 @@ pub const Session = struct {
     /// overflow is dropped WHOLE (never cut, which would desync the
     /// child's parser) and counted. The count is the honest record that
     /// a reply was lost, checkable by the app.
-    response_buffer: [16 * 1024]u8 = undefined,
+    response_buffer: [response_capacity]u8 = undefined,
     response_len: usize = 0,
     responses_dropped: u32 = 0,
     /// Keyboard-selection state: the anchor stays put, the head moves.
@@ -57,6 +57,21 @@ pub const Session = struct {
     font_size: f32 = 13,
 
     pub const CellPos = struct { x: u16 = 0, y: u16 = 0 };
+
+    /// Query-answer buffer size.
+    pub const response_capacity: usize = 16 * 1024;
+
+    /// The app feeds output in sub-slices no larger than this, draining
+    /// answers after each, so a burst of pipelined query replies cannot
+    /// outrun the response buffer within one feed. A reply can be several
+    /// times its triggering query (XTVERSION and the primary DA answer a
+    /// ~4-byte request with ~25 bytes), so the slice is the buffer scaled
+    /// down by a generous worst-case expansion factor: even an unbroken
+    /// run of the shortest high-expansion query across a full slice
+    /// produces fewer reply bytes than the buffer holds. That keeps the
+    /// write-back lossless; `responses_dropped` stays the honest fallback
+    /// count should a reply ever overflow anyway.
+    pub const feed_slice_bytes: usize = response_capacity / 16;
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, initial_cols: u16, initial_rows: u16) !*Session {
         const session = try gpa.create(Session);

@@ -119,6 +119,7 @@ const mini_core = struct {
         img_state: ImageState,
         img_events: i64,
         // Pty event mirrors.
+        pty_key: []const u8,
         pty_state: PtyState,
         pty_bytes: []const u8,
         pty_code: i64,
@@ -269,8 +270,9 @@ const mini_core = struct {
         write_pty, // 74: pty_write "shell" "ls\n"
         resize_pty, // 75: pty_resize "shell" 100x40
         kill_pty, // 76: pty_kill "shell"
-        pty_evt: struct { // 77: the six-field pty event arm (the emitted
+        pty_evt: struct { // 77: the seven-field pty event arm (the emitted
             // shape — payload fields keep their TS names)
+            key: []const u8,
             state: PtyState,
             bytes: []const u8,
             code: f64,
@@ -322,6 +324,7 @@ const mini_core = struct {
                 .chan_events = 0,
                 .img_state = .loaded,
                 .img_events = 0,
+                .pty_key = "",
                 .pty_state = .output,
                 .pty_bytes = "",
                 .pty_code = -1,
@@ -596,6 +599,7 @@ const mini_core = struct {
             .kill_pty => return .{ .model = model, .cmd = cmdPtyKill("shell") },
             .pty_evt => |event| {
                 const out = frameCreate(model.*);
+                out.pty_key = event.key;
                 out.pty_state = event.state;
                 out.pty_bytes = event.bytes;
                 out.pty_code = @intFromFloat(event.code);
@@ -2309,6 +2313,9 @@ test "a pty session decodes whole, routes output batches, and retires on the exi
     try std.testing.expectEqual(@as(i64, 1), Host.model().pty_events);
     try std.testing.expectEqual(mini_core.PtyState.output, Host.model().pty_state);
     try std.testing.expectEqualStrings("prompt% ", Host.model().pty_bytes);
+    // The arm carries the app's own session key, never the engine key —
+    // two sessions on one arm are told apart by this field.
+    try std.testing.expectEqualStrings("shell", Host.model().pty_key);
     try fx.feedPtyOutput(shell_pty_key, "ls\r\n");
     Host.drain(fx);
     try std.testing.expectEqual(@as(i64, 2), Host.model().pty_events);
@@ -2382,13 +2389,17 @@ test "pty_kill records the kill and the cancelled exit routes the event arm loud
     Host.dispatch(fx, .kill_pty);
     // The fake pty mirrors the kill; the test answers it by feeding
     // the exit the real transport would deliver — reason `.cancelled`,
-    // the spawn cancel convention, LOUD through the event arm.
+    // the spawn cancel convention, LOUD through the event arm. A kill is
+    // a cancellation, not a signaled death, so it carries no signal and
+    // the -1 code sentinel; the feed boundary clamps any stray signal to
+    // 0 to match the live io loop's own contract.
     try std.testing.expect(fx.ptyKillRequested(shell_pty_key));
     try fx.feedPtyExit(shell_pty_key, -1, 9, .cancelled, 0);
     Host.drain(fx);
     try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
     try std.testing.expectEqual(mini_core.PtyReason.cancelled, Host.model().pty_reason);
-    try std.testing.expectEqual(@as(i64, 9), Host.model().pty_signal);
+    try std.testing.expectEqual(@as(i64, 0), Host.model().pty_signal);
+    try std.testing.expectEqual(@as(i64, -1), Host.model().pty_code);
 
     // The entry retired and the key is free for a fresh session.
     Host.dispatch(fx, .open_pty);

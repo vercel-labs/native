@@ -570,18 +570,21 @@ export type PtyState = "output" | "exit";
 /// pty or exec could not start.
 export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
 
-/// The payload shape of a pty event arm — six fields, matched by NAME
-/// (the AudioEventArm convention). `state` must be a named
-/// string-literal-union alias carrying exactly the two PtyState members
-/// and `reason` one carrying exactly the five PtyExitReason members
-/// (any declaration order — the host matches members by name); `bytes`
-/// is the coalesced output batch ("output" events only, empty
-/// otherwise); `code` is the child's exit code on an "exited" end, -1
-/// otherwise; `signal` is the fatal signal after a "signaled" end, else
-/// 0; `droppedWrites` counts `Cmd.ptyWrite` payloads refused over the
-/// session's life — zero means every write reached the child, never a
-/// silent drop.
+/// The payload shape of a pty event arm — seven fields, matched by NAME
+/// (the AudioEventArm convention). `key` is the app's own session key
+/// (the `Cmd.ptySpawn` `key`, or "" when the spawn named none) — two
+/// sessions routing one event arm are told apart by this field. `state`
+/// must be a named string-literal-union alias carrying exactly the two
+/// PtyState members and `reason` one carrying exactly the five
+/// PtyExitReason members (any declaration order — the host matches
+/// members by name); `bytes` is the coalesced output batch ("output"
+/// events only, empty otherwise); `code` is the child's exit code on an
+/// "exited" end, -1 otherwise; `signal` is the fatal signal after a
+/// "signaled" end, else 0; `droppedWrites` counts `Cmd.ptyWrite`
+/// payloads refused over the session's life — zero means every write
+/// reached the child, never a silent drop.
 export type PtyEventArm = {
+  readonly key: string;
   readonly state: PtyState;
   readonly bytes: Uint8Array;
   readonly code: number;

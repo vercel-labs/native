@@ -1529,6 +1529,24 @@ const PtyStaging = struct {
     data: [max_effect_pty_staging_bytes]u8 = undefined,
 };
 
+/// The outbound (child stdin) buffers of one open pty: the byte ring the
+/// loop thread stages `ptyWrite` payloads into and the io thread drains,
+/// plus the per-payload length ring `dropped_writes` accounts from. Held
+/// in a SEPARATE heap block — allocated at the slot's spawn, freed at its
+/// retire — rather than inline in the process-lifetime `PtyShared`
+/// header, so the ~64 KiB never joins the permanent leak: only the small
+/// header does (the `ChannelShared` invariant). Freeing at retire is
+/// safe for the same reason the staging ring's free is: the io thread's
+/// exit is its last touch of this block (it drains outbound only inside
+/// its read loop, gated by `open`), and `ptyWrite` runs on the loop
+/// thread that owns retire — so at retire nothing reaches it. A teardown
+/// that ABANDONS a stuck io thread leaks this block with the thread,
+/// exactly as it leaks the staging ring.
+const PtyOutbound = struct {
+    data: [max_effect_pty_outbound_bytes]u8 = undefined,
+    write_lens: [max_effect_pty_write_records]u32 = @splat(0),
+};
+
 /// The owner-side counters a pty io thread may touch while the pty is
 /// open — the `ChannelOwnerRefs` shape: the shared post-order stamp and
 /// the pending mirror behind `hasPending`. Same validity argument: every
@@ -1546,8 +1564,12 @@ const PtyOwnerRefs = struct {
 /// FREED — the abandoned-worker invariant, channel-shaped: teardown may
 /// abandon an io thread stuck past its join deadline, and everything
 /// that thread can still reach must stay allocated forever. The
-/// bounded leak is one header (plus one staging ring while open) per
-/// pty slot per Effects instance.
+/// permanently-leaked part is just this small header, per pty slot per
+/// Effects instance; the two large per-session buffers (the staging ring
+/// and the outbound block, ~256 KiB and ~64 KiB) live in their own heap
+/// allocations freed at retire, so they never join the permanent leak —
+/// only a teardown that ABANDONS a stuck io thread leaks them, with the
+/// thread that can still reach them.
 ///
 /// Lock discipline is `ChannelShared`'s, verbatim: `mutex` guards only
 /// bounded copies; the host wake lives in `wake` behind its OWN mutex,
@@ -1581,21 +1603,24 @@ const PtyShared = struct {
     /// ring is full; the loop nudges the io thread's wake pipe after
     /// draining so reading resumes (the back-pressure handshake).
     reader_parked: bool = false,
-    /// Outbound (child stdin) FIFO, loop thread -> io thread. Refusals
-    /// count into `dropped_writes`, reported on the exit event.
+    /// Outbound (child stdin) FIFO, loop thread -> io thread. The byte
+    /// ring and per-payload length ring live in `outbound` (a heap block
+    /// freed at retire, so the ~64 KiB stays OUT of the permanent leak);
+    /// the cursors below index into it and stay inline in the header.
+    /// Valid (non-null) exactly while `open`. Refusals count into
+    /// `dropped_writes`, reported on the exit event.
+    outbound: ?*PtyOutbound = null,
     out_head: usize = 0,
     out_len: usize = 0,
-    out_data: [max_effect_pty_outbound_bytes]u8 = undefined,
     /// Per-payload accounting for `dropped_writes`, so a discard counts
     /// the writes NOT yet fully sent — never the ones already delivered.
-    /// `out_write_lens` is a ring of the byte length of each staged-but-
-    /// not-fully-sent `ptyWrite`; `out_front_sent` is how many bytes of
-    /// the head payload have already left. As bytes flush, fully-sent
+    /// `outbound.write_lens` is a ring of the byte length of each staged-
+    /// but-not-fully-sent `ptyWrite`; `out_front_sent` is how many bytes
+    /// of the head payload have already left. As bytes flush, fully-sent
     /// payloads pop; on a discard, the surviving `out_write_count` is
     /// what was truly lost. A pathological backlog past the record cap
     /// merges into the tail entry (a bounded undercount, never a wrong
     /// overcount of delivered writes).
-    out_write_lens: [max_effect_pty_write_records]u32 = @splat(0),
     out_write_head: usize = 0,
     out_write_count: usize = 0,
     out_front_sent: usize = 0,
@@ -2043,9 +2068,10 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             return;
         }
         const take = @min(chunk.len, shared.out_len);
+        const outbound = shared.outbound.?;
         var index: usize = 0;
         while (index < take) : (index += 1) {
-            chunk[index] = shared.out_data[(shared.out_head + index) % max_effect_pty_outbound_bytes];
+            chunk[index] = outbound.data[(shared.out_head + index) % max_effect_pty_outbound_bytes];
         }
         shared.mutex.unlock();
         const wrote = transport.write(chunk[0..take]) catch |err| switch (err) {
@@ -2078,8 +2104,9 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
         // Pop every payload these bytes fully sent, so a later discard
         // counts only the writes that never reached the child.
         var sent = wrote;
+        const write_lens = &shared.outbound.?.write_lens;
         while (sent > 0 and shared.out_write_count > 0) {
-            const front = shared.out_write_lens[shared.out_write_head] - shared.out_front_sent;
+            const front = write_lens[shared.out_write_head] - shared.out_front_sent;
             if (sent >= front) {
                 sent -= front;
                 shared.out_front_sent = 0;
@@ -4410,9 +4437,11 @@ pub fn Effects(comptime Msg: type) type {
                     // wake still runs) will lock this header's wake mutex
                     // later, so freeing it here would be a use-after-
                     // free. The leak is bounded (at most `max_effect_ptys`
-                    // ~64 KiB headers per Effects instance) and never
-                    // grows during a runtime's life (headers are reused
-                    // across sessions), matching every channel header.
+                    // small headers per Effects instance — the ~64 KiB
+                    // outbound block and the staging ring freed at retire)
+                    // and never grows during a runtime's life (headers are
+                    // reused across sessions), matching every channel
+                    // header.
                     if (pty_slot.shared) |shared| {
                         if (!quiesceChannelWake(&shared.wake, self.channel_wake_join_deadline_ms)) {
                             self.abandoned_channel_wakes += 1;
@@ -6193,6 +6222,15 @@ pub fn Effects(comptime Msg: type) type {
             };
             const slot = &self.pty_slots[slot_index];
             if (!slot.fake) return error.PtyLiveFeed;
+            // Normalize the tuple to the EffectPtyEvent contract the live
+            // io loop guarantees, so a fake (test or replay) can never
+            // stage an event the recorder journals but replay's damage
+            // gate then refuses: a signal is meaningful only after a
+            // `.signaled` end, and a code only after an `.exited` one —
+            // every other reason carries the -1 sentinel. This clamps at
+            // the feed boundary rather than trusting the caller.
+            const norm_signal: i32 = if (reason == .signaled) signal else 0;
+            const norm_code: i32 = if (reason == .exited) code else effect_error_exit_code;
             if (slot.park_state == .terminated) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(
@@ -6225,9 +6263,9 @@ pub fn Effects(comptime Msg: type) type {
                     .event = .{
                         .key = key,
                         .kind = .exit,
-                        .code = code,
+                        .code = norm_code,
                         .reason = reason,
-                        .signal = signal,
+                        .signal = norm_signal,
                         .dropped_writes = dropped_writes,
                     },
                     .pty_fn = slot.on_event,
@@ -6243,9 +6281,9 @@ pub fn Effects(comptime Msg: type) type {
                 .channel_generation = slot.generation,
                 .key = key,
                 .pty_kind = .exit,
-                .code = code,
+                .code = norm_code,
                 .reason = reason,
-                .pty_signal = signal,
+                .pty_signal = norm_signal,
                 .pty_dropped_writes = dropped_writes,
             };
             if (!self.enqueue(&entry)) return error.EffectQueueFull;
@@ -6471,12 +6509,13 @@ pub fn Effects(comptime Msg: type) type {
                     shared.dropped_writes +|= 1;
                     break :accepted false;
                 }
+                const outbound = shared.outbound.?;
                 var index: usize = 0;
                 while (index < bytes.len) : (index += 1) {
-                    shared.out_data[(shared.out_head + shared.out_len + index) % max_effect_pty_outbound_bytes] = bytes[index];
+                    outbound.data[(shared.out_head + shared.out_len + index) % max_effect_pty_outbound_bytes] = bytes[index];
                 }
                 shared.out_len += bytes.len;
-                shared.out_write_lens[(shared.out_write_head + shared.out_write_count) % max_effect_pty_write_records] = @intCast(bytes.len);
+                outbound.write_lens[(shared.out_write_head + shared.out_write_count) % max_effect_pty_write_records] = @intCast(bytes.len);
                 shared.out_write_count += 1;
                 break :accepted true;
             };
@@ -10255,10 +10294,19 @@ pub fn Effects(comptime Msg: type) type {
                 shared.open = false;
                 const staging = shared.staging;
                 shared.staging = null;
+                const outbound = shared.outbound;
+                shared.outbound = null;
                 shared.owner = null;
                 shared.mutex.unlock();
                 revokeChannelWake(&shared.wake);
+                // Both heap blocks free here: the io thread staged its
+                // exit as its last touch of either (it reads outbound and
+                // writes staging only inside its read loop, gated by
+                // `open`), and `ptyWrite` runs on this same loop thread —
+                // so at retire nothing reaches them. Only the small
+                // `PtyShared` header stays, the channel bounded-leak rule.
                 if (staging) |st| process_allocator.destroy(st);
+                if (outbound) |ob| process_allocator.destroy(ob);
             }
             if (comptime pty_transport.supported) {
                 if (slot.io_thread) |thread| {
@@ -10321,12 +10369,19 @@ pub fn Effects(comptime Msg: type) type {
                 return self.failPtyStart(slot, options);
             };
             staging.* = .{};
+            const outbound = self.channel_storage_allocator.create(PtyOutbound) catch {
+                process_allocator.destroy(staging);
+                return self.failPtyStart(slot, options);
+            };
+            outbound.* = .{};
             const pipe = pty_transport.pipePair() catch {
+                process_allocator.destroy(outbound);
                 process_allocator.destroy(staging);
                 return self.failPtyStart(slot, options);
             };
             var env_buffer: [pty_transport.max_env_entries]pty_transport.EnvVar = undefined;
             const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer) orelse {
+                process_allocator.destroy(outbound);
                 process_allocator.destroy(staging);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
@@ -10339,6 +10394,7 @@ pub fn Effects(comptime Msg: type) type {
                 .cols = slot.cols,
                 .rows = slot.rows,
             }) catch {
+                process_allocator.destroy(outbound);
                 process_allocator.destroy(staging);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
@@ -10349,6 +10405,7 @@ pub fn Effects(comptime Msg: type) type {
             shared.open = true;
             shared.generation = generation;
             shared.staging = staging;
+            shared.outbound = outbound;
             shared.data_seq_valid = false;
             shared.exit_staged = false;
             shared.exit_code = effect_error_exit_code;
@@ -10391,10 +10448,12 @@ pub fn Effects(comptime Msg: type) type {
                     shared.mutex.lock();
                     shared.open = false;
                     shared.staging = null;
+                    shared.outbound = null;
                     shared.owner = null;
                     shared.mutex.unlock();
                     revokeChannelWake(&shared.wake);
                     process_allocator.destroy(staging);
+                    process_allocator.destroy(outbound);
                     pty_transport.closeFd(pipe[0]);
                     pty_transport.closeFd(pipe[1]);
                     transport.kill(false);
@@ -10408,10 +10467,12 @@ pub fn Effects(comptime Msg: type) type {
                 shared.mutex.lock();
                 shared.open = false;
                 shared.staging = null;
+                shared.outbound = null;
                 shared.owner = null;
                 shared.mutex.unlock();
                 revokeChannelWake(&shared.wake);
                 process_allocator.destroy(staging);
+                process_allocator.destroy(outbound);
                 pty_transport.closeFd(pipe[0]);
                 pty_transport.closeFd(pipe[1]);
                 transport.kill(false);

@@ -151,8 +151,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.phase = .live;
                 model.output_batches += 1;
                 model.output_bytes += event.bytes.len;
-                model.session.feed(event.bytes);
-                flushResponses(model, fx);
+                feedOutput(model, fx, event.bytes);
             },
             .exit => {
                 model.phase = if (event.reason == .rejected or event.reason == .spawn_failed) .failed else .ended;
@@ -210,6 +209,31 @@ fn writeInput(fx: *Fx, bytes: []const u8) void {
         fx.ptyWrite(shell_key, bytes[offset..end]);
         offset = end;
     }
+}
+
+/// Feed one pty output batch and return the emulator's query answers to
+/// the child. A batch can be many times the response buffer, and a
+/// pathological all-query batch (thousands of pipelined DSR/DA1 requests)
+/// could produce more replies than the buffer holds in one pass — so the
+/// batch is fed in sub-slices no larger than the response buffer, with
+/// the answers drained after each. The VT stream keeps parser state
+/// across slices, so splitting mid-escape-sequence is invisible; each
+/// query's reply is well under a slice's worth of input, so the buffer
+/// never overflows and no reply is dropped. This keeps the write-back
+/// lossless: a child that blocks on a DSR answer never hangs.
+fn feedOutput(model: *Model, fx: *Fx, bytes: []const u8) void {
+    const slice_bytes = grid.Session.feed_slice_bytes;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + slice_bytes, bytes.len);
+        model.session.feed(bytes[offset..end]);
+        flushResponses(model, fx);
+        offset = end;
+    }
+    // A zero-length batch never reaches here (the engine coalesces only
+    // non-empty reads), but a batch that produced no output still drains
+    // any answer a prior partial sequence completed.
+    if (bytes.len == 0) flushResponses(model, fx);
 }
 
 /// Terminal answers to queries (DSR, DA1) the last feed produced go
@@ -457,10 +481,19 @@ fn headerView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
 }
 
 fn statusView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
+    // The right-hand fact is the output tally; if a query reply ever
+    // overflowed the write-back buffer (the sub-sliced feed keeps this at
+    // zero in practice), say so plainly rather than let the child hang on
+    // a silently lost answer.
+    const dropped = model.session.responses_dropped;
+    const tally = if (dropped > 0)
+        ui.fmt("{d} batches / {d} bytes - {d} replies dropped", .{ model.output_batches, model.output_bytes, dropped })
+    else
+        ui.fmt("{d} batches / {d} bytes", .{ model.output_batches, model.output_bytes });
     return ui.row(.{ .height = status_height, .padding = 6, .gap = 12, .cross = .center }, .{
         mutedText(ui, statusText(ui, model)),
         ui.spacer(1),
-        mutedText(ui, ui.fmt("{d} batches / {d} bytes", .{ model.output_batches, model.output_bytes })),
+        mutedText(ui, tally),
     });
 }
 

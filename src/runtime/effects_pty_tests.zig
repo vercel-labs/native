@@ -153,11 +153,15 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     try testing.expect(!fx.ptyKillRequested(11));
     fx.ptyKill(11);
     try testing.expect(fx.ptyKillRequested(11));
-    // The scripted ending after a kill: the test answers with the
-    // cancelled exit, the same shape the live transport reports.
-    try fx.feedPtyExit(11, effects_mod.effect_error_exit_code, 9, .cancelled, 1);
+    // The scripted ending after a kill: a kill is a cancellation, not a
+    // signaled death, so the live transport reports reason `.cancelled`
+    // with no signal and the -1 code. Feeding a stray signal 9 proves
+    // the feed boundary clamps the tuple to that contract rather than
+    // journaling an event replay's damage gate would later refuse.
+    try fx.feedPtyExit(11, 7, 9, .cancelled, 1);
     const exit = try expectExit(&fx, 11, .cancelled);
-    try testing.expectEqual(@as(i32, 9), exit.signal);
+    try testing.expectEqual(@as(i32, 0), exit.signal);
+    try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
     try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
 }
 

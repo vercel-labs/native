@@ -1047,7 +1047,7 @@ export type Msg =
   | { readonly kind: "type_ls" }
   | { readonly kind: "fit" }
   | { readonly kind: "end" }
-  | { readonly kind: "pty_evt"; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: string; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 
 export function initialModel(): Model {
   return { chunks: 0, out: new Uint8Array(0), code: -1, exits: 0, drops: 0 };
@@ -1129,8 +1129,8 @@ test "pty wire records match rt.zig's documented layout" {
 
     // Output batches route the event arm as plain Msgs and keep
     // flowing across dispatches (the non-retiring stream shape).
-    _ = dispatch(.{ .pty_evt = .{ .state = .output, .bytes = "prompt% ", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
-    _ = dispatch(.{ .pty_evt = .{ .state = .output, .bytes = "ls\\r\\n", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
+    _ = dispatch(.{ .pty_evt = .{ .key = "shell", .state = .output, .bytes = "prompt% ", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
+    _ = dispatch(.{ .pty_evt = .{ .key = "shell", .state = .output, .bytes = "ls\\r\\n", .code = -1, .reason = .exited, .signal = 0, .droppedWrites = 0 } }, &log);
     try std.testing.expectEqual(@as(@TypeOf(g_model.chunks), 2), g_model.chunks);
     try std.testing.expectEqualStrings("ls\\r\\n", g_model.out);
 
@@ -1167,7 +1167,7 @@ test "pty wire records match rt.zig's documented layout" {
 
     // The exit terminal routes the same arm; code and the droppedWrites
     // counter land in the model.
-    _ = dispatch(.{ .pty_evt = .{ .state = .exit, .bytes = "", .code = 0, .reason = .exited, .signal = 0, .droppedWrites = 3 } }, &log);
+    _ = dispatch(.{ .pty_evt = .{ .key = "shell", .state = .exit, .bytes = "", .code = 0, .reason = .exited, .signal = 0, .droppedWrites = 3 } }, &log);
     try std.testing.expectEqual(@as(@TypeOf(g_model.exits), 1), g_model.exits);
     try std.testing.expectEqual(@as(@TypeOf(g_model.code), 0), g_model.code);
     try std.testing.expectEqual(@as(@TypeOf(g_model.drops), 3), g_model.drops);

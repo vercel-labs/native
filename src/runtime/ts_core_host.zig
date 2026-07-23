@@ -1820,14 +1820,14 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
         ) void {
             if (key.len > 0 and findPty(key) != null) {
-                fx.stageLoopMsg(msgFromTagPty(event_tag, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                fx.stageLoopMsg(msgFromTagPty(event_tag, key, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
             const index = freePtyIndex() orelse {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
                 // vocabulary for every refusal, never a crash.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                fx.stageLoopMsg(msgFromTagPty(event_tag, key, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];
@@ -1909,8 +1909,9 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: a pty event arrived for a session the bridge is not tracking");
             }
             const entry = &ptys[index];
+            const wire_key = entry.wireKey();
             if (event.kind == .exit) entry.used = false;
-            return msgFromTagPty(entry.event_tag, event);
+            return msgFromTagPty(entry.event_tag, wire_key, event);
         }
 
         /// The wire `cancel` record: first match wins across the four
@@ -2592,12 +2593,12 @@ pub fn TsCoreHost(comptime core: type) type {
             const info = @typeInfo(T);
             if (info != .@"struct") return false;
             const fields = info.@"struct".fields;
-            if (fields.len != 6) return false;
+            if (fields.len != 7) return false;
             var ok = true;
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, "state") or std.mem.eql(u8, f.name, "reason")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
-                } else if (std.mem.eql(u8, f.name, "bytes")) {
+                } else if (std.mem.eql(u8, f.name, "bytes") or std.mem.eql(u8, f.name, "key")) {
                     if (f.type != []const u8) ok = false;
                 } else if (std.mem.eql(u8, f.name, "code") or std.mem.eql(u8, f.name, "signal") or std.mem.eql(u8, f.name, "droppedWrites")) {
                     if (f.type != i64 and f.type != f64) ok = false;
@@ -2635,7 +2636,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the staged rejection Msgs that must be self-contained across
         /// the frame reset — carry the static empty slice, the channel
         /// record's rule.
-        fn msgFromTagPty(tag: u8, event: runtime_effects.EffectPtyEvent) Msg {
+        fn msgFromTagPty(tag: u8, wire_key: []const u8, event: runtime_effects.EffectPtyEvent) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
                     if (comptime ptyArmShape(arm.type)) {
@@ -2652,6 +2653,18 @@ pub fn TsCoreHost(comptime core: type) type {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.signal) else @intCast(event.signal);
                             } else if (comptime std.mem.eql(u8, f.name, "droppedWrites")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_writes) else @intCast(event.dropped_writes);
+                            } else if (comptime std.mem.eql(u8, f.name, "key")) {
+                                // The app's own session key, copied into the
+                                // frame arena like every routed payload. Two
+                                // sessions sharing one event arm are told
+                                // apart by this field — never the engine key.
+                                if (wire_key.len == 0) {
+                                    @field(payload, f.name) = "";
+                                } else {
+                                    const copy = core.rt.frameAlloc(u8, wire_key.len);
+                                    @memcpy(copy, wire_key);
+                                    @field(payload, f.name) = copy;
+                                }
                             } else if (event.bytes.len == 0) {
                                 @field(payload, f.name) = "";
                             } else {
@@ -2662,7 +2675,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                         return @unionInit(Msg, arm.name, payload);
                     }
-                    @panic("ts core host: a pty event targets Msg arm '" ++ arm.name ++ "', which is not the six-field pty event record");
+                    @panic("ts core host: a pty event targets Msg arm '" ++ arm.name ++ "', which is not the seven-field pty event record");
                 }
             }
             @panic("ts core host: a pty event names a Msg tag outside the union");

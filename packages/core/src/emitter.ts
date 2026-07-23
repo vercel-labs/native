@@ -3027,11 +3027,13 @@ export class Emitter {
     return this.emitExpr(arg, ctx, { k: "f64" }).code;
   }
 
-  /// Resolve the pty event arm: exactly the six SDK-fixed fields,
-  /// matched by NAME — state (a named literal-union alias carrying
-  /// exactly the two pty states, any order), bytes (the output batch),
-  /// code (number), reason (a named alias carrying exactly the five
-  /// spawn exit reasons, any order), signal and droppedWrites (numbers).
+  /// Resolve the pty event arm: exactly the seven SDK-fixed fields,
+  /// matched by NAME — key (the app's own session key, so two sessions
+  /// on one arm are distinguishable), state (a named literal-union alias
+  /// carrying exactly the two pty states, any order), bytes (the output
+  /// batch), code (number), reason (a named alias carrying exactly the
+  /// five spawn exit reasons, any order), signal and droppedWrites
+  /// (numbers).
   private ptyEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
     const unionName = ctx.cmdReturn!.msgUnion;
     const info = this.table.unions.get(unionName);
@@ -3041,13 +3043,14 @@ export class Emitter {
       this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
     }
     const shape =
-      "the six pty event fields — state (a named alias of exactly " +
+      "the seven pty event fields — key: string, state (a named alias of exactly " +
       PTY_STATES.map((s) => `"${s}"`).join(" | ") +
       "), bytes: Uint8Array, code: number, reason (a named alias of exactly " +
       PTY_EXIT_REASONS.map((s) => `"${s}"`).join(" | ") +
       "), signal: number, droppedWrites: number";
     const fieldsByName = new Map(arm.fields.map((f) => [f.tsName, f]));
     const isNumber = (k: string): boolean => k === "number" || k === "i64" || k === "f64";
+    const key = fieldsByName.get("key");
     const state = fieldsByName.get("state");
     const bytes = fieldsByName.get("bytes");
     const code = fieldsByName.get("code");
@@ -3065,7 +3068,9 @@ export class Emitter {
       reason.type.members.length === PTY_EXIT_REASONS.length &&
       PTY_EXIT_REASONS.every((s) => reason.type.k === "enum" && reason.type.members.includes(s));
     const matches =
-      arm.fields.length === 6 &&
+      arm.fields.length === 7 &&
+      key !== undefined &&
+      key.type.k === "string" &&
       stateOk &&
       reasonOk &&
       bytes !== undefined &&
