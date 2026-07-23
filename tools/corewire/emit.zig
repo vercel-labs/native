@@ -43,8 +43,8 @@ const Payload = sidecar_mod.Payload;
 /// structurally; a union payload carrying exactly these dispatches
 /// through the ABI's text_input entry.
 const text_input_event_tags = [_][]const u8{
-    "insert_text",         "delete_backward",    "delete_forward", "delete_word_backward",
-    "delete_word_forward", "clear",              "move_caret",     "set_selection",
+    "insert_text",         "delete_backward",    "delete_forward",     "delete_word_backward",
+    "delete_word_forward", "clear",              "move_caret",         "set_selection",
     "set_composition",     "commit_composition", "cancel_composition",
 };
 
