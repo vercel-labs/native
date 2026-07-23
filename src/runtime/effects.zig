@@ -5038,13 +5038,14 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 // Running ptys arm the same producer-wake seam and hit
                 // the same dead end: their io thread could never wake
-                // the host. Wind each down — kill the child and wait
-                // (bounded) for the io thread to stage its exit — so the
-                // exit is pending for the catch-up sweep below to
-                // deliver, instead of stranding forever. (Reachable only
-                // when a pty was spawned before `bindServices`, which
-                // the standard startup order never does; contained here
-                // regardless.)
+                // the host. Wind each down — kill the child, wait
+                // (bounded) for the io thread to stage its exit, and
+                // past the deadline stage the cancelled terminal from
+                // this thread instead — so the exit is pending for the
+                // catch-up sweep below to deliver, never stranded.
+                // (Reachable only when a pty was spawned before
+                // `bindServices`, which the standard startup order
+                // never does; contained here regardless.)
                 if (comptime pty_transport.supported) {
                     for (&self.pty_slots) |*pty_slot| {
                         if (!(pty_slot.state == .running and !pty_slot.fake)) continue;
@@ -5058,15 +5059,68 @@ pub fn Effects(comptime Msg: type) type {
                         shared.mutex.unlock();
                         pty_transport.nudge(pty_slot.wake_pipe[1]);
                         const start_ns = runtime_clock.monotonicNanoseconds();
+                        var io_done = false;
                         while (true) {
                             shared.mutex.lock();
-                            const done = shared.io_done;
+                            io_done = shared.io_done;
                             shared.mutex.unlock();
-                            if (done) break;
+                            if (io_done) break;
                             const elapsed_ms = (runtime_clock.monotonicNanoseconds() - start_ns) / std.time.ns_per_ms;
                             if (elapsed_ms >= self.spawn_join_deadline_ms) break;
                             std.atomic.spinLoopHint();
                         }
+                        if (io_done) continue;
+                        // The io thread missed the deadline (a reap can
+                        // honestly take seconds). Leaving the slot as-is
+                        // would strand its exit: the staging the thread
+                        // eventually does could never wake the host —
+                        // the snapshot it wakes through is exactly what
+                        // failed to allocate. So stage the cancelled
+                        // terminal HERE, on the loop thread, and revoke
+                        // the session (`open = false`) so the thread's
+                        // own staging goes inert behind the same gates
+                        // stale channel posts fail; the sweep below
+                        // delivers it. The thread detaches, and its
+                        // transport, pipe fds, and heap blocks leak —
+                        // the teardown abandon rule applied mid-life,
+                        // because exit delivery's retire must never
+                        // close an fd under a live reader.
+                        shared.mutex.lock();
+                        const thread_settled = shared.exit_staged or shared.io_done;
+                        if (!thread_settled) {
+                            // Outbound staged at abandon never reaches
+                            // the child: fold it into dropped_writes,
+                            // the io thread's own exit-time rule.
+                            if (shared.out_len > 0) {
+                                shared.dropped_writes +|= @intCast(shared.out_write_count);
+                                shared.out_len = 0;
+                                shared.out_write_count = 0;
+                                shared.out_front_sent = 0;
+                            }
+                            shared.exit_reason = .cancelled;
+                            shared.exit_signal = 0;
+                            shared.exit_code = effect_error_exit_code;
+                            shared.exit_staged = true;
+                            if (shared.owner) |owner| {
+                                shared.exit_seq = owner.seq.fetchAdd(1, .seq_cst);
+                                _ = owner.pending.fetchAdd(1, .seq_cst);
+                            }
+                            shared.open = false;
+                        }
+                        shared.mutex.unlock();
+                        if (thread_settled) continue;
+                        if (comptime builtin.os.tag != .freestanding) {
+                            std.debug.print(
+                                "effects bindServices: a pty io thread is still running after {d}ms; staging its cancelled exit from the loop and abandoning the thread (its fds and staging leak)\n",
+                                .{self.spawn_join_deadline_ms},
+                            );
+                        }
+                        if (pty_slot.io_thread) |thread| {
+                            thread.detach();
+                            pty_slot.io_thread = null;
+                        }
+                        pty_slot.transport = null;
+                        pty_slot.wake_pipe = .{ -1, -1 };
                     }
                 }
             }

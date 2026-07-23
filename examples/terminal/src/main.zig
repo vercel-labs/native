@@ -174,6 +174,11 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     model.outbound_head = 0;
     model.outbound_len = 0;
     model.outbound_dropped = 0;
+    // The refused-write tally is per session: the exit that ended the
+    // last shell recorded ITS transport drops here, and the status line
+    // renders the tally in every phase — a restarted shell must start
+    // the count at zero, not inherit its predecessor's.
+    model.dropped_writes = 0;
     // Hard-reset the emulator so a restarted shell starts from a clean
     // terminal — no leftover mode (application-cursor, reverse video),
     // scrollback, palette override, or partial escape sequence from the

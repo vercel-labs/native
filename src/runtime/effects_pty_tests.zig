@@ -15,6 +15,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
+const platform_mod = @import("../platform/root.zig");
 const pty_transport = @import("pty.zig");
 const session_blobs = @import("session_blobs.zig");
 const session_record = @import("session_record.zig");
@@ -720,6 +721,93 @@ test "teardown with a live pty returns promptly and reaps the child" {
     // returns without waiting out the sleep.
     try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(50), .awake);
     fx.deinit();
+}
+
+/// Fails exactly the next channel-storage allocation and delegates
+/// everything else to the page allocator (the channel suite's
+/// `ChannelStorageFailingAllocator`, restated here for the pty seam).
+const PtyStorageFailingAllocator = struct {
+    backing: std.mem.Allocator = std.heap.page_allocator,
+    armed: bool = false,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *PtyStorageFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *PtyStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        if (self.armed) {
+            self.armed = false;
+            return null;
+        }
+        return self.backing.vtable.alloc(self.backing.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *PtyStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.resize(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *PtyStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        return self.backing.vtable.remap(self.backing.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *PtyStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "a failed bind-site snapshot publication never strands a live pty's exit" {
+    if (comptime !pty_transport.supported) return;
+    // The wind-down's past-deadline arm abandons the io thread and
+    // deliberately leaks its transport, so the harness rides the page
+    // allocator instead of the leak-checking one.
+    var fx = DirectFx.init(std.heap.page_allocator);
+    defer fx.deinit();
+    var failing: PtyStorageFailingAllocator = .{};
+    fx.channel_storage_allocator = failing.allocator();
+    // Zero deadline: the wind-down never waits for the io thread, so
+    // the loop-side staging arm is what runs. (A thread that beats even
+    // this window stages the same cancelled exit itself — the assertion
+    // holds on either arm.)
+    fx.spawn_join_deadline_ms = 0;
+
+    const null_platform = try std.heap.page_allocator.create(platform_mod.NullPlatform);
+    defer std.heap.page_allocator.destroy(null_platform);
+    null_platform.* = platform_mod.NullPlatform.init(.{});
+    const host_platform = null_platform.platform();
+
+    // A long-lived child spawned BEFORE the bind — the one shape where a
+    // running pty can meet a failed publication.
+    fx.ptySpawn(.{
+        .key = 56,
+        .argv = &.{"/bin/cat"},
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(50), .awake);
+
+    failing.armed = true;
+    fx.bindServices(&host_platform.services);
+    try testing.expect(fx.wake_services.load(.seq_cst) == null);
+
+    // The wind-down killed the child and staged the cancelled terminal —
+    // loop-side past the deadline — so the exit delivers instead of
+    // stranding behind a wake that can never fire.
+    var result = try drainUntilExit(&fx, 5_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expectEqual(effects_mod.EffectExitReason.cancelled, result.exit.reason);
+    try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
+    // The key freed with the delivery: the slot retired, nothing pends.
+    try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
 }
 
 // ---------------------------------------- record/replay acceptance

@@ -979,6 +979,46 @@ test "a claimed key stays claimed when its command rebuilds the tree mid-dispatc
         .text = "x",
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+
+    // The carry DIES AT BLUR: it marks "the text arriving next belongs
+    // to the claimed key_down just routed", and a focus move breaks
+    // that adjacency. A claimed activation that moves focus before its
+    // committed text arrives (Enter/Space commands routinely do) must
+    // not leave the carry armed to swallow the refocused surface's
+    // first unrelated commit.
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "other",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 120, 240, 120),
+    });
+    const rearmed = [_]canvas.Widget{
+        .{
+            .id = 6,
+            .kind = .button,
+            .frame = geometry.RectF.init(10, 10, 96, 32),
+            .text = "Run",
+        },
+    };
+    var nodes_rearmed: [3]canvas.WidgetLayoutNode = undefined;
+    const layout_rearmed = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &rearmed }, geometry.RectF.init(0, 0, 240, 120), &nodes_rearmed);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout_rearmed);
+    harness.runtime.views[0].canvas_widget_focused_id = 6;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "space",
+    } });
+    try harness.runtime.focusView(1, "other");
+    try harness.runtime.focusView(1, "canvas");
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "y",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
 }
 
 test "a widget-started composition resolves in its starting editor after focus moves" {

@@ -805,6 +805,38 @@ test "restart during starting is a no-op - the original session is not duplicate
     try testing.expectEqual(@as(usize, 1), app_state.effects.pendingPtyCount());
 }
 
+test "a restarted shell starts its refused-write tally at zero" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // The first session ends with transport drops on record: the exit
+    // carries them into the model, where the status tally renders them.
+    try app_state.effects.feedPtyOutput(1, "demo$ ");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try app_state.effects.feedPtyExit(1, 0, 0, .exited, 3);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try testing.expectEqual(app.Phase.ended, app_state.model.phase);
+    try testing.expectEqual(@as(u32, 3), app_state.model.dropped_writes);
+
+    // Cmd+R: the new shell's tally is its own — zero, not the dead
+    // session's drops.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "r",
+        .modifiers = .{ .primary = true },
+    } });
+    try testing.expectEqual(app.Phase.starting, app_state.model.phase);
+    try testing.expectEqual(@as(u32, 0), app_state.model.dropped_writes);
+}
+
 test "a recorded terminal session replays byte-identical offline - no shell present" {
     const gpa = testing.allocator;
     const buffer = try std.heap.page_allocator.create(JournalBuffer);

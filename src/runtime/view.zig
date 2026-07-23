@@ -130,6 +130,13 @@ pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
     // does not, the pin must die here.
     view.canvas_widget_ime_commit_grace = .none;
     view.canvas_widget_ime_owner_id = 0;
+    // The split-event claim carry dies too: it marks "the text_input
+    // arriving NEXT on this view belongs to the claimed key_down just
+    // routed", and a focus move breaks that adjacency — a claimed
+    // Enter/Space activation that moves focus before its key-up would
+    // otherwise leave the carry armed to swallow the refocused view's
+    // first unrelated commit.
+    view.canvas_widget_claimed_key_grace = false;
     if (runtime.targetless_ime_commit_grace and
         runtime.targetless_ime_preedit_window == view.window_id and
         std.mem.eql(u8, runtime.targetless_ime_preedit_label[0..runtime.targetless_ime_preedit_label_len], view.label))
