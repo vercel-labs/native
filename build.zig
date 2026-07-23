@@ -482,6 +482,15 @@ pub fn build(b: *std.Build) void {
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Prove corewire-generated mirrors fingerprint-identical to transpiler output (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
+        // Skipped unless the caller supplies a compiled-core archive:
+        // the repo builds none, so the step gates on the env var and
+        // `zig build test` stays green without it.
+        const parity_step = b.step("test-external-core-parity", "Run the compiled-core behavior-parity suite (requires node and NATIVE_SDK_EXTERNAL_CORE_ARCHIVE=<link input[" ++ [_]u8{std.fs.path.delimiter} ++ "link input...]>; skipped when unset)");
+        if (ts_core_artifacts.external_core_parity) |parity_tests| {
+            const parity_run = b.addRunArtifact(parity_tests);
+            parity_step.dependOn(&parity_run.step);
+            test_step.dependOn(&parity_run.step);
+        }
         ts_core_e2e_step.dependOn(&host_e2e_run.step);
         ts_core_e2e_step.dependOn(&soundboard_e2e_run.step);
         ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
@@ -2859,6 +2868,12 @@ const TsCoreE2eArtifacts = struct {
     /// mirror — and compared by layout fingerprint and model-contract
     /// artifact.
     sidecar_conformance: *std.Build.Step.Compile,
+    /// Behavior parity against a REAL compiled core: built only when
+    /// NATIVE_SDK_EXTERNAL_CORE_ARCHIVE names the archive(s) to link
+    /// (path-delimiter-separated link inputs exporting the markup
+    /// fixture's attested symbol set); null — the suite is skipped —
+    /// otherwise.
+    external_core_parity: ?*std.Build.Step.Compile,
 };
 
 fn tsCoreE2eArtifact(
@@ -2986,6 +3001,29 @@ fn tsCoreE2eArtifact(
         conformance_mod.addImport(fixture.facade_import, facadeCoreModule(b, target, optimize, node, corewire_exe, sidecar_json));
     }
 
+    // Compiled-core behavior parity (tests/sidecar/
+    // external_core_parity_tests.zig): the executable half of the
+    // conformance story, gated on a caller-supplied compiled-core
+    // archive because the repo builds none itself. The env var carries
+    // one or more link inputs (path-delimiter-separated) that together
+    // export the markup fixture's attested symbol set; the binary pairs
+    // a FRESH generated mirror with them (the conformance binary's
+    // mirror links the stub core's exports — one process cannot carry
+    // both symbol sets).
+    const external_core_parity: ?*std.Build.Step.Compile = if (b.graph.environ_map.get("NATIVE_SDK_EXTERNAL_CORE_ARCHIVE")) |archives| blk: {
+        const parity_mod = module(b, target, optimize, "tests/sidecar/external_core_parity_tests.zig");
+        parity_mod.link_libc = true;
+        parity_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+        parity_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
+        parity_mod.addImport("ts_core", markup_fixture_mod);
+        parity_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+        var inputs = std.mem.tokenizeScalar(u8, archives, std.fs.path.delimiter);
+        while (inputs.next()) |input| {
+            parity_mod.addObjectFile(.{ .cwd_relative = b.dupe(input) });
+        }
+        break :blk filteredTestArtifact(b, parity_mod, "external-core-parity-tests", &.{});
+    } else null;
+
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
@@ -2993,6 +3031,7 @@ fn tsCoreE2eArtifact(
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
+        .external_core_parity = external_core_parity,
     };
 }
 
