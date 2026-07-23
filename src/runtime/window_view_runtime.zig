@@ -629,6 +629,23 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            // A target-less IME composition owned by this view dies with
+            // it: a later view REUSING the same window+label must not
+            // inherit the stale sequence (its first composition update
+            // would be mistaken for a continuation and bypass its own
+            // focused editor). The buffer stays allocated; only the
+            // ownership state clears.
+            if (self.targetless_ime_preedit_len > 0 and
+                self.targetless_ime_preedit_window == self.views[index].window_id and
+                std.mem.eql(
+                    u8,
+                    self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                    self.views[index].label,
+                ))
+            {
+                self.targetless_ime_preedit_len = 0;
+                self.targetless_ime_commit_grace = false;
+            }
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {
                 const next = &self.views[cursor + 1];

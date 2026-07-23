@@ -312,7 +312,15 @@ pub const Pty = struct {
         if (!supported) return false;
         if (self.exec_status < 0) return false;
         var probe: [1]u8 = undefined;
-        return c.read(self.exec_status, &probe, 1) > 0;
+        while (true) {
+            const n = c.read(self.exec_status, &probe, 1);
+            if (n > 0) return true;
+            // A signal interrupting the read must not read as success —
+            // the failure byte may be sitting right there. EAGAIN
+            // (empty, non-blocking) and EOF are the genuine successes.
+            if (n < 0 and errnoValue() == eintr) continue;
+            return false;
+        }
     }
 };
 

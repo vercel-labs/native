@@ -403,7 +403,29 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 const armed = self.views[index].canvas_widget_ime_commit_grace;
                 if (armed == .none) break :grace .none;
                 self.views[index].canvas_widget_ime_commit_grace = .none;
-                if (input_event.kind == .text_input) break :grace armed;
+                if (input_event.kind == .text_input) {
+                    if (armed == .route_to_owner) {
+                        // The owner may have vanished between the cancel
+                        // and this trailing commit (the cancel's own app
+                        // dispatch can rebuild the tree): a dead owner
+                        // converts the grace to a SWALLOW — the composed
+                        // result resolves nowhere, never in whichever
+                        // editor holds focus now.
+                        const owner = self.views[index].canvas_widget_ime_owner_id;
+                        const alive = alive: {
+                            if (owner == 0) break :alive false;
+                            if (self.views[index].widgetLayoutTree().findById(owner)) |node| {
+                                break :alive canvas.isWidgetTextEntry(node.widget);
+                            }
+                            break :alive false;
+                        };
+                        if (!alive) {
+                            self.views[index].canvas_widget_ime_owner_id = 0;
+                            break :grace .swallow;
+                        }
+                    }
+                    break :grace armed;
+                }
                 // Disarmed: release the owner a route_to_owner grace
                 // held through the cancel.
                 if (armed == .route_to_owner) self.views[index].canvas_widget_ime_owner_id = 0;
