@@ -374,7 +374,24 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 try CanvasWidgetEventMethods().updateCanvasWidgetControlFromKeyboard(self, keyboard_event.*);
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, keyboard_event);
             }
-            var widget_text_input_event = if (widget_surface_dismissed)
+            // An IME sequence belongs to whoever it STARTED over: a
+            // composition buffered by the target-less consumer (this
+            // surface owns a live target-less preedit) continues
+            // target-less even if a text widget has since taken focus —
+            // routing its commit or cancel to the newly focused editor
+            // would resolve a composition that editor never saw, and the
+            // target-less consumer's composed text would be lost.
+            const ime_continuation_owned_targetless = switch (input_event.kind) {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => self.targetless_ime_preedit_len > 0 and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    ),
+                else => false,
+            };
+            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {

@@ -866,6 +866,100 @@ test "runtime applies GPU text and IME input to focused canvas text fields" {
     try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 }
 
+test "a target-less composition stays target-less when a text field takes focus mid-sequence" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+        last_committed: [16]u8 = undefined,
+        last_committed_len: usize = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-targetless-ime-ownership", .source = platform.WebViewSource.html("<h1>O</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                    const text = keyboard_event.keyboard.text;
+                    const len = @min(text.len, self.last_committed.len);
+                    @memcpy(self.last_committed[0..len], text[0..len]);
+                    self.last_committed_len = len;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    const children = [_]canvas.Widget{
+        .{
+            .id = 2,
+            .kind = .text_field,
+            .frame = geometry.RectF.init(10, 10, 160, 32),
+            .text = "",
+        },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+
+    // The composition STARTS target-less (nothing focused): the preedit
+    // buffers for the surface's own consumer.
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b", // か
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // Focus lands on a text field mid-sequence. The empty commit
+    // resolves the composition it STARTED — the target-less one — not
+    // the newly focused editor: the composed bytes reach the
+    // target-less consumer and the field's text is untouched.
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try std.testing.expectEqualStrings("\xe3\x81\x8b", app_state.last_committed[0..app_state.last_committed_len]);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("", retained.findById(2).?.widget.text);
+
+    // With the sequence resolved, a fresh composition belongs to the
+    // focused editor as usual.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "ne",
+    } });
+    const composing = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("ne", composing.findById(2).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+}
+
 test "a focused widget's claimed key never doubles into target-less committed text" {
     const TestApp = struct {
         committed_count: u32 = 0,
