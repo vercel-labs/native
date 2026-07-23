@@ -1,0 +1,446 @@
+//! Sidecar-shim conformance: for every core in the ts-core corpus, the
+//! build runs BOTH lanes — today's transpiler emitting core.zig, and
+//! corewire generating the mirror from that core's contract sidecar —
+//! and this suite holds their reflection surfaces byte-identical:
+//!
+//! 1. `layout_fingerprint.describe` of Model and Msg (field names,
+//!    order, types, enum values, union tags — everything the journal
+//!    and wire identities hash) must match exactly.
+//! 2. The model-contract artifact (the serialized Contract `native
+//!    check` verifies markup against: scalars, nested groups,
+//!    iterables, msg payload classes, unbound lists) must match
+//!    byte-for-byte, after one principled normalization: Zig names
+//!    anonymous payload records with a compiler-internal instance
+//!    counter (`Msg__struct_<N>`), which differs across modules even
+//!    for identical declarations — in both lanes alike — so the digits
+//!    are masked before comparison. No checker keys on those digits;
+//!    every load-bearing spelling ("f64", "[]const u8", named types)
+//!    is compared exactly.
+//!
+//! A fixture passing both is proof the reflecting seams (markup
+//! engines, adapter, bridge, model-contract emit) cannot tell the
+//! generated mirror from transpiler output. The suite also forces full
+//! semantic analysis of every generated shim (dispatch stubs, snapshot
+//! decoder, channel forwarders, helper methods) against the stub core's
+//! exported symbol set, so the executable surface compiles and links
+//! even though no compiled core exists to drive it yet.
+//!
+//! The markup fixture's sidecar is hand-written
+//! (tests/sidecar/markup_fixture.contract.json) — independent ground
+//! truth for the schema. The other fixtures' sidecars are extracted
+//! from the transpiled modules at build time (tools/corewire/
+//! extract.zig); the comparison stays honest because the reference side
+//! is always the real transpiled module, so an extraction infidelity
+//! surfaces here exactly like a generator one.
+
+const std = @import("std");
+const native_sdk = @import("native_sdk");
+const lf = native_sdk.automation.layout_fingerprint;
+const canvas = native_sdk.canvas;
+const contract = canvas.ui_markup.contract;
+
+const stub_core = @import("stub_core.zig");
+const corewire_rt = @import("corewire_rt");
+
+const ts_markup = @import("ts_markup_core");
+const shim_markup = @import("shim_markup_core");
+const facade_markup = @import("facade_markup_core");
+const ts_host = @import("ts_host_core");
+const shim_host = @import("shim_host_core");
+const facade_host = @import("facade_host_core");
+const ts_soundboard = @import("ts_soundboard_core");
+const shim_soundboard = @import("shim_soundboard_core");
+const facade_soundboard = @import("facade_soundboard_core");
+const ts_monitor = @import("ts_monitor_core");
+const shim_monitor = @import("shim_monitor_core");
+const facade_monitor = @import("facade_monitor_core");
+const ts_ai_chat = @import("ts_ai_chat_core");
+const shim_ai_chat = @import("shim_ai_chat_core");
+const facade_ai_chat = @import("facade_ai_chat_core");
+
+const testing = std.testing;
+
+fn expectDescribeIdentical(comptime ts: type, comptime shim: type) !void {
+    try testing.expectEqualStrings(comptime lf.describe(ts.Model), comptime lf.describe(shim.Model));
+    try testing.expectEqualStrings(comptime lf.describe(ts.Msg), comptime lf.describe(shim.Msg));
+    // Same description, same hash — the fingerprint idiom the journal
+    // and protocol identities ride.
+    try testing.expectEqual(lf.hash(comptime lf.describe(ts.Model)), lf.hash(comptime lf.describe(shim.Model)));
+    try testing.expectEqual(lf.hash(comptime lf.describe(ts.Msg)), lf.hash(comptime lf.describe(shim.Msg)));
+}
+
+/// Serialize a reflected contract the way the model-contract build step
+/// does (source_hash stays 0: both sides reflect the same app sources,
+/// and the hash is an emit-time input, not a reflection fact).
+fn artifactBytes(comptime Model: type, comptime Msg: type, allocator: std.mem.Allocator) ![]const u8 {
+    const described = comptime canvas.describeModelContract(Model, Msg);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try contract.writeArtifact(described, &out.writer);
+    return allocator.dupe(u8, out.written());
+}
+
+/// Mask the compiler's anonymous-type instance counters
+/// (`__struct_<digits>` -> `__struct_#`): the one spelling that differs
+/// between two modules declaring identical anonymous records.
+fn maskAnonCounters(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const marker = "__struct_";
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, text, index, marker)) |found| {
+        const digits_start = found + marker.len;
+        var digits_end = digits_start;
+        while (digits_end < text.len and std.ascii.isDigit(text[digits_end])) digits_end += 1;
+        if (digits_end == digits_start) {
+            try out.appendSlice(allocator, text[index .. found + marker.len]);
+            index = found + marker.len;
+            continue;
+        }
+        try out.appendSlice(allocator, text[index..found]);
+        try out.appendSlice(allocator, marker);
+        try out.append(allocator, '#');
+        index = digits_end;
+    }
+    try out.appendSlice(allocator, text[index..]);
+    return out.items;
+}
+
+fn expectContractIdentical(comptime ts: type, comptime shim: type) !void {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ts_artifact = try maskAnonCounters(arena, try artifactBytes(ts.Model, ts.Msg, arena));
+    const shim_artifact = try maskAnonCounters(arena, try artifactBytes(shim.Model, shim.Msg, arena));
+    try testing.expectEqualStrings(ts_artifact, shim_artifact);
+}
+
+// ------------------------------------------------------ markup fixture
+// The bootstrap pair: hand-written sidecar, the full channel surface
+// (frame/key/pinch/appearance/chrome/env), text-input and inline-record
+// payloads, an optional scalar, a node-pointer iterable.
+
+test "markup fixture: layout fingerprints are identical" {
+    try expectDescribeIdentical(ts_markup, shim_markup);
+}
+
+test "markup fixture: model-contract artifacts are byte-identical" {
+    try expectContractIdentical(ts_markup, shim_markup);
+}
+
+test "markup fixture: channel exports mirror the transpiled surface" {
+    // The adapter wires channels from export presence; hold the two
+    // lanes' export sets and arm-name constants equal.
+    try testing.expectEqual(@hasDecl(ts_markup, "frameMsg"), @hasDecl(shim_markup, "frameMsg"));
+    try testing.expectEqual(@hasDecl(ts_markup, "keyMsg"), @hasDecl(shim_markup, "keyMsg"));
+    try testing.expectEqual(@hasDecl(ts_markup, "pinchMsg"), @hasDecl(shim_markup, "pinchMsg"));
+    try testing.expectEqual(@hasDecl(ts_markup, "commandMsg"), @hasDecl(shim_markup, "commandMsg"));
+    try testing.expectEqualStrings(ts_markup.appearanceMsg, shim_markup.appearanceMsg);
+    try testing.expectEqualStrings(ts_markup.chromeMsg, shim_markup.chromeMsg);
+    try testing.expectEqual(ts_markup.envMsgs.len, shim_markup.envMsgs.len);
+    inline for (ts_markup.envMsgs, shim_markup.envMsgs) |expected, actual| {
+        try testing.expectEqualStrings(expected.env, actual.env);
+        try testing.expectEqualStrings(expected.msg, actual.msg);
+    }
+}
+
+test "markup fixture: wire tags ride declaration order" {
+    inline for (@typeInfo(ts_markup.Msg).@"union".fields, 0..) |field, tag| {
+        try testing.expectEqualStrings(field.name, shim_markup.msg_tags[tag]);
+    }
+}
+
+// -------------------------------------------------- host e2e fixture
+// The effect-vocabulary stressor: 50 arms across every payload family
+// (void, bytes, number f64/i64, number_bytes, and the audio/image/
+// channel event records), enums in the model, an InitResult boot.
+
+test "host fixture: layout fingerprints are identical" {
+    try expectDescribeIdentical(ts_host, shim_host);
+}
+
+test "host fixture: model-contract artifacts are byte-identical" {
+    try expectContractIdentical(ts_host, shim_host);
+}
+
+test "host fixture: the boot shape mirrors the transpiled surface" {
+    // fixture.ts returns [model, cmd] from initialModel: both lanes
+    // must expose the InitResult shape, not the bare pointer.
+    try testing.expect(@typeInfo(@typeInfo(@TypeOf(ts_host.initialModel)).@"fn".return_type.?) == .@"struct");
+    try testing.expect(@typeInfo(@typeInfo(@TypeOf(shim_host.initialModel)).@"fn".return_type.?) == .@"struct");
+    try testing.expectEqual(@hasDecl(ts_host, "subscriptions"), @hasDecl(shim_host, "subscriptions"));
+}
+
+// -------------------------------------------------------- soundboard
+// The helper-heavy real app: dozens of exported Model helpers
+// (fn-backed scalars and iterables), optional model fields, chrome and
+// env channels.
+
+test "soundboard: layout fingerprints are identical" {
+    try expectDescribeIdentical(ts_soundboard, shim_soundboard);
+}
+
+test "soundboard: model-contract artifacts are byte-identical" {
+    try expectContractIdentical(ts_soundboard, shim_soundboard);
+}
+
+// ---------------------------------------------------- system monitor
+
+test "system monitor: layout fingerprints are identical" {
+    try expectDescribeIdentical(ts_monitor, shim_monitor);
+}
+
+test "system monitor: model-contract artifacts are byte-identical" {
+    try expectContractIdentical(ts_monitor, shim_monitor);
+}
+
+// ------------------------------------------------------------ ai-chat
+// The worked-example app: 13 helpers, a node-pointer draft record, a
+// controlled scroll, text input, number_bytes fetch completion, three
+// env channels.
+
+test "ai-chat: layout fingerprints are identical" {
+    try expectDescribeIdentical(ts_ai_chat, shim_ai_chat);
+}
+
+test "ai-chat: model-contract artifacts are byte-identical" {
+    try expectContractIdentical(ts_ai_chat, shim_ai_chat);
+}
+
+test "ai-chat: helper methods keep the exported call surface" {
+    // The markup engines bind helpers as Model methods; hold the two
+    // lanes' method sets equal by name and shape (the contract
+    // comparison already proves kinds — this pins presence).
+    const ts_decls = @typeInfo(ts_ai_chat.Model).@"struct".decls;
+    const shim_decls = @typeInfo(shim_ai_chat.Model).@"struct".decls;
+    comptime var ts_fn_count = 0;
+    comptime var shim_fn_count = 0;
+    inline for (ts_decls) |decl| {
+        if (@typeInfo(@TypeOf(@field(ts_ai_chat.Model, decl.name))) == .@"fn") ts_fn_count += 1;
+    }
+    inline for (shim_decls) |decl| {
+        if (@typeInfo(@TypeOf(@field(shim_ai_chat.Model, decl.name))) == .@"fn") shim_fn_count += 1;
+    }
+    try testing.expectEqual(ts_fn_count, shim_fn_count);
+    inline for (ts_decls) |decl| {
+        if (@typeInfo(@TypeOf(@field(ts_ai_chat.Model, decl.name))) != .@"fn") continue;
+        try testing.expect(@hasDecl(shim_ai_chat.Model, decl.name));
+    }
+}
+
+// ---------------------------------------------- executable surface
+// Force full semantic analysis and codegen of every generated shim —
+// dispatch stubs, snapshot decoders, channel forwarders, helper
+// methods — linked against the stub core's exported symbol set. No
+// compiled core exists yet (the ABI is a draft), so these paths are
+// compile- and link-proven here, not executed.
+
+// ------------------------------------------------ facade parity axis
+//
+// The third comparison: the sidecar's TypeScript projection
+// (core_facade.ts), compiled through the shipped transpiler (the
+// compile IS the subset-acceptance proof), must produce the exact
+// canonical bytes the host's decoder expects. The facade encodes its
+// deterministic sample and zero models in compiled subset arithmetic;
+// the reference bytes come from the shared canonical encoder
+// (corewire_rt.encodeAlloc) over the SHIM module's mirror type — the
+// sidecar-classed layout — after a by-name value conversion (the
+// facade compile's own number classes are inference-decided and may
+// legally differ; the bytes must not).
+
+/// Convert a value between two structurally-equivalent mirror types by
+/// field/arm/member NAME, normalizing numeric classes and reference
+/// storage (pointers deref on read, re-materialize on write).
+fn convertValue(comptime Target: type, value: anytype, allocator: std.mem.Allocator) !Target {
+    const Source = @TypeOf(value);
+    if (@typeInfo(Source) == .pointer and @typeInfo(Source).pointer.size == .one) {
+        return convertValue(Target, value.*, allocator);
+    }
+    switch (@typeInfo(Target)) {
+        .bool => return value,
+        .int => return switch (@typeInfo(Source)) {
+            .int => @intCast(value),
+            .float => @intFromFloat(value),
+            else => @compileError("cannot convert " ++ @typeName(Source) ++ " to " ++ @typeName(Target)),
+        },
+        .float => return switch (@typeInfo(Source)) {
+            .float => @floatCast(value),
+            .int => @floatFromInt(value),
+            else => @compileError("cannot convert " ++ @typeName(Source) ++ " to " ++ @typeName(Target)),
+        },
+        .@"enum" => {
+            switch (value) {
+                inline else => |tag| return @field(Target, @tagName(tag)),
+            }
+        },
+        .optional => |info| {
+            if (value) |inner| return try convertValue(info.child, inner, allocator);
+            return null;
+        },
+        .pointer => |info| switch (info.size) {
+            .slice => {
+                if (info.child == u8) return allocator.dupe(u8, value);
+                const out = try allocator.alloc(info.child, value.len);
+                for (out, value) |*slot, element| {
+                    slot.* = try convertValue(info.child, element, allocator);
+                }
+                return out;
+            },
+            .one => {
+                const out = try allocator.create(info.child);
+                out.* = try convertValue(info.child, value, allocator);
+                return out;
+            },
+            else => @compileError("no conversion for " ++ @typeName(Target)),
+        },
+        .@"struct" => |info| {
+            var out: Target = undefined;
+            inline for (info.fields) |field| {
+                @field(out, field.name) = try convertValue(field.type, @field(value, field.name), allocator);
+            }
+            return out;
+        },
+        .@"union" => |info| {
+            switch (value) {
+                inline else => |payload, tag| {
+                    inline for (info.fields) |field| {
+                        if (comptime std.mem.eql(u8, field.name, @tagName(tag))) {
+                            if (field.type == void) return @unionInit(Target, field.name, {});
+                            return @unionInit(Target, field.name, try convertValue(field.type, payload, allocator));
+                        }
+                    }
+                    unreachable;
+                },
+            }
+        },
+        else => @compileError("no conversion for " ++ @typeName(Target)),
+    }
+}
+
+/// The facade's compiled snapshot encoder must byte-match the canonical
+/// encoder over the sidecar-classed mirror layout, for both the zero
+/// model and the deterministic sample.
+fn expectSnapshotParity(comptime facade: type, comptime shim: type) !void {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    facade.rt.resetAll();
+    const models = [_]*const facade.Model{ facade.initialModel(), facade.nsc_core_sample_model() };
+    for (models) |model| {
+        const facade_bytes = facade.nsc_core_model_snapshot(1, model);
+        const converted = try convertValue(shim.Model, model, arena);
+        const canonical = corewire_rt.encodeAlloc(shim.Model, converted, arena);
+        try testing.expectEqualSlices(u8, canonical, facade_bytes);
+    }
+    facade.rt.resetAll();
+}
+
+fn expectScalarProbeParity(comptime facade: type) !void {
+    const f64_values = [_]f64{
+        0.0,     -0.0,                    1.0,                    -1.0,               0.5,                 -2.75,
+        0.1,     1.5625,                  1e300,                  -1e300,             1e-300,              5e-324,
+        -5e-324, 2.2250738585072014e-308, 1.7976931348623157e308, 9007199254740991.0, -9007199254740991.0, 3.141592653589793,
+    };
+    for (f64_values) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_f64(value);
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    // The infinities and the canonical quiet NaN.
+    const specials = [_]f64{ std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    for (specials) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_f64(value);
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    // Non-canonical NaNs (sign, payload bits) canonicalize to the one
+    // quiet pattern in BOTH encoders — payload bits are not values.
+    const canonical_nan = [_]u8{ 0, 0, 0, 0, 0, 0, 0xf8, 0x7f };
+    const odd_nans = [_]f64{ -std.math.nan(f64), @bitCast(@as(u64, 0x7ff800000000beef)) };
+    for (odd_nans) |value| {
+        facade.rt.frameReset();
+        try testing.expectEqualSlices(u8, &canonical_nan, facade.nsc_core_probe_f64(value));
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try testing.expectEqualSlices(u8, &canonical_nan, corewire_rt.encodeAlloc(f64, value, arena_state.allocator()));
+    }
+    const i64_values = [_]i64{ 0, 1, -1, 255, 256, -256, 65535, -65536, 42424242, -1234567890123, 9007199254740991, -9007199254740991 };
+    for (i64_values) |value| {
+        facade.rt.frameReset();
+        const encoded = facade.nsc_core_probe_i64(@floatFromInt(value));
+        var expected: [8]u8 = undefined;
+        std.mem.writeInt(u64, &expected, @bitCast(value), .little);
+        try testing.expectEqualSlices(u8, &expected, encoded);
+    }
+    facade.rt.frameReset();
+}
+
+test "markup fixture: facade scalar encodings match native bit patterns" {
+    try expectScalarProbeParity(facade_markup);
+}
+
+test "markup fixture: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_markup, shim_markup);
+}
+
+test "markup fixture: facade wire constructors carry declaration-order tags" {
+    // The constructor family is the dispatch-table projection: the arm
+    // a constructor builds must sit at its wire tag in the facade's own
+    // compiled union.
+    const add = facade_markup.nsc_core_msg_add();
+    try testing.expectEqual(@as(usize, 0), @intFromEnum(std.meta.activeTag(add)));
+    const zoomed = facade_markup.nsc_core_msg_zoomed(1.5, 7, true);
+    try testing.expectEqual(@as(usize, 9), @intFromEnum(std.meta.activeTag(zoomed)));
+    try testing.expectEqual(@as(f64, 1.5), zoomed.zoomed.factor);
+    try testing.expect(zoomed.zoomed.fromBoard);
+    try testing.expectEqual(@as(usize, 0), facade_markup.nsc_core_tag_add);
+    try testing.expectEqual(@as(usize, 9), facade_markup.nsc_core_tag_zoomed);
+}
+
+test "host fixture: facade scalar encodings match native bit patterns" {
+    try expectScalarProbeParity(facade_host);
+}
+
+test "host fixture: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_host, shim_host);
+}
+
+test "soundboard: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_soundboard, shim_soundboard);
+}
+
+test "system monitor: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_monitor, shim_monitor);
+}
+
+test "ai-chat: facade snapshots byte-match the canonical encoder" {
+    try expectSnapshotParity(facade_ai_chat, shim_ai_chat);
+}
+
+/// Reference every public declaration, recursing into declared types
+/// (all of a shim's public type declarations are its own, so the walk
+/// never leaves the generated module).
+fn refAllDeclsRecursive(comptime T: type) void {
+    inline for (comptime std.meta.declarations(T)) |decl| {
+        if (@TypeOf(@field(T, decl.name)) == type) {
+            switch (@typeInfo(@field(T, decl.name))) {
+                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl.name)),
+                else => {},
+            }
+        }
+        _ = &@field(T, decl.name);
+    }
+}
+
+test "every generated shim fully analyzes and links against the ABI" {
+    refAllDeclsRecursive(shim_markup);
+    refAllDeclsRecursive(shim_host);
+    refAllDeclsRecursive(shim_soundboard);
+    refAllDeclsRecursive(shim_monitor);
+    refAllDeclsRecursive(shim_ai_chat);
+    testing.refAllDecls(stub_core);
+}

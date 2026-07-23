@@ -1,0 +1,153 @@
+{
+  "format": 1,
+  "wire_version": 3,
+  "abi_version": 1,
+  "compiler_version": "0.0.1",
+  "entry": "tests/ts-core/markup_fixture.ts",
+  "source_hash": "5eedc0de00000001",
+  "build_id": "b11d1d0000000001",
+  "types": {
+    "structs": [
+      {"name": "Task", "fields": [
+        {"name": "id", "type": {"kind": "i64"}},
+        {"name": "title", "type": {"kind": "bytes"}},
+        {"name": "done", "type": {"kind": "bool"}}
+      ]},
+      {"name": "Model", "fields": [
+        {"name": "filter", "type": {"kind": "enum", "name": "Filter"}},
+        {"name": "nextId", "type": {"kind": "i64"}},
+        {"name": "doneCount", "type": {"kind": "i64"}},
+        {"name": "banner", "type": {"kind": "bytes"}},
+        {"name": "selected", "type": {"kind": "optional", "inner": {"kind": "f64"}}},
+        {"name": "tasks", "type": {"kind": "slice", "elem": {"kind": "node", "name": "Task"}}},
+        {"name": "stampMs", "type": {"kind": "f64"}},
+        {"name": "draft", "type": {"kind": "bytes"}},
+        {"name": "canvasWidth", "type": {"kind": "i64"}},
+        {"name": "zoom", "type": {"kind": "f64"}},
+        {"name": "zoomWindowId", "type": {"kind": "f64"}},
+        {"name": "zoomFromBoard", "type": {"kind": "bool"}},
+        {"name": "dark", "type": {"kind": "bool"}},
+        {"name": "chromeTop", "type": {"kind": "f64"}},
+        {"name": "previewSurface", "type": {"kind": "i64"}}
+      ]},
+      {"name": "TextCaretMove", "fields": [
+        {"name": "direction", "type": {"kind": "enum", "name": "TextCaretDirection"}},
+        {"name": "extend", "type": {"kind": "bool"}}
+      ]},
+      {"name": "TextSelection", "fields": [
+        {"name": "anchor", "type": {"kind": "i64"}},
+        {"name": "focus", "type": {"kind": "i64"}}
+      ]},
+      {"name": "TextInputEvent_set_composition", "fields": [
+        {"name": "text", "type": {"kind": "bytes"}},
+        {"name": "cursor", "type": {"kind": "optional", "inner": {"kind": "i64"}}}
+      ]},
+      {"name": "Msg_zoomed", "fields": [
+        {"name": "factor", "type": {"kind": "f64"}},
+        {"name": "windowId", "type": {"kind": "f64"}},
+        {"name": "fromBoard", "type": {"kind": "bool"}}
+      ]},
+      {"name": "Msg_appearance_changed", "fields": [
+        {"name": "colorScheme", "type": {"kind": "enum", "name": "ColorScheme"}},
+        {"name": "reduceMotion", "type": {"kind": "bool"}},
+        {"name": "highContrast", "type": {"kind": "bool"}}
+      ]},
+      {"name": "ChromeInsets", "fields": [
+        {"name": "top", "type": {"kind": "f64"}},
+        {"name": "right", "type": {"kind": "f64"}},
+        {"name": "bottom", "type": {"kind": "f64"}},
+        {"name": "left", "type": {"kind": "f64"}}
+      ]},
+      {"name": "ChromeButtons", "fields": [
+        {"name": "x", "type": {"kind": "f64"}},
+        {"name": "y", "type": {"kind": "f64"}},
+        {"name": "width", "type": {"kind": "f64"}},
+        {"name": "height", "type": {"kind": "f64"}}
+      ]},
+      {"name": "Msg_chrome_changed", "fields": [
+        {"name": "insets", "type": {"kind": "value", "name": "ChromeInsets"}},
+        {"name": "buttons", "type": {"kind": "value", "name": "ChromeButtons"}},
+        {"name": "tabsProjected", "type": {"kind": "bool"}}
+      ]}
+    ],
+    "enums": [
+      {"name": "Filter", "members": ["all", "open", "done"]},
+      {"name": "TextCaretDirection", "members": ["previous", "next", "previous_word", "next_word", "start", "end"]},
+      {"name": "ColorScheme", "members": ["light", "dark"]}
+    ],
+    "unions": [
+      {"name": "TextInputEvent", "arms": [
+        {"name": "insert_text", "payload": {"kind": "bytes"}},
+        {"name": "delete_backward", "payload": {"kind": "void"}},
+        {"name": "delete_forward", "payload": {"kind": "void"}},
+        {"name": "delete_word_backward", "payload": {"kind": "void"}},
+        {"name": "delete_word_forward", "payload": {"kind": "void"}},
+        {"name": "clear", "payload": {"kind": "void"}},
+        {"name": "move_caret", "payload": {"kind": "value", "name": "TextCaretMove"}},
+        {"name": "set_selection", "payload": {"kind": "value", "name": "TextSelection"}},
+        {"name": "set_composition", "payload": {"kind": "value", "name": "TextInputEvent_set_composition"}},
+        {"name": "commit_composition", "payload": {"kind": "void"}},
+        {"name": "cancel_composition", "payload": {"kind": "void"}}
+      ]}
+    ]
+  },
+  "model": "Model",
+  "model_helpers": [],
+  "model_unbound": [],
+  "msg": {
+    "name": "Msg",
+    "arms": [
+      {"name": "add", "payload": {"kind": "void"}},
+      {"name": "toggle", "payload": {"kind": "number", "class": "i64"}},
+      {"name": "pick", "payload": {"kind": "number", "class": "f64"}},
+      {"name": "cycle", "payload": {"kind": "void"}},
+      {"name": "clear", "payload": {"kind": "void"}},
+      {"name": "stamp", "payload": {"kind": "void"}},
+      {"name": "stamped", "payload": {"kind": "number", "class": "f64"}},
+      {"name": "draft_edit", "payload": {"kind": "union", "name": "TextInputEvent"}},
+      {"name": "canvas_resized", "payload": {"kind": "number", "class": "i64"}},
+      {"name": "zoomed", "payload": {"kind": "record", "name": "Msg_zoomed"}},
+      {"name": "appearance_changed", "payload": {"kind": "record", "name": "Msg_appearance_changed"}},
+      {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}},
+      {"name": "banner_set", "payload": {"kind": "bytes"}}
+    ],
+    "unbound": []
+  },
+  "init_returns_cmd": false,
+  "update_returns_cmd": true,
+  "has_subscriptions": false,
+  "channels": {
+    "command_msg": false,
+    "frame_msg": true,
+    "key_msg": true,
+    "pinch_msg": true,
+    "appearance_msg": "appearance_changed",
+    "chrome_msg": "chrome_changed",
+    "env_msgs": [
+      {"env": "TS_BOARD_BANNER", "msg": "banner_set"}
+    ]
+  },
+  "abi": {
+    "prefix": "nsc_core_",
+    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "boot_cmd",
+      "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes",
+      "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input",
+      "dispatch_scroll_state", "subscriptions", "frame_reset", "model_snapshot",
+      "helper_call", "collect", "frame_msg", "key_msg", "pinch_msg"],
+    "snapshot_format": 1
+  },
+  "integer_slots": [
+    {"slot": "Task.id", "class": "i64"},
+    {"slot": "Model.nextId", "class": "i64"},
+    {"slot": "Model.doneCount", "class": "i64"},
+    {"slot": "Model.canvasWidth", "class": "i64"},
+    {"slot": "Model.previewSurface", "class": "i64"},
+    {"slot": "TextSelection.anchor", "class": "i64"},
+    {"slot": "TextSelection.focus", "class": "i64"},
+    {"slot": "TextInputEvent_set_composition.cursor", "class": "i64"},
+    {"slot": "Msg.toggle", "class": "i64"},
+    {"slot": "Msg.canvas_resized", "class": "i64"}
+  ],
+  "deterministic": true,
+  "async_free": true
+}
