@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     // lexically normalized (cwd-resolved, `.`/`..` folded) — filesystem
     // identities beyond spelling (symlinks, hard links) stay the
     // caller's responsibility.
-    const input_resolved = try std.fs.path.resolve(arena, &.{input});
+    const input_resolved = try canonicalSpelling(init.io, arena, input);
     // The staging PREFIX spellings join the checked set: outputs land
     // by rename from exclusively-created `<path>.corewire-tmp.<nonce>`
     // files, and a sidecar sitting on the prefix spelling is close
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     var resolved: [paths.len]?[]const u8 = @splat(null);
     for (paths, 0..) |maybe_path, path_index| {
         const path = maybe_path orelse continue;
-        resolved[path_index] = try std.fs.path.resolve(arena, &.{path});
+        resolved[path_index] = try canonicalSpelling(init.io, arena, path);
     }
     for (resolved, 0..) |maybe_path, path_index| {
         const path = maybe_path orelse continue;
@@ -179,7 +179,13 @@ pub fn main(init: std.process.Init) !void {
     // aimed at ONE output path are the caller's serialization to
     // provide (the build graph never shares output directories between
     // steps).
-    const shim_staged: ?[]const u8 = if (out_path) |out| try stageOutput(init, stderr, out, generated) else null;
+    const shim_staged: ?[]const u8 = if (out_path) |out|
+        stageOutput(init, stderr, out, generated) catch |err| switch (err) {
+            error.Staging => std.process.exit(1),
+            else => return err,
+        }
+    else
+        null;
     const facade_staged: ?[]const u8 = if (facade_path) |out| blk: {
         // The shim staging file exists now, so a filesystem-level alias
         // of the two output paths (Unicode case folding, links) gets one
@@ -192,7 +198,15 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(2);
             }
         }
-        break :blk try stageOutput(init, stderr, out, facade.?);
+        break :blk stageOutput(init, stderr, out, facade.?) catch |err| switch (err) {
+            error.Staging => {
+                // The sibling projection was already staged; leave no
+                // stray staging file behind the failure.
+                if (shim_staged) |staged| std.Io.Dir.cwd().deleteFile(init.io, staged) catch {};
+                std.process.exit(1);
+            },
+            else => return err,
+        };
     } else null;
 
     var committed_shim = false;
@@ -220,6 +234,32 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// A path spelling fit for alias comparison: the deepest EXISTING
+/// ancestor directory resolves canonically (symlinked or case-folded
+/// parents land on one spelling), and the not-yet-existing tail rides
+/// verbatim — so two spellings of one future file compare equal even
+/// before the file exists.
+fn canonicalSpelling(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const resolved = try std.fs.path.resolve(arena, &.{path});
+    var head: []const u8 = resolved;
+    var tail: []const u8 = "";
+    while (head.len > 0) {
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.Io.Dir.cwd().realPathFile(io, head, &buffer)) |len| {
+            if (tail.len == 0) return arena.dupe(u8, buffer[0..len]);
+            return std.fs.path.join(arena, &.{ buffer[0..len], tail });
+        } else |_| {}
+        const parent = std.fs.path.dirname(head) orelse break;
+        const base = std.fs.path.basename(head);
+        tail = if (tail.len == 0)
+            base
+        else
+            try std.fs.path.join(arena, &.{ base, tail });
+        head = parent;
+    }
+    return resolved;
+}
+
 /// Whether two paths currently resolve to one existing file, by asking
 /// the filesystem for canonical paths: the alias net behind the lexical
 /// checks (Unicode case folding, symlinks — a canonical path is unique
@@ -240,7 +280,8 @@ fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
 /// file beside `out` and return its path; the caller commits by rename.
 /// Exclusive creation can never truncate an existing entry (whatever it
 /// links to), and the unique suffix keeps concurrent invocations off
-/// each other's bytes.
+/// each other's bytes. Failures print their teaching and return
+/// error.Staging so the caller can delete sibling staging files.
 fn stageOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) ![]const u8 {
     if (std.fs.path.dirname(out)) |dir| {
         std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
@@ -252,7 +293,7 @@ fn stageOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, 
     const staging = std.Io.Dir.cwd().createFile(init.io, temp_path, .{ .exclusive = true }) catch |err| {
         try stderr.print("corewire: cannot stage {s}: {t}\n", .{ temp_path, err });
         try stderr.flush();
-        std.process.exit(1);
+        return error.Staging;
     };
     var write_failed = false;
     {
@@ -270,7 +311,7 @@ fn stageOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, 
         std.Io.Dir.cwd().deleteFile(init.io, temp_path) catch {};
         try stderr.print("corewire: cannot write {s}\n", .{temp_path});
         try stderr.flush();
-        std.process.exit(1);
+        return error.Staging;
     }
     return temp_path;
 }
