@@ -154,6 +154,34 @@ const FacadeEmitter = struct {
                 self.diags.flag("msg.arms", "arm \"{s}\" cannot join the facade's constructor names (nsc_core_msg_<arm>); use identifier characters in the core source", .{arm.name});
             }
         }
+        // The subset records identifier-named properties only (a quoted
+        // member has no accepted spelling), and a one-member
+        // string-literal union is not a union node, so neither construct
+        // can be authored in the source language the facade projects to.
+        for (self.sidecar.types.structs) |entry| {
+            for (entry.fields) |field| {
+                if (!isBareProperty(field.name)) {
+                    self.diags.flag("types", "field \"{s}\" is not an identifier-named property, which the projected subset cannot declare; rename it in the core source", .{field.name});
+                }
+            }
+        }
+        for (self.sidecar.msg.arms) |arm| {
+            switch (arm.payload) {
+                .number_bytes => |desc| {
+                    for ([_][]const u8{ desc.number_field, desc.bytes_field }) |field_name| {
+                        if (!isBareProperty(field_name)) {
+                            self.diags.flag("msg.arms", "field \"{s}\" is not an identifier-named property, which the projected subset cannot declare; rename it in the core source", .{field_name});
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        for (self.sidecar.types.enums) |entry| {
+            if (entry.members.len < 2) {
+                self.diags.flag("types", "enum \"{s}\" has one member — a single string literal is not a union in the projected subset, so no source can author it; give the state a second member or fold it away in the core source", .{entry.name});
+            }
+        }
         const facade_decls = [_][]const u8{ "initialModel", "update", "viewUnbound", "asciiBytes", "NscfContractError", "NSCF_POW" };
         // Field names join the fence only for the reserved nsc name
         // space (they may otherwise be anything, quoted if exotic):
@@ -1080,6 +1108,14 @@ fn tsParam(arena: std.mem.Allocator, name: []const u8, index: usize) error{OutOf
     // The fallback lives in the fenced nsc name space, so it can never
     // collide with an authored sibling field's spelling.
     return std.fmt.allocPrint(arena, "nscf_arg{d}", .{index});
+}
+
+/// A property name the subset can declare bare (reserved words are
+/// legal property spellings; quoting is not accepted).
+fn isBareProperty(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] >= '0' and name[0] <= '9') return false;
+    return isIdentifierFragment(name);
 }
 
 fn isIdentifierFragment(name: []const u8) bool {
