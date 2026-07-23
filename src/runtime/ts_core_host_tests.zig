@@ -1758,11 +1758,35 @@ test "a stale wire key's verbs never touch a playback the bridge did not load" {
     Host.dispatch(fx, .vmute_it);
     try std.testing.expect(!fx.videoSnapshot().muted);
 
+    // Volume is gated too while a FOREIGN playback is live: its
+    // volume is not this key's to move.
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 1.0), fx.videoSnapshot().volume);
+
     // Stop retires the entry and cancels the entry's OWN stream, but
     // the playback on the channel — someone else's — survives.
     Host.dispatch(fx, .vstop_it);
     try std.testing.expect(fx.videoSnapshot().active);
     try std.testing.expect(fx.videoSnapshot().playing);
+}
+
+test "volume set after a failed load is remembered for the retry" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // The load fails and resets the channel; the handler sets the
+    // volume before retrying. Volume is a remembered preference the
+    // next load re-applies, and with the channel idle there is no
+    // other caller's playback to protect — the command must land.
+    Host.dispatch(fx, .vload);
+    try fx.feedVideoEvent(.failed, 0, 0, false, false, 0, 0);
+    Host.drain(fx);
+    try std.testing.expect(!fx.videoSnapshot().active);
+    Host.dispatch(fx, .vvol_it);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.videoSnapshot().volume);
+    Host.dispatch(fx, .vload);
+    try std.testing.expectEqual(@as(f32, 0.25), fx.pendingVideo().?.volume);
 }
 
 test "stop cancels the stream: staged terminals never outlive it" {

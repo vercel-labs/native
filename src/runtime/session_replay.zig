@@ -267,6 +267,13 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .video and videoRecordShapeDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: video record for key {d} claims .{s} with motion or geometry the recorder never writes on that kind - terminals deliver with playing and buffering false and no dimensions, and a completion pins position to the duration, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effect.kind == .video_load and videoLoadOutcomeDamaged(effect)) {
                     std.debug.print(
                         "replay refused after event {d}: video load record for key {d} claims outcome .{s} - the recorder stamps .loaded on a resolved cascade and .failed on a refusal, nothing else, so the journal is damaged or hand-edited; re-record the session\n",
@@ -480,6 +487,24 @@ fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
 fn videoRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
     if (record.video_kind == .rejected) return record.video_token != 0;
     return record.video_token == 0;
+}
+
+/// Recorder truth for a `.video` record's payload SHAPE, per kind:
+/// `.failed` and `.rejected` deliver with playing and buffering false
+/// (the terminal resolution forces the flags) and no dimensions (no
+/// failure path ever measured a frame); `.completed` pins position to
+/// the duration with the flags false. A record violating these can
+/// only be hand-edited — and a synchronously failed load's record has
+/// no platform event behind it to cross-check at the pairing, so the
+/// gate is where the impossible payload refuses.
+fn videoRecordShapeDamaged(record: journal.EffectResultRecord) bool {
+    return switch (record.video_kind) {
+        .failed, .rejected => record.video_playing or record.video_buffering or
+            record.video_width != 0 or record.video_height != 0,
+        .completed => record.video_playing or record.video_buffering or
+            record.video_position_ms != record.video_duration_ms,
+        .loaded, .position => false,
+    };
 }
 
 fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {

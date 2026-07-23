@@ -1394,8 +1394,19 @@ pub fn TsCoreHost(comptime core: type) type {
             // bridge never issued (a declarative <video>): transport
             // verbs act only while the entry's own stream is the
             // playback on the channel — anything else is a stale key
-            // and no-ops, the idle rule.
-            if (fx.videoOwnerToken() != video_entry.token) return;
+            // and no-ops, the idle rule. VOLUME is the one exception
+            // with the channel IDLE: it is a remembered preference the
+            // next load re-applies (a failed load's handler routinely
+            // sets it before retrying), and with nobody's playback on
+            // the channel there is nothing to protect — a FOREIGN live
+            // playback still gates it, its volume is not this key's to
+            // move.
+            if (fx.videoOwnerToken() != video_entry.token) {
+                if (verb == 4 and fx.videoOwnerToken() == 0) {
+                    fx.setVideoVolume(@floatCast(value));
+                }
+                return;
+            }
             switch (verb) {
                 0 => fx.playVideo(),
                 1 => fx.pauseVideo(),
