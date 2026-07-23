@@ -6467,15 +6467,15 @@ pub fn Effects(comptime Msg: type) type {
                 return error.ReplayDamagedRecord;
             }
             // The delivered drop count is the fed (transport-reported)
-            // count PLUS the refusals the fake itself already counted
-            // (an oversized write against a fake increments
-            // `slot.dropped_writes` exactly like the live admission
-            // path) — the counted-refusal contract holds for scripted
-            // sessions too, without every test re-deriving the tally.
+            // count PLUS the refusals the fake itself counted onto the
+            // slot (an oversized write, or a write after this exit was
+            // staged — both mirror the live admission path). The fold
+            // happens AT DELIVERY, the live staged-exit drain's rule, so
+            // a refusal between this feed and the drain still lands in
+            // the delivered tally; the entry carries only the fed count.
             // Under session replay the slot count is always zero
             // (replay-mode writes never reach the fake admission path),
             // so a replayed exit delivers exactly the journaled count.
-            const total_dropped = dropped_writes +| slot.dropped_writes;
             const start_failure = reason == .rejected or reason == .spawn_failed;
             if (start_failure) {
                 // A start failure the recorded spawn produced at
@@ -6502,7 +6502,7 @@ pub fn Effects(comptime Msg: type) type {
                         .code = norm_code,
                         .reason = reason,
                         .signal = norm_signal,
-                        .dropped_writes = total_dropped,
+                        .dropped_writes = dropped_writes,
                     },
                     .pty_fn = slot.on_event,
                     .regenerates = false,
@@ -6520,7 +6520,7 @@ pub fn Effects(comptime Msg: type) type {
                 .code = norm_code,
                 .reason = reason,
                 .pty_signal = norm_signal,
-                .pty_dropped_writes = total_dropped,
+                .pty_dropped_writes = dropped_writes,
             };
             if (!self.enqueue(&entry)) return error.EffectQueueFull;
             // One terminal per spawn, on every fake — not just replay
@@ -6744,6 +6744,15 @@ pub fn Effects(comptime Msg: type) type {
         /// journaled verdict records.
         fn ptyWriteAdmit(slot: *PtySlot, bytes: []const u8) bool {
             if (slot.fake) {
+                // The fed exit is staged (one terminal per spawn, marked
+                // `.terminated`): the session is already over, so a late
+                // write refuses and counts — the LIVE admission path's
+                // staged-exit rule, mirrored so scripted sessions report
+                // the same dropped tally a real transport would.
+                if (slot.park_state == .terminated) {
+                    slot.dropped_writes +|= 1;
+                    return false;
+                }
                 if (bytes.len > max_effect_pty_write_bytes) {
                     slot.dropped_writes +|= 1;
                     return false;
@@ -8822,10 +8831,16 @@ pub fn Effects(comptime Msg: type) type {
                         .pty => |entry| {
                             // A fed park-retiring start failure frees
                             // its parked slot before the Msg reaches
-                            // update — the channel discipline.
+                            // update — the channel discipline. The drop
+                            // count folds in the slot's own tally AT
+                            // DELIVERY (the live staged-exit drain's
+                            // rule): a write refused after the feed
+                            // still lands in the delivered count.
+                            var event = entry.event;
                             if (entry.retire_slot) |slot_index| {
                                 const parked = &self.pty_slots[slot_index];
                                 if (parked.state != .idle and parked.generation == entry.retire_generation) {
+                                    event.dropped_writes +|= parked.dropped_writes;
                                     self.retirePtySlot(parked);
                                 }
                             }
@@ -8840,16 +8855,16 @@ pub fn Effects(comptime Msg: type) type {
                             // keep `truncated = false` and feed.
                             self.journalNote(.{
                                 .kind = .pty,
-                                .key = entry.event.key,
-                                .pty_kind = entry.event.kind,
-                                .code = entry.event.code,
-                                .exit_reason = entry.event.reason,
-                                .pty_signal = entry.event.signal,
-                                .pty_dropped_writes = entry.event.dropped_writes,
+                                .key = event.key,
+                                .pty_kind = event.kind,
+                                .code = event.code,
+                                .exit_reason = event.reason,
+                                .pty_signal = event.signal,
+                                .pty_dropped_writes = event.dropped_writes,
                                 .truncated = entry.regenerates,
                             });
                             const pty_fn = entry.pty_fn orelse continue;
-                            return pty_fn(entry.event);
+                            return pty_fn(event);
                         },
                         .staged => |msg| {
                             // Deliberately NO journal record: a
@@ -9332,6 +9347,14 @@ pub fn Effects(comptime Msg: type) type {
                         const pty_slot = &self.pty_slots[entry.slot_index];
                         if (pty_slot.state == .idle or entry.channel_generation != pty_slot.generation) continue;
                         const on_event = pty_slot.on_event;
+                        // The delivered drop count reads AT DELIVERY, the
+                        // live staged-exit drain's rule: a write refused
+                        // AFTER the exit was fed (and counted onto the
+                        // slot) still lands in the delivered tally.
+                        // Captured before retire resets the slot. Under
+                        // replay the slot count is always zero, so the
+                        // journaled count delivers verbatim.
+                        const slot_dropped = pty_slot.dropped_writes;
                         if (entry.pty_kind == .exit) self.retirePtySlot(pty_slot);
                         const bytes: []const u8 = if (self.drain_heap_line) |heap|
                             heap[0..entry.line_len]
@@ -9344,7 +9367,10 @@ pub fn Effects(comptime Msg: type) type {
                             .code = entry.code,
                             .reason = entry.reason,
                             .signal = entry.pty_signal,
-                            .dropped_writes = entry.pty_dropped_writes,
+                            .dropped_writes = if (entry.pty_kind == .exit)
+                                entry.pty_dropped_writes +| slot_dropped
+                            else
+                                entry.pty_dropped_writes,
                         };
                         self.journalNote(.{
                             .kind = .pty,

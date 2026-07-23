@@ -394,6 +394,24 @@ test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {
     }
 }
 
+test "a write after the fed exit is staged refuses and counts - the live rule on fakes" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.ptySpawn(.{ .key = 58, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+    try testing.expect(fx.ptyWrite(58, "before"));
+    try fx.feedPtyExit(58, 0, 0, .exited, 0);
+    // The exit is staged but undelivered: the session is already over,
+    // so the write refuses (never a silent acceptance the real
+    // transport would have rejected) AND lands in the delivered tally —
+    // the delivery-time fold reads the slot's count, the same rule the
+    // live staged-exit drain follows.
+    try testing.expect(!fx.ptyWrite(58, "late"));
+    const exit = try expectExit(&fx, 58, .exited);
+    try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
+}
+
 test "a fake pty refuses a second feed after its exit is queued" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
