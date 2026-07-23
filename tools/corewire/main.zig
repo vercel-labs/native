@@ -221,6 +221,16 @@ pub fn main(init: std.process.Init) !void {
         committed_shim = true;
     }
     if (facade_path) |out| {
+        // The shim now EXISTS, so aliases no spelling check can see
+        // (filesystem Unicode normalization above all) finally resolve:
+        // a facade target that reaches the just-committed shim refuses
+        // instead of replacing it.
+        if (committed_shim and sameExistingFile(init.io, out, out_path.?)) {
+            std.Io.Dir.cwd().deleteFile(init.io, facade_staged.?) catch {};
+            try stderr.print("corewire: --facade {s} resolves to the file --out just wrote — the second projection would overwrite the first\n", .{out});
+            try stderr.flush();
+            std.process.exit(2);
+        }
         std.Io.Dir.cwd().rename(facade_staged.?, std.Io.Dir.cwd(), out, init.io) catch |err| {
             std.Io.Dir.cwd().deleteFile(init.io, facade_staged.?) catch {};
             if (committed_shim) {
@@ -234,30 +244,44 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// A path spelling fit for alias comparison: the deepest EXISTING
-/// ancestor directory resolves canonically (symlinked or case-folded
-/// parents land on one spelling), and the not-yet-existing tail rides
-/// verbatim — so two spellings of one future file compare equal even
+/// A path spelling fit for alias comparison: components canonicalize
+/// one at a time against the filesystem, so `..` applies to the REAL
+/// parent (never lexically across a symlink), symlinked or case-folded
+/// ancestors land on one spelling, and a not-yet-existing tail rides
+/// verbatim — two spellings of one future file compare equal even
 /// before the file exists.
 fn canonicalSpelling(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const resolved = try std.fs.path.resolve(arena, &.{path});
-    var head: []const u8 = resolved;
-    var tail: []const u8 = "";
-    while (head.len > 0) {
-        var buffer: [std.fs.max_path_bytes]u8 = undefined;
-        if (std.Io.Dir.cwd().realPathFile(io, head, &buffer)) |len| {
-            if (tail.len == 0) return arena.dupe(u8, buffer[0..len]);
-            return std.fs.path.join(arena, &.{ buffer[0..len], tail });
-        } else |_| {}
-        const parent = std.fs.path.dirname(head) orelse break;
-        const base = std.fs.path.basename(head);
-        tail = if (tail.len == 0)
-            base
-        else
-            try std.fs.path.join(arena, &.{ base, tail });
-        head = parent;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    // The canonical base: cwd for relative paths, the root for absolute.
+    var base: []const u8 = if (std.fs.path.isAbsolute(path))
+        try arena.dupe(u8, "/")
+    else blk: {
+        const len = std.Io.Dir.cwd().realPath(io, &buffer) catch break :blk try arena.dupe(u8, ".");
+        break :blk try arena.dupe(u8, buffer[0..len]);
+    };
+    var exists = true;
+    var components = std.mem.tokenizeScalar(u8, path, std.fs.path.sep);
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            // `base` carries no symlinks once canonical, so its lexical
+            // parent IS its real parent; a `..` under a nonexistent
+            // tail unwinds the tail it just added.
+            base = std.fs.path.dirname(base) orelse base;
+            continue;
+        }
+        const candidate = try std.fs.path.join(arena, &.{ base, component });
+        if (exists) {
+            if (std.Io.Dir.cwd().realPathFile(io, candidate, &buffer)) |len| {
+                base = try arena.dupe(u8, buffer[0..len]);
+                continue;
+            } else |_| {
+                exists = false;
+            }
+        }
+        base = candidate;
     }
-    return resolved;
+    return base;
 }
 
 /// Whether two paths currently resolve to one existing file, by asking

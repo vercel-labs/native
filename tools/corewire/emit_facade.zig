@@ -85,6 +85,7 @@ const FacadeEmitter = struct {
     out: std.ArrayListUnmanaged(u8),
     inlined: []const []const u8 = &.{},
     sample_ordinal: usize = 0,
+    sample_slice_depth: usize = 0,
 
     /// The projection's spelling for a table name: the compile profile
     /// designates the root exports `Model` and `Msg` by exact name (the
@@ -645,8 +646,14 @@ const FacadeEmitter = struct {
             .void => try out.appendSlice(self.arena, "undefined"),
             .optional => |inner| try self.sampleValue(out, inner.*, depth),
             .slice => |elem| {
+                // Two elements at the outermost level exercise ordering;
+                // nested levels take one so deeply nested sequence types
+                // stay linear in the emitted text.
+                const element_count: usize = if (self.sample_slice_depth == 0) 2 else 1;
+                self.sample_slice_depth += 1;
+                defer self.sample_slice_depth -= 1;
                 try out.appendSlice(self.arena, "[\n");
-                for (0..2) |_| {
+                for (0..element_count) |_| {
                     try out.appendSlice(self.arena, try self.indentText(depth + 1));
                     try self.sampleValue(out, elem.*, depth + 1);
                     try out.appendSlice(self.arena, ",\n");
