@@ -90,6 +90,7 @@ const Emitter = struct {
 
     fn run(self: *Emitter) Error!void {
         try self.validateEmissionNames();
+        self.validateChannelShapes();
         if (self.diags.hasErrors()) return;
         self.inlined = try self.inlinedNames();
         try self.header();
@@ -180,6 +181,106 @@ const Emitter = struct {
                 }
             }
         }
+    }
+
+    // ------------------------------------------- channel arm shapes
+    //
+    // The appearance and chrome channels have no function entry point:
+    // the host constructs the named arm's record itself, so the arm
+    // must carry the exact structural vocabulary the adapter builds by
+    // field name. The adapter re-proves this at comptime over the
+    // mirror; checking here moves the teaching to tool time instead of
+    // a compile error inside generated wiring.
+
+    fn validateChannelShapes(self: *Emitter) void {
+        if (self.sidecar.channels.appearance_msg) |arm_name| {
+            const teaching = "the appearance arm must carry exactly {{ colorScheme: a light/dark enum, reduceMotion: bool, highContrast: bool }} — the host builds this record by field name";
+            const record = self.channelArmRecord(arm_name) orelse {
+                self.diags.flag("channels.appearance_msg", teaching, .{});
+                return;
+            };
+            if (!self.isAppearanceRecord(record)) {
+                self.diags.flag("channels.appearance_msg", teaching, .{});
+            }
+        }
+        if (self.sidecar.channels.chrome_msg) |arm_name| {
+            const teaching = "the chrome arm must carry exactly {{ insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool }} — the host builds this record by field name";
+            const record = self.channelArmRecord(arm_name) orelse {
+                self.diags.flag("channels.chrome_msg", teaching, .{});
+                return;
+            };
+            if (!self.isChromeRecord(record)) {
+                self.diags.flag("channels.chrome_msg", teaching, .{});
+            }
+        }
+    }
+
+    fn channelArmRecord(self: *Emitter, arm_name: []const u8) ?*const sidecar_mod.Struct {
+        const arm = sidecar_mod.findArm(self.sidecar.msg, arm_name) orelse return null;
+        return switch (arm.payload) {
+            .record => |name| sidecar_mod.findStruct(self.sidecar.types, name),
+            else => null,
+        };
+    }
+
+    fn isAppearanceRecord(self: *Emitter, record: *const sidecar_mod.Struct) bool {
+        if (record.fields.len != 3) return false;
+        var scheme_ok = false;
+        var reduce_ok = false;
+        var contrast_ok = false;
+        for (record.fields) |field| {
+            if (std.mem.eql(u8, field.name, "colorScheme")) {
+                const members = switch (field.type) {
+                    .enum_ref => |name| (sidecar_mod.findEnum(self.sidecar.types, name) orelse return false).members,
+                    else => return false,
+                };
+                if (members.len != 2) return false;
+                var light = false;
+                var dark = false;
+                for (members) |member| {
+                    if (std.mem.eql(u8, member, "light")) light = true;
+                    if (std.mem.eql(u8, member, "dark")) dark = true;
+                }
+                scheme_ok = light and dark;
+            } else if (std.mem.eql(u8, field.name, "reduceMotion")) {
+                reduce_ok = field.type == .bool;
+            } else if (std.mem.eql(u8, field.name, "highContrast")) {
+                contrast_ok = field.type == .bool;
+            }
+        }
+        return scheme_ok and reduce_ok and contrast_ok;
+    }
+
+    fn isChromeRecord(self: *Emitter, record: *const sidecar_mod.Struct) bool {
+        if (record.fields.len != 3) return false;
+        var insets_ok = false;
+        var buttons_ok = false;
+        var tabs_ok = false;
+        for (record.fields) |field| {
+            if (std.mem.eql(u8, field.name, "insets")) {
+                insets_ok = self.isNumericRecord(field.type, &.{ "top", "right", "bottom", "left" });
+            } else if (std.mem.eql(u8, field.name, "buttons")) {
+                buttons_ok = self.isNumericRecord(field.type, &.{ "x", "y", "width", "height" });
+            } else if (std.mem.eql(u8, field.name, "tabsProjected")) {
+                tabs_ok = field.type == .bool;
+            }
+        }
+        return insets_ok and buttons_ok and tabs_ok;
+    }
+
+    fn isNumericRecord(self: *Emitter, ref: TypeRef, names: []const []const u8) bool {
+        const record = self.recordOf(ref) orelse return false;
+        if (record.fields.len != names.len) return false;
+        outer: for (names) |name| {
+            for (record.fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) {
+                    if (!isNumericRef(field.type)) return false;
+                    continue :outer;
+                }
+            }
+            return false;
+        }
+        return true;
     }
 
     fn allTableNames(self: *Emitter) Error![]const []const u8 {
@@ -1078,6 +1179,8 @@ fn ident(name: []const u8) Ident {
 
 fn isPlainIdentifier(name: []const u8) bool {
     if (name.len == 0) return false;
+    // `_` is the discard token, not a declarable identifier.
+    if (std.mem.eql(u8, name, "_")) return false;
     if (name[0] >= '0' and name[0] <= '9') return false;
     for (name) |char| {
         const ok = (char >= 'a' and char <= 'z') or (char >= 'A' and char <= 'Z') or
@@ -1373,6 +1476,33 @@ test "keywords and exotic names are quoted" {
     try testing.expect(!isPlainIdentifier("test"));
     try testing.expect(!isPlainIdentifier("u8"));
     try testing.expect(!isPlainIdentifier("1abc"));
+    try testing.expect(!isPlainIdentifier("_"));
+    try testing.expect(isPlainIdentifier("_x"));
     try testing.expect(isPlainIdentifier("super"));
     try testing.expect(isPlainIdentifier("chatScrollTop"));
+}
+
+test "an appearance channel on a wrong-shaped arm refuses with a teaching" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // An enum payload passes the schema's named-type-family rule (V9)
+    // but the host cannot build the appearance record into it.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"Phase\", \"members\": [\"a\", \"b\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"enum\", \"name\": \"Phase\"}}",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "\"appearance_msg\": null", "\"appearance_msg\": \"bump\"");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "colorScheme: a light/dark enum") != null) found = true;
+    }
+    try testing.expect(found);
 }
