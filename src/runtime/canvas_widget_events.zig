@@ -399,11 +399,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
-                    if (pointer_event.pointer.phase == .hover) {
+                    // A hover-phase move earns the proof UNLESS the host
+                    // stamped the event touch-sourced
+                    // (`platform.touch_pointer_id_bit`): Windows
+                    // synthesizes a mouse-shaped move for every tap, and
+                    // that fake float must never make touch hoverable.
+                    const touch_sourced = pointer_event.pointer.pointer_id & platform.touch_pointer_id_bit != 0;
+                    if (pointer_event.pointer.phase == .hover and !touch_sourced) {
                         self.views[index].canvas_widget_hover_pointer_live = true;
                         self.views[index].canvas_widget_hover_pointer_id = pointer_event.pointer.pointer_id;
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                     } else if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                     }
                 },
@@ -412,6 +420,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_pressed_id = target_id;
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
                     if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
                     }
                 },
@@ -420,6 +429,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
                     if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
                         self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                     }
                 },
@@ -437,7 +447,18 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         self.views[index].canvas_widget_hover_pointer_live = false;
                     }
                 },
-                .wheel => {},
+                .wheel => {
+                    // The proven pointer's wheel carries its CURRENT
+                    // position: refresh the chain's re-hit anchor before
+                    // the scroll reconcile resolves against it, so a
+                    // wheel arriving ahead of its coalesced motion event
+                    // still derives containment from where the pointer
+                    // really is (the wash resolves from this same wheel
+                    // point).
+                    if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                    }
+                },
             }
 
             // Hover-detail chrome (chart cursor + floating card) tracks

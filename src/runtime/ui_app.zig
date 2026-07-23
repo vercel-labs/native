@@ -902,6 +902,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// dispatches must not drain recursively through `dispatch`'s
         /// tail.
         hover_msg_draining: bool = false,
+        /// Nonzero while `eventFn` is on the stack: `dispatch` and
+        /// `drainEffects` tails drain hover edges only for DIRECT
+        /// callers (embedders, command handlers, tests) — inside a
+        /// runtime event, draining belongs to the event's own tail so
+        /// hover dispatches can never rebuild a view out from under the
+        /// input cycle's pending scroll/resize/change observations.
+        hover_msg_event_depth: u32 = 0,
         /// Context-menu presentation fallback state: the widget whose
         /// declared menu is mounted as an anchored canvas surface because
         /// the platform could not present it natively. Set by
@@ -1347,15 +1354,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // events land before the first frame on every launch, so it
             // used to cost a full view build on the launch path.
             if (!self.installed) return;
-            try self.rebuild(runtime, self.canvas_window_id);
-            try self.rebuildWindowSlots(runtime);
-            // Hover edges the rebuilds above produced (an unmounted
-            // hovered element's leave, an adoption re-hit-test's
-            // handoff) settle here too, so DIRECT dispatches — command
-            // handlers, embedders, tests — deliver them without waiting
-            // for the next platform event. The drain's own dispatches
-            // re-enter through this tail and are guarded.
-            if (!self.hover_msg_draining) try self.drainHoverMsgs(runtime);
+            // Hover edges the rebuilds produce (an unmounted hovered
+            // element's leave, an adoption re-hit-test's handoff)
+            // settle at this tail for DIRECT callers — command
+            // handlers, embedders, tests — without waiting for the
+            // next platform event, and on the REBUILD-ERROR path too:
+            // a failed secondary-window rebuild must not strand the
+            // leave the main rebuild already produced. Inside a runtime
+            // event the event's own tail drains instead, and the
+            // drain's own dispatches re-enter here guarded.
+            var rebuild_error: ?anyerror = null;
+            self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                rebuild_error = err;
+            };
+            if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                rebuild_error = err;
+            };
+            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
+                self.drainHoverMsgs(runtime) catch |err| {
+                    if (rebuild_error == null) rebuild_error = err;
+                };
+            }
+            if (rebuild_error) |err| return err;
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above (one model, every window's view derives
             // from it); `window_id` names the dispatch origin for apps
@@ -1399,9 +1419,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 dispatched = true;
             }
             self.publishAudioState(runtime);
+            var rebuild_error: ?anyerror = null;
             if (dispatched) {
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                    rebuild_error = err;
+                };
+                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                    rebuild_error = err;
+                };
             } else if (self.installed and
                 !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
             {
@@ -1410,13 +1435,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // the mirrors after the last build rendered them:
                 // re-render the chrome so its controls never keep
                 // advertising a playback that is gone.
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                    rebuild_error = err;
+                };
+                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                    rebuild_error = err;
+                };
             }
-            // Same tail as `dispatch`: effect-driven rebuilds settle
-            // the hover edges they produced (this path is also public —
-            // host-pumped embeds call it directly).
-            if (!self.hover_msg_draining) try self.drainHoverMsgs(runtime);
+            // Same tail as `dispatch`, same error-path duty: effect-
+            // driven rebuilds settle the hover edges they produced
+            // (this path is also public — host-pumped embeds call it
+            // directly).
+            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
+                self.drainHoverMsgs(runtime) catch |err| {
+                    if (rebuild_error == null) rebuild_error = err;
+                };
+            }
+            if (rebuild_error) |err| return err;
         }
 
         /// Mirror the effects channel's audio playback state into the
@@ -3425,22 +3460,61 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
-            // Hover enter/leave delivery rides the tail of EVERY
-            // runtime event: the standing chain moves during pointer
-            // routing, scroll reconciles (wheel, kinetic, drivers,
-            // keyboard), dismissals, and any rebuild the dispatches
-            // above performed — one drain seam catches them all, and
-            // replay re-runs the same events through the same seam.
-            // The drain runs on the handler's ERROR path too (the
-            // degraded-error doctrine): a failing handler must not
-            // strand edges the event already produced — a closed
-            // window's leave, a failed rebuild's prune — until some
-            // later event happens by.
+            self.hover_msg_event_depth += 1;
+            defer self.hover_msg_event_depth -= 1;
+            // Hover enter/leave delivery rides the tail of runtime
+            // events: the standing chain moves during pointer routing,
+            // scroll reconciles (wheel, kinetic, drivers, keyboard),
+            // dismissals, and any rebuild the dispatches above
+            // performed — the drain seam catches them all, and replay
+            // re-runs the same events through the same seam. The drain
+            // runs on the handler's ERROR path too (the degraded-error
+            // doctrine): a failing handler must not strand edges the
+            // event already produced — a closed window's leave, a
+            // failed rebuild's prune — until some later event happens
+            // by. Mid-cycle DERIVED widget events skip the drain (see
+            // `hoverDrainsAfterEvent`): their input cycle's terminal
+            // `gpu_surface_input` dispatch drains after the cycle's
+            // pending scroll/resize/change observations were delivered,
+            // so a hover Msg's rebuild can never unmount a view whose
+            // promised observation is still queued.
             handleRuntimeEvent(self, runtime, event_value) catch |err| {
-                self.drainHoverMsgs(runtime) catch {};
+                if (hoverDrainsAfterEvent(event_value)) self.drainHoverMsgs(runtime) catch {};
                 return err;
             };
-            try self.drainHoverMsgs(runtime);
+            if (hoverDrainsAfterEvent(event_value)) try self.drainHoverMsgs(runtime);
+        }
+
+        /// Whether the hover drain runs at this event's tail. Derived
+        /// widget events that only occur INSIDE a gpu-surface input
+        /// cycle defer to the cycle's terminal `gpu_surface_input`
+        /// dispatch — which always follows them, after the pending
+        /// scroll/resize/change drains. Scroll/resize/change events also
+        /// arrive standalone from the native-driver and kinetic paths;
+        /// those defer at most one frame (both paths run under an
+        /// actively pumping frame channel), which is the price of never
+        /// rebuilding mid-cycle. Dismiss events DO drain: the
+        /// automation/accessibility dismiss verb dispatches one
+        /// standalone, and a dismissal's own Msg rebuild already runs
+        /// before the cycle's pending drains, so draining here adds no
+        /// new hazard class. Everything else — commands, timers, wakes,
+        /// frames, the terminal input dispatch, native menu selections —
+        /// drains immediately.
+        fn hoverDrainsAfterEvent(event_value: Event) bool {
+            return switch (event_value) {
+                .canvas_widget_pointer,
+                .canvas_widget_keyboard,
+                .canvas_widget_drag,
+                .canvas_widget_file_drop,
+                .canvas_widget_context_press,
+                .canvas_widget_context_menu_request,
+                .canvas_widget_context_menu_shown,
+                .canvas_widget_scroll,
+                .canvas_widget_resize,
+                .canvas_widget_change,
+                => false,
+                else => true,
+            };
         }
 
         fn handleRuntimeEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
@@ -4084,9 +4158,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn capturedHoverLeaveMsg(self: *Self, position: usize, msg: MsgT) ?MsgT {
             _ = self.hover_msg_leave_arenas[position].reset(.free_all);
             return deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[position].allocator()) catch {
+                // A refused capture holds no bytes either: the partial
+                // copy is released with the arena before the fallback.
+                _ = self.hover_msg_leave_arenas[position].reset(.free_all);
                 ui_app_log.debug("hover-leave capture skipped: the payload cannot be owned (a single-item pointer shape, or allocation failed) - an unmount-driven leave for this element resolves from the live tree or degrades to silence", .{});
                 return null;
             };
+        }
+
+        /// Release a delivered capture's bytes: reset the slot arena and
+        /// clear the slot. Runs once the captured Msg was CONSUMED
+        /// (dispatch is synchronous), so a retired slot never retains a
+        /// large payload copy until some later hover happens to reuse
+        /// its depth.
+        fn releaseHoverLeaveCapture(self: *Self, position: usize) void {
+            self.hover_msg_leave_msgs[position] = null;
+            _ = self.hover_msg_leave_arenas[position].reset(.free_all);
         }
 
         /// Recursively copy a Msg value so it owns every byte it
@@ -4096,8 +4183,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// untagged unions) refuse rather than alias.
         fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator) anyerror!T {
             return switch (@typeInfo(T)) {
-                .void, .int, .float, .bool, .@"enum" => value,
+                .void, .int, .float, .bool, .@"enum", .vector, .error_set => value,
                 .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator) else null,
+                .error_union => |info| if (value) |payload| try deepCopyMsgValue(info.payload, payload, allocator) else |err| err,
                 .array => |info| blk: {
                     var out: T = undefined;
                     for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
@@ -4114,7 +4202,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     inline else => |payload, tag| @unionInit(T, @tagName(tag), try deepCopyMsgValue(@TypeOf(payload), payload, allocator)),
                 },
                 .pointer => |info| blk: {
-                    if (info.size != .slice or info.sentinel_ptr != null) return error.HoverCapturePayloadUnsupported;
+                    if (info.size != .slice) return error.HoverCapturePayloadUnsupported;
+                    if (comptime std.meta.sentinel(T)) |sentinel| {
+                        const out = try allocator.allocSentinel(info.child, sentinel, value.len);
+                        for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
+                        break :blk out;
+                    }
                     const out = try allocator.alloc(info.child, value.len);
                     for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator);
                     break :blk out;
@@ -4257,6 +4350,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
             self.hover_msg_chain_len = standing_len;
+            const retired_len = prefix + leave_count;
             for (prefix..standing_len) |position| self.hover_msg_leave_msgs[position] = null;
 
             // Deliver: leaves innermost-first, then enters
@@ -4280,6 +4374,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     if (first_error == null) first_error = err;
                 };
             }
+            // Every leave Msg above was consumed synchronously: retired
+            // slots release their captured payload bytes now instead of
+            // holding them until some later hover reuses the depth;
+            // entering slots reset again as they re-capture below.
+            for (prefix..retired_len) |position| self.releaseHoverLeaveCapture(position);
             for (standing_chain[prefix..standing_len], prefix..) |id, position| {
                 // Resolve from the LIVE tree per edge: an earlier edge
                 // in this batch may have rebuilt the view (payload
@@ -4290,7 +4389,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // dispatches, from the same tree that resolved it, so
                 // an enter whose own handler unmounts the element still
                 // has its leave to deliver.
-                const live = self.treeForViewLabel(standing_label) orelse break;
+                const live = self.treeForViewLabel(standing_label) orelse {
+                    // A failed rebuild cleared the tree mid-batch: keep
+                    // the not-yet-entered tail OUT of the mirror so the
+                    // next drain retries it once the tree returns (the
+                    // entering-with-no-tree deferral above then holds
+                    // the line instead of consuming enters as silence).
+                    self.hover_msg_chain_len = position;
+                    break;
+                };
                 const enter_msg = live.msgFor(id, .hover_enter);
                 if (live.msgFor(id, .hover_leave)) |leave_msg| {
                     self.hover_msg_leave_msgs[position] = self.capturedHoverLeaveMsg(position, leave_msg);

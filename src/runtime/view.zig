@@ -473,6 +473,14 @@ pub const RuntimeView = struct {
     /// only, so replay reproduces it.
     canvas_widget_hover_pointer_live: bool = false,
     canvas_widget_hover_pointer_id: u64 = 0,
+    /// The PROVEN pointer's last position — the anchor every point-blind
+    /// chain re-hit-test (scroll, adoption) resolves against, instead of
+    /// `canvas_last_pointer_position`, which any device updates: on a
+    /// host with a mouse and a touchscreen, a touch drag must not move
+    /// the re-hit anchor of the mouse's standing containment. Updated
+    /// only by the proven pointer's own events; meaningful while
+    /// `canvas_widget_hover_pointer_live` holds.
+    canvas_widget_hover_pointer_position: geometry.PointF = .{},
     /// Hover-intent state for ANCHORED tooltips — runtime-owned
     /// presentation chrome; the model never hears hover. `armed` is
     /// the tooltip whose trigger is hovered while its show delay runs;

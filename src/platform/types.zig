@@ -1718,11 +1718,28 @@ pub const GpuSurfaceInputKind = enum {
     pinch_end,
 };
 
+/// Reserved bit in `GpuSurfaceInputEvent.pointer_id`: a host that can
+/// identify a TOUCH-sourced pointer event stamps it (a
+/// `GDK_SOURCE_TOUCHSCREEN` device on GTK; a mouse message whose
+/// `GetMessageExtraInfo` carries the touch `MI_WP_SIGNATURE` on
+/// Windows, where the OS synthesizes mouse-shaped moves for taps), and
+/// the runtime's hover-Msg containment then refuses to treat that
+/// pointer as hover-capable — the mechanical backstop for the "touch
+/// never synthesizes hover" contract even where the OS fakes a hover
+/// move. Hosts that cannot identify the source leave ids unstamped;
+/// unstamped ids keep today's behavior. The bit rides the EXISTING id
+/// field, so journals and the input codec are unchanged.
+pub const touch_pointer_id_bit: u64 = 1 << 63;
+
 pub const GpuSurfaceInputEvent = struct {
     window_id: WindowId = 1,
     label: []const u8,
     kind: GpuSurfaceInputKind,
     timestamp_ns: u64 = 0,
+    /// Host pointer identity, when the host distinguishes pointers
+    /// (per-sequence touch ids, `WM_POINTER` ids); 0 on single-pointer
+    /// hosts. Touch-sourced events additionally carry
+    /// `touch_pointer_id_bit`.
     pointer_id: u64 = 0,
     x: f32 = 0,
     y: f32 = 0,

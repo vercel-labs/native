@@ -435,7 +435,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
                 if (self.canvas_widget_hover_pointer_live) {
-                    self.setCanvasWidgetHoverMsgChainForHit(raw);
+                    // The chain re-hits at the PROVEN pointer's own
+                    // anchor, never the passed point: the passed point
+                    // follows `canvas_last_pointer_position`, which any
+                    // device updates — a touch drag must not steer the
+                    // mouse's containment. On single-pointer hosts the
+                    // two are the same position.
+                    self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
                 } else {
                     self.pruneCanvasWidgetHoverMsgChain();
                 }

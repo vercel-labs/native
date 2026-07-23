@@ -5926,6 +5926,21 @@ test "touch-shaped input (down/up/drag without hover) never synthesizes hover ms
     try expectHoverLog(&app_state.model, &.{});
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
 
+    // A TOUCH-STAMPED hover-phase move (the mouse-shaped float Windows
+    // synthesizes for taps, marked by the host with the reserved
+    // pointer-id bit) earns no proof either: the fake float dispatches
+    // nothing and leaves no standing containment.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .pointer_id = zero_platform.touch_pointer_id_bit | 1,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
     // A hover-phase move proves a hover-capable pointer; from then on
     // clicks and drags keep full mouse fidelity.
     try hoverMove(harness, app, 50, 20);
