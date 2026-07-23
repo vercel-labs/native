@@ -690,6 +690,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             window_id: platform.WindowId = 0,
             on_close: ?MsgT = null,
             installed: bool = false,
+            /// This slot's handler-tree currency (the per-slot half of
+            /// `main_tree_current`): false only between handing the
+            /// runtime this window's new layout and adopting the
+            /// matching tree — so one window's failed publication never
+            /// poisons its siblings, and this window's own next
+            /// successful rebuild (a frame-driven retry included)
+            /// restores it.
+            tree_current: bool = true,
             /// The `<video src>` declaration the in-flight build pass
             /// recorded (arena-borrowed; consumed by
             /// `rebuildWindowSlot` immediately after the pass succeeds
@@ -928,7 +936,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// have moved and never otherwise. Captured leaves dispatch
         /// regardless: their Msgs are owned bytes, not tree lookups.
         main_tree_current: bool = true,
-        slot_trees_current: bool = true,
         build_generation: u64 = 0,
         /// The `build_generation` the mirror's captures were last
         /// refreshed against.
@@ -1640,20 +1647,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// window converges within the same rebuild instead of waiting
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
-            self.rebuildTree(runtime, window_id) catch |err| {
-                // The main handler tree may now disagree with the
-                // runtime's retained state (a failed build, or a failed
-                // publication after `self.tree` already moved): flag it
-                // stale so hover-Msg delivery defers entering edges
-                // until a rebuild lands (see `main_tree_current`).
-                self.main_tree_current = false;
-                return err;
-            };
-            self.main_tree_current = true;
-            self.build_generation +%= 1;
-        }
-
-        fn rebuildTree(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.syncModel(runtime, window_id);
             if (comptime features.runtime_markup) {
                 // Under automation, drive the interpreter from the first
@@ -1715,6 +1708,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const layout = built.layout;
             launch_timing.lapOnce("first_view_built");
 
+            // The INSTALL WINDOW: between handing the runtime the new
+            // layout and adopting the matching handler tree,
+            // `self.tree` and the runtime's retained state can disagree
+            // — a failure in between is the one place the main tree
+            // goes stale (see `main_tree_current`). A failure BEFORE it
+            // leaves the old, still-matching pair current; a failure
+            // AFTER it — animation scheduling, web panes, the status
+            // item — leaves a genuinely current pair, so hover enters
+            // keep flowing even when an idle app performs no further
+            // rebuild.
+            self.main_tree_current = false;
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
@@ -1727,6 +1731,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.tree = tree;
             self.arena_index = next_index;
             live_tree_reset = false;
+            self.main_tree_current = true;
+            self.build_generation +%= 1;
             // The build INSTALLED: its video declaration now speaks
             // for what the glass shows.
             self.commitStagedVideoDeclaration();
@@ -2428,29 +2434,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (!slot.installed) continue;
                 try self.rebuildWindowSlot(runtime, slot);
             }
-            // A clean pass over EVERY installed slot is what restores
-            // the slot family's currency; the main flag stays whatever
-            // the main rebuild left it.
-            self.slot_trees_current = true;
         }
 
-        /// Every slot rebuild — the full pass above AND the direct
-        /// resize/install call sites — carries the currency and
-        /// generation bookkeeping: a failure marks the slot family
-        /// stale (hover enters into it defer; see `slot_trees_current`),
-        /// and a success ticks `build_generation` so standing hover
-        /// captures refresh against the moved bindings. Success here
-        /// never RESTORES the family's currency — only the clean full
-        /// pass does.
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
-            self.rebuildWindowSlotTree(runtime, slot) catch |err| {
-                self.slot_trees_current = false;
-                return err;
-            };
-            self.build_generation +%= 1;
-        }
-
-        fn rebuildWindowSlotTree(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
@@ -2476,6 +2462,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             const tree = built.tree;
             const layout = built.layout;
+            // The slot's install window — the per-slot mirror of the
+            // main rebuild's stamp: stale only between publication and
+            // handler-tree adoption, current again the moment THIS
+            // window's rebuild lands, wherever it was driven from (the
+            // full pass or a direct resize/install site).
+            slot.tree_current = false;
             _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
@@ -2483,6 +2475,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.tree = tree;
             slot.arena_index = next_index;
             live_tree_reset = false;
+            slot.tree_current = true;
+            self.build_generation +%= 1;
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -4215,10 +4209,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// The currency flag governing hover-Msg resolution through the
         /// handler tree behind `view_label` (see `main_tree_current`):
         /// the main canvas keys on the main flag, every secondary
-        /// window on the slot family's.
-        fn hoverTreeCurrentFor(self: *const Self, view_label: []const u8) bool {
+        /// window on ITS OWN slot's — one window's failed publication
+        /// never defers hover into its siblings. An unknown label has
+        /// no tree at all; the null-tree checks own that case.
+        fn hoverTreeCurrentFor(self: *Self, view_label: []const u8) bool {
             if (std.mem.eql(u8, view_label, self.options.canvas_label)) return self.main_tree_current;
-            return self.slot_trees_current;
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| return slot.tree_current;
+            return true;
         }
 
         /// One capture slot per possible mirror entry PLUS one spare:
@@ -4422,6 +4419,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // unbinding never un-promises it). Runs before the settled
             // fast path below, which compares ids and would never see a
             // binding-only change.
+            var first_error: ?anyerror = null;
             if (mirror_len > 0 and self.hoverTreeCurrentFor(self.hoverMsgViewLabel()) and self.hover_msg_captured_generation != self.build_generation) {
                 if (self.treeForViewLabel(self.hoverMsgViewLabel())) |mirror_tree| {
                     var refreshed = true;
@@ -4434,13 +4432,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         // destroy the still-valid capture it was
                         // refreshing.
                         const fresh = self.claimHoverSlot();
-                        self.captureHoverLeave(fresh, leave_msg) catch {
+                        self.captureHoverLeave(fresh, leave_msg) catch |err| {
                             // Transient (allocation): keep the old
-                            // capture and retry on the next drain — the
+                            // capture, retry on the next drain — the
                             // generation stays behind so this refresh
-                            // runs again.
+                            // runs again — and surface the failure LOUD
+                            // through the dispatch-error machinery: if
+                            // the element unmounts before a retry
+                            // lands, its refreshed leave is lost, and
+                            // that must never be silent.
                             self.releaseHoverSlot(fresh);
                             refreshed = false;
+                            ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying on the next drain; an unmount before a successful retry loses the newly bound leave", .{err});
+                            if (first_error == null) first_error = err;
                             continue;
                         };
                         self.releaseHoverSlot(self.hover_msg_slots[position]);
@@ -4479,7 +4483,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     identical = false;
                 }
             }
-            if (identical) return false;
+            if (identical) {
+                if (first_error) |err| return err;
+                return false;
+            }
 
             // Entering edges resolve through the DESTINATION view's
             // handler tree, and only a CURRENT one (`hoverTreeCurrentFor`): a
@@ -4573,7 +4580,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // one failed rebuild must not swallow its siblings' edges)
             // — and the first error propagates after the batch, into
             // the same degraded handling every event handler gets.
-            var first_error: ?anyerror = null;
             for (leave_ids[0..leave_count], leave_slots[0..leave_count]) |id, slot| {
                 // The capture wins (leave answers what enter announced);
                 // an unowned capture falls back to the live tree while

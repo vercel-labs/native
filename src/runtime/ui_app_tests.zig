@@ -6246,7 +6246,53 @@ test "a leave handler added while the listener stands is captured before the unm
     try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
 }
 
-test "a failed publication defers enters but never withholds captured leaves" {
+test "hover edges defer while a tree is stale and deliver after recovery" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // White-box: mark the main tree stale, the state a failure INSIDE
+    // the install window leaves behind (publication adopted, handler
+    // tree not yet) — the narrow seam no budget lever reaches
+    // deterministically from outside. An enter-only transition then
+    // has nothing deliverable: the enter DEFERS rather than resolving
+    // through the stale tree (any owed leave would still dispatch and
+    // its rebuild would heal the staleness — the pure-enter case is
+    // the one that must wait).
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 60);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.two_entered);
+
+    // Recovery: the next successful rebuild restores currency at the
+    // install seam, and its own drain delivers the deferred enter.
+    try app_state.dispatch(&harness.runtime, 1, .churn);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // Leaves never wait on currency: stale again, moving off the row
+    // still delivers the captured leave — and that dispatch's own
+    // successful rebuild heals the flag at the install seam.
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
+    try std.testing.expect(app_state.main_tree_current);
+}
+
+test "a failed build keeps the still-matching pair live: edges flow through it" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
@@ -6267,31 +6313,30 @@ test "a failed publication defers enters but never withholds captured leaves" {
     } });
     try hoverMove(harness, app, 50, 20);
 
-    // The explode rebuild exceeds the per-view widget-node budget: the
-    // build succeeded (self.tree moved) but the runtime refused it, so
-    // the handler tree is non-null AND stale — the drain must key on
-    // currency, not non-nullness.
+    // The explode rebuild fails at LAYOUT — before publication, before
+    // `self.tree` moves — so the OLD handler tree still matches the
+    // runtime's retained state and stays CURRENT: a failure outside
+    // the install window must never defer hover edges (an idle app
+    // might perform no further rebuild to lift the deferral).
     if (app_state.dispatch(&harness.runtime, 1, .explode)) |_| {
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expect(app_state.model.exploded);
 
     // The pointer moves to the second row (hit-tested against the
-    // runtime's RETAINED tree, which never adopted the failed build):
-    // row one's captured leave delivers NOW — a broken destination
-    // never withholds owned captures — while row two's enter defers
-    // rather than resolving through the stale tree. The leave Msg's
-    // own rebuild still fails (the model remains exploded), so the
-    // event ERRORS after the Msg landed — the degradation contract:
-    // the edge is delivered, the failure is loud.
+    // retained tree the failed build never replaced): row one's
+    // captured leave AND row two's enter both flow through the
+    // still-matching pair. Each edge's own dispatch rebuild fails (the
+    // model remains exploded), so the event ERRORS after the Msgs
+    // landed — the degradation contract: edges delivered, failures
+    // loud.
     if (hoverMove(harness, app, 50, 60)) |_| {
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
-    try std.testing.expectEqual(@as(u32, 0), app_state.model.two_entered);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
 
-    // Recovery: a successful rebuild restores currency and the very
-    // same dispatch's drain delivers the deferred enter.
+    // Recovery is clean: a successful rebuild changes nothing owed.
     try app_state.dispatch(&harness.runtime, 1, .calm);
     try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
 
