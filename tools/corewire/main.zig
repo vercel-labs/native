@@ -170,21 +170,53 @@ pub fn main(init: std.process.Init) !void {
     try diags.write(input, stderr);
     try stderr.flush();
 
-    if (out_path) |out| {
-        try writeOutput(init, stderr, out, generated);
-    }
-    if (facade_path) |out| {
-        // The shim was just written, so a filesystem-level alias of the
-        // two output paths (Unicode case folding, links) is visible now
-        // even where the spelling checks above could not see it.
+    // Stage-then-commit: BOTH projections write completely into
+    // exclusively-created staging files before either rename, so a
+    // write failure can never leave a fresh shim beside a stale facade.
+    // The two renames remain two filesystem operations — a failure
+    // between them reports both files as a possibly skewed pair and the
+    // nonzero exit makes the caller regenerate; concurrent invocations
+    // aimed at ONE output path are the caller's serialization to
+    // provide (the build graph never shares output directories between
+    // steps).
+    const shim_staged: ?[]const u8 = if (out_path) |out| try stageOutput(init, stderr, out, generated) else null;
+    const facade_staged: ?[]const u8 = if (facade_path) |out| blk: {
+        // The shim staging file exists now, so a filesystem-level alias
+        // of the two output paths (Unicode case folding, links) gets one
+        // more net before any rename.
         if (out_path) |shim_out| {
             if (sameExistingFile(init.io, out, shim_out)) {
-                try stderr.print("corewire: --facade {s} resolves to the file --out just wrote — the second projection would overwrite the first\n", .{out});
+                if (shim_staged) |staged| std.Io.Dir.cwd().deleteFile(init.io, staged) catch {};
+                try stderr.print("corewire: --facade {s} resolves to the --out file — the second projection would overwrite the first\n", .{out});
                 try stderr.flush();
                 std.process.exit(2);
             }
         }
-        try writeOutput(init, stderr, out, facade.?);
+        break :blk try stageOutput(init, stderr, out, facade.?);
+    } else null;
+
+    var committed_shim = false;
+    if (out_path) |out| {
+        std.Io.Dir.cwd().rename(shim_staged.?, std.Io.Dir.cwd(), out, init.io) catch |err| {
+            std.Io.Dir.cwd().deleteFile(init.io, shim_staged.?) catch {};
+            if (facade_staged) |staged| std.Io.Dir.cwd().deleteFile(init.io, staged) catch {};
+            try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        committed_shim = true;
+    }
+    if (facade_path) |out| {
+        std.Io.Dir.cwd().rename(facade_staged.?, std.Io.Dir.cwd(), out, init.io) catch |err| {
+            std.Io.Dir.cwd().deleteFile(init.io, facade_staged.?) catch {};
+            if (committed_shim) {
+                try stderr.print("corewire: cannot write {s}: {t} — {s} was already replaced, so the two projections on disk may be from different generations; re-run to restore the pair\n", .{ out, err, out_path.? });
+            } else {
+                try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
+            }
+            try stderr.flush();
+            std.process.exit(1);
+        };
     }
 }
 
@@ -204,17 +236,15 @@ fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, buffer_a[0..len_a], buffer_b[0..len_b]);
 }
 
-fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) !void {
+/// Write `data` into an exclusively-created, uniquely-named staging
+/// file beside `out` and return its path; the caller commits by rename.
+/// Exclusive creation can never truncate an existing entry (whatever it
+/// links to), and the unique suffix keeps concurrent invocations off
+/// each other's bytes.
+fn stageOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) ![]const u8 {
     if (std.fs.path.dirname(out)) |dir| {
         std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
     }
-    // Write-then-rename, through a staging file this invocation CREATES
-    // EXCLUSIVELY under a unique name: exclusive creation can never
-    // truncate an existing entry (whatever it links to), the unique
-    // suffix keeps concurrent invocations off each other's bytes, and
-    // the rename replaces the destination's directory entry without
-    // writing through it — so no alias of the destination can lose
-    // shared content.
     const arena = init.arena.allocator();
     var nonce: [8]u8 = undefined;
     init.io.random(&nonce);
@@ -242,10 +272,5 @@ fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, 
         try stderr.flush();
         std.process.exit(1);
     }
-    std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), out, init.io) catch |err| {
-        std.Io.Dir.cwd().deleteFile(init.io, temp_path) catch {};
-        try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
-        try stderr.flush();
-        std.process.exit(1);
-    };
+    return temp_path;
 }
