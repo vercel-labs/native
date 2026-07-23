@@ -75,6 +75,9 @@ const Emitter = struct {
     sidecar: Sidecar,
     diags: *sidecar_mod.Diagnostics,
     out: std.ArrayListUnmanaged(u8),
+    /// Table entries emitted inline at their single reference site
+    /// (see inlinedNames).
+    inlined: []const []const u8 = &.{},
 
     fn print(self: *Emitter, comptime fmt: []const u8, args: anytype) Error!void {
         const text = try std.fmt.allocPrint(self.arena, fmt, args);
@@ -86,6 +89,9 @@ const Emitter = struct {
     }
 
     fn run(self: *Emitter) Error!void {
+        try self.validateEmissionNames();
+        if (self.diags.hasErrors()) return;
+        self.inlined = try self.inlinedNames();
         try self.header();
         try self.mirrorTypes();
         try self.modelStruct();
@@ -95,6 +101,63 @@ const Emitter = struct {
         try self.channels();
         try self.helperPlumbing();
         try self.snapshotPlumbing();
+    }
+
+    // -------------------------------------------- emission-name space
+    //
+    // The generated module declares more than the mirror types: the rt
+    // block, the tag table, the entry points, and (per wired channel)
+    // the fixed event-record vocabulary. A sidecar whose own names
+    // collide with those declarations would generate a module that
+    // cannot compile — refuse at tool time with the exact name instead.
+
+    fn validateEmissionNames(self: *Emitter) Error!void {
+        var reserved: std.ArrayListUnmanaged([]const u8) = .empty;
+        try reserved.appendSlice(self.arena, &.{
+            "std",                 "shim_rt",       "core_abi",        "abi",
+            "rt",                  "msg_tags",      "boot",            "initialModel",
+            "update",              "UpdateResult",  "commitModelRoot", "sidecar_build_id",
+            "sidecar_abi_version", "deterministic", "async_free",      "callHelper",
+            "snapshotModel",       "msgFromWire",
+        });
+        if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
+        if (self.sidecar.has_subscriptions) try reserved.append(self.arena, "subscriptions");
+        if (self.sidecar.channels.command_msg) try reserved.append(self.arena, "commandMsg");
+        if (self.sidecar.channels.frame_msg) try reserved.appendSlice(self.arena, &.{ "frameMsg", "FrameEvent" });
+        if (self.sidecar.channels.key_msg) try reserved.appendSlice(self.arena, &.{ "keyMsg", "KeyEvent" });
+        if (self.sidecar.channels.pinch_msg) try reserved.appendSlice(self.arena, &.{ "pinchMsg", "PinchEvent", "PinchPhase" });
+        if (self.sidecar.channels.appearance_msg != null) try reserved.append(self.arena, "appearanceMsg");
+        if (self.sidecar.channels.chrome_msg != null) try reserved.append(self.arena, "chromeMsg");
+        if (self.sidecar.channels.env_msgs.len > 0) try reserved.append(self.arena, "envMsgs");
+
+        const table_names = try self.allTableNames();
+        for (table_names) |name| {
+            if (nameListed(reserved.items, name)) {
+                self.diags.flag("types", "type name \"{s}\" collides with a declaration the generated shim itself must make; rename the type in the core source", .{name});
+            }
+        }
+        if (nameListed(reserved.items, self.sidecar.msg.name) or nameListed(table_names, self.sidecar.msg.name)) {
+            self.diags.flag("msg.name", "message union name \"{s}\" collides with another declaration of the generated shim; rename the union in the core source", .{self.sidecar.msg.name});
+        }
+        // Helper methods share the model struct's member namespace with
+        // its fields.
+        if (sidecar_mod.findStruct(self.sidecar.types, self.sidecar.model)) |model| {
+            for (self.sidecar.model_helpers) |helper| {
+                for (model.fields) |field| {
+                    if (std.mem.eql(u8, helper.name, field.name)) {
+                        self.diags.flag("model_helpers", "helper \"{s}\" collides with the model field of the same name — the mirror declares helpers as model methods, one member namespace; rename one in the core source", .{helper.name});
+                    }
+                }
+            }
+        }
+    }
+
+    fn allTableNames(self: *Emitter) Error![]const []const u8 {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (self.sidecar.types.structs) |entry| try names.append(self.arena, entry.name);
+        for (self.sidecar.types.enums) |entry| try names.append(self.arena, entry.name);
+        for (self.sidecar.types.unions) |entry| try names.append(self.arena, entry.name);
+        return names.items;
     }
 
     // ------------------------------------------------------- preamble
@@ -116,13 +179,21 @@ const Emitter = struct {
             \\const std = @import("std");
             \\const shim_rt = @import("shim_rt.zig");
             \\const core_abi = @import("core_abi.zig");
-            \\const abi = core_abi.Bindings("{s}");
+            \\const abi = core_abi.Bindings("{f}");
             \\
             \\/// The sidecar's identity facts, restated for the boot-time pairing
             \\/// fence (the out-of-graph backstop: a cached or hand-copied core
             \\/// must never dispatch against another build's tag order).
             \\pub const sidecar_build_id: u64 = 0x{x:0>16};
             \\pub const sidecar_abi_version: u32 = {d};
+            \\
+            \\/// The compiler's module-graph attestations, restated so host
+            \\/// policy can gate on them: record/replay arms only against a
+            \\/// deterministic core, and loop-free-core policies read
+            \\/// async_free. Computed facts of the compiled graph — the sidecar
+            \\/// records verdicts, never hopes.
+            \\pub const deterministic: bool = {};
+            \\pub const async_free: bool = {};
             \\
             \\/// The kernel surface the host layer drives, forwarded to the shim
             \\/// arena and the core's own frame reset (one cycle boundary for
@@ -147,7 +218,16 @@ const Emitter = struct {
             \\    }}
             \\}};
             \\
-        , .{ self.sidecar.entry, self.sidecar.compiler_version, self.sidecar.build_id, self.sidecar.abi.prefix, self.sidecar.build_id, self.sidecar.abi_version });
+        , .{
+            commentText(self.arena, self.sidecar.entry),
+            commentText(self.arena, self.sidecar.compiler_version),
+            self.sidecar.build_id,
+            std.zig.fmtString(self.sidecar.abi.prefix),
+            self.sidecar.build_id,
+            self.sidecar.abi_version,
+            self.sidecar.deterministic,
+            self.sidecar.async_free,
+        });
     }
 
     // --------------------------------------------------- mirror types
@@ -163,33 +243,42 @@ const Emitter = struct {
             std.mem.endsWith(u8, name, member);
     }
 
+    /// Inline a table entry only when the pattern matches AND the entry
+    /// is referenced exactly once in the whole sidecar: an authored type
+    /// that merely spells like the pattern but is shared across sites
+    /// stays a named top-level declaration (inlining it at one site
+    /// would leave the others dangling).
     fn inlinedNames(self: *Emitter) Error![]const []const u8 {
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var candidates: std.ArrayListUnmanaged([]const u8) = .empty;
         for (self.sidecar.types.structs) |entry| {
             for (entry.fields) |field| {
-                try noteInlined(&names, self.arena, entry.name, field.name, field.type);
+                try noteCandidate(&candidates, self.arena, entry.name, field.name, field.type);
             }
         }
         for (self.sidecar.types.unions) |entry| {
             for (entry.arms) |arm| {
-                try noteInlined(&names, self.arena, entry.name, arm.name, arm.payload);
+                try noteCandidate(&candidates, self.arena, entry.name, arm.name, arm.payload);
             }
         }
         for (self.sidecar.msg.arms) |arm| {
             switch (arm.payload) {
                 .record => |name| if (isSynthesizedRef(self.sidecar.msg.name, arm.name, name)) {
-                    try names.append(self.arena, name);
+                    try candidates.append(self.arena, name);
                 },
                 else => {},
             }
         }
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (candidates.items) |name| {
+            if (try self.referenceCount(name) == 1) try names.append(self.arena, name);
+        }
         return names.items;
     }
 
-    fn noteInlined(names: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator, container: []const u8, member: []const u8, ref: TypeRef) error{OutOfMemory}!void {
+    fn noteCandidate(names: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator, container: []const u8, member: []const u8, ref: TypeRef) error{OutOfMemory}!void {
         switch (ref) {
-            .optional => |inner| try noteInlined(names, arena, container, member, inner.*),
-            .slice => |elem| try noteInlined(names, arena, container, member, elem.*),
+            .optional => |inner| try noteCandidate(names, arena, container, member, inner.*),
+            .slice => |elem| try noteCandidate(names, arena, container, member, elem.*),
             .node, .value => |name| if (isSynthesizedRef(container, member, name)) {
                 try names.append(arena, name);
             },
@@ -197,13 +286,48 @@ const Emitter = struct {
         }
     }
 
-    fn mirrorTypes(self: *Emitter) Error!void {
-        const inlined = try self.inlinedNames();
-        for (self.sidecar.types.enums) |entry| {
-            if (entry.members.len > 256) {
-                self.diags.flag("types.enums", "enum \"{s}\" has {d} members; the mirror's enums ride a u8 tag (256 members at most)", .{ entry.name, entry.members.len });
-                continue;
+    /// How many reference sites name a table entry, across the whole
+    /// sidecar (model root, table fields and arms, msg descriptors,
+    /// helper signatures).
+    fn referenceCount(self: *Emitter, name: []const u8) Error!usize {
+        var count: usize = 0;
+        if (std.mem.eql(u8, self.sidecar.model, name)) count += 1;
+        for (self.sidecar.types.structs) |entry| {
+            for (entry.fields) |field| count += refNames(field.type, name);
+        }
+        for (self.sidecar.types.unions) |entry| {
+            for (entry.arms) |arm| count += refNames(arm.payload, name);
+        }
+        for (self.sidecar.msg.arms) |arm| {
+            switch (arm.payload) {
+                .record, .union_ref, .enum_ref => |payload_name| {
+                    if (std.mem.eql(u8, payload_name, name)) count += 1;
+                },
+                .scalar => |ref| count += refNames(ref, name),
+                else => {},
             }
+        }
+        for (self.sidecar.model_helpers) |helper| {
+            count += refNames(helper.returns, name);
+            for (helper.params) |param| count += refNames(param, name);
+        }
+        return count;
+    }
+
+    fn refNames(ref: TypeRef, name: []const u8) usize {
+        return switch (ref) {
+            .optional => |inner| refNames(inner.*, name),
+            .slice => |elem| refNames(elem.*, name),
+            .node, .value, .enum_ref, .union_ref => |ref_name| @intFromBool(std.mem.eql(u8, ref_name, name)),
+            else => 0,
+        };
+    }
+
+    fn mirrorTypes(self: *Emitter) Error!void {
+        const inlined = self.inlined;
+        for (self.sidecar.types.enums) |entry| {
+            // The 256-member bound is validated by the reader
+            // (sidecar.zig) before emission ever runs.
             try self.print("\npub const {f} = enum(u8) {{", .{ident(entry.name)});
             for (entry.members, 0..) |member, index| {
                 try self.print("\n    {f} = {d},", .{ ident(member), index });
@@ -251,7 +375,7 @@ const Emitter = struct {
     }
 
     fn spellNamed(self: *Emitter, name: []const u8, container: []const u8, member: []const u8) Error![]const u8 {
-        if (!isSynthesizedRef(container, member, name)) {
+        if (!isSynthesizedRef(container, member, name) or !nameListed(self.inlined, name)) {
             return std.fmt.allocPrint(self.arena, "{f}", .{ident(name)});
         }
         const entry = sidecar_mod.findStruct(self.sidecar.types, name) orelse
@@ -316,7 +440,7 @@ const Emitter = struct {
         try self.raw("\n\n    pub const view_unbound = .{");
         for (names, 0..) |name, index| {
             if (index > 0) try self.raw(",");
-            try self.print(" \"{s}\"", .{name});
+            try self.print(" \"{f}\"", .{std.zig.fmtString(name)});
         }
         try self.raw(" };");
     }
@@ -330,6 +454,12 @@ const Emitter = struct {
                 .void => try self.print("\n    {f},", .{ident(arm.name)}),
                 .bytes => try self.print("\n    {f}: []const u8,", .{ident(arm.name)}),
                 .number => |class| try self.print("\n    {f}: {s},", .{ ident(arm.name), @tagName(class) }),
+                // The two-field family carries no field-order fact; the
+                // mirror declares the number field first, the emitted
+                // convention of every producer of this shape. A record
+                // declared bytes-first must ride the record family (its
+                // table entry carries order explicitly) — see
+                // SCHEMA-GAPS.md.
                 .number_bytes => |desc| try self.print("\n    {f}: struct {{ {f}: {s}, {f}: []const u8 }},", .{ ident(arm.name), ident(desc.number_field), @tagName(desc.number_class), ident(desc.bytes_field) }),
                 .record => |name| try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellNamed(name, self.sidecar.msg.name, arm.name) }),
                 .union_ref, .enum_ref => |name| try self.print("\n    {f}: {f},", .{ ident(arm.name), ident(name) }),
@@ -350,7 +480,7 @@ const Emitter = struct {
             \\pub const msg_tags = [_][]const u8{
         );
         for (self.sidecar.msg.arms) |arm| {
-            try self.print("\n    \"{s}\",", .{arm.name});
+            try self.print("\n    \"{f}\",", .{std.zig.fmtString(arm.name)});
         }
         try self.raw("\n};\n");
         try self.print(
@@ -653,10 +783,10 @@ const Emitter = struct {
         }
 
         if (chan.appearance_msg) |arm_name| {
-            try self.print("\n/// The arm the host fills with the structural appearance record.\npub const appearanceMsg = \"{s}\";\n", .{arm_name});
+            try self.print("\n/// The arm the host fills with the structural appearance record.\npub const appearanceMsg = \"{f}\";\n", .{std.zig.fmtString(arm_name)});
         }
         if (chan.chrome_msg) |arm_name| {
-            try self.print("\n/// The arm the host fills with the structural window-chrome record.\npub const chromeMsg = \"{s}\";\n", .{arm_name});
+            try self.print("\n/// The arm the host fills with the structural window-chrome record.\npub const chromeMsg = \"{f}\";\n", .{std.zig.fmtString(arm_name)});
         }
         if (chan.env_msgs.len > 0) {
             try self.raw(
@@ -669,7 +799,7 @@ const Emitter = struct {
                 \\
             );
             for (chan.env_msgs) |entry| {
-                try self.print("    .{{ .env = \"{s}\", .msg = \"{s}\" }},\n", .{ entry.env, entry.msg });
+                try self.print("    .{{ .env = \"{f}\", .msg = \"{f}\" }},\n", .{ std.zig.fmtString(entry.env), std.zig.fmtString(entry.msg) });
             }
             try self.raw("};\n");
         }
@@ -688,7 +818,7 @@ const Emitter = struct {
                 if (arm.payload == .void) {
                     try self.print("        {d} => return .{f},\n", .{ tag, ident(arm.name) });
                 } else {
-                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType(Msg, \"{s}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), arm.name });
+                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType(Msg, \"{f}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), std.zig.fmtString(arm.name) });
                 }
             }
             try self.raw(
@@ -751,6 +881,17 @@ fn nameListed(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
+/// Sidecar strings quoted inside the generated module's comments:
+/// control characters would break the comment line, so they become
+/// spaces (comments are provenance, never load-bearing).
+fn commentText(arena: std.mem.Allocator, text: []const u8) []const u8 {
+    const out = arena.dupe(u8, text) catch return "";
+    for (out) |*char| {
+        if (char.* < 0x20 or char.* == 0x7f) char.* = ' ';
+    }
+    return out;
+}
+
 // -------------------------------------------------- identifier safety
 
 /// Emit a sidecar name as a Zig identifier, `@"..."`-quoting anything
@@ -764,7 +905,7 @@ const Ident = struct {
         if (isPlainIdentifier(self.name)) {
             try writer.writeAll(self.name);
         } else {
-            try writer.print("@\"{s}\"", .{self.name});
+            try writer.print("@\"{f}\"", .{std.zig.fmtString(self.name)});
         }
     }
 };
@@ -835,6 +976,94 @@ test "the emitted shim parses as Zig" {
     const source_z = try arena.dupeZ(u8, source);
     const tree = try std.zig.Ast.parse(arena, source_z, .zig);
     try testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "a type name colliding with a shim declaration refuses with a teaching" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The model root renamed to "rt": layout-legal, but the generated
+    // module must also declare its kernel block under that name.
+    const renamed = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"Model\"", "\"rt\"");
+    const with_slot = try std.mem.replaceOwned(u8, arena, renamed, "\"slot\": \"Model.count\"", "\"slot\": \"rt.count\"");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, with_slot, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "collides with a declaration") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "a shared authored type spelling like a synthesized name stays a top-level declaration" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // "Model_user" is referenced from BOTH Model.user (where the
+    // synthesized pattern matches) and Model.backup: inlining it at the
+    // first site would leave the second dangling.
+    const source =
+        \\{
+        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "types": {
+        \\    "structs": [
+        \\      {"name": "Model_user", "fields": [{"name": "id", "type": {"kind": "f64"}}]},
+        \\      {"name": "Model", "fields": [
+        \\        {"name": "user", "type": {"kind": "value", "name": "Model_user"}},
+        \\        {"name": "backup", "type": {"kind": "value", "name": "Model_user"}}
+        \\      ]}
+        \\    ],
+        \\    "enums": [], "unions": []
+        \\  },
+        \\  "model": "Model", "model_helpers": [], "model_unbound": [],
+        \\  "msg": {"name": "Msg", "arms": [{"name": "bump", "payload": {"kind": "void"}}], "unbound": []},
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\    "appearance_msg": null, "chrome_msg": null, "env_msgs": []},
+        \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
+        \\    "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes",
+        \\    "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input",
+        \\    "dispatch_scroll_state", "subscriptions", "frame_reset", "model_snapshot", "helper_call",
+        \\    "collect"], "snapshot_format": 1},
+        \\  "integer_slots": [], "deterministic": true, "async_free": true
+        \\}
+    ;
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const Model_user = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "user: Model_user,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "backup: Model_user,") != null);
+}
+
+test "exotic strings in names and env entries emit as valid Zig" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"env_msgs\": []",
+        "\"env_msgs\": [{\"env\": \"APP\\\"MODE\\\\X\", \"msg\": \"label_set\"}]",
+    );
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    const generated = try emit(arena, parsed, &diags);
+    const source_z = try arena.dupeZ(u8, generated);
+    const tree = try std.zig.Ast.parse(arena, source_z, .zig);
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
+    try testing.expect(std.mem.indexOf(u8, generated, "APP\\\"MODE\\\\X") != null);
+}
+
+test "the shim restates the module-graph attestations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const generated = try emitFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const deterministic: bool = true;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub const async_free: bool = true;") != null);
 }
 
 test "keywords and exotic names are quoted" {

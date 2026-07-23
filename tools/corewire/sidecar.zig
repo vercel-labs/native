@@ -1074,6 +1074,19 @@ fn validateMsg(sidecar: Sidecar, diags: *Diagnostics) void {
     if (sidecar.msg.arms.len > 256) {
         diags.flag("msg.arms", "{d} arms exceed the 256-arm bound (wire tags ride a u8) — V6", .{sidecar.msg.arms.len});
     }
+    // The same u8 bound governs every tabled union (the canonical value
+    // encoding carries a one-byte arm index), and the mirror's enums
+    // ride enum(u8) with member index = wire value.
+    for (sidecar.types.unions, 0..) |entry, index| {
+        if (entry.arms.len > 256) {
+            diags.flag(pathOfStatic(diags, "types.unions[{d}]", .{index}), "union \"{s}\" has {d} arms; encoded union values carry a one-byte declaration-order arm index (256 arms at most)", .{ entry.name, entry.arms.len });
+        }
+    }
+    for (sidecar.types.enums, 0..) |entry, index| {
+        if (entry.members.len > 256) {
+            diags.flag(pathOfStatic(diags, "types.enums[{d}]", .{index}), "enum \"{s}\" has {d} members; the mirror's enums ride a u8 tag with member index = wire value (256 members at most)", .{ entry.name, entry.members.len });
+        }
+    }
     for (sidecar.msg.arms, 0..) |arm, index| {
         switch (arm.payload) {
             .number_bytes => |desc| {
@@ -1478,6 +1491,28 @@ test "V6: more than 256 arms refuses" {
     // The unbound list must still resolve.
     const patched = try replaced(arena, source, "\"unbound\": [\"label_set\"]", "\"unbound\": []");
     try expectRefusal(patched, "msg.arms", "exceed the 256-arm bound");
+}
+
+test "a tabled union past the one-byte arm bound refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var arms: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..257) |index| {
+        if (index > 0) try arms.appendSlice(arena, ", ");
+        const one = try std.fmt.allocPrint(arena, "{{\"name\": \"arm_{d}\", \"payload\": {{\"kind\": \"void\"}}}}", .{index});
+        try arms.appendSlice(arena, one);
+    }
+    const union_entry = try std.fmt.allocPrint(arena, "\"unions\": [{{\"name\": \"Wide\", \"arms\": [{s}]}}]", .{arms.items});
+    const with_union = try replaced(arena, minimal_valid_json, "\"unions\": []", union_entry);
+    // Reference it so the reachability rule is satisfied.
+    const source = try replaced(
+        arena,
+        with_union,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"union\", \"name\": \"Wide\"}}",
+    );
+    try expectRefusal(source, "types.unions[0]", "one-byte declaration-order arm index");
 }
 
 test "V7: number_bytes with matching field names refuses" {

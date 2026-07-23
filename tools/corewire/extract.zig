@@ -72,23 +72,23 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
                     var fields: []const u8 = "";
                     for (info.fields, 0..) |field, index| {
                         if (index > 0) fields = fields ++ ", ";
-                        fields = fields ++ "{\"name\": \"" ++ field.name ++ "\", \"type\": " ++ typeRefJson(field.type, item.name, field.name) ++ "}";
+                        fields = fields ++ "{\"name\": " ++ js(field.name) ++ ", \"type\": " ++ typeRefJson(field.type, item.name, field.name) ++ "}";
                         if (spellsI64(field.type)) {
                             appendSlot(&slots, &slot_count, item.name ++ "." ++ field.name);
                         }
                     }
                     if (struct_count > 0) structs = structs ++ ",\n      ";
-                    structs = structs ++ "{\"name\": \"" ++ item.name ++ "\", \"fields\": [" ++ fields ++ "]}";
+                    structs = structs ++ "{\"name\": " ++ js(item.name) ++ ", \"fields\": [" ++ fields ++ "]}";
                     struct_count += 1;
                 },
                 .@"enum" => |info| {
                     var members: []const u8 = "";
                     for (info.fields, 0..) |member, index| {
                         if (index > 0) members = members ++ ", ";
-                        members = members ++ "\"" ++ member.name ++ "\"";
+                        members = members ++ js(member.name);
                     }
                     if (enum_count > 0) enums = enums ++ ",\n      ";
-                    enums = enums ++ "{\"name\": \"" ++ item.name ++ "\", \"members\": [" ++ members ++ "]}";
+                    enums = enums ++ "{\"name\": " ++ js(item.name) ++ ", \"members\": [" ++ members ++ "]}";
                     enum_count += 1;
                 },
                 .@"union" => |info| {
@@ -96,13 +96,13 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
                     for (info.fields, 0..) |arm, index| {
                         if (index > 0) arms = arms ++ ", ";
                         const payload = if (arm.type == void) "{\"kind\": \"void\"}" else typeRefJson(arm.type, item.name, arm.name);
-                        arms = arms ++ "{\"name\": \"" ++ arm.name ++ "\", \"payload\": " ++ payload ++ "}";
+                        arms = arms ++ "{\"name\": " ++ js(arm.name) ++ ", \"payload\": " ++ payload ++ "}";
                         if (arm.type != void and spellsI64(arm.type)) {
                             appendSlot(&slots, &slot_count, item.name ++ "." ++ arm.name);
                         }
                     }
                     if (union_count > 0) unions = unions ++ ",\n      ";
-                    unions = unions ++ "{\"name\": \"" ++ item.name ++ "\", \"arms\": [" ++ arms ++ "]}";
+                    unions = unions ++ "{\"name\": " ++ js(item.name) ++ ", \"arms\": [" ++ arms ++ "]}";
                     union_count += 1;
                 },
                 else => @compileError("the type table cannot carry " ++ @typeName(item.T)),
@@ -114,7 +114,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
         for (@typeInfo(core.Msg).@"union".fields, 0..) |arm, index| {
             if (index > 0) msg_arms = msg_arms ++ ",\n      ";
             const descriptor = payloadDescriptor(arm.type, arm.name, &slots, &slot_count);
-            msg_arms = msg_arms ++ "{\"name\": \"" ++ arm.name ++ "\", \"payload\": " ++ descriptor ++ "}";
+            msg_arms = msg_arms ++ "{\"name\": " ++ js(arm.name) ++ ", \"payload\": " ++ descriptor ++ "}";
         }
 
         // Helpers, in Model-declaration (= export) order.
@@ -128,7 +128,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             if (spellsI64(helper.Return)) {
                 appendSlot(&slots, &slot_count, "helpers." ++ decl.name ++ ".return");
             }
-            helpers = helpers ++ "{\"name\": \"" ++ decl.name ++ "\", \"params\": [" ++ params ++ "], \"returns\": " ++
+            helpers = helpers ++ "{\"name\": " ++ js(decl.name) ++ ", \"params\": [" ++ params ++ "], \"returns\": " ++
                 typeRefJson(helper.Return, "helpers", decl.name) ++ ", \"arena\": " ++ (if (helper.arena) "true" else "false") ++ "}";
             helper_count += 1;
         }
@@ -145,11 +145,11 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
         if (@hasDecl(core, "envMsgs")) {
             for (core.envMsgs, 0..) |env_entry, index| {
                 if (index > 0) env_msgs = env_msgs ++ ", ";
-                env_msgs = env_msgs ++ "{\"env\": \"" ++ env_entry.env ++ "\", \"msg\": \"" ++ env_entry.msg ++ "\"}";
+                env_msgs = env_msgs ++ "{\"env\": " ++ js(env_entry.env) ++ ", \"msg\": " ++ js(env_entry.msg) ++ "}";
             }
         }
-        const appearance: []const u8 = if (@hasDecl(core, "appearanceMsg")) "\"" ++ core.appearanceMsg ++ "\"" else "null";
-        const chrome: []const u8 = if (@hasDecl(core, "chromeMsg")) "\"" ++ core.chromeMsg ++ "\"" else "null";
+        const appearance: []const u8 = if (@hasDecl(core, "appearanceMsg")) js(core.appearanceMsg) else "null";
+        const chrome: []const u8 = if (@hasDecl(core, "chromeMsg")) js(core.chromeMsg) else "null";
 
         // Entry-shape flags, by return type — the same discrimination
         // the bridge applies to transpiled modules.
@@ -186,7 +186,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
             "  \"wire_version\": 3,\n" ++
             "  \"abi_version\": 1,\n" ++
             "  \"compiler_version\": \"0.0.1\",\n" ++
-            "  \"entry\": \"" ++ entry ++ "\",\n" ++
+            "  \"entry\": " ++ js(entry) ++ ",\n" ++
             "  \"source_hash\": \"" ++ std.fmt.comptimePrint("{x:0>16}", .{source_hash}) ++ "\",\n" ++
             "  \"build_id\": \"" ++ std.fmt.comptimePrint("{x:0>16}", .{build_id}) ++ "\",\n" ++
             "  \"types\": " ++ types_json ++ ",\n" ++
@@ -218,9 +218,32 @@ fn boolJson(comptime value: bool) []const u8 {
     return if (value) "true" else "false";
 }
 
+/// A JSON string literal: quoted and escaped (author-controlled
+/// spellings — env names, unbound lists, identifiers — may carry any
+/// byte; the sidecar must stay valid JSON regardless).
+fn js(comptime text: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "\"";
+        for (text) |char| {
+            out = out ++ switch (char) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => if (char < 0x20)
+                    std.fmt.comptimePrint("\\u{x:0>4}", .{char})
+                else
+                    &[_]u8{char},
+            };
+        }
+        return out ++ "\"";
+    }
+}
+
 fn appendSlot(comptime slots: *[]const u8, comptime count: *usize, comptime path: []const u8) void {
     if (count.* > 0) slots.* = slots.* ++ ",\n    ";
-    slots.* = slots.* ++ "{\"slot\": \"" ++ path ++ "\", \"class\": \"i64\"}";
+    slots.* = slots.* ++ "{\"slot\": " ++ js(path) ++ ", \"class\": \"i64\"}";
     count.* += 1;
 }
 
@@ -262,7 +285,7 @@ fn unboundJson(comptime T: type) []const u8 {
         var out: []const u8 = "";
         for (T.view_unbound, 0..) |name, index| {
             if (index > 0) out = out ++ ", ";
-            out = out ++ "\"" ++ name ++ "\"";
+            out = out ++ js(name);
         }
         return out;
     }
@@ -303,12 +326,12 @@ fn typeRefJson(comptime T: type, comptime container: []const u8, comptime member
         .optional => |info| return "{\"kind\": \"optional\", \"inner\": " ++ typeRefJson(info.child, container, member) ++ "}",
         .pointer => |info| switch (info.size) {
             .slice => return "{\"kind\": \"slice\", \"elem\": " ++ typeRefJson(info.child, container, member) ++ "}",
-            .one => return "{\"kind\": \"node\", \"name\": \"" ++ tableName(info.child, container, member) ++ "\"}",
+            .one => return "{\"kind\": \"node\", \"name\": " ++ js(tableName(info.child, container, member)) ++ "}",
             else => @compileError("no TypeRef form for " ++ @typeName(T)),
         },
-        .@"struct" => return "{\"kind\": \"value\", \"name\": \"" ++ tableName(T, container, member) ++ "\"}",
-        .@"enum" => return "{\"kind\": \"enum\", \"name\": \"" ++ tableName(T, container, member) ++ "\"}",
-        .@"union" => return "{\"kind\": \"union\", \"name\": \"" ++ tableName(T, container, member) ++ "\"}",
+        .@"struct" => return "{\"kind\": \"value\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
+        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
+        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
         else => @compileError("no TypeRef form for " ++ @typeName(T)),
     }
 }
@@ -339,8 +362,8 @@ fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime s
     }
     if (T == bool) return "{\"kind\": \"scalar\", \"type\": {\"kind\": \"bool\"}}";
     switch (@typeInfo(T)) {
-        .@"enum" => return "{\"kind\": \"enum\", \"name\": \"" ++ tableName(T, "Msg", arm_name) ++ "\"}",
-        .@"union" => return "{\"kind\": \"union\", \"name\": \"" ++ tableName(T, "Msg", arm_name) ++ "\"}",
+        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}",
+        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}",
         .@"struct" => |info| {
             // The ubiquitous inline number-plus-bytes shape (fetch
             // {status, body}, collect-spawn {code, output}) rides the
@@ -352,10 +375,10 @@ fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime s
                 if (info.fields[0].type == i64) {
                     appendSlot(slots, slot_count, "Msg." ++ arm_name ++ "." ++ info.fields[0].name);
                 }
-                return "{\"kind\": \"number_bytes\", \"number_field\": \"" ++ info.fields[0].name ++
-                    "\", \"number_class\": \"" ++ class ++ "\", \"bytes_field\": \"" ++ info.fields[1].name ++ "\"}";
+                return "{\"kind\": \"number_bytes\", \"number_field\": " ++ js(info.fields[0].name) ++
+                    ", \"number_class\": \"" ++ class ++ "\", \"bytes_field\": " ++ js(info.fields[1].name) ++ "}";
             }
-            return "{\"kind\": \"record\", \"name\": \"" ++ tableName(T, "Msg", arm_name) ++ "\"}";
+            return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}";
         },
         else => @compileError("no payload descriptor for Msg arm payload " ++ @typeName(T)),
     }
@@ -475,4 +498,31 @@ test "extraction of a small core produces a valid sidecar" {
 
     // Determinism: a second evaluation is byte-identical.
     try testing.expectEqualStrings(json, comptime sidecarJson(Core, "src/core.ts"));
+}
+
+test "reflected strings are JSON-escaped" {
+    const Core = struct {
+        pub const Model = struct { label: []const u8 };
+        pub const Msg = union(enum) { rename: []const u8 };
+        pub const envMsgs = .{
+            .{ .env = "APP\"MODE\\X", .msg = "rename" },
+        };
+        pub fn initialModel() *const Model {
+            unreachable;
+        }
+        pub fn update(model: *const Model, msg: Msg) *const Model {
+            _ = msg;
+            return model;
+        }
+    };
+    const json = comptime sidecarJson(Core, "src/core.ts");
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sidecar_mod = @import("sidecar.zig");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const sidecar = try sidecar_mod.read(arena, json, &diags);
+    try testing.expectEqualStrings("APP\"MODE\\X", sidecar.channels.env_msgs[0].env);
+    try testing.expect(!sidecar.update_returns_cmd);
 }

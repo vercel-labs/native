@@ -63,25 +63,35 @@ pub fn frameReset() void {
     _ = arena_state.reset(.retain_capacity);
 }
 
-/// Full reset (the deterministic re-init seam): both arenas; the
+/// Full reset (the deterministic re-init seam): every arena; the
 /// core's own state resets through its init entry.
 pub fn resetAll() void {
     _ = arena_state.reset(.retain_capacity);
-    _ = model_arena_state.reset(.retain_capacity);
+    for (&model_arenas) |*arena| _ = arena.reset(.retain_capacity);
 }
 
-// The decoded committed model lives in its own arena: it must survive
+// The decoded committed model lives in its own storage: it must survive
 // frame resets (views read it between cycles, exactly as they read the
-// transpiler lane's committed heap) and is replaced wholesale at the
-// next snapshot decode.
-var model_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+// transpiler lane's committed heap). TWO arenas, flipped per decode, so
+// the previously returned root also survives the decode that replaces
+// it — the transpiler lane gives the same one-generation grace (an old
+// root stays readable until the heap's next compaction), and the bridge
+// leans on it when a boot path derives twice before adopting a root.
+var model_arenas = [2]std.heap.ArenaAllocator{
+    std.heap.ArenaAllocator.init(std.heap.page_allocator),
+    std.heap.ArenaAllocator.init(std.heap.page_allocator),
+};
+var model_arena_index: u1 = 0;
 
-/// Decode a committed-model snapshot into a fresh mirror root,
-/// releasing the previous decode (the host layer holds exactly one
-/// committed root at a time, the shipped bridge contract).
+/// Decode a committed-model snapshot into a fresh mirror root. The
+/// PREVIOUS decode's root stays valid until the decode after this one;
+/// anything older is gone (the host holds exactly one committed root at
+/// a time, the shipped bridge contract).
 pub fn decodeSnapshot(comptime T: type, bytes: []const u8) *const T {
-    _ = model_arena_state.reset(.retain_capacity);
-    const allocator = model_arena_state.allocator();
+    model_arena_index +%= 1;
+    const arena = &model_arenas[model_arena_index];
+    _ = arena.reset(.retain_capacity);
+    const allocator = arena.allocator();
     const out = allocator.create(T) catch @panic("the core shim's model arena is out of memory — the decoded snapshot did not fit");
     out.* = decodeExact(T, bytes, allocator);
     return out;
@@ -350,6 +360,26 @@ test "records, slices, references, and unions round-trip" {
     try testing.expectEqual(@as(i64, -1), decoded.last.move.direction);
     try testing.expect(decoded.last.move.extend);
     try testing.expectEqual(@as(f64, 0.5), decoded.score);
+}
+
+test "a decoded model root survives exactly one subsequent decode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Model = struct { label: []const u8, count: i64 };
+
+    const first_bytes = encodeAlloc(Model, .{ .label = "first", .count = 1 }, a);
+    const second_bytes = encodeAlloc(Model, .{ .label = "second", .count = 2 }, a);
+
+    const first = decodeSnapshot(Model, first_bytes);
+    const second = decodeSnapshot(Model, second_bytes);
+    // The boot path may derive a fresh root while a consumer still
+    // holds the previous one; both generations must read correctly.
+    try testing.expectEqualStrings("first", first.label);
+    try testing.expectEqual(@as(i64, 1), first.count);
+    try testing.expectEqualStrings("second", second.label);
+    try testing.expectEqual(@as(i64, 2), second.count);
+    resetAll();
 }
 
 test "void union arms ride as the bare arm index" {
