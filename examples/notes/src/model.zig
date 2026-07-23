@@ -938,7 +938,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .list_resized => |fraction| model.list_split = fraction,
         // Same controlled pattern for the note-list scroll: store the
         // applied offset, echo it back through the scroll's value.
-        .note_list_scrolled => |state| model.note_list_scroll = state.offset,
+        .note_list_scrolled => |state| model.note_list_scroll = state.offset_y,
         .chrome_changed => |chrome| {
             model.chrome_leading = chrome.insets.left;
             // Match the header to the titlebar band so its centered

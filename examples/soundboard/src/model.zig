@@ -867,9 +867,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .canvas_resized => |width| model.canvas_width = width,
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .grid_scrolled => |state| model.grid_scroll = state.offset,
-        .detail_scrolled => |state| model.detail_scroll = state.offset,
-        .songs_scrolled => |state| model.songs_scroll = state.offset,
+        .grid_scrolled => |state| model.grid_scroll = state.offset_y,
+        .detail_scrolled => |state| model.detail_scroll = state.offset_y,
+        .songs_scrolled => |state| model.songs_scroll = state.offset_y,
         .open_album => |id| {
             model.open_album = id;
             model.tab = .albums;

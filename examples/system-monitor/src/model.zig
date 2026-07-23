@@ -584,7 +584,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_sampling => setSampling(model, fx, model.paused),
         .search_edit => |edit| model.search_buffer.apply(edit),
-        .table_scrolled => |state| model.table_scroll = state.offset,
+        .table_scrolled => |state| model.table_scroll = state.offset_y,
         .set_sort => |key| {
             if (model.sort_key == key) {
                 model.sort_descending = !model.sort_descending;

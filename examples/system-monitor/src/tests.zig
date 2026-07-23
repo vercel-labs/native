@@ -534,7 +534,7 @@ test "the process rows are table rows and the table scroll is controlled" {
 
     // The scroll echoes the model-owned offset: the applied offset lands
     // in the model and the next build carries it.
-    apply(&model, .{ .table_scrolled = .{ .offset = 66 } });
+    apply(&model, .{ .table_scrolled = .{ .offset_y = 66 } });
     try testing.expectEqual(@as(f32, 66), model.table_scroll);
     tree = try buildTree(arena, &model);
     const scroll = findByKind(tree.root, .scroll_view).?;

@@ -721,7 +721,7 @@ pub const GpuComponentsApp = struct {
         };
     }
 
-    fn componentVirtualScrollState(self: *@This(), id: canvas.ObjectId, viewport_extent: f32, content_extent: f32) ?canvas.ScrollState {
+    fn componentVirtualScrollState(self: *@This(), id: canvas.ObjectId, viewport_extent: f32, content_extent: f32) ?canvas.ScrollAxisState {
         const offset = self.componentVirtualScrollValue(id) orelse return null;
         const velocity = self.componentVirtualScrollVelocity(id) orelse return null;
         return .{
@@ -754,7 +754,7 @@ pub const GpuComponentsApp = struct {
         }
     }
 
-    fn setComponentVirtualScrollState(self: *@This(), id: canvas.ObjectId, state: canvas.ScrollState) anyerror!void {
+    fn setComponentVirtualScrollState(self: *@This(), id: canvas.ObjectId, state: canvas.ScrollAxisState) anyerror!void {
         switch (id) {
             120 => {
                 self.virtual_scroll.nav = state.offset;

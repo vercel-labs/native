@@ -455,7 +455,7 @@ pub fn clampComponentVirtualScrollOffset(raw_next: f32, max_offset: f32, fallbac
     return std.math.clamp(@max(0, raw_next), 0, @max(0, max_offset));
 }
 
-pub fn componentScrollStatesEqual(a: canvas.ScrollState, b: canvas.ScrollState) bool {
+pub fn componentScrollStatesEqual(a: canvas.ScrollAxisState, b: canvas.ScrollAxisState) bool {
     return a.offset == b.offset and
         a.velocity == b.velocity and
         a.viewport_extent == b.viewport_extent and

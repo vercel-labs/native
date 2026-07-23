@@ -454,7 +454,7 @@ test "the preview scroll offset round-trips through the model" {
     var model = main.initialModel();
 
     // The runtime delivers the applied offset; the model stores it…
-    main.update(&model, .{ .doc_scrolled = .{ .offset = 120, .viewport_extent = 600, .content_extent = 2400 } }, &fx);
+    main.update(&model, .{ .doc_scrolled = .{ .offset_y = 120, .viewport_extent_y = 600, .content_extent_y = 2400 } }, &fx);
     try testing.expectEqual(@as(f32, 120), model.doc_scroll);
 
     // …and the rebuilt tree echoes it back through the scroll's value,

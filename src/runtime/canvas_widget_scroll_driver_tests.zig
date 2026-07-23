@@ -580,3 +580,116 @@ test "a rebuild restores the retained scroll offset with translated descendants"
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 20, 180, 32), retained.findById(3).?.frame);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 64, 180, 32), retained.findById(4).?.frame);
 }
+
+test "a two-axis region's driver carries both content dimensions and follows offset_x reports" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A BOTH-axes region: content reaches x = 460 and y = 120 inside a
+    // 180 x 72 viewport, so the driver's content size must exceed the
+    // frame on both dimensions.
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 120) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const region = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value = 12,
+        .value_x = 24,
+        .children = &tiles,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(region, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    // Rebased: frame + (content - viewport) on each axis.
+    try std.testing.expectEqual(@as(f32, 460), drivers[0].content_size.width);
+    try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
+    try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_x);
+    try std.testing.expectEqual(@as(f32, 12), drivers[0].offset_y);
+    try std.testing.expect(drivers[0].set_offset);
+
+    // A driver report with both offsets lands on both axes: the widget
+    // adopts the offsets and the descendants translate to match.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_x = 60,
+        .offset_y = 30,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 60), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 30), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-60, -30, 140, 120), retained.findById(2).?.frame);
+}
+
+test "a horizontal-only region's driver pins its vertical range" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // Content is both WIDE and TALL, but the region grants only the
+    // horizontal axis: the driver's content height pins to the frame so
+    // the OS scroller can never travel vertically, and a stray vertical
+    // report must not displace content.
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 200) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const shelf = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &tiles,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(f32, 460), drivers[0].content_size.width);
+    try std.testing.expectEqual(@as(f32, 72), drivers[0].content_size.height);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_x = 40,
+        .offset_y = 50,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 40), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-40, 0, 140, 200), retained.findById(2).?.frame);
+}

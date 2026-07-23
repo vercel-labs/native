@@ -675,6 +675,42 @@ test "overscroll on scroll stamps the region's edge behavior" {
     try testing.expectEqual(canvas.ScrollOverscroll.none, canvas.widgetScrollPhysics(tree.root.children[1], physics).overscroll);
 }
 
+test "axis and value-x stamp the region's scroll axes and horizontal offset" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n  <scroll axis=\"both\">\n    <column><text>b</text></column>\n  </scroll>\n  <scroll>\n    <column><text>c</text></column>\n  </scroll>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const shelf = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, shelf.kind);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, shelf.scroll_axes);
+    try testing.expectEqual(@as(f32, 120), shelf.value_x);
+    try testing.expect(canvas.widgetScrollsAxis(shelf, .horizontal));
+    try testing.expect(!canvas.widgetScrollsAxis(shelf, .vertical));
+    const freeform = tree.root.children[1];
+    try testing.expectEqual(canvas.ScrollAxes.both, freeform.scroll_axes);
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .vertical));
+    // The undeclared region keeps the pre-axis default: vertical only.
+    const classic = tree.root.children[2];
+    try testing.expectEqual(canvas.ScrollAxes.vertical, classic.scroll_axes);
+    try testing.expect(!canvas.widgetScrollsAxis(classic, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(classic, .vertical));
+}
+
+test "axis value vocabulary mirrors the live ScrollAxes enum" {
+    // The validator's std-only mirror of the enum's member names; a new
+    // member cannot ship without its markup spelling.
+    const fields = @typeInfo(canvas.ScrollAxes).@"enum".fields;
+    try testing.expectEqual(fields.len, canvas.ui_markup.axis_value_names.len);
+    inline for (fields, 0..) |field, index| {
+        try testing.expectEqualStrings(field.name, canvas.ui_markup.axis_value_names[index]);
+    }
+}
+
 test "overscroll value vocabulary mirrors the live WidgetOverscroll enum" {
     // The validator's std-only mirror of the enum's member names; a new
     // member cannot ship without its markup spelling.

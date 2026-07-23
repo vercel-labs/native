@@ -1547,3 +1547,269 @@ test "engine wheel scrolls a windowed virtual list against its declared extent" 
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 19_936), retained.findById(1).?.widget.value);
 }
+
+test "runtime wheel delta_x scrolls a horizontal scroll view and quiets its vertical axis" {
+    const TestApp = struct {
+        scroll_event_count: u32 = 0,
+        last_scroll: canvas.ScrollState = .{},
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-horizontal-scroll", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_scroll => |scroll_event| {
+                    self.scroll_event_count += 1;
+                    self.last_scroll = scroll_event.scroll;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A shelf: three fixed-width tiles in a row, reaching x = 460 inside
+    // a 180-wide viewport (max horizontal offset 280).
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 60) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(160, 0, 140, 60) },
+        .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const shelf = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &tiles,
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // A diagonal wheel: delta_x scrolls the shelf, delta_y dies (the
+    // region grants no vertical axis).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = 1_000_000_000,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_x = 24,
+        .delta_y = 16,
+    } });
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-24, 0, 140, 60), retained.findById(2).?.frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(136, 0, 140, 60), retained.findById(3).?.frame);
+
+    // The observation delivers the two-axis state: a live horizontal
+    // axis and a QUIET vertical one (content pinned to the viewport).
+    try std.testing.expectEqual(@as(u32, 1), app_state.scroll_event_count);
+    try std.testing.expectEqual(@as(f32, 24), app_state.last_scroll.offset_x);
+    try std.testing.expectEqual(@as(f32, 180), app_state.last_scroll.viewport_extent_x);
+    try std.testing.expectEqual(@as(f32, 460), app_state.last_scroll.content_extent_x);
+    try std.testing.expectEqual(@as(f32, 0), app_state.last_scroll.offset_y);
+    try std.testing.expectEqual(@as(f32, 72), app_state.last_scroll.content_extent_y);
+    try std.testing.expectEqual(@as(f32, 0), app_state.last_scroll.axis(.vertical).maxOffset());
+
+    // The wheel left horizontal momentum for the kinetic stepper.
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity_x > 0);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(180, 72),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_016_000_000,
+        .frame_interval_ns = 16_000_000,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(180, 72),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 1_032_000_000,
+        .frame_interval_ns = 16_000_000,
+    } });
+    const stepped = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(stepped.findById(1).?.widget.value_x > 24);
+    try std.testing.expectEqual(@as(f32, 0), stepped.findById(1).?.widget.value);
+}
+
+test "nested regions route each wheel axis to the nearest ancestor scrolling that axis" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-nested-axis-routing", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // The reported nested shape: a HORIZONTAL timeline (id 1) holding a
+    // VERTICAL list (id 2) whose rows overflow its height. The wheel
+    // lands over the list.
+    const rows = [_]canvas.Widget{
+        .{ .id = 3, .kind = .button, .frame = geometry.RectF.init(0, 0, 120, 32), .text = "One" },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(0, 44, 120, 32), .text = "Two" },
+        .{ .id = 5, .kind = .button, .frame = geometry.RectF.init(0, 88, 120, 32), .text = "Three" },
+    };
+    const inner = canvas.Widget{
+        .id = 2,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 120, 72),
+        .children = &rows,
+    };
+    const spacer = canvas.Widget{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(130, 0, 300, 60) };
+    const timeline = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &.{ inner, spacer },
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(timeline, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // One diagonal gesture over the inner list: delta_y scrolls the
+    // LIST (the nearest vertical scrollable), delta_x passes through it
+    // to the TIMELINE (the nearest horizontal scrollable).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = 1_000_000_000,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_x = 30,
+        .delta_y = 24,
+    } });
+
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), retained.findById(2).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(2).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 30), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    // The list's rows moved UP by the consumed delta_y AND left by the
+    // timeline's consumed delta_x (the list itself rides the timeline).
+    try std.testing.expectEqualDeep(geometry.RectF.init(-30, -24, 120, 32), retained.findById(3).?.frame);
+
+    // A purely horizontal follow-up over the same point keeps the list
+    // still and moves only the timeline.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .timestamp_ns = 1_032_000_000,
+        .kind = .scroll,
+        .x = 20,
+        .y = 20,
+        .delta_x = 10,
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 24), retained.findById(2).?.widget.value);
+    try std.testing.expectEqual(@as(f32, 40), retained.findById(1).?.widget.value_x);
+}
+
+test "horizontal-only scroll views take the whole keymap on their one axis" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-widget-horizontal-keymap", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 60) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(160, 0, 140, 60) },
+        .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const shelf = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &tiles,
+    };
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.focusView(1, "canvas");
+    harness.runtime.views[0].canvas_widget_focused_id = 1;
+
+    // ArrowRight steps a line on the ONE axis the region grants: the
+    // viewport-width-derived step (max(24, 180 * 0.35) = 63).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "arrowright",
+    } });
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 63), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+
+    // End jumps to the horizontal terminus (content 460 - viewport 180).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "end",
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 280), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-280, 0, 140, 60), retained.findById(2).?.frame);
+
+    // Home returns to the origin.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "home",
+    } });
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 140, 60), retained.findById(2).?.frame);
+}

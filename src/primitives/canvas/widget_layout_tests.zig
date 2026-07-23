@@ -1413,6 +1413,83 @@ test "widget scroll view scrollbars use control visual tokens" {
     }
 }
 
+test "horizontal scroll views draw the bottom-edge scrollbar and two-axis regions reserve the corner" {
+    const tokens: DesignTokens = .{};
+
+    // A horizontal shelf: content reaches x = 460 in a 120-wide
+    // viewport. Only the horizontal bar (part slots 4/5) exists.
+    const tiles = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 40) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 40) },
+    };
+    const shelf = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .value_x = 20,
+        .children = &tiles,
+    };
+    var shelf_nodes: [4]WidgetLayoutNode = undefined;
+    const shelf_layout = try layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 120, 60), &shelf_nodes);
+    // The horizontal offset displaces children leftward at layout time,
+    // exactly as the vertical offset displaces them upward.
+    try expectLayoutFrame(shelf_layout, 2, geometry.RectF.init(-20, 0, 140, 40));
+    try expectLayoutFrame(shelf_layout, 3, geometry.RectF.init(300, 0, 140, 40));
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try shelf_layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 2)) == null);
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 3)) == null);
+    switch (display_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            // Bottom edge: inset 3, thickness 3, full width minus insets.
+            try expectRect(geometry.RectF.init(3, 54, 114, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(1, 5)).?.command) {
+        .fill_rounded_rect => |thumb| {
+            try std.testing.expectEqual(@as(f32, 54), thumb.rect.y);
+            try std.testing.expect(thumb.rect.width < 114);
+            try std.testing.expect(thumb.rect.x > 3);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A both-axes region with overflow on both axes draws BOTH bars,
+    // each track ending short of the shared corner.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 400, 300) }},
+    };
+    var sheet_nodes: [3]WidgetLayoutNode = undefined;
+    const sheet_layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 120, 60), &sheet_nodes);
+    var sheet_commands: [16]CanvasCommand = undefined;
+    var sheet_builder = Builder.init(&sheet_commands);
+    try sheet_layout.emitDisplayList(&sheet_builder, tokens);
+    const sheet_list = sheet_builder.displayList();
+    switch (sheet_list.findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rounded_rect => |track| {
+            // The vertical track gives up thickness + inset (6) at the
+            // bottom corner: 60 - 2*3 - 6 = 48.
+            try expectRect(geometry.RectF.init(114, 3, 3, 48), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (sheet_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            try expectRect(geometry.RectF.init(3, 54, 108, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 3)) != null);
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 5)) != null);
+}
+
 test "widget focus traversal skips scroll clipped children" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },

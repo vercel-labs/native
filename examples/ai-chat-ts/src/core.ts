@@ -390,7 +390,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // The controlled-scroll echo: the applied offset lands in the
       // model, so the next rebuild's `value` binding never fights the
       // runtime.
-      return { ...model, chatScrollTop: msg.scroll.offset };
+      return { ...model, chatScrollTop: msg.scroll.offsetY };
     case "endpoint_set":
       return { ...model, endpoint: msg.value };
     case "model_set":
