@@ -98,6 +98,15 @@ pub fn main(init: std.process.Init) !void {
             try stderr.flush();
             std.process.exit(2);
         }
+        // Spelling checks cannot see every filesystem aliasing (Unicode
+        // case folding, links), so ask the filesystem: an output whose
+        // path already resolves to the sidecar's own file is the same
+        // refusal, whatever the spelling.
+        if (sameExistingFile(init.io, path, input_resolved)) {
+            try stderr.print("corewire: output {s} resolves to the sidecar's own file — generating would destroy the input contract\n", .{path});
+            try stderr.flush();
+            std.process.exit(2);
+        }
         for (resolved[path_index + 1 ..]) |maybe_other| {
             const other = maybe_other orelse continue;
             if (std.ascii.eqlIgnoreCase(path, other)) {
@@ -156,8 +165,27 @@ pub fn main(init: std.process.Init) !void {
         try writeOutput(init, stderr, out, generated);
     }
     if (facade_path) |out| {
+        // The shim was just written, so a filesystem-level alias of the
+        // two output paths (Unicode case folding, links) is visible now
+        // even where the spelling checks above could not see it.
+        if (out_path) |shim_out| {
+            if (sameExistingFile(init.io, out, shim_out)) {
+                try stderr.print("corewire: --facade {s} resolves to the file --out just wrote — the second projection would overwrite the first\n", .{out});
+                try stderr.flush();
+                std.process.exit(2);
+            }
+        }
         try writeOutput(init, stderr, out, facade.?);
     }
+}
+
+/// Whether two paths currently resolve to one existing file, by asking
+/// the filesystem (inode identity where the platform reports it): the
+/// alias net behind the lexical checks. Nonexistent paths are distinct.
+fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
+    const stat_a = std.Io.Dir.cwd().statFile(io, a, .{}) catch return false;
+    const stat_b = std.Io.Dir.cwd().statFile(io, b, .{}) catch return false;
+    return stat_a.inode == stat_b.inode;
 }
 
 fn writeOutput(init: std.process.Init, stderr: *std.Io.Writer, out: []const u8, data: []const u8) !void {
