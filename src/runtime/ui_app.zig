@@ -870,6 +870,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hold_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         hold_view_label_len: usize = 0,
         hold_window_id: platform.WindowId = 1,
+        /// Hover-Msg delivery mirror: the containment chain — and which
+        /// view it belongs to — as the app last HEARD it. The runtime
+        /// owns the STANDING chain per view (derived from journaled
+        /// input at the same seams the hover wash resolves through);
+        /// this mirror is the dispatch bookkeeping, and the diff
+        /// between the two is exactly the enter/leave Msgs owed. One
+        /// pointer, one standing mirror (the hold-arming shape). Leave
+        /// Msgs are captured BY VALUE when their enter dispatches (the
+        /// context-menu snapshot precedent), so a widget unmounted
+        /// mid-hover still delivers the paired leave the live tree can
+        /// no longer resolve — no enter without its eventual leave.
+        hover_msg_window_id: platform.WindowId = 1,
+        hover_msg_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+        hover_msg_view_label_len: usize = 0,
+        hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
+        hover_msg_chain_len: usize = 0,
+        hover_msg_leave_msgs: [canvas.max_widget_depth]?MsgT = undefined,
         /// Context-menu presentation fallback state: the widget whose
         /// declared menu is mounted as an anchored canvas surface because
         /// the platform could not present it natively. Set by
@@ -3372,6 +3389,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            try handleRuntimeEvent(self, runtime, event_value);
+            // Hover enter/leave delivery rides the tail of EVERY
+            // runtime event: the standing chain moves during pointer
+            // routing, scroll reconciles (wheel, kinetic, drivers,
+            // keyboard), dismissals, and any rebuild the dispatches
+            // above performed — one drain seam catches them all, and
+            // replay re-runs the same events through the same seam.
+            try self.drainHoverMsgs(runtime);
+        }
+
+        fn handleRuntimeEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
             switch (event_value) {
                 .command => |command| {
                     const map = self.options.on_command orelse return;
@@ -3986,6 +4014,132 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
+        }
+
+        /// Cap on hover-Msg drain passes per runtime event: each pass
+        /// delivers one coalesced containment transition, and the Msgs
+        /// it dispatches can rebuild the tree and move the standing
+        /// chain again (an enter handler that unmounts the hovered
+        /// element owes an immediate leave — the second pass delivers
+        /// it). The fixed cap keeps a flapping app (enter mounts,
+        /// leave unmounts, forever) from wedging the event loop;
+        /// residue delivers on the next event's drain.
+        const hover_msg_drain_passes: usize = 4;
+
+        fn hoverMsgViewLabel(self: *const Self) []const u8 {
+            return self.hover_msg_view_label_storage[0..self.hover_msg_view_label_len];
+        }
+
+        /// Deliver hover enter/leave Msgs owed since the last drain:
+        /// diff the runtime's standing containment chain against the
+        /// delivered mirror and dispatch the edges — leaves innermost
+        /// first, then enters outermost first (the DOM's
+        /// mouseleave/mouseenter order). Intermediate flickers within
+        /// one event coalesce away: only the settled containment
+        /// dispatches, which is what "discrete edges, never per-move"
+        /// means under a fast pointer.
+        fn drainHoverMsgs(self: *Self, runtime: *Runtime) anyerror!void {
+            if (!self.installed) return;
+            var passes: usize = 0;
+            while (passes < hover_msg_drain_passes) : (passes += 1) {
+                if (!try self.stepHoverMsgs(runtime)) return;
+            }
+        }
+
+        /// One drain pass: resolve the view whose standing chain is
+        /// live, compare it to the mirror, and — when they differ —
+        /// dispatch the owed edges and commit the mirror. Returns
+        /// whether it dispatched anything (the drain loop re-checks:
+        /// a dispatched Msg's rebuild may have moved the chain again).
+        ///
+        /// One pointer means at most one view should hold a standing
+        /// chain; if a host ever leaves two populated (a missing
+        /// pointer-cancel on window switch), the mirror's own view
+        /// wins while it stands — deterministic, never flapping.
+        fn stepHoverMsgs(self: *Self, runtime: *Runtime) anyerror!bool {
+            var standing_index: ?usize = null;
+            for (runtime.views[0..runtime.view_count], 0..) |*view, index| {
+                if (view.kind != .gpu_surface) continue;
+                if (view.canvas_widget_hover_msg_chain_len == 0) continue;
+                const is_mirror = view.window_id == self.hover_msg_window_id and
+                    std.mem.eql(u8, view.label, self.hoverMsgViewLabel());
+                if (is_mirror) {
+                    standing_index = index;
+                    break;
+                }
+                if (standing_index == null) standing_index = index;
+            }
+
+            // The standing chain and the view identity it belongs to
+            // (the mirror's own view when nothing stands anywhere:
+            // its entries owe leaves against that view's tree).
+            var standing_window: platform.WindowId = self.hover_msg_window_id;
+            var standing_label: []const u8 = self.hoverMsgViewLabel();
+            var standing_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined;
+            var standing_len: usize = 0;
+            if (standing_index) |index| {
+                const view = &runtime.views[index];
+                standing_window = view.window_id;
+                standing_label = view.label;
+                standing_len = view.canvas_widget_hover_msg_chain_len;
+                @memcpy(standing_chain[0..standing_len], view.canvas_widget_hover_msg_chain[0..standing_len]);
+            }
+
+            const same_view = standing_window == self.hover_msg_window_id and
+                std.mem.eql(u8, standing_label, self.hoverMsgViewLabel());
+            var prefix: usize = 0;
+            if (same_view) {
+                while (prefix < standing_len and prefix < self.hover_msg_chain_len and
+                    standing_chain[prefix] == self.hover_msg_chain[prefix]) : (prefix += 1)
+                {}
+            }
+            if (same_view and prefix == standing_len and prefix == self.hover_msg_chain_len) return false;
+
+            // Capture everything this pass dispatches BEFORE committing
+            // the mirror: the dispatches below rebuild the tree, which
+            // moves the runtime's standing chains under us.
+            const leave_window = self.hover_msg_window_id;
+            var leave_msgs: [canvas.max_widget_depth]?MsgT = undefined;
+            var leave_count: usize = 0;
+            var index = self.hover_msg_chain_len;
+            while (index > prefix) {
+                index -= 1;
+                leave_msgs[leave_count] = self.hover_msg_leave_msgs[index];
+                leave_count += 1;
+            }
+
+            // Enter Msgs (and the leave captures their eventual exits
+            // will dispatch) resolve against the live tree at the
+            // transition — the context-menu snapshot rule: leave
+            // answers what enter announced, whatever rebuilds do to
+            // the binding in between.
+            const tree = self.treeForViewLabel(standing_label);
+            var enter_msgs: [canvas.max_widget_depth]?MsgT = undefined;
+            for (standing_chain[prefix..standing_len], prefix..) |id, position| {
+                enter_msgs[position] = if (tree) |value| value.msgFor(id, .hover_enter) else null;
+                self.hover_msg_leave_msgs[position] = if (tree) |value| value.msgFor(id, .hover_leave) else null;
+            }
+
+            // Commit the mirror before dispatching so a mid-dispatch
+            // error can never re-deliver the same edges. The identity
+            // rewrite only runs on a view CHANGE — when the view stood,
+            // `standing_label` aliases the mirror's own storage.
+            if (!same_view) {
+                self.hover_msg_window_id = standing_window;
+                const label_len = @min(standing_label.len, self.hover_msg_view_label_storage.len);
+                @memcpy(self.hover_msg_view_label_storage[0..label_len], standing_label[0..label_len]);
+                self.hover_msg_view_label_len = label_len;
+            }
+            @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
+            self.hover_msg_chain_len = standing_len;
+
+            for (leave_msgs[0..leave_count]) |maybe_msg| {
+                if (maybe_msg) |msg| try self.dispatch(runtime, leave_window, msg);
+            }
+            for (enter_msgs[prefix..standing_len]) |maybe_msg| {
+                if (maybe_msg) |msg| try self.dispatch(runtime, standing_window, msg);
+            }
+            return true;
         }
 
         /// Re-render the house video chrome from the moved channel

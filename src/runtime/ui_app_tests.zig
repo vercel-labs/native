@@ -5581,3 +5581,311 @@ test "pinch identity distinguishes windows and views in the Msg" {
     try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
 }
+
+// ------------------------------------------------------------ hover fixture
+
+const HoverEntry = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+};
+
+const HoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+    show_vanish: bool = true,
+
+    fn push(model: *HoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const HoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const HoverMsg = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+};
+
+const HoverApp = ui_app_model.UiApp(HoverModel, HoverMsg);
+
+fn hoverUpdate(model: *HoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .outer_enter => model.push(.outer_enter),
+        .outer_leave => model.push(.outer_leave),
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        .vanish_enter => {
+            // The enter handler unmounts the hovered element: the very
+            // next drain pass owes (and delivers) the captured leave.
+            model.push(.vanish_enter);
+            model.show_vanish = false;
+        },
+        .vanish_leave => model.push(.vanish_leave),
+    }
+}
+
+/// A listening panel (y 0..120) holding two listening rows (y 0..40 and
+/// 40..80; the band at 80..120 is the panel's own), then a listening row
+/// (y 120..160) whose ENTER unmounts it. Dead space below. Fixed heights
+/// so the tests probe laid-out geometry deterministically.
+fn hoverView(ui: *HoverApp.Ui, model: *const HoverModel) HoverApp.Ui.Node {
+    const rows = ui.column(.{ .gap = 0 }, .{
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 1 }, .on_hover_leave = .{ .row_leave = 1 } }, .{
+            ui.text(.{}, "Row one"),
+        }),
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 2 }, .on_hover_leave = .{ .row_leave = 2 } }, .{
+            ui.text(.{}, "Row two"),
+        }),
+    });
+    const outer = ui.panel(.{ .height = 120, .on_hover_enter = .outer_enter, .on_hover_leave = .outer_leave }, .{rows});
+    if (model.show_vanish) {
+        return ui.column(.{ .gap = 0 }, .{
+            outer,
+            ui.row(.{ .height = 40, .on_hover_enter = .vanish_enter, .on_hover_leave = .vanish_leave }, .{
+                ui.text(.{}, "Vanish"),
+            }),
+        });
+    }
+    return ui.column(.{ .gap = 0 }, .{outer});
+}
+
+const hover_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const hover_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Hover",
+    .width = 400,
+    .height = 300,
+    .views = &hover_views,
+}};
+const hover_scene: app_manifest.ShellConfig = .{ .windows = &hover_windows };
+
+fn hoverOptions() HoverApp.Options {
+    return .{
+        .name = "ui-app-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = hoverUpdate,
+        .view = hoverView,
+    };
+}
+
+fn hoverMove(harness: anytype, app: anytype, x: f32, y: f32) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = x,
+        .y = y,
+    } });
+}
+
+fn expectHoverLog(model: *const HoverModel, expected: []const HoverEntry) !void {
+    try std.testing.expectEqualSlices(HoverEntry, expected, model.entries());
+}
+
+test "hover msgs dispatch containment edges: nested listeners, cancel, and coalesced moves" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Dead space: nothing listens, nothing dispatches, and the runtime
+    // holds no standing chain (unbound surfaces pay nothing).
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // Onto row one (over its plain TEXT child — containment falls
+    // through to the listeners): enters fire outermost first.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // Row one to row two: the shared panel ancestor stays entered — the
+    // pointer never left it, the DOM mouseenter/mouseleave rule.
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 } });
+
+    // Onto the panel's own band below the rows: only the row leaves.
+    try hoverMove(harness, app, 50, 100);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 } });
+
+    // Off the panel entirely.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+
+    // Back inside, then the pointer LEAVES THE VIEW (the pointer-cancel
+    // hosts emit on window exit): leaves fire innermost first.
+    app_state.model = .{};
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+}
+
+test "hover enter that unmounts its element still delivers the captured leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The enter handler hides the row; the rebuild prunes it from the
+    // standing chain and the SAME event's drain delivers the leave Msg
+    // captured when the enter dispatched — the live tree can no longer
+    // resolve it. No enter without its eventual leave.
+    try hoverMove(harness, app, 50, 140);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // The pointer now stands over dead space (the row is gone); moving
+    // again dispatches nothing further.
+    try hoverMove(harness, app, 50, 141);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+}
+
+// ------------------------------------------------- hover-under-scroll fixture
+
+const ScrollHoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+
+    fn push(model: *ScrollHoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const ScrollHoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const ScrollHoverApp = ui_app_model.UiApp(ScrollHoverModel, HoverMsg);
+
+fn scrollHoverUpdate(model: *ScrollHoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        else => {},
+    }
+}
+
+/// Ten listening rows of 40 points inside a 120-point scroll viewport:
+/// scrolling moves rows under a stationary pointer.
+fn scrollHoverView(ui: *ScrollHoverApp.Ui, model: *const ScrollHoverModel) ScrollHoverApp.Ui.Node {
+    _ = model;
+    var rows: [10]ScrollHoverApp.Ui.Node = undefined;
+    for (&rows, 0..) |*node, index| {
+        const id: u32 = @intCast(index + 1);
+        node.* = ui.row(.{
+            .height = 40,
+            .key = canvas.uiKey(@as(u64, id)),
+            .on_hover_enter = .{ .row_enter = id },
+            .on_hover_leave = .{ .row_leave = id },
+        }, .{ui.text(.{}, ui.fmt("Row {d}", .{id}))});
+    }
+    const row_nodes: []const ScrollHoverApp.Ui.Node = rows[0..];
+    return ui.scroll(.{ .height = 120 }, .{ui.column(.{ .gap = 0 }, row_nodes)});
+}
+
+fn scrollHoverOptions() ScrollHoverApp.Options {
+    return .{
+        .name = "ui-app-scroll-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = scrollHoverUpdate,
+        .view = scrollHoverView,
+    };
+}
+
+test "hover msgs re-resolve when content scrolls under a stationary pointer" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ScrollHoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ScrollHoverApp.init(std.heap.page_allocator, .{}, scrollHoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Park the pointer on row 1.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = 50,
+        .y = 20,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{.{ .row_enter = 1 }}, app_state.model.entries());
+
+    // A wheel scroll of 80 points slides row 3 under the stationary
+    // pointer: the same leave/enter a real move off row 1 onto row 3
+    // would dispatch — content moved, containment followed.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .timestamp_ns = 2_000_000,
+        .x = 50,
+        .y = 20,
+        .delta_y = 80,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{ .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 3 } }, app_state.model.entries());
+}

@@ -323,6 +323,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (self.canvas_widget_hovered_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_hovered_id)) {
                 self.canvas_widget_hovered_id = 0;
             }
+            // Hover-Msg entries whose widgets this rebuild unmounted owe
+            // their leave edge; survivors keep standing (the adoption
+            // reconcile re-hit-tests the stored pointer position right
+            // after, wherever one exists).
+            self.pruneCanvasWidgetHoverMsgChain();
             // The hover point belongs to the hovered widget's detail
             // chrome; without a hovered widget it means nothing.
             if (self.canvas_widget_hovered_id == 0) self.canvas_widget_hover_point = null;
@@ -376,6 +381,30 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return layout.nodes[target_index].widget.id;
         }
 
+        /// Recompute the standing hover-Msg chain from a raw hit — the
+        /// pointer and scroll seams call this with the SAME raw hit the
+        /// wash resolution consumed, so containment and the wash always
+        /// agree on where the pointer stands.
+        pub fn setCanvasWidgetHoverMsgChainForHit(self: *RuntimeView, hit: ?canvas.WidgetHit) void {
+            const chain = self.widgetLayoutTree().hoverMsgChainForHit(hit, &self.canvas_widget_hover_msg_chain);
+            self.canvas_widget_hover_msg_chain_len = chain.len;
+        }
+
+        /// Point-blind prune of the standing hover-Msg chain: drop
+        /// entries whose widgets left the tree (their leave edge is
+        /// due), keep the rest — the wash's exact rebuild rule (an id
+        /// survives a rebuild until a re-hit-test says otherwise).
+        pub fn pruneCanvasWidgetHoverMsgChain(self: *RuntimeView) void {
+            const layout = self.widgetLayoutTree();
+            var kept: usize = 0;
+            for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
+                if (!canvasWidgetInteractionTargetExists(layout, id)) continue;
+                self.canvas_widget_hover_msg_chain[kept] = id;
+                kept += 1;
+            }
+            self.canvas_widget_hover_msg_chain_len = kept;
+        }
+
         pub fn reconcileCanvasWidgetRenderStateAfterScroll(self: *RuntimeView, point: ?geometry.PointF) void {
             const layout = self.widgetLayoutTree();
             if (self.canvas_widget_focused_id != 0 and layout.focusTargetById(self.canvas_widget_focused_id) == null) {
@@ -394,13 +423,23 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (point) |value| {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
-                // move to this point would produce.
-                const hit = layout.hoverTargetForHit(layout.hitTestWithTokens(value, self.widget_tokens));
+                // move to this point would produce. The hover-Msg chain
+                // re-resolves from the same raw hit, so content sliding
+                // out from under a stationary pointer fires the same
+                // leave a real move off it would.
+                const raw = layout.hitTestWithTokens(value, self.widget_tokens);
+                const hit = layout.hoverTargetForHit(raw);
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
-            } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
-                next_hovered_id = 0;
-                next_cursor = .arrow;
+                self.setCanvasWidgetHoverMsgChainForHit(raw);
+            } else {
+                if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
+                    next_hovered_id = 0;
+                    next_cursor = .arrow;
+                }
+                // No trustworthy position: like the wash, entries
+                // survive by id until their widgets leave the tree.
+                self.pruneCanvasWidgetHoverMsgChain();
             }
 
             var next_pressed_id = self.canvas_widget_pressed_id;
@@ -557,6 +596,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 self.canvas_widget_cursor = .arrow;
             }
             if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index)) self.canvas_widget_pressed_id = 0;
+            // Hover-Msg listeners inside the dismissed surface owe their
+            // leave edge — the surface is gone from under the pointer;
+            // listeners outside it keep standing (the wash rule).
+            {
+                var kept: usize = 0;
+                for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
+                    if (self.canvasWidgetIdDescendsFromIndex(id, surface_index)) continue;
+                    self.canvas_widget_hover_msg_chain[kept] = id;
+                    kept += 1;
+                }
+                self.canvas_widget_hover_msg_chain_len = kept;
+            }
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;

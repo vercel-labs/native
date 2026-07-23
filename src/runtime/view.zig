@@ -441,6 +441,21 @@ pub const RuntimeView = struct {
     canvas_widget_focus_visible_keyboard: bool = false,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
+    /// The STANDING hover-Msg containment chain: every widget on the
+    /// last resolved raw hover hit's ancestor path that listens for
+    /// hover Msgs (`Widget.hover_msgs`), outermost first
+    /// (`WidgetLayoutTree.hoverMsgChainForHit`). Recomputed at exactly
+    /// the seams the hover WASH resolves through — pointer phases,
+    /// scroll re-hit-tests (wheel, kinetic, drivers, keyboard), layout
+    /// adoption, and the rebuild/dismissal prunes — so hover-Msg
+    /// containment and the wash can never disagree about where the
+    /// pointer stands. Derived from journaled input only, so replay
+    /// reproduces identical chains. The ui-app layer diffs this
+    /// against the chain it last DELIVERED (its own mirror) and
+    /// dispatches enter/leave Msgs; apps that bind no hover handlers
+    /// keep the chain empty and pay nothing.
+    canvas_widget_hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
+    canvas_widget_hover_msg_chain_len: usize = 0,
     /// Hover-intent state for ANCHORED tooltips — runtime-owned
     /// presentation chrome; the model never hears hover. `armed` is
     /// the tooltip whose trigger is hovered while its show delay runs;
@@ -680,6 +695,8 @@ pub const RuntimeView = struct {
     pub const canvasWidgetCursorForId = CanvasWidgetTreeMethods.canvasWidgetCursorForId;
     pub const canvasWidgetRenderState = CanvasWidgetTreeMethods.canvasWidgetRenderState;
     pub const reconcileCanvasWidgetRenderStateAfterScroll = CanvasWidgetTreeMethods.reconcileCanvasWidgetRenderStateAfterScroll;
+    pub const setCanvasWidgetHoverMsgChainForHit = CanvasWidgetTreeMethods.setCanvasWidgetHoverMsgChainForHit;
+    pub const pruneCanvasWidgetHoverMsgChain = CanvasWidgetTreeMethods.pruneCanvasWidgetHoverMsgChain;
     pub const dismissCanvasWidgetSurfaceFromEscape = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceFromEscape;
     pub const dismissCanvasWidgetMenuSurfaceForFocusDeparture = CanvasWidgetTreeMethods.dismissCanvasWidgetMenuSurfaceForFocusDeparture;
     pub const dismissCanvasWidgetSurfaceForTarget = CanvasWidgetTreeMethods.dismissCanvasWidgetSurfaceForTarget;

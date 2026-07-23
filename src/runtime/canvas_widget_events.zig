@@ -366,32 +366,45 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const target_id: canvas.ObjectId = if (pointer_event.target) |target| target.id else 0;
             const hover_target = layout_tree.hoverTargetForHit(pointer_event.target);
             const hover_target_id: canvas.ObjectId = if (hover_target) |value| value.id else 0;
-            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens));
+            const raw_hit = layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens);
+            const hit_target = layout_tree.hoverTargetForHit(raw_hit);
             const hit_target_id: canvas.ObjectId = if (hit_target) |value| value.id else 0;
             const hit_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hit_target));
             var next_hovered_id = self.views[index].canvas_widget_hovered_id;
             var next_pressed_id = self.views[index].canvas_widget_pressed_id;
             var next_cursor = self.views[index].canvas_widget_cursor;
 
+            // The hover-Msg chain re-resolves from the SAME raw hit the
+            // wash phase-switch consumes below, so containment and the
+            // wash always agree: fresh hit test for hovers/moves/ups
+            // (drags included — the wash follows the actual pointer),
+            // the routed raw target for downs, empty on cancel (the
+            // pointer left the view — the window-leave edge). Wheel
+            // keeps the standing chain; the scroll reconcile re-derives
+            // it from the post-scroll tree.
             switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
+                    self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                 },
                 .down => {
                     next_hovered_id = hover_target_id;
                     next_pressed_id = target_id;
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
+                    self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
                 },
                 .up => {
                     next_hovered_id = hit_target_id;
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
+                    self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
                 },
                 .cancel => {
                     next_hovered_id = 0;
                     next_pressed_id = 0;
                     next_cursor = .arrow;
+                    self.views[index].canvas_widget_hover_msg_chain_len = 0;
                 },
                 .wheel => {},
             }
