@@ -107,6 +107,10 @@ pub fn canvasRenderAnimationStartNsForView(view: *const RuntimeView) u64 {
     return @max(view.gpu_input_timestamp_ns, view.gpu_timestamp_ns);
 }
 
+/// The cancel-to-commit routing grace (see
+/// `RuntimeView.canvas_widget_ime_commit_grace`).
+pub const ImeCommitGrace = enum { none, route_to_owner, swallow };
+
 pub const RuntimeView = struct {
     id: platform.ViewId = 0,
     window_id: platform.WindowId = 1,
@@ -434,6 +438,16 @@ pub const RuntimeView = struct {
     /// fallback (`canvas_widget_focused_id` is where NEW input goes;
     /// this is where the open sequence finishes).
     canvas_widget_ime_owner_id: canvas.ObjectId = 0,
+    /// One-shot routing grace armed by a composition CANCEL: every host
+    /// encodes a CONVERTED commit (the composed result differs from the
+    /// marked text) as cancel-then-text_input, so the text_input
+    /// immediately following a cancel still belongs to the sequence —
+    /// routed to the owner that composed it (`route_to_owner`, the
+    /// owner pin held through the cancel), or swallowed alongside an
+    /// orphaned sequence (`swallow`). Any OTHER event disarms it: a
+    /// plain Escape cancel is followed by its own key_down, which
+    /// disarms the grace before the user's next typing could misroute.
+    canvas_widget_ime_commit_grace: ImeCommitGrace = .none,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
     /// True when `canvas_widget_focus_visible_id` was written by the
     /// KEYBOARD focus contract (`setCanvasWidgetFocusFromKeyboard`) —

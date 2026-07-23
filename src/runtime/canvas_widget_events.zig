@@ -192,9 +192,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // text entry even when keyboard focus has since moved, so
             // the starting editor resolves its own marked text — never
             // the newly focused widget, never the target-less fallback.
+            // `text_input` prefers the owner too: the owner pin is only
+            // ever set mid-sequence (and held one event past a cancel,
+            // the converted-commit grace), and in both windows a
+            // text_input is the sequence's own resolution — the hosts
+            // never deliver ordinary typing while a composition is open.
             const ime_owner = self.views[index].canvas_widget_ime_owner_id;
             const target_id = switch (input_event.kind) {
-                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => id: {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition, .text_input => id: {
                     if (ime_owner != 0) {
                         if (tree.findById(ime_owner)) |node| {
                             if (canvas.isWidgetTextEntry(node.widget)) break :id ime_owner;

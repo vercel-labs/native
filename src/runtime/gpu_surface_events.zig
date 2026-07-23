@@ -391,14 +391,34 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     ),
                 else => false,
             };
+            // Resolve the one-shot cancel grace FIRST (see
+            // `ImeCommitGrace`): a text_input arriving right after a
+            // cancel is a converted commit's result and still belongs
+            // to the cancelled sequence; any other event disarms the
+            // grace (a plain Escape cancel is chased by its own
+            // key_down, so ordinary typing never inherits it).
+            const ime_grace: @import("view.zig").ImeCommitGrace = grace: {
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :grace .none;
+                if (self.views[index].kind != .gpu_surface) break :grace .none;
+                const armed = self.views[index].canvas_widget_ime_commit_grace;
+                if (armed == .none) break :grace .none;
+                self.views[index].canvas_widget_ime_commit_grace = .none;
+                if (input_event.kind == .text_input) break :grace armed;
+                // Disarmed: release the owner a route_to_owner grace
+                // held through the cancel.
+                if (armed == .route_to_owner) self.views[index].canvas_widget_ime_owner_id = 0;
+                break :grace .none;
+            };
             // A WIDGET-owned sequence whose owning editor vanished (a
             // rebuild removed it mid-composition) can resolve NOWHERE:
-            // its commit or cancel is swallowed — routing it to the
-            // newly focused editor would resolve a composition that
-            // editor never saw, and the target-less fallback would type
-            // it into a consumer that never composed it. The stale pin
-            // clears either way; a fresh set_composition simply reopens
-            // ownership at the focused editor.
+            // every continuation is swallowed — routing to the newly
+            // focused editor would resolve (or preedit-update) a
+            // composition that editor never saw, and the target-less
+            // fallback would type it into a consumer that never composed
+            // it. The pin HOLDS through set updates (the sequence is
+            // still open) and clears only when its commit or cancel
+            // closes it; an orphaned cancel arms the swallow grace so a
+            // converted commit's trailing text_input is swallowed too.
             const ime_widget_owner_orphaned = switch (input_event.kind) {
                 .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => blk: {
                     const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
@@ -412,12 +432,18 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         break :alive false;
                     };
                     if (alive) break :blk false;
-                    self.views[index].canvas_widget_ime_owner_id = 0;
-                    break :blk input_event.kind != .ime_set_composition;
+                    if (input_event.kind != .ime_set_composition) {
+                        self.views[index].canvas_widget_ime_owner_id = 0;
+                        if (input_event.kind == .ime_cancel_composition) {
+                            self.views[index].canvas_widget_ime_commit_grace = .swallow;
+                        }
+                    }
+                    break :blk true;
                 },
                 else => false,
             };
-            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned)
+            const ime_grace_swallow = ime_grace == .swallow;
+            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned or ime_grace_swallow)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -431,15 +457,19 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, text_input_event);
                 // Composition ownership follows the ROUTED editor: a
                 // set_composition opens (or continues) the sequence in
-                // its target, and the sequence's commit/cancel — or a
-                // direct insertion — closes it, releasing the routing
-                // pin that kept continuations with the starting editor
-                // across focus moves.
+                // its target; a commit — or a direct insertion — closes
+                // it. A CANCEL holds the pin one more event and arms the
+                // route grace: the hosts encode a converted commit as
+                // cancel-then-text_input, so the trailing text_input
+                // must still find the owner (the grace probe above
+                // releases the pin instead when anything else follows a
+                // plain cancel).
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     switch (input_event.kind) {
                         .ime_set_composition => self.views[index].canvas_widget_ime_owner_id =
                             text_input_event.keyboard.focused_id orelse 0,
-                        .ime_commit_composition, .ime_cancel_composition, .text_input => self.views[index].canvas_widget_ime_owner_id = 0,
+                        .ime_cancel_composition => self.views[index].canvas_widget_ime_commit_grace = .route_to_owner,
+                        .ime_commit_composition, .text_input => self.views[index].canvas_widget_ime_owner_id = 0,
                         else => {},
                     }
                 }
@@ -518,7 +548,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             if (widget_text_input_event) |text_input_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
-            } else if (!widget_surface_dismissed and !ime_widget_owner_orphaned) {
+            } else if (!widget_surface_dismissed and !ime_widget_owner_orphaned and !ime_grace_swallow) {
                 // No focused text widget consumed this text: committed
                 // text still reaches the app as a TARGET-LESS text event
                 // — the key_down fallback's typing twin, for apps that

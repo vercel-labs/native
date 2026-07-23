@@ -88,9 +88,14 @@ pub fn reapSurrendered() void {
         if (slot.* < 0) continue;
         var status: c_int = 0;
         const r = c.waitpid(slot.*, &status, wnohang);
-        // Reaped, or already gone (ECHILD from an embedder reaper):
-        // either way the entry is settled. 0 = still wedged, keep it.
-        if (r != 0) slot.* = -1;
+        // Reaped (r == pid), or already gone (ECHILD from an embedder
+        // reaper): the entry is settled. 0 = still wedged, and EINTR —
+        // however unlikely against a non-blocking wait — keeps the pid
+        // for the next poll rather than abandoning a live child to
+        // zombie unreaped.
+        if (r == 0) continue;
+        if (r < 0 and errnoValue() == eintr) continue;
+        slot.* = -1;
     }
 }
 
