@@ -998,6 +998,23 @@ fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8
         // blurred view's tooltip floating.
         if (was_focused and !view.focused) {
             try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).resetCanvasTooltipIntentForViewBlur(self, view_index);
+            // Focus loss also disarms the cancel-to-commit grace and
+            // releases its owner pin: hosts emit a standalone cancel
+            // when a composing view blurs, and after refocus an
+            // IM-consumed keystroke's text_input arrives BEFORE its
+            // key_down echo — the stale grace would route that fresh
+            // commit to the old editor (or swallow it) instead of the
+            // one focused now.
+            if (view.canvas_widget_ime_commit_grace != .none) {
+                view.canvas_widget_ime_commit_grace = .none;
+                view.canvas_widget_ime_owner_id = 0;
+            }
+            if (self.targetless_ime_commit_grace and
+                self.targetless_ime_preedit_window == view.window_id and
+                std.mem.eql(u8, self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len], view.label))
+            {
+                self.targetless_ime_commit_grace = false;
+            }
         }
     }
     for (self.webviews[0..self.webview_count]) |*webview| {

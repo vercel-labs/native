@@ -219,6 +219,20 @@ pub const Session = struct {
         const r: vt.size.CellCountInt = @intCast(std.math.clamp(@as(usize, new_rows), 2, max_rows));
         if (c == session.term.cols and r == session.term.rows) return true;
         session.term.resize(session.gpa, .{ .cols = c, .rows = r }) catch return false;
+        // Reflow moves every cell, so keyboard-selection coordinates
+        // into the OLD grid are meaningless (and a caret past the new
+        // edge would strand Shift+Arrow and copy on cells that no
+        // longer exist). Re-anchor at the clamped head: selection mode
+        // stays armed, the caret lands inside the new grid, and the
+        // stale range is dropped rather than copied.
+        if (session.select_anchor != null) {
+            session.select_head = .{
+                .x = @intCast(@min(@as(usize, session.select_head.x), @as(usize, session.term.cols) - 1)),
+                .y = @intCast(@min(@as(usize, session.select_head.y), @as(usize, session.term.rows) - 1)),
+            };
+            session.select_anchor = session.select_head;
+            session.applySelection();
+        }
         return true;
     }
 

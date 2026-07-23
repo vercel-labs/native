@@ -726,6 +726,30 @@ test "a payload the outbound ring cannot hold whole is dropped whole, never torn
     try testing.expectEqualStrings("ok", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "resize re-anchors an armed selection inside the new grid" {
+    const session = try createSession(80, 24);
+    defer session.destroy();
+
+    // An armed selection with its caret deep in the old grid.
+    session.beginSelection(false);
+    session.select_head = .{ .x = 70, .y = 20 };
+    session.select_anchor = session.select_head;
+    try testing.expect(session.selectionActive());
+
+    // Shrinking reflows every cell: coordinates into the old grid are
+    // meaningless, so the caret re-anchors clamped inside the new one
+    // and the stale range is dropped rather than copied.
+    try testing.expect(session.resize(40, 12));
+    try testing.expect(session.select_head.x < 40);
+    try testing.expect(session.select_head.y < 12);
+    try testing.expectEqual(session.select_head, session.select_anchor.?);
+
+    // Selection machinery keeps working after the reflow.
+    session.moveSelection(1, 0, true);
+    try testing.expect(session.selectionActive());
+    try testing.expect(session.select_head.x < 40);
+}
+
 test "reset clears the previous session's palette and dynamic color overrides" {
     const session = try createSession(80, 24);
     defer session.destroy();

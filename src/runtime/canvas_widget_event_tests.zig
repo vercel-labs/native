@@ -1402,6 +1402,85 @@ test "a recreated surface never inherits a stale target-less composition" {
     try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
 }
 
+test "a cancel grace dies with its view - the trailing text reaches the new surface's editor" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-ime-grace-recreate", .source = platform.WebViewSource.html("<h1>D</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    // A target-less composition CANCELS (arming the converted-commit
+    // grace, its preedit already zeroed), and the cancel's handling
+    // closes the surface and recreates the label with a focused editor.
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    harness.runtime.views[0].focused = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_set_composition,
+        .text = "ka",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .ime_cancel_composition,
+    } });
+    try harness.runtime.closeView(1, "canvas");
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text_field, .frame = geometry.RectF.init(10, 10, 160, 32), .text = "" },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].focused = true;
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    // The grace died with the old view: this text belongs to the NEW
+    // surface's focused editor, never leaked target-less.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "KA",
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualStrings("KA", retained.findById(2).?.widget.text);
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+}
+
 test "an orphaned composition is swallowed, never rerouted to another editor" {
     const TestApp = struct {
         committed_count: u32 = 0,

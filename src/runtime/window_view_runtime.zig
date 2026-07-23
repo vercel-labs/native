@@ -633,9 +633,12 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             // it: a later view REUSING the same window+label must not
             // inherit the stale sequence (its first composition update
             // would be mistaken for a continuation and bypass its own
-            // focused editor). The buffer stays allocated; only the
-            // ownership state clears.
-            if (self.targetless_ime_preedit_len > 0 and
+            // focused editor) NOR the cancel-to-commit grace (whose
+            // trailing text would leak target-less into the new
+            // surface — cancellation zeroes the preedit length before
+            // arming the grace, so both states gate the clear). The
+            // buffer stays allocated; only the ownership state clears.
+            if ((self.targetless_ime_preedit_len > 0 or self.targetless_ime_commit_grace) and
                 self.targetless_ime_preedit_window == self.views[index].window_id and
                 std.mem.eql(
                     u8,
