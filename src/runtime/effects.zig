@@ -4249,6 +4249,19 @@ pub fn Effects(comptime Msg: type) type {
         pending_staged_spill: []PendingStaged = &.{},
         pending_staged_head: usize = 0,
         pending_staged_len: usize = 0,
+        /// Durable backing for the KEY bytes a staged Msg carries (a TS
+        /// bridge spawn-rejection names the app's requested key). A staged
+        /// Msg outlives the caller's frame arena, and the caller has no
+        /// durable home for the key (a rejected spawn has no live table
+        /// slot), so `stageLoopKey` copies it here: one heap buffer per
+        /// key (stable address — the array of pointers may grow and move,
+        /// the buffers never do, so already-staged Msgs keep valid
+        /// slices). Reclaimed wholesale the moment the staged stage is
+        /// empty again (every keyed Msg delivered, so no slice is live),
+        /// which `stageLoopKey` checks before it appends — bounding the
+        /// storage to one batch's rejections however large that batch is.
+        staged_keys: [][]u8 = &.{},
+        staged_keys_len: usize = 0,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -4797,6 +4810,12 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.pending_staged_head = 0;
             self.pending_staged_len = 0;
+            // The durable key buffers those staged Msgs referenced.
+            self.releaseStagedKeys();
+            if (self.staged_keys.len > 0) {
+                self.allocator.free(self.staged_keys);
+                self.staged_keys = &.{};
+            }
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -6369,6 +6388,25 @@ pub fn Effects(comptime Msg: type) type {
         pub fn ptyKillRequested(self: *Self, key: u64) bool {
             const slot = self.findPtySlot(key) orelse return false;
             return slot.kill_requested;
+        }
+
+        /// Free space, in bytes, of the session's outbound (child stdin)
+        /// FIFO — how much a `ptyWrite` can accept RIGHT NOW before the
+        /// child, not reading, back-pressures further writes (which
+        /// `ptyWrite` then refuses whole, counting a dropped write). An
+        /// app that must deliver a large paste losslessly writes at most
+        /// this many bytes and buffers the rest, retrying as the child
+        /// reads and the FIFO drains. Zero for an unknown key. A fake or
+        /// parked occupancy captures writes wholesale with no FIFO, so it
+        /// reports the full capacity — its writes never back-pressure.
+        pub fn ptyOutboundFree(self: *Self, key: u64) usize {
+            const slot = self.findPtySlot(key) orelse return 0;
+            const shared = slot.shared orelse return max_effect_pty_outbound_bytes;
+            if (slot.fake or !pty_transport.supported) return max_effect_pty_outbound_bytes;
+            shared.mutex.lock();
+            defer shared.mutex.unlock();
+            if (!shared.open) return 0;
+            return max_effect_pty_outbound_bytes - @min(shared.out_len, max_effect_pty_outbound_bytes);
         }
 
         /// Spawn a command onto a fresh pseudo-terminal and stream its
@@ -11128,6 +11166,49 @@ pub fn Effects(comptime Msg: type) type {
                 .seq = self.nextPendingSeq(),
                 .msg = msg,
             });
+        }
+
+        /// Copy a staged Msg's KEY bytes into durable storage and return
+        /// the durable slice, for a caller (the TS bridge) whose staged
+        /// rejection must name a key it has no live table slot to hold
+        /// (a duplicate or table-full spawn). The slice outlives the
+        /// caller's frame arena and stays valid until the staged Msg is
+        /// delivered — however many rejections one `Cmd.batch` stages,
+        /// each gets its own stable buffer, so none clobbers another
+        /// still awaiting delivery. Call BEFORE `stageLoopMsg` and pass
+        /// the returned slice into the built Msg. Loop-thread only; the
+        /// same self-contained/deterministic-replay contract as
+        /// `stageLoopMsg` rides on the caller.
+        pub fn stageLoopKey(self: *Self, key: []const u8) []const u8 {
+            if (key.len == 0) return "";
+            // The stage is empty: every previously staged Msg delivered,
+            // so no slice into these buffers is live — reclaim them all
+            // before appending this batch's first key. This is the only
+            // point storage is released (never at delivery, where the Msg
+            // being handed to `update` still references its key).
+            if (self.pending_staged_len == 0) self.releaseStagedKeys();
+            if (self.staged_keys_len == self.staged_keys.len) {
+                const new_cap = if (self.staged_keys.len == 0) 8 else self.staged_keys.len * 2;
+                const grown = self.allocator.alloc([]u8, new_cap) catch
+                    @panic("effects: out of memory staging a loop-side Msg key - each staged rejection is one refused spawn's only answer and must never be dropped");
+                @memcpy(grown[0..self.staged_keys_len], self.staged_keys[0..self.staged_keys_len]);
+                if (self.staged_keys.len > 0) self.allocator.free(self.staged_keys);
+                self.staged_keys = grown;
+            }
+            const buf = self.allocator.alloc(u8, key.len) catch
+                @panic("effects: out of memory staging a loop-side Msg key - each staged rejection is one refused spawn's only answer and must never be dropped");
+            @memcpy(buf, key);
+            self.staged_keys[self.staged_keys_len] = buf;
+            self.staged_keys_len += 1;
+            return buf;
+        }
+
+        /// Free every durable staged-Msg key buffer. Safe only when the
+        /// staged stage is empty (no delivered-pending Msg references
+        /// one) or at teardown.
+        fn releaseStagedKeys(self: *Self) void {
+            for (self.staged_keys[0..self.staged_keys_len]) |buf| self.allocator.free(buf);
+            self.staged_keys_len = 0;
         }
 
         /// The caller-staged Msg stage's current backing storage —

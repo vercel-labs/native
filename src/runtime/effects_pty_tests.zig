@@ -189,6 +189,33 @@ test "a signaled exit carries its signal; a signaled feed with no signal is refu
     try testing.expectEqual(effects_mod.effect_error_exit_code, exit.code);
 }
 
+test "staged-Msg keys stay valid across a large batch (no fixed-ring clobber)" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    // A single Cmd.batch can stage far more keyed rejections than any
+    // fixed ring holds; each must keep its OWN key until delivery. Stage
+    // many distinct keys WITHOUT draining (the stage never empties, so no
+    // reclaim happens between them) and capture each returned durable
+    // slice.
+    const count = 40;
+    var slices: [count][]const u8 = undefined;
+    var scratch: [count][8]u8 = undefined;
+    for (0..count) |i| {
+        const key = std.fmt.bufPrint(&scratch[i], "k{d}", .{i}) catch unreachable;
+        slices[i] = fx.stageLoopKey(key);
+        fx.stageLoopMsg(.{ .pty = .{ .key = 0, .kind = .exit, .reason = .rejected } });
+    }
+    // Every captured slice still reads its ORIGINAL key — none clobbered
+    // by a later one, though the backing array grew several times past
+    // its initial capacity.
+    for (0..count) |i| {
+        var expect: [8]u8 = undefined;
+        const want = std.fmt.bufPrint(&expect, "k{d}", .{i}) catch unreachable;
+        try testing.expectEqualStrings(want, slices[i]);
+    }
+}
+
 test "a fake pty refuses a second feed after its exit is queued" {
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();

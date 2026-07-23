@@ -625,37 +625,6 @@ pub fn TsCoreHost(comptime core: type) type {
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
-        /// Durable backing for the key on a STAGED spawn-rejection Msg.
-        /// A rejection (duplicate wire key, or the table full) is staged
-        /// now and delivered a later frame, past a frame-arena reset — so
-        /// its key cannot ride the frame arena the live event path uses.
-        /// It also has no live `PtyEntry` to borrow durable storage from
-        /// (a duplicate collides with a DIFFERENT session's entry; a
-        /// table-full spawn gets none). This process-static ring is that
-        /// storage: each rejection copies its requested key into the next
-        /// slot and the Msg references it. Sized well beyond any realistic
-        /// count of keyed rejections staged before one drain (the stage
-        /// delivers every frame, and a handful of refused spawns per frame
-        /// is the ceiling in practice); the ring is never dangling, so the
-        /// worst a pathological over-`ring`-length burst does is reuse an
-        /// already-delivered slot — never a corrupt key.
-        const pty_reject_key_ring_len: usize = 4 * runtime_effects.max_effect_ptys;
-        var pty_reject_keys: [pty_reject_key_ring_len][max_wire_key_bytes]u8 = undefined;
-        var pty_reject_key_lens: [pty_reject_key_ring_len]usize = @splat(0);
-        var pty_reject_key_cursor: usize = 0;
-
-        /// Copy a rejected spawn's requested key into the durable ring and
-        /// return the durable slice, so the staged rejection Msg carries
-        /// the app's own key (correlating the refusal with its command)
-        /// without a frame-arena reference. An empty key stays empty.
-        fn stageRejectKey(key: []const u8) []const u8 {
-            if (key.len == 0) return "";
-            const slot = pty_reject_key_cursor % pty_reject_key_ring_len;
-            pty_reject_key_cursor +%= 1;
-            @memcpy(pty_reject_keys[slot][0..key.len], key);
-            pty_reject_key_lens[slot] = key.len;
-            return pty_reject_keys[slot][0..key.len];
-        }
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -1854,17 +1823,20 @@ pub fn TsCoreHost(comptime core: type) type {
                 // The rejection is STAGED (delivered a later frame), so its
                 // key must be self-contained: the wire key points into this
                 // dispatch's command buffer, gone by delivery, so copy it
-                // into the durable ring and reference that. The app's key
-                // rides the refusal, correlating it with its command.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, stageRejectKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // into the engine's durable staged-key store and reference
+                // that. The app's key rides the refusal, correlating it
+                // with its command — however many rejections one batch
+                // stages, each keeps its own durable buffer.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
             const index = freePtyIndex() orelse {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
                 // vocabulary for every refusal, never a crash. Staged, so
-                // the requested key rides the durable ring, not the arena.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, stageRejectKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // the requested key rides the engine's durable staged-key
+                // store, not the frame arena.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];

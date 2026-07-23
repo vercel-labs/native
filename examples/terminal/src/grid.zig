@@ -304,6 +304,17 @@ pub const PaintOptions = struct {
     /// degrades to fewer painted rows instead of a failed render. 0
     /// means unbounded (tests that size their own builder).
     command_budget: usize = 0,
+    /// Display-list TEXT bytes to hold back from the grid for the widgets
+    /// the app appends AFTER this chrome prefix (a header, a status line).
+    /// Those widgets draw their own glyphs into the SAME per-view text
+    /// store (`canvas.max_display_list_text_bytes`), so a grapheme-heavy
+    /// grid that consumed all of it would push the combined display list
+    /// over the runtime limit and fail the whole frame — leaving stale
+    /// content. Reserving their worst-case text here makes the grid
+    /// degrade to a few fewer painted rows instead, and the widgets
+    /// always fit. 0 means the grid may use the whole store (tests that
+    /// paint no widgets).
+    text_reserve: usize = 0,
 };
 
 /// Paint the session's viewport into the display list: per-row
@@ -366,7 +377,10 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     // row is skipped WHOLE if it would not fit the remaining store — so
     // the grid degrades to fewer complete rows, never a row torn
     // mid-way by an allocation failure.
-    const text_store: usize = canvas.max_display_list_text_bytes;
+    const text_store: usize = if (canvas.max_display_list_text_bytes > options.text_reserve)
+        canvas.max_display_list_text_bytes - options.text_reserve
+    else
+        0;
     var text_bytes_emitted: usize = 0;
 
     // A run's staging buffer. Sized well past a full narrow row
