@@ -324,7 +324,30 @@ const FacadeEmitter = struct {
         const escaped = tsString(self.arena, arm_name);
         const ref = payload orelse
             return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\" }}", .{escaped});
+        // A synthesized inline record flattens beside `kind`, exactly
+        // as its authoring produced it; everything else is a single
+        // payload whose authored member name the contract erased.
+        if (self.synthesizedRecordOf(ref, union_name, arm_name)) |record| {
+            var text: std.ArrayListUnmanaged(u8) = .empty;
+            try text.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"", .{escaped}));
+            for (record.fields) |field| {
+                try text.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "; readonly {s}: {s}", .{ try tsProp(self.arena, field.name), try self.spellRef(field.type, record.name, field.name) }));
+            }
+            try text.appendSlice(self.arena, " }");
+            return text.items;
+        }
         return std.fmt.allocPrint(self.arena, "{{ readonly kind: \"{s}\"; readonly value: {s} }}", .{ escaped, try self.spellRef(ref, union_name, arm_name) });
+    }
+
+    /// The struct behind a synthesized, inlined record reference at
+    /// this site — the shape that flattens beside `kind`.
+    fn synthesizedRecordOf(self: *FacadeEmitter, ref: TypeRef, container: []const u8, member: []const u8) ?*const sidecar_mod.Struct {
+        const name = switch (ref) {
+            .node, .value => |n| n,
+            else => return null,
+        };
+        if (!emit_mod.isSynthesizedRef(container, member, name) or !nameListed(self.inlined, name)) return null;
+        return sidecar_mod.findStruct(self.sidecar.types, name);
     }
 
     fn msgArmTypeLiteral(self: *FacadeEmitter, arm: sidecar_mod.MsgArm) Error![]const u8 {
@@ -590,6 +613,15 @@ const FacadeEmitter = struct {
         const arm = entry.arms[arm_index];
         if (arm.payload == .void) {
             try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\" }}", .{tsString(self.arena, arm.name)}));
+            return;
+        }
+        if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
+            try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\"", .{tsString(self.arena, arm.name)}));
+            for (record.fields) |field| {
+                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: ", .{try tsProp(self.arena, field.name)}));
+                try field_value(self, out, field.type, depth);
+            }
+            try out.appendSlice(self.arena, " }");
             return;
         }
         try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\", value: ", .{tsString(self.arena, arm.name)}));
@@ -912,7 +944,13 @@ const FacadeEmitter = struct {
         try self.print("\nfunction {s}(value: {s}): Uint8Array {{\n", .{ try self.encoderNameFor(entry.name), self.spellName(entry.name) });
         for (entry.arms, 0..) |arm, index| {
             try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte({d})];\n", .{ tsString(self.arena, arm.name), index });
-            if (arm.payload != .void) {
+            if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
+                // Flattened beside `kind`: encode the record's fields
+                // off the narrowed arm in declaration order.
+                for (record.fields, 0..) |field, field_index| {
+                    try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8);
+                }
+            } else if (arm.payload != .void) {
                 try self.fieldEncodeStatements(arm.payload, "value.value", 2, 0);
             }
             try self.raw("    return nscfCat(parts);\n  }\n");
@@ -1147,6 +1185,29 @@ test "unbound helper names stay out of the facade's viewUnbound list" {
     // sidecar fact.
     try testing.expect(std.mem.indexOf(u8, generated, "\"count\",") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "\"summary\",") == null);
+}
+
+test "synthesized records inside tabled unions flatten beside kind" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The set_composition shape: an authored multi-field arm whose
+    // record was tabled under the synthesized pattern.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Edit_set_composition\", \"fields\": [{\"name\": \"text\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"cursor\", \"type\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"f64\"}}}]},");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"unions\": []", "\"unions\": [{\"name\": \"Edit\", \"arms\": [{\"name\": \"clear\", \"payload\": {\"kind\": \"void\"}}, {\"name\": \"set_composition\", \"payload\": {\"kind\": \"value\", \"name\": \"Edit_set_composition\"}}]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"union\", \"name\": \"Edit\"}}",
+    );
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "| { readonly kind: \"set_composition\"; readonly text: Uint8Array; readonly cursor: number | null }") != null);
+    // The union encoder reads the flattened fields off the narrowed arm.
+    try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"set_composition\")") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "const nscfOpt8 = value.cursor;") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "value.value") == null);
 }
 
 test "renamed message roots still flatten their synthesized payload records" {

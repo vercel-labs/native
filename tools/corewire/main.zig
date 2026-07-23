@@ -88,14 +88,19 @@ pub fn main(init: std.process.Init) !void {
     }
     for (resolved, 0..) |maybe_path, path_index| {
         const path = maybe_path orelse continue;
-        if (std.mem.eql(u8, path, input_resolved)) {
+        // Case-insensitively: the default volumes on two of the three
+        // desktop platforms fold case, so differently-cased spellings
+        // of one file must count as aliases everywhere (refusing a
+        // case-only distinction on a case-sensitive volume costs
+        // nothing anyone wants).
+        if (std.ascii.eqlIgnoreCase(path, input_resolved)) {
             try stderr.print("corewire: output {s} names the sidecar itself — generating would destroy the input contract\n", .{path});
             try stderr.flush();
             std.process.exit(2);
         }
         for (resolved[path_index + 1 ..]) |maybe_other| {
             const other = maybe_other orelse continue;
-            if (std.mem.eql(u8, path, other)) {
+            if (std.ascii.eqlIgnoreCase(path, other)) {
                 try stderr.print("corewire: --out and --facade name one file ({s}) — the second projection would overwrite the first\n", .{path});
                 try stderr.flush();
                 std.process.exit(2);
