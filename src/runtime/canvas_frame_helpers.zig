@@ -417,7 +417,13 @@ pub fn canvasWidgetEscapeKey(key: []const u8) bool {
     return std.ascii.eqlIgnoreCase(key, "escape") or std.ascii.eqlIgnoreCase(key, "esc");
 }
 
-fn gpuInputHasTextCommandModifier(input_event: GpuSurfaceInputEvent) bool {
+/// A text/IME input carrying a command chord (primary, command, or
+/// control) is a SHORTCUT, not typing: focused text widgets refuse to
+/// insert it (above), and the target-less `on_text` fallback applies the
+/// same gate so a Ctrl/Cmd-chorded key never delivers both the shortcut
+/// and a literal character. Alt stays out of the set on purpose — Option
+/// composes text on macOS and AltGr produces it elsewhere.
+pub fn gpuInputHasTextCommandModifier(input_event: GpuSurfaceInputEvent) bool {
     return input_event.modifiers.primary or input_event.modifiers.command or input_event.modifiers.control;
 }
 

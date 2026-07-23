@@ -455,6 +455,41 @@ test "IME: a preedit is provisional; only the commit reaches the pty" {
     try testing.expectEqualStrings("\xe3\x81\x8b", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "a command-chorded text event never types a literal character into the pty" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Some hosts emit a text_input alongside a Ctrl/Cmd shortcut. The
+    // chord is not typing: the runtime's text gate (the focused-widget
+    // rule, applied target-less too) must stop the literal "c" — the
+    // child sees the ENCODED control byte from the key channel only,
+    // never the chord plus a stray character.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .key = "c",
+        .text = "c",
+        .modifiers = .{ .control = true },
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+
+    // Unmodified typing still flows.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "c",
+    } });
+    try testing.expectEqualStrings("c", app_state.effects.ptyWrittenBytes(1));
+}
+
 test "restart during starting is a no-op - the original session is not duplicated" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

@@ -866,6 +866,117 @@ test "runtime applies GPU text and IME input to focused canvas text fields" {
     try std.testing.expectEqual(@as(u32, 5), app_state.widget_keyboard_count);
 }
 
+test "target-less IME preedit is per-surface and command chords never commit text" {
+    const TestApp = struct {
+        committed_count: u32 = 0,
+        last_committed: [64]u8 = undefined,
+        last_committed_len: usize = 0,
+        last_committed_label: []const u8 = "",
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-targetless-ime", .source = platform.WebViewSource.html("<h1>IME</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .canvas_widget_keyboard => |keyboard_event| {
+                    // Only the target-less committed synthesis: phase
+                    // text_input with no focused-widget target.
+                    if (keyboard_event.keyboard.phase != .text_input) return;
+                    if (keyboard_event.target != null) return;
+                    self.committed_count += 1;
+                    const text = keyboard_event.keyboard.text;
+                    const len = @min(text.len, self.last_committed.len);
+                    @memcpy(self.last_committed[0..len], text[0..len]);
+                    self.last_committed_len = len;
+                    self.last_committed_label = keyboard_event.view_label;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    // TWO focused surfaces, no widgets anywhere: every text event takes
+    // the target-less path.
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas-b",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 120, 240, 120),
+    });
+    harness.runtime.views[0].focused = true;
+    harness.runtime.views[1].focused = true;
+
+    // Surface A composes; the preedit is provisional — nothing commits.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_set_composition,
+        .text = "\xe3\x81\x8b", // か
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // THE per-surface pin: surface B's empty commit must NOT insert
+    // surface A's buffered composition — B owns no preedit.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-b",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.committed_count);
+
+    // A's own empty commit still resolves ITS composition — B's stray
+    // commit neither consumed nor cleared it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .ime_commit_composition,
+        .text = "",
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+    try std.testing.expectEqualStrings("\xe3\x81\x8b", app_state.last_committed[0..app_state.last_committed_len]);
+    try std.testing.expectEqualStrings("canvas-a", app_state.last_committed_label);
+
+    // THE chord pin: a command-modified text event is a shortcut, not
+    // typing — the same gate focused text widgets apply — so Ctrl+C
+    // commits nothing on the target-less path either.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .text_input,
+        .key = "c",
+        .text = "c",
+        .modifiers = .{ .control = true },
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.committed_count);
+
+    // Unmodified typing still commits.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas-a",
+        .kind = .text_input,
+        .text = "x",
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.committed_count);
+    try std.testing.expectEqualStrings("x", app_state.last_committed[0..app_state.last_committed_len]);
+}
+
 test "runtime dispatches opted-in canvas widget drag events" {
     const TestApp = struct {
         raw_input_count: u32 = 0,

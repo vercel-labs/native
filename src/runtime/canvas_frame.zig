@@ -24,6 +24,7 @@ pub const canvasWidgetKeyboardEventFromGpuInput = canvas_frame_helpers.canvasWid
 pub const canvasWidgetTextInputEventFromGpuInput = canvas_frame_helpers.canvasWidgetTextInputEventFromGpuInput;
 pub const canvasWidgetEscapeKey = canvas_frame_helpers.canvasWidgetEscapeKey;
 pub const canvasWidgetKeyboardModifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers;
+pub const gpuInputHasTextCommandModifier = canvas_frame_helpers.gpuInputHasTextCommandModifier;
 pub const mergeCanvasRenderOverrides = canvas_frame_helpers.mergeCanvasRenderOverrides;
 pub const findCanvasRenderOverrideIndex = canvas_frame_helpers.findCanvasRenderOverrideIndex;
 pub const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;

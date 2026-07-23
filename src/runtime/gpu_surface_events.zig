@@ -461,16 +461,37 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // text is committed unchanged, so the bytes come from
                 // the buffered preedit. Only committed UTF-8 ever
                 // reaches `on_text`; key names never reconstruct text.
+                // Preedit state is scoped to its ORIGINATING surface (the
+                // way a focused widget's editor scopes composition to the
+                // widget): only the owning surface's events consume or
+                // clear the buffer, so surface B's empty commit can never
+                // insert a composition typed into surface A.
+                const owns_preedit = self.targetless_ime_preedit_len > 0 and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    );
                 const committed: ?[]const u8 = switch (input_event.kind) {
                     .text_input => blk: {
-                        self.targetless_ime_preedit_len = 0;
+                        // A command-chorded text event is a SHORTCUT, not
+                        // typing — the same gate the focused-widget text
+                        // path applies (`canvasWidgetTextEditEventFromGpuInput`),
+                        // so Ctrl/Cmd+C never delivers both the chord and
+                        // a literal "c". It neither commits nor disturbs
+                        // a composition in progress.
+                        if (canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event)) break :blk null;
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
                         break :blk if (input_event.text.len > 0) input_event.text else null;
                     },
                     .ime_set_composition => blk: {
                         // Buffer the FULL composition (grow to fit, never
                         // truncate): each set_composition REPLACES the
-                        // preedit, so this holds one composition's bytes.
-                        // If growth fails, CLEAR the preedit rather than
+                        // preedit, so this holds one composition's bytes
+                        // — and takes ownership for this surface (at most
+                        // one system composition exists at a time). If
+                        // growth fails, CLEAR the preedit rather than
                         // leave the prior (now superseded) composition
                         // active — a later empty commit must never insert
                         // stale text the user has since replaced.
@@ -484,18 +505,28 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         }
                         @memcpy(self.targetless_ime_preedit[0..input_event.text.len], input_event.text);
                         self.targetless_ime_preedit_len = input_event.text.len;
+                        self.targetless_ime_preedit_window = input_event.window_id;
+                        const label_len = @min(input_event.label.len, self.targetless_ime_preedit_label.len);
+                        @memcpy(self.targetless_ime_preedit_label[0..label_len], input_event.label[0..label_len]);
+                        self.targetless_ime_preedit_label_len = label_len;
                         break :blk null; // preedit is provisional
                     },
                     .ime_commit_composition => blk: {
+                        // An EMPTY commit means "commit the marked text
+                        // unchanged" — buffered bytes stand in ONLY when
+                        // this surface owns them; another surface's empty
+                        // commit commits nothing of ours.
                         const text = if (input_event.text.len > 0)
                             input_event.text
+                        else if (owns_preedit)
+                            self.targetless_ime_preedit[0..self.targetless_ime_preedit_len]
                         else
-                            self.targetless_ime_preedit[0..self.targetless_ime_preedit_len];
-                        self.targetless_ime_preedit_len = 0;
+                            "";
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
                         break :blk if (text.len > 0) text else null;
                     },
                     .ime_cancel_composition => blk: {
-                        self.targetless_ime_preedit_len = 0;
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
                         break :blk null;
                     },
                     else => null,

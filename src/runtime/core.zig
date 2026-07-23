@@ -345,6 +345,17 @@ pub const Runtime = struct {
     /// composition directly.
     targetless_ime_preedit: []u8 = &.{},
     targetless_ime_preedit_len: usize = 0,
+    /// The surface that buffered the preedit (window + view label) —
+    /// target-less composition state is PER SURFACE, the way a focused
+    /// widget's editor scopes its own composition to the widget. Only
+    /// events from the owning surface consume or clear the buffer: a
+    /// second surface's empty commit must never insert a composition the
+    /// user typed into the first (its own cancel/commit, delivered on its
+    /// own label, clears it). A new `ime_set_composition` from any
+    /// surface takes ownership — at most one system composition exists.
+    targetless_ime_preedit_window: platform.WindowId = 0,
+    targetless_ime_preedit_label: [platform.max_view_label_bytes]u8 = undefined,
+    targetless_ime_preedit_label_len: usize = 0,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
