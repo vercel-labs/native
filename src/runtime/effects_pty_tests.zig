@@ -277,6 +277,24 @@ test "settle refuses replay write-count divergence in both directions" {
         try testing.expect(fx.ptyWrite(83, "wrong session"));
         try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
     }
+    // The clock feed settles by the same rule: a journaled value never
+    // consumed (the replayed updates read the clock fewer times)...
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        try fx.pushReplayClock(1_000);
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
+    // ...and a read past the journaled values (answered 0 optimistically,
+    // which need not move any checkpoint) both fail the settle.
+    {
+        var fx = DirectFx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        try testing.expectEqual(@as(i64, 0), fx.wallMs());
+        try testing.expectError(error.ReplayDivergence, fx.settleReplayFeeds());
+    }
     // Exact consumption settles clean.
     {
         var fx = DirectFx.init(testing.allocator);
@@ -284,7 +302,9 @@ test "settle refuses replay write-count divergence in both directions" {
         fx.armReplay();
         fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(83, false);
+        try fx.pushReplayClock(1_000);
         try testing.expect(!fx.ptyWrite(83, "recorded"));
+        try testing.expectEqual(@as(i64, 1_000), fx.wallMs());
         try fx.settleReplayFeeds();
     }
 }

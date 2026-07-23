@@ -5314,6 +5314,29 @@ pub fn Effects(comptime Msg: type) type {
         /// optimistic answer and changes no state), so the settle check
         /// is what makes write-count divergence loud.
         pub fn settleReplayFeeds(self: *Self) error{ReplayDivergence}!void {
+            // The clock feed settles by the same rule as the write
+            // verdicts: a `wallMs` read past the journaled values, or a
+            // journaled value never consumed, is divergence a checkpoint
+            // may not see (the optimistic 0 answer, or the skipped read,
+            // need not move any rendered state).
+            if (self.replay_clock_underflows > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} wallMs read(s) ran past the journaled clock values - the replayed updates read the clock more often than the recording did (nondeterminism outside the effect boundary?)\n",
+                        .{self.replay_clock_underflows},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
+            if (self.replay_clock_len > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} journaled clock value(s) were never consumed - the replayed updates read the clock fewer times than the recording did (nondeterminism outside the effect boundary?)\n",
+                        .{self.replay_clock_len},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
             if (self.replay_pty_write_divergences > 0) {
                 if (comptime builtin.os.tag != .freestanding) {
                     std.debug.print(

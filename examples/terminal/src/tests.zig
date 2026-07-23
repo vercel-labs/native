@@ -559,6 +559,37 @@ test "chorded punctuation and function keys encode their control sequences" {
     try testing.expectEqualStrings("\x1c\x1b[91;5u\x1bOP", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "a query reply refused by a full ring is retained and retried, never cleared" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+
+    // The child pipelines a DSR query; its reply waits in the
+    // emulator's buffer. With the pending ring full RIGHT NOW, the move
+    // must leave the reply IN PLACE — clearing it would strand a child
+    // blocked on the answer.
+    app_state.model.session.feed("\x1b[6n");
+    const reply_len = app_state.model.session.pendingResponses().len;
+    try testing.expect(reply_len > 0);
+    app_state.model.outbound_len = app_state.model.outbound_buffer.len;
+    app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
+    try testing.expectEqual(reply_len, app_state.model.session.pendingResponses().len);
+    try testing.expectEqual(@as(u64, 0), app_state.model.outbound_dropped);
+
+    // The ring drains (the child read); the retry moves the reply whole
+    // and it reaches the pty.
+    app_state.model.outbound_len = 0;
+    app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
+    try testing.expectEqual(@as(usize, 0), app_state.model.session.pendingResponses().len);
+    const written = app_state.effects.ptyWrittenBytes(1);
+    try testing.expectEqual(reply_len, written.len);
+    try testing.expect(std.mem.startsWith(u8, written, "\x1b["));
+}
+
 test "a payload the outbound ring cannot hold whole is dropped whole, never torn" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });

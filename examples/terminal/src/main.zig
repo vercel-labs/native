@@ -216,7 +216,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (model.selecting or !model.acceptsInput()) return;
             if (event.text.len == 0) return;
             model.session.scrollToBottom();
-            enqueueOutbound(model, fx, event.text);
+            enqueueTransient(model, fx, event.text);
         },
         .viewport => |size| {
             // Commit the new size only once the emulator actually took
@@ -229,7 +229,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             fx.ptyResize(shell_key, size.cols, size.rows);
             flushOutbound(model, fx);
         },
-        .flush_outbound => flushOutbound(model, fx),
+        .flush_outbound => {
+            flushOutbound(model, fx);
+            // The drain may have freed room for query replies a full
+            // ring left retained in the emulator's buffer.
+            moveResponsesToOutbound(model, fx);
+        },
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
             if (result.outcome != .ok) model.copied_bytes = 0;
@@ -253,22 +258,36 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
 /// pending ring in stream order, then flush what the pty's stdin FIFO
 /// will take. A large payload is not submitted all at once: `flushOutbound`
 /// paces it as the child reads, so the tail is never dropped. Admission
-/// is ALL-OR-NOTHING: a payload the ring cannot hold whole is dropped
-/// whole and counted — a query reply or encoded key cut mid-sequence
+/// is ALL-OR-NOTHING — a query reply or encoded key cut mid-sequence
 /// would feed the child a malformed control sequence, which is worse
-/// than a counted loss. Reaching the drop at all means the child ignored
-/// 256 KiB of pending input; the count is surfaced, never silent.
-fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) void {
+/// than a whole loss — and the RESULT says which disposal the caller
+/// must apply: `true` means the payload is DISPOSED (queued whole, or
+/// impossible — larger than the ring itself — and counted as dropped);
+/// `false` means it merely does not fit RIGHT NOW, is untouched and
+/// uncounted, and the caller retains it to retry as the ring drains.
+fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) bool {
     const cap = model.outbound_buffer.len;
-    if (bytes.len > cap - model.outbound_len) {
+    if (bytes.len > cap) {
         model.outbound_dropped += bytes.len;
-        return;
+        return true;
     }
+    if (bytes.len > cap - model.outbound_len) return false;
     for (bytes, 0..) |byte, i| {
         model.outbound_buffer[(model.outbound_head + model.outbound_len + i) % cap] = byte;
     }
     model.outbound_len += bytes.len;
     flushOutbound(model, fx);
+    return true;
+}
+
+/// Enqueue a TRANSIENT payload (typed text, an encoded key): the event's
+/// bytes do not outlive this dispatch, so a right-now refusal cannot be
+/// retried later — it is counted as dropped instead, never silent.
+/// Hitting this at all means the child ignored the whole 256 KiB ring.
+fn enqueueTransient(model: *Model, fx: *Fx, bytes: []const u8) void {
+    if (!enqueueOutbound(model, fx, bytes)) {
+        model.outbound_dropped += bytes.len;
+    }
 }
 
 /// Push as much pending outbound as the pty's stdin FIFO will accept, in
@@ -321,13 +340,16 @@ fn feedOutput(model: *Model, fx: *Fx, bytes: []const u8) void {
 /// then flush. Routing them through the SAME ring as typed input is what
 /// makes them lossless: a reply refused by a full FIFO stays queued and
 /// retries, never cleared before it lands (which would hang a child
-/// blocking on it). The sub-sliced feed keeps each move well under the
-/// emulator's reply buffer; a pending ring too full to take the batch
-/// whole drops it whole into `outbound_dropped` (all-or-nothing
-/// admission) — counted, never a torn escape sequence.
-fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
+/// blocking on it). Replies are DURABLE (the emulator's buffer holds
+/// them), so a ring too full right now leaves them IN PLACE — uncleared,
+/// retried on the next output, resize, or frame — instead of discarding
+/// an answer the child may be blocked on. Only a queued (or impossible,
+/// counted) batch clears; never a torn escape sequence either way.
+pub fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
     const pending = model.session.pendingResponses();
-    if (pending.len > 0) enqueueOutbound(model, fx, pending);
+    if (pending.len > 0) {
+        if (!enqueueOutbound(model, fx, pending)) return;
+    }
     model.session.clearResponses();
 }
 
@@ -443,7 +465,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     session.scrollToBottom();
     // Through the pending ring like committed text, so an encoded key
     // typed while a paste is still draining lands after it in the stream.
-    enqueueOutbound(model, fx, buffer[0..writer.end]);
+    enqueueTransient(model, fx, buffer[0..writer.end]);
 }
 
 fn keyIs(key: []const u8, name: []const u8) bool {
@@ -666,9 +688,11 @@ fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     );
     if (proposed.x == model.cols and proposed.y == model.rows) {
         // No resize this frame: if bytes are still queued (a large paste
-        // draining, or a child that read without echoing), nudge the
-        // update loop to push more now that the FIFO may have freed.
-        if (model.outbound_len > 0) return .flush_outbound;
+        // draining, or a child that read without echoing), or a query
+        // reply sits retained in the emulator's buffer behind a full
+        // ring, nudge the update loop to push more now that the FIFO
+        // may have freed.
+        if (model.outbound_len > 0 or model.session.response_len > 0) return .flush_outbound;
         return null;
     }
     return .{ .viewport = .{ .cols = proposed.x, .rows = proposed.y } };
