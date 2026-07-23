@@ -131,7 +131,18 @@ const FacadeEmitter = struct {
                 self.diags.flag("msg.arms", "arm \"{s}\" cannot join the facade's constructor names (nsc_core_msg_<arm>); use identifier characters in the core source", .{arm.name});
             }
         }
-        const facade_decls = [_][]const u8{ "initialModel", "update", "viewUnbound", "asciiBytes" };
+        const facade_decls = [_][]const u8{ "initialModel", "update", "viewUnbound", "asciiBytes", "NscfContractError", "NSCF_POW" };
+        // Field names join the fence only for the reserved nsc name
+        // space (they may otherwise be anything, quoted if exotic):
+        // constructor parameter fallbacks and the runtime prelude own
+        // those spellings.
+        for (self.sidecar.types.structs) |entry| {
+            for (entry.fields) |field| {
+                if (std.mem.startsWith(u8, field.name, "nsc_core_") or std.mem.startsWith(u8, field.name, "nscf")) {
+                    self.diags.flag("types", "field \"{s}\" takes the facade's reserved nsc name space; rename it in the core source", .{field.name});
+                }
+            }
+        }
         for (self.sidecar.types.structs) |entry| try self.fenceDecl(entry.name, &facade_decls);
         for (self.sidecar.types.enums) |entry| try self.fenceDecl(entry.name, &facade_decls);
         for (self.sidecar.types.unions) |entry| try self.fenceDecl(entry.name, &facade_decls);
@@ -275,7 +286,15 @@ const FacadeEmitter = struct {
             .bytes => "Uint8Array",
             .void => "void",
             .optional => |inner| try std.fmt.allocPrint(self.arena, "{s} | null", .{try self.spellRef(inner.*, container, member)}),
-            .slice => |elem| try std.fmt.allocPrint(self.arena, "readonly {s}[]", .{try self.spellRef(elem.*, container, member)}),
+            .slice => |elem| blk: {
+                // Composite element spellings parenthesize: `number |
+                // null[]` would type the null as the array.
+                const spelled = try self.spellRef(elem.*, container, member);
+                if (std.mem.indexOfAny(u8, spelled, " |") != null) {
+                    break :blk try std.fmt.allocPrint(self.arena, "readonly ({s})[]", .{spelled});
+                }
+                break :blk try std.fmt.allocPrint(self.arena, "readonly {s}[]", .{spelled});
+            },
             // Reference storage is a layout fact of the host mirror;
             // TypeScript sees the record value either way.
             .node, .value => |name| self.arena.dupe(u8, name),
@@ -878,7 +897,9 @@ fn tsAccess(arena: std.mem.Allocator, base: []const u8, name: []const u8) error{
 /// unlike properties, must be plain identifiers).
 fn tsParam(arena: std.mem.Allocator, name: []const u8, index: usize) error{OutOfMemory}![]const u8 {
     if (isTsIdentifier(name)) return name;
-    return std.fmt.allocPrint(arena, "arg{d}", .{index});
+    // The fallback lives in the fenced nsc name space, so it can never
+    // collide with an authored sibling field's spelling.
+    return std.fmt.allocPrint(arena, "nscf_arg{d}", .{index});
 }
 
 fn isIdentifierFragment(name: []const u8) bool {
@@ -942,6 +963,38 @@ test "facade emission is deterministic and carries the projection surface" {
     try testing.expect(std.mem.indexOf(u8, first, "function nscfF64(value: number): Uint8Array {") != null);
     // The unbound list rides the facade (the author declares nothing).
     try testing.expect(std.mem.indexOf(u8, first, "export const viewUnbound = [\n  \"label_set\",\n] as const;") != null);
+}
+
+test "composite slice elements parenthesize in the projection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"slice\", \"elem\": {\"kind\": \"optional\", \"inner\": {\"kind\": \"f64\"}}}}",
+    );
+    const generated = try facadeFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "readonly label: readonly (number | null)[];") != null);
+}
+
+test "a type taking a generated facade declaration's name refuses" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"enums\": []", "\"enums\": [{\"name\": \"NscfContractError\", \"members\": [\"a\"]}]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"enum\", \"name\": \"NscfContractError\"}}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emitFacade(arena, parsed, &diags));
 }
 
 test "facade names that TypeScript cannot declare refuse with a teaching" {

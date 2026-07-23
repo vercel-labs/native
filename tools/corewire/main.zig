@@ -74,6 +74,25 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(2);
     }
+    // Distinct paths only: the two projections must not overwrite each
+    // other, and no output may destroy the input contract.
+    const paths = [_]?[]const u8{ out_path, facade_path };
+    for (paths, 0..) |maybe_path, path_index| {
+        const path = maybe_path orelse continue;
+        if (std.mem.eql(u8, path, input)) {
+            try stderr.print("corewire: output {s} names the sidecar itself — generating would destroy the input contract\n", .{path});
+            try stderr.flush();
+            std.process.exit(2);
+        }
+        for (paths[path_index + 1 ..]) |maybe_other| {
+            const other = maybe_other orelse continue;
+            if (std.mem.eql(u8, path, other)) {
+                try stderr.print("corewire: --out and --facade name one file ({s}) — the second projection would overwrite the first\n", .{path});
+                try stderr.flush();
+                std.process.exit(2);
+            }
+        }
+    }
 
     const source = std.Io.Dir.cwd().readFileAlloc(init.io, input, arena, .limited(sidecar_mod.max_sidecar_bytes)) catch |err| {
         try stderr.print("corewire: cannot read {s}: {t}\n", .{ input, err });
