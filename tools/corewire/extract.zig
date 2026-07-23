@@ -41,18 +41,19 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
 
         // ---------------------------------------- phase 1: reach set
         var reach = ReachSet{};
-        reach.collect(core.Model, "", "");
+        const msg_zig = lastComponent(@typeName(core.Msg));
+        reach.collect(core.Model, "", "", "");
         for (@typeInfo(core.Msg).@"union".fields) |arm| {
             if (arm.type == void) continue;
             // The number_bytes family exists so the one ubiquitous
             // inline shape never needs a table entry — skip it here
             // exactly when payloadDescriptor classifies it that way.
-            if (isNumberBytesShape(arm.type)) continue;
-            reach.collect(arm.type, "Msg", arm.name);
+            if (isNumberBytesShape(arm.type, msg_zig)) continue;
+            reach.collect(arm.type, msg_zig, "Msg", arm.name);
         }
         for (@typeInfo(core.Model).@"struct".decls) |decl| {
             if (helperShape(core.Model, decl.name)) |helper| {
-                reach.collect(helper.Return, "helpers", decl.name);
+                reach.collect(helper.Return, "", "helpers", decl.name);
             }
         }
 
@@ -72,7 +73,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
                     var fields: []const u8 = "";
                     for (info.fields, 0..) |field, index| {
                         if (index > 0) fields = fields ++ ", ";
-                        fields = fields ++ "{\"name\": " ++ js(field.name) ++ ", \"type\": " ++ typeRefJson(field.type, item.name, field.name) ++ "}";
+                        fields = fields ++ "{\"name\": " ++ js(field.name) ++ ", \"type\": " ++ typeRefJson(field.type, lastComponent(@typeName(item.T)), item.name, field.name) ++ "}";
                         if (spellsI64(field.type)) {
                             appendSlot(&slots, &slot_count, item.name ++ "." ++ field.name);
                         }
@@ -95,7 +96,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
                     var arms: []const u8 = "";
                     for (info.fields, 0..) |arm, index| {
                         if (index > 0) arms = arms ++ ", ";
-                        const payload = if (arm.type == void) "{\"kind\": \"void\"}" else typeRefJson(arm.type, item.name, arm.name);
+                        const payload = if (arm.type == void) "{\"kind\": \"void\"}" else typeRefJson(arm.type, lastComponent(@typeName(item.T)), item.name, arm.name);
                         arms = arms ++ "{\"name\": " ++ js(arm.name) ++ ", \"payload\": " ++ payload ++ "}";
                         if (arm.type != void and spellsI64(arm.type)) {
                             appendSlot(&slots, &slot_count, item.name ++ "." ++ arm.name);
@@ -113,7 +114,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
         var msg_arms: []const u8 = "";
         for (@typeInfo(core.Msg).@"union".fields, 0..) |arm, index| {
             if (index > 0) msg_arms = msg_arms ++ ",\n      ";
-            const descriptor = payloadDescriptor(arm.type, arm.name, &slots, &slot_count);
+            const descriptor = payloadDescriptor(arm.type, msg_zig, arm.name, &slots, &slot_count);
             msg_arms = msg_arms ++ "{\"name\": " ++ js(arm.name) ++ ", \"payload\": " ++ descriptor ++ "}";
         }
 
@@ -129,7 +130,7 @@ pub fn sidecarJson(comptime core: type, comptime entry: []const u8) []const u8 {
                 appendSlot(&slots, &slot_count, "helpers." ++ decl.name ++ ".return");
             }
             helpers = helpers ++ "{\"name\": " ++ js(decl.name) ++ ", \"params\": [" ++ params ++ "], \"returns\": " ++
-                typeRefJson(helper.Return, "helpers", decl.name) ++ ", \"arena\": " ++ (if (helper.arena) "true" else "false") ++ "}";
+                typeRefJson(helper.Return, "", "helpers", decl.name) ++ ", \"arena\": " ++ (if (helper.arena) "true" else "false") ++ "}";
             helper_count += 1;
         }
 
@@ -305,24 +306,31 @@ fn lastComponent(comptime full: []const u8) []const u8 {
 /// The table name of a named or synthesized type at a reference site:
 /// anonymous records take the schema's deterministic
 /// `<Container>_<member>` pattern, named types keep the author's
-/// spelling.
-fn tableName(comptime T: type, comptime container: []const u8, comptime member: []const u8) []const u8 {
+/// spelling. `parent_zig` is the enclosing type's own emitted name —
+/// the compiler names an anonymous member after its parent, so
+/// anonymity is recognized only when the prefix IS that parent.
+fn tableName(comptime T: type, comptime parent_zig: []const u8, comptime container: []const u8, comptime member: []const u8) []const u8 {
     const last = lastComponent(@typeName(T));
-    if (isAnonymousName(last)) {
+    if (isAnonymousName(last, parent_zig)) {
         return container ++ "_" ++ member;
     }
     return last;
 }
 
 /// The compiler names anonymous containers `<Parent>__struct_<digits>`
-/// (instance counter to the end of the name). Only the FINAL marker
-/// counts: an authored `Foo__struct_Row` keeps its identity, while an
-/// anonymous member nested under it (`Foo__struct_Row__struct_17`) is
-/// recognized by its last suffix — matching the first marker would
-/// retain the counter-bearing name verbatim and break determinism.
-fn isAnonymousName(comptime name: []const u8) bool {
+/// — the enclosing declaration's name, the marker, and an instance
+/// counter to the end. All three parts must line up: the FINAL marker
+/// carries all-digit text to the end AND the prefix before it is the
+/// parent's own name, so an authored `Foo__struct_17` under `Model`
+/// keeps its identity (its prefix is not "Model"), while a genuine
+/// anonymous member under any parent — synthesized-named parents
+/// included — is recognized. The one spelling this cannot separate is
+/// an AUTHORED type named exactly `<its own parent>__struct_<digits>`,
+/// which sits inside the compiler's own generated-name space.
+fn isAnonymousName(comptime name: []const u8, comptime parent_zig: []const u8) bool {
     inline for (.{ "__struct_", "__union_" }) |marker| {
         if (std.mem.lastIndexOf(u8, name, marker)) |at| {
+            if (!std.mem.eql(u8, name[0..at], parent_zig)) continue;
             const digits = name[at + marker.len ..];
             if (digits.len > 0) {
                 var all_digits = true;
@@ -345,21 +353,21 @@ fn isBytes(comptime T: type) bool {
 
 /// The TypeRef JSON of a mirror type at a reference site (phase 2:
 /// naming only; the reach set already carries every referenced entry).
-fn typeRefJson(comptime T: type, comptime container: []const u8, comptime member: []const u8) []const u8 {
+fn typeRefJson(comptime T: type, comptime parent_zig: []const u8, comptime container: []const u8, comptime member: []const u8) []const u8 {
     if (T == bool) return "{\"kind\": \"bool\"}";
     if (T == f64) return "{\"kind\": \"f64\"}";
     if (T == i64) return "{\"kind\": \"i64\"}";
     if (isBytes(T)) return "{\"kind\": \"bytes\"}";
     switch (@typeInfo(T)) {
-        .optional => |info| return "{\"kind\": \"optional\", \"inner\": " ++ typeRefJson(info.child, container, member) ++ "}",
+        .optional => |info| return "{\"kind\": \"optional\", \"inner\": " ++ typeRefJson(info.child, parent_zig, container, member) ++ "}",
         .pointer => |info| switch (info.size) {
-            .slice => return "{\"kind\": \"slice\", \"elem\": " ++ typeRefJson(info.child, container, member) ++ "}",
-            .one => return "{\"kind\": \"node\", \"name\": " ++ js(tableName(info.child, container, member)) ++ "}",
+            .slice => return "{\"kind\": \"slice\", \"elem\": " ++ typeRefJson(info.child, parent_zig, container, member) ++ "}",
+            .one => return "{\"kind\": \"node\", \"name\": " ++ js(tableName(info.child, parent_zig, container, member)) ++ "}",
             else => @compileError("no TypeRef form for " ++ @typeName(T)),
         },
-        .@"struct" => return "{\"kind\": \"value\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
-        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
-        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, container, member)) ++ "}",
+        .@"struct" => return "{\"kind\": \"value\", \"name\": " ++ js(tableName(T, parent_zig, container, member)) ++ "}",
+        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, parent_zig, container, member)) ++ "}",
+        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, parent_zig, container, member)) ++ "}",
         else => @compileError("no TypeRef form for " ++ @typeName(T)),
     }
 }
@@ -367,12 +375,12 @@ fn typeRefJson(comptime T: type, comptime container: []const u8, comptime member
 /// The anonymous two-field number-plus-bytes record, in its emitted
 /// field order (number first) — the shape the number_bytes descriptor
 /// family carries without a table entry.
-fn isNumberBytesShape(comptime T: type) bool {
+fn isNumberBytesShape(comptime T: type, comptime msg_zig: []const u8) bool {
     const info = switch (@typeInfo(T)) {
         .@"struct" => |s| s,
         else => return false,
     };
-    const anonymous = isAnonymousName(lastComponent(@typeName(T)));
+    const anonymous = isAnonymousName(lastComponent(@typeName(T)), msg_zig);
     return anonymous and info.fields.len == 2 and
         (info.fields[0].type == f64 or info.fields[0].type == i64) and
         isBytes(info.fields[1].type);
@@ -380,7 +388,7 @@ fn isNumberBytesShape(comptime T: type) bool {
 
 /// The payload descriptor of one Msg arm, collecting integer slots for
 /// the number-carrying families.
-fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime slots: *[]const u8, comptime slot_count: *usize) []const u8 {
+fn payloadDescriptor(comptime T: type, comptime msg_zig: []const u8, comptime arm_name: []const u8, comptime slots: *[]const u8, comptime slot_count: *usize) []const u8 {
     if (T == void) return "{\"kind\": \"void\"}";
     if (isBytes(T)) return "{\"kind\": \"bytes\"}";
     if (T == f64) return "{\"kind\": \"number\", \"class\": \"f64\"}";
@@ -390,15 +398,15 @@ fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime s
     }
     if (T == bool) return "{\"kind\": \"scalar\", \"type\": {\"kind\": \"bool\"}}";
     switch (@typeInfo(T)) {
-        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}",
-        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}",
+        .@"enum" => return "{\"kind\": \"enum\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}",
+        .@"union" => return "{\"kind\": \"union\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}",
         .@"struct" => |info| {
             // The ubiquitous inline number-plus-bytes shape (fetch
             // {status, body}, collect-spawn {code, output}) rides the
             // dedicated two-field family instead of a synthesized
             // table entry — but only in its emitted field order
             // (number first); anything else stays a tabled record.
-            if (isNumberBytesShape(T)) {
+            if (isNumberBytesShape(T, msg_zig)) {
                 const class = if (info.fields[0].type == i64) "i64" else "f64";
                 if (info.fields[0].type == i64) {
                     appendSlot(slots, slot_count, "Msg." ++ arm_name ++ "." ++ info.fields[0].name);
@@ -406,7 +414,7 @@ fn payloadDescriptor(comptime T: type, comptime arm_name: []const u8, comptime s
                 return "{\"kind\": \"number_bytes\", \"number_field\": " ++ js(info.fields[0].name) ++
                     ", \"number_class\": \"" ++ class ++ "\", \"bytes_field\": " ++ js(info.fields[1].name) ++ "}";
             }
-            return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, "Msg", arm_name)) ++ "}";
+            return "{\"kind\": \"record\", \"name\": " ++ js(tableName(T, msg_zig, "Msg", arm_name)) ++ "}";
         },
         .pointer => @compileError("Msg arm payloads held BY REFERENCE (" ++ @typeName(T) ++ ") have no schema form: the named-type payload family carries no storage kind, so a by-reference record arm cannot be described faithfully in sidecar format 1 — see SCHEMA-GAPS.md"),
         else => @compileError("no payload descriptor for Msg arm payload " ++ @typeName(T)),
@@ -431,32 +439,32 @@ const ReachSet = struct {
     /// order (deterministic; table order carries no meaning for a
     /// mirror — Zig declarations are order-free — and V4/V6 order
     /// checks are the emitter's, requiring the source).
-    fn collect(comptime self: *ReachSet, comptime T: type, comptime container: []const u8, comptime member: []const u8) void {
+    fn collect(comptime self: *ReachSet, comptime T: type, comptime parent_zig: []const u8, comptime container: []const u8, comptime member: []const u8) void {
         if (T == bool or T == f64 or T == i64 or isBytes(T)) return;
         switch (@typeInfo(T)) {
-            .optional => |info| self.collect(info.child, container, member),
+            .optional => |info| self.collect(info.child, parent_zig, container, member),
             .pointer => |info| switch (info.size) {
-                .slice, .one => self.collect(info.child, container, member),
+                .slice, .one => self.collect(info.child, parent_zig, container, member),
                 else => @compileError("unreachable table shape " ++ @typeName(T)),
             },
             .@"struct" => |info| {
                 if (self.listed(T)) return;
-                const name = tableName(T, container, member);
+                const name = tableName(T, parent_zig, container, member);
                 self.entries = self.entries ++ &[_]ReachEntry{.{ .T = T, .name = name }};
-                for (info.fields) |field| self.collect(field.type, name, field.name);
+                for (info.fields) |field| self.collect(field.type, lastComponent(@typeName(T)), name, field.name);
             },
             .@"union" => |info| {
                 if (self.listed(T)) return;
-                const name = tableName(T, container, member);
+                const name = tableName(T, parent_zig, container, member);
                 self.entries = self.entries ++ &[_]ReachEntry{.{ .T = T, .name = name }};
                 for (info.fields) |field| {
                     if (field.type == void) continue;
-                    self.collect(field.type, name, field.name);
+                    self.collect(field.type, lastComponent(@typeName(T)), name, field.name);
                 }
             },
             .@"enum" => {
                 if (self.listed(T)) return;
-                self.entries = self.entries ++ &[_]ReachEntry{.{ .T = T, .name = tableName(T, container, member) }};
+                self.entries = self.entries ++ &[_]ReachEntry{.{ .T = T, .name = tableName(T, parent_zig, container, member) }};
             },
             else => @compileError("unreachable table shape " ++ @typeName(T)),
         }
@@ -533,12 +541,16 @@ test "anonymous-name detection keys on the final compiler suffix" {
     // Authored names merely containing the marker keep their identity;
     // only a trailing instance counter marks a compiler-named type.
     comptime {
-        std.debug.assert(!isAnonymousName("Foo__struct_Row"));
-        std.debug.assert(!isAnonymousName("Task"));
-        std.debug.assert(!isAnonymousName("Foo__union_2x"));
-        std.debug.assert(isAnonymousName("Msg__struct_26987"));
-        std.debug.assert(isAnonymousName("Foo__struct_Row__struct_17"));
-        std.debug.assert(isAnonymousName("Edit__union_4"));
+        std.debug.assert(!isAnonymousName("Foo__struct_Row", "Msg"));
+        std.debug.assert(!isAnonymousName("Task", "Msg"));
+        std.debug.assert(!isAnonymousName("Foo__union_2x", "Msg"));
+        std.debug.assert(isAnonymousName("Msg__struct_26987", "Msg"));
+        // An authored name that merely LOOKS compiler-made keeps its
+        // identity when its prefix is not the enclosing parent.
+        std.debug.assert(!isAnonymousName("Foo__struct_17", "Model"));
+        std.debug.assert(isAnonymousName("Foo__struct_Row__struct_17", "Foo__struct_Row"));
+        std.debug.assert(!isAnonymousName("Foo__struct_Row__struct_17", "Msg"));
+        std.debug.assert(isAnonymousName("Edit__union_4", "Edit"));
     }
 }
 

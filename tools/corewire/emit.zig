@@ -1184,7 +1184,16 @@ pub fn inlinedTableNames(arena: std.mem.Allocator, sidecar: Sidecar) error{OutOf
     }
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     for (candidates.items) |name| {
-        if (referenceCount(sidecar, name) == 1) try names.append(arena, name);
+        if (referenceCount(sidecar, name) != 1) continue;
+        // A genuine synthesized record carries at least two fields (a
+        // one-field inline arm collapses to a bare payload at emission
+        // and a zero-field arm is void, so neither ever gets tabled).
+        // Inlining a smaller pattern-named record would let the facade
+        // compile collapse it while the mirror keeps a record — the two
+        // projections must never diverge, so such records stay named.
+        const entry = sidecar_mod.findStruct(sidecar.types, name) orelse continue;
+        if (entry.fields.len < 2) continue;
+        try names.append(arena, name);
     }
     return names.items;
 }

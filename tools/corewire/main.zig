@@ -317,7 +317,19 @@ fn sameExistingFile(io: std.Io, a: []const u8, b: []const u8) bool {
     var buffer_b: [std.fs.max_path_bytes]u8 = undefined;
     const len_a = std.Io.Dir.cwd().realPathFile(io, a, &buffer_a) catch return false;
     const len_b = std.Io.Dir.cwd().realPathFile(io, b, &buffer_b) catch return false;
-    return std.mem.eql(u8, buffer_a[0..len_a], buffer_b[0..len_b]);
+    if (std.mem.eql(u8, buffer_a[0..len_a], buffer_b[0..len_b])) return true;
+    // Distinct canonical paths can still be one file where a mount
+    // exposes a directory twice (bind mounts). The portable stat
+    // carries no device id, so full identity is unprovable — but a
+    // matching inode PLUS matching kind, size, and every timestamp is
+    // one file for any honest filesystem, and a coincidental match
+    // across volumes merely refuses a spelling nobody needs.
+    const stat_a = std.Io.Dir.cwd().statFile(io, a, .{}) catch return false;
+    const stat_b = std.Io.Dir.cwd().statFile(io, b, .{}) catch return false;
+    return stat_a.inode == stat_b.inode and stat_a.kind == stat_b.kind and
+        stat_a.size == stat_b.size and stat_a.nlink == stat_b.nlink and
+        stat_a.mtime.nanoseconds == stat_b.mtime.nanoseconds and
+        stat_a.ctime.nanoseconds == stat_b.ctime.nanoseconds;
 }
 
 /// Write `data` into an exclusively-created, uniquely-named staging
