@@ -3926,6 +3926,12 @@ pub fn Effects(comptime Msg: type) type {
 
         allocator: std.mem.Allocator,
         executor: EffectExecutor = .real,
+        /// Test seam for the FAKE pty only: while set, fake `ptyWrite`
+        /// admissions refuse (and count) exactly as the live path does
+        /// against a full outbound FIFO — the scriptable stand-in for a
+        /// child that stopped reading, so retention/back-pressure logic
+        /// tests both phases (refusing, then draining) honestly.
+        fake_pty_write_full: bool = false,
         /// Fake-executor convention: while set, every `loadImage` that
         /// parks a fake request completes IMMEDIATELY with these bytes
         /// (through `feedImageBytes`, the full decode→register path) —
@@ -6804,7 +6810,7 @@ pub fn Effects(comptime Msg: type) type {
             };
             if (bytes.len == 0) return true;
             if (self.replay) return self.takeReplayPtyWriteVerdict(key);
-            const accepted = ptyWriteAdmit(slot, bytes);
+            const accepted = self.ptyWriteAdmit(slot, bytes);
             self.journalNote(.{
                 .kind = .pty,
                 .key = key,
@@ -6816,7 +6822,7 @@ pub fn Effects(comptime Msg: type) type {
 
         /// The admission decision behind `ptyWrite` — the live half the
         /// journaled verdict records.
-        fn ptyWriteAdmit(slot: *PtySlot, bytes: []const u8) bool {
+        fn ptyWriteAdmit(self: *Self, slot: *PtySlot, bytes: []const u8) bool {
             if (slot.fake) {
                 // The fed exit is staged (one terminal per spawn, marked
                 // `.terminated`): the session is already over, so a late
@@ -6824,6 +6830,13 @@ pub fn Effects(comptime Msg: type) type {
                 // staged-exit rule, mirrored so scripted sessions report
                 // the same dropped tally a real transport would.
                 if (slot.park_state == .terminated) {
+                    slot.dropped_writes +|= 1;
+                    return false;
+                }
+                // The scripted full-FIFO stand-in (see
+                // `fake_pty_write_full`): refuse and count like the live
+                // admission against a child that stopped reading.
+                if (self.fake_pty_write_full) {
                     slot.dropped_writes +|= 1;
                     return false;
                 }

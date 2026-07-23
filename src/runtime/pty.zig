@@ -760,6 +760,14 @@ fn buildEnvpZ(arena: std.mem.Allocator, env: ?[]const EnvVar, term: []const u8) 
     const extra: usize = if (has_term) 0 else 1;
     var out = try arena.allocSentinel(?[*:0]const u8, list.len + extra, null);
     for (list, 0..) |entry, i| {
+        // The requested TERM REPLACES an inherited one: the spawn
+        // declared what terminal the child is attached to (this pty's
+        // emulator), and a stale `TERM=dumb` riding in from the host
+        // environment would misdeclare its capabilities.
+        if (std.mem.eql(u8, entry.name, "TERM")) {
+            out[i] = try std.fmt.allocPrintSentinel(arena, "TERM={s}", .{term}, 0);
+            continue;
+        }
         out[i] = try std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ entry.name, entry.value }, 0);
     }
     if (!has_term) {
@@ -1092,6 +1100,21 @@ test "the child environment is exactly env plus TERM" {
     const out = buf[0..total];
     // TERM injected, MARKER passed through, HOME absent (clean env).
     try std.testing.expect(std.mem.indexOf(u8, out, default_term ++ "|pty-proof|") != null);
+
+    // An INHERITED TERM is replaced, never preserved: the spawn
+    // declared what terminal the child is attached to, and a stale
+    // `TERM=dumb` from the host environment would misdeclare it.
+    const q = try spawn(std.testing.allocator, .{
+        .argv = &.{ "/bin/sh", "-c", "printf '%s' \"$TERM\"" },
+        .env = &.{.{ .name = "TERM", .value = "dumb" }},
+        .term = "xterm-256color",
+    });
+    defer q.close();
+    var term_buf: [128]u8 = undefined;
+    const term_total = testReadAll(q, &term_buf);
+    _ = q.reapBlocking();
+    try std.testing.expect(std.mem.indexOf(u8, term_buf[0..term_total], "xterm-256color") != null);
+    try std.testing.expect(std.mem.indexOf(u8, term_buf[0..term_total], "dumb") == null);
 }
 
 test "a late exec-failure byte on the carried status pipe converts at reap time" {

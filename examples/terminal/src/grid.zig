@@ -405,6 +405,13 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         .fill = .{ .color = palette.background },
     });
 
+    // Everything the grid paints is CLIPPED to its frame: for one frame
+    // after a shrink, the emulator still holds the pre-resize grid (the
+    // resize lands via the journaled viewport Msg), and unclipped rows
+    // or wide cells would paint over the status bar and past the right
+    // edge. The clip makes the stale frame degrade to a cropped grid.
+    try builder.pushClip(.{ .id = grid_id_base + 0x4_0000_0000, .rect = options.frame });
+
     const origin_x = options.frame.x;
     const origin_y = options.frame.y;
     const cell_w = session.cell_width;
@@ -414,8 +421,9 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     // style): a background run, a text run, AND an underline run per
     // column — three commands each — plus one selection wash. Reserve
     // that so the LAST painted row can never push the list past the
-    // budget; the cursor and scrollbar (+2) fit under the same reserve.
-    const row_reserve: usize = max_cols * 3 + 4;
+    // budget; the cursor, scrollbar, and clip push/pop (+4) fit under
+    // the same reserve.
+    const row_reserve: usize = max_cols * 3 + 6;
     const row_ceiling: usize = if (options.command_budget > row_reserve)
         options.command_budget - row_reserve
     else
@@ -451,7 +459,10 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
         // emit a row's first runs and then fail mid-row.
         if (text_bytes_emitted + rowTextBytes(row) > text_store) break;
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
-        if (row_y + cell_h > options.frame.y + options.frame.height + cell_h) break;
+        // Rows STARTING at or past the frame's bottom paint nothing
+        // visible; a row straddling the edge still paints and the clip
+        // crops it, so content reaches the very edge without spilling.
+        if (row_y >= options.frame.y + options.frame.height) break;
         const row_id = grid_id_base + (@as(u64, @intCast(row_index)) << 16);
 
         // Background runs: contiguous cells sharing a non-default bg.
@@ -660,6 +671,7 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
             });
         }
     }
+    try builder.popClip();
 }
 
 /// UTF-8 byte need of one cell's rendered text: its primary code point

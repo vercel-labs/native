@@ -599,6 +599,7 @@ test "stdin order holds: a retained reply reaches the child before newer typing"
     session.feed("\x1b[6n");
     const reply = try gpa.dupe(u8, session.pendingResponses());
     defer gpa.free(reply);
+    app_state.effects.fake_pty_write_full = true;
     app_state.model.outbound_len = app_state.model.outbound_buffer.len;
     app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
     try testing.expectEqual(reply.len, session.pendingResponses().len);
@@ -617,6 +618,7 @@ test "stdin order holds: a retained reply reaches the child before newer typing"
 
     // The ring frees (the child read): the next keystroke moves the
     // retained reply FIRST, then itself — the child's stdin order.
+    app_state.effects.fake_pty_write_full = false;
     app_state.model.outbound_len = 0;
     try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -645,6 +647,7 @@ test "retained replies keep accumulating while further output feeds - the buffer
     // queries — more reply bytes than the buffer's initial capacity.
     // Every reply must accumulate (the buffer grows), none dropped:
     // clearing or dropping would strand a child blocked on an answer.
+    app_state.effects.fake_pty_write_full = true;
     app_state.model.outbound_len = app_state.model.outbound_buffer.len;
     const burst = "\x1b[6n" ** 6000; // ~36 KiB of replies, > 16 KiB initial
     session.feed(burst);
@@ -653,6 +656,7 @@ test "retained replies keep accumulating while further output feeds - the buffer
     try testing.expect(session.pendingResponses().len > grid.Session.response_capacity);
 
     // The ring drains; the whole accumulated batch moves and clears.
+    app_state.effects.fake_pty_write_full = false;
     app_state.model.outbound_len = 0;
     app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
     try testing.expectEqual(@as(usize, 0), session.pendingResponses().len);
@@ -675,6 +679,7 @@ test "a query reply refused by a full ring is retained and retried, never cleare
     app_state.model.session.feed("\x1b[6n");
     const reply_len = app_state.model.session.pendingResponses().len;
     try testing.expect(reply_len > 0);
+    app_state.effects.fake_pty_write_full = true;
     app_state.model.outbound_len = app_state.model.outbound_buffer.len;
     app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
     try testing.expectEqual(reply_len, app_state.model.session.pendingResponses().len);
@@ -682,6 +687,7 @@ test "a query reply refused by a full ring is retained and retried, never cleare
 
     // The ring drains (the child read); the retry moves the reply whole
     // and it reaches the pty.
+    app_state.effects.fake_pty_write_full = false;
     app_state.model.outbound_len = 0;
     app.moveResponsesToOutbound(&app_state.model, &app_state.effects);
     try testing.expectEqual(@as(usize, 0), app_state.model.session.pendingResponses().len);

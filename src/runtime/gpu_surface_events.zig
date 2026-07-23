@@ -695,10 +695,20 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     },
                     else => null,
                 };
+                // An IME RESOLUTION is never a widget's claimed key: the
+                // structural-claim gate exists so one keystroke cannot
+                // both activate a focused control and type its literal
+                // character, but a composition's committed result (an
+                // owned empty commit, or a converted commit's trailing
+                // text riding the grace) is the END of a sequence the
+                // widget never participated in — a focused button's
+                // Space claim must not eat it.
+                const ime_resolution = targetless_commit_grace or
+                    input_event.kind == .ime_commit_composition;
                 if (committed) |text| {
                     if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                         if (self.views[index].kind == .gpu_surface and self.views[index].focused and
-                            !committed_text_claimed)
+                            (!committed_text_claimed or ime_resolution))
                         {
                             try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                                 .window_id = input_event.window_id,

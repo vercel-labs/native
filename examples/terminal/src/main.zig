@@ -165,6 +165,9 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // a lingering `selecting` flag would show a caret over no selection
     // AND make the new shell reject all typed text until Escape.
     model.selecting = false;
+    // The copy feedback belonged to the session that ended — the new
+    // shell's status line must not claim its predecessor's clipboard.
+    model.copied_bytes = 0;
     // Drop any bytes still queued for the session that just ended — a
     // restarted shell must not receive the dead one's unsent keystrokes.
     model.outbound_head = 0;
@@ -275,7 +278,14 @@ fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) bool {
         model.outbound_dropped += bytes.len;
         return true;
     }
-    if (bytes.len > cap - model.outbound_len) return false;
+    if (bytes.len > cap - model.outbound_len) {
+        // The occupancy may be STALE — the child may have resumed
+        // reading since the ring filled — so drain what the FIFO will
+        // take before refusing: a keystroke arriving between periodic
+        // flushes must not drop when flushing would make room now.
+        flushOutbound(model, fx);
+        if (bytes.len > cap - model.outbound_len) return false;
+    }
     for (bytes, 0..) |byte, i| {
         model.outbound_buffer[(model.outbound_head + model.outbound_len + i) % cap] = byte;
     }
@@ -546,9 +556,14 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
     // Option+F commits the composed `ƒ` through the text channel, so
     // encoding an Alt-F escape here too would double the input (the
     // child would see both). On macOS, Option composes; everywhere else
-    // Alt is Meta (ESC prefix, no composed text).
+    // Alt is Meta (ESC prefix, no composed text) — EXCEPT Ctrl+Alt
+    // together, which Windows uses to represent AltGr: that combination
+    // composes text (AltGr+Q commits `@` through the text channel), so
+    // encoding it as a Ctrl+Alt chord would send wrong bytes AND
+    // shadow the composed character.
+    const altgr = event.modifiers.control and event.modifiers.alt and builtin.os.tag != .macos;
     const alt_is_chord = event.modifiers.alt and builtin.os.tag != .macos;
-    const chorded = event.modifiers.control or event.modifiers.super or alt_is_chord;
+    const chorded = (event.modifiers.control or event.modifiers.super or alt_is_chord) and !altgr;
     if (!chorded) return null;
     if (key.len == 1) {
         // The emulator's encoder expects the pressed CHARACTER as UTF-8

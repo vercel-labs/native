@@ -422,8 +422,12 @@ pub fn canvasWidgetEscapeKey(key: []const u8) bool {
 /// insert it (above), and the target-less `on_text` fallback applies the
 /// same gate so a Ctrl/Cmd-chorded key never delivers both the shortcut
 /// and a literal character. Alt stays out of the set on purpose — Option
-/// composes text on macOS and AltGr produces it elsewhere.
+/// composes text on macOS and AltGr produces it elsewhere — and
+/// Ctrl+Alt TOGETHER is exempt too: Windows represents AltGr as
+/// Ctrl+Alt, so a text event carrying both is composed text (AltGr+Q's
+/// `@`), not a chord.
 pub fn gpuInputHasTextCommandModifier(input_event: GpuSurfaceInputEvent) bool {
+    if (input_event.modifiers.control and input_event.modifiers.option) return false;
     return input_event.modifiers.primary or input_event.modifiers.command or input_event.modifiers.control;
 }
 
