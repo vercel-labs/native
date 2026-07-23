@@ -1957,10 +1957,17 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         shared.mutex.lock();
         const shutdown = shared.shutdown;
         const killed = shared.kill_requested;
+        // A REPLACED session — the slot retired past an abandon and a
+        // new spawn reused this permanent header with a fresh
+        // generation — silences this thread at once: the staging ring,
+        // parking flag, and every counter belong to the successor now,
+        // and `shutdown`/`kill_requested` were reset out from under a
+        // thread that missed its join deadline.
+        const superseded = shared.generation != generation;
         const staged = if (shared.staging) |staging| staging.len else max_effect_pty_staging_bytes;
         const room = max_effect_pty_staging_bytes - staged;
         const want_read = room > 0;
-        if (!want_read) shared.reader_parked = true;
+        if (!want_read and !superseded) shared.reader_parked = true;
         const want_write = shared.out_len > 0;
         shared.mutex.unlock();
 
@@ -1975,7 +1982,7 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         // The direct child is dead, so `reapBlocking` below returns at
         // once; the escaped descendant runs on detached, the spawn
         // family's documented limit.
-        if (shutdown or killed) break :read_loop;
+        if (shutdown or killed or superseded) break :read_loop;
 
         const ready = pty_transport.wait(transport.parent, nudge_fd, want_read, want_write);
         if (ready.nudged) pty_transport.drainNudges(nudge_fd);
@@ -2012,7 +2019,11 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
     // — the exit always arrives. This is the thread's LAST shared touch
     // before the wake.
     shared.mutex.lock();
-    shared.reaping = true;
+    // Generation-gated like every terminal publish below: a superseded
+    // thread still reaps ITS OWN child (hygiene), but the successor's
+    // `reaping` flag steers the successor's ptyKill and must never be
+    // raised by a stale thread.
+    if (shared.generation == generation) shared.reaping = true;
     shared.mutex.unlock();
     const exit = transport.reapEnding();
     // Every session end is also a cheap moment to settle earlier
@@ -2059,7 +2070,10 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
             _ = owner.pending.fetchAdd(1, .seq_cst);
         }
     }
-    shared.io_done = true;
+    // `io_done` is the retirement-side COMPLETION PROOF (block frees
+    // hang on it), so a superseded thread must not publish it into a
+    // successor session that reset it for its own thread.
+    if (shared.generation == generation) shared.io_done = true;
     shared.mutex.unlock();
     ChannelHandle.requestHostWake(&shared.wake, generation);
 }
@@ -2127,7 +2141,11 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
             // write landed".
             error.WriteFailed => {
                 shared.mutex.lock();
-                if (shared.out_len > 0) {
+                // Same re-check as the accounting below: a session
+                // revoked (or replaced) during the write owns these
+                // counters now — a stale thread must not fold drops
+                // into a successor's tallies.
+                if (shared.open and shared.generation == generation and shared.out_len > 0) {
                     shared.dropped_writes +|= @intCast(shared.out_write_count);
                     shared.out_len = 0;
                     shared.out_write_count = 0;
@@ -2139,6 +2157,17 @@ fn ptyFlushOutbound(shared: *PtyShared, transport: pty_transport.Pty, generation
         };
         if (wrote == 0) return;
         shared.mutex.lock();
+        // RE-CHECK the gates after the unlocked write: the loop thread
+        // may have revoked this session while the write ran (an abandon
+        // past the join deadline retires the slot and nulls — possibly
+        // frees — the outbound block). A revoked session's accounting
+        // is dead state; touching the block would be a null unwrap or a
+        // use-after-free. Every heap-block deref on this thread sits
+        // under the mutex WITH its gate — this was the one that did not.
+        if (!shared.open or shared.generation != generation) {
+            shared.mutex.unlock();
+            return;
+        }
         shared.out_head = (shared.out_head + wrote) % max_effect_pty_outbound_bytes;
         shared.out_len -= @min(wrote, shared.out_len);
         // Pop every payload these bytes fully sent, so a later discard
@@ -5082,9 +5111,13 @@ pub fn Effects(comptime Msg: type) type {
                         // stale channel posts fail; the sweep below
                         // delivers it. The thread detaches, and its
                         // transport, pipe fds, and heap blocks leak —
-                        // the teardown abandon rule applied mid-life,
-                        // because exit delivery's retire must never
-                        // close an fd under a live reader.
+                        // the teardown abandon rule applied mid-life:
+                        // exit delivery's retire must never close an fd
+                        // under a live reader (transport and pipe are
+                        // forgotten below), and it frees the staging
+                        // blocks only on the thread's own `io_done`
+                        // proof, never under a thread still running
+                        // (see `retirePtySlot`).
                         shared.mutex.lock();
                         const thread_settled = shared.exit_staged or shared.io_done;
                         if (!thread_settled) {
@@ -10797,20 +10830,35 @@ pub fn Effects(comptime Msg: type) type {
                 const outbound = shared.outbound;
                 shared.outbound = null;
                 shared.owner = null;
+                // The frees below happen ONLY when the io thread's
+                // completion is PROVEN: `io_done` publishes in the same
+                // critical section as the staged exit, past the thread's
+                // last block touch (it reads outbound and writes staging
+                // only inside its read loop, under this mutex, gated by
+                // `open`/`generation`). The normal exit delivery always
+                // observes it true. An ABANDONED thread — detached past
+                // a join deadline, still inside its read loop when the
+                // loop thread staged the synthetic exit — leaves it
+                // false, and its blocks LEAK instead (the teardown
+                // abandon rule): the gates make a freed-block touch
+                // impossible only for code that reaches them, and memory
+                // lifetime must not hang on every future deref staying
+                // gated. Fake and parked slots never install blocks, so
+                // this proof gates nothing there.
+                const io_settled = shared.io_done;
                 shared.mutex.unlock();
                 revokeChannelWake(&shared.wake);
-                // Both heap blocks free here: the io thread staged its
-                // exit as its last touch of either (it reads outbound and
-                // writes staging only inside its read loop, gated by
-                // `open`), and `ptyWrite` runs on this same loop thread —
-                // so at retire nothing reaches them. Only the small
-                // `PtyShared` header stays, the channel bounded-leak rule.
-                // Freed through the SAME seam that allocated them
-                // (`channel_storage_allocator`): a swapped-in tracking or
-                // arena allocator must see its own frees, never a
-                // mismatched destroy against the default backing.
-                if (staging) |st| self.channel_storage_allocator.destroy(st);
-                if (outbound) |ob| self.channel_storage_allocator.destroy(ob);
+                if (io_settled) {
+                    // Only the small `PtyShared` header stays, the
+                    // channel bounded-leak rule. Freed through the SAME
+                    // seam that allocated them
+                    // (`channel_storage_allocator`): a swapped-in
+                    // tracking or arena allocator must see its own
+                    // frees, never a mismatched destroy against the
+                    // default backing.
+                    if (staging) |st| self.channel_storage_allocator.destroy(st);
+                    if (outbound) |ob| self.channel_storage_allocator.destroy(ob);
+                }
             }
             if (comptime pty_transport.supported) {
                 if (slot.io_thread) |thread| {

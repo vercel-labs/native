@@ -729,6 +729,10 @@ test "teardown with a live pty returns promptly and reaps the child" {
 const PtyStorageFailingAllocator = struct {
     backing: std.mem.Allocator = std.heap.page_allocator,
     armed: bool = false,
+    /// Frees observed through the seam — the abandon pin asserts
+    /// retirement LEAKED the staging blocks (zero frees) rather than
+    /// freeing them under a live io thread.
+    free_count: usize = 0,
 
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
@@ -762,6 +766,7 @@ const PtyStorageFailingAllocator = struct {
 
     fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *PtyStorageFailingAllocator = @ptrCast(@alignCast(ptr));
+        self.free_count += 1;
         self.backing.vtable.free(self.backing.ptr, memory, alignment, ret_addr);
     }
 };
@@ -786,13 +791,16 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     null_platform.* = platform_mod.NullPlatform.init(.{});
     const host_platform = null_platform.platform();
 
-    // A long-lived child spawned BEFORE the bind — the one shape where a
-    // running pty can meet a failed publication.
+    // A long-lived, NON-READING child spawned BEFORE the bind — the one
+    // shape where a running pty can meet a failed publication — with a
+    // write in flight, so the io thread's outbound machinery is live
+    // across the abandon.
     fx.ptySpawn(.{
         .key = 56,
-        .argv = &.{"/bin/cat"},
+        .argv = &.{ "/bin/sh", "-c", "exec sleep 30" },
         .on_event = DirectFx.ptyMsg(.pty),
     });
+    try testing.expect(fx.ptyWrite(56, "in-flight bytes\r"));
     try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(50), .awake);
 
     failing.armed = true;
@@ -808,6 +816,11 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
     // The key freed with the delivery: the slot retired, nothing pends.
     try testing.expectEqual(@as(?DirectMsg, null), fx.takeMsg());
+    // Retirement DEFERRED the block frees: the io thread never proved
+    // completion (`io_done`) before the abandon, so freeing its staging
+    // or outbound block would race its own in-flight write accounting —
+    // both must LEAK (zero frees through the seam), the abandon rule.
+    try testing.expectEqual(@as(usize, 0), failing.free_count);
 }
 
 // ---------------------------------------- record/replay acceptance
