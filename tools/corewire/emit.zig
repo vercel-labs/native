@@ -236,6 +236,17 @@ const Emitter = struct {
     /// pattern for its one reference site (`<Container>_<member>`) is
     /// emitted inline there, matching the transpiler's inline anonymous
     /// records.
+    ///
+    /// The sidecar carries no synthesized-vs-authored marker, so a
+    /// single-use AUTHORED type that happens to spell exactly
+    /// `<Container>_<member>` at its one reference site is
+    /// indistinguishable from a synthesized entry and inlines too —
+    /// layout, fingerprint, and binding surface stay identical either
+    /// way; only `@typeName`-carrying artifacts see the difference.
+    /// The bias must run this direction: real synthesized records (the
+    /// common case, pinned by the conformance corpus) MUST inline to
+    /// mirror the emitted module. Closing the ambiguity needs a schema
+    /// fact (see SCHEMA-GAPS.md).
     fn isSynthesizedRef(container: []const u8, member: []const u8, name: []const u8) bool {
         if (name.len != container.len + 1 + member.len) return false;
         return std.mem.startsWith(u8, name, container) and

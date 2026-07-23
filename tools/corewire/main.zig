@@ -81,7 +81,11 @@ pub fn main(init: std.process.Init) !void {
         error.OutOfMemory => return err,
     };
 
-    const generated: ?[]const u8 = if (check_only) null else emit_mod.emit(arena, parsed, &diags) catch |err| switch (err) {
+    // `--check` runs the FULL pipeline and discards the text: a sidecar
+    // must never pass the checker and then refuse at generate time
+    // (emitter-level rules — emission-name collisions above all — are
+    // part of the contract's validity).
+    const generated: []const u8 = emit_mod.emit(arena, parsed, &diags) catch |err| switch (err) {
         error.Refused => {
             try diags.write(input, stderr);
             try stderr.flush();
@@ -94,12 +98,11 @@ pub fn main(init: std.process.Init) !void {
     try diags.write(input, stderr);
     try stderr.flush();
 
-    if (generated) |text| {
-        const out = out_path.?;
+    if (out_path) |out| {
         if (std.fs.path.dirname(out)) |dir| {
             std.Io.Dir.cwd().createDirPath(init.io, dir) catch {};
         }
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = text }) catch |err| {
+        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out, .data = generated }) catch |err| {
             try stderr.print("corewire: cannot write {s}: {t}\n", .{ out, err });
             try stderr.flush();
             std.process.exit(1);

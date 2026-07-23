@@ -243,9 +243,13 @@ pub const Diagnostics = struct {
     }
 
     fn push(self: *Diagnostics, severity: @FieldType(Diagnostic, "severity"), path: []const u8, comptime fmt: []const u8, args: anytype) void {
-        const message = std.fmt.allocPrint(self.arena, fmt, args) catch return;
-        const owned_path = self.arena.dupe(u8, path) catch return;
-        self.list.append(self.arena, .{ .path = owned_path, .message = message, .severity = severity }) catch {};
+        // A diagnostic that cannot be recorded must never vanish — a
+        // dropped refusal would let a malformed sidecar read as clean.
+        // The tool runs on an arena; exhaustion here is terminal.
+        const oom = "corewire: out of memory while recording a diagnostic";
+        const message = std.fmt.allocPrint(self.arena, fmt, args) catch @panic(oom);
+        const owned_path = self.arena.dupe(u8, path) catch @panic(oom);
+        self.list.append(self.arena, .{ .path = owned_path, .message = message, .severity = severity }) catch @panic(oom);
     }
 
     pub fn hasErrors(self: *const Diagnostics) bool {
@@ -274,8 +278,11 @@ pub const Diagnostics = struct {
 /// diagnostics carry every teaching; the caller prints them and stops.
 /// All returned memory lives in the caller's arena.
 pub fn read(arena: std.mem.Allocator, source: []const u8, diags: *Diagnostics) error{ Refused, OutOfMemory }!Sidecar {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{}) catch {
-        return diags.fail("", "the sidecar is not valid JSON — it should be the core.contract.json a core-mode compile writes beside the compiled object", .{});
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{}) catch |err| switch (err) {
+        // Memory pressure is not malformed input; keep the contract's
+        // error meanings honest.
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return diags.fail("", "the sidecar is not valid JSON — it should be the core.contract.json a core-mode compile writes beside the compiled object", .{}),
     };
     var mapper = Mapper{ .arena = arena, .diags = diags };
     const sidecar = try mapper.mapRoot(root);
