@@ -140,13 +140,13 @@ test "fake pty write capture, resize mirror, and kill mirror" {
     fx.executor = .fake;
 
     fx.ptySpawn(.{ .key = 11, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
-    fx.ptyWrite(11, "ls -la");
-    fx.ptyWrite(11, "\r");
+    try testing.expect(fx.ptyWrite(11, "ls -la"));
+    try testing.expect(fx.ptyWrite(11, "\r"));
     try testing.expectEqualStrings("ls -la\r", fx.ptyWrittenBytes(11));
 
-    // Over-bound single write: refused whole, never captured cut.
+    // Over-bound single write: refused whole (returns false), never a cut.
     const oversized = "z" ** (effects_mod.max_effect_pty_write_bytes + 1);
-    fx.ptyWrite(11, oversized);
+    try testing.expect(!fx.ptyWrite(11, oversized));
     try testing.expectEqualStrings("ls -la\r", fx.ptyWrittenBytes(11));
 
     fx.ptyResize(11, 200, 60);
@@ -381,7 +381,7 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
         .argv = &.{"/bin/cat"},
         .on_event = DirectFx.ptyMsg(.pty),
     });
-    fx.ptyWrite(53, "ping\r");
+    try testing.expect(fx.ptyWrite(53, "ping\r"));
     // The line discipline echoes the input and cat writes it back;
     // either way "ping" must appear in the stream.
     var seen = false;
@@ -520,7 +520,7 @@ fn ptySessionUpdate(model: *PtySessionModel, msg: PtySessionMsg, fx: *PtySession
         // Journaled as a command dispatch; the write itself is inert
         // under replay (the recorded output already carries its
         // consequences) — "replay reproduces stdin for free".
-        .type_command => fx.ptyWrite(session_pty_key, "ls\r"),
+        .type_command => _ = fx.ptyWrite(session_pty_key, "ls\r"),
         .event => |event| model.record(event),
     }
 }

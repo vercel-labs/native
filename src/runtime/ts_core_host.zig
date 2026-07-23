@@ -1195,7 +1195,10 @@ pub fn TsCoreHost(comptime core: type) type {
                     0x1A => {
                         const key = takeShortBytes(cmd, &at);
                         const bytes = takeLongBytes(cmd, &at);
-                        if (findPty(key)) |index| fx.ptyWrite(pty_key_base + index, bytes);
+                        // TS `Cmd.ptyWrite` is fire-and-forget: a refusal
+                        // counts into the exit's dropped_writes, so the
+                        // acceptance result is ignored here.
+                        if (findPty(key)) |index| _ = fx.ptyWrite(pty_key_base + index, bytes);
                     },
                     // pty_resize [op][key_len][key][cols f64 LE][rows f64 LE]
                     0x1B => {

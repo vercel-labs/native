@@ -6390,25 +6390,6 @@ pub fn Effects(comptime Msg: type) type {
             return slot.kill_requested;
         }
 
-        /// Free space, in bytes, of the session's outbound (child stdin)
-        /// FIFO — how much a `ptyWrite` can accept RIGHT NOW before the
-        /// child, not reading, back-pressures further writes (which
-        /// `ptyWrite` then refuses whole, counting a dropped write). An
-        /// app that must deliver a large paste losslessly writes at most
-        /// this many bytes and buffers the rest, retrying as the child
-        /// reads and the FIFO drains. Zero for an unknown key. A fake or
-        /// parked occupancy captures writes wholesale with no FIFO, so it
-        /// reports the full capacity — its writes never back-pressure.
-        pub fn ptyOutboundFree(self: *Self, key: u64) usize {
-            const slot = self.findPtySlot(key) orelse return 0;
-            const shared = slot.shared orelse return max_effect_pty_outbound_bytes;
-            if (slot.fake or !pty_transport.supported) return max_effect_pty_outbound_bytes;
-            shared.mutex.lock();
-            defer shared.mutex.unlock();
-            if (!shared.open) return 0;
-            return max_effect_pty_outbound_bytes - @min(shared.out_len, max_effect_pty_outbound_bytes);
-        }
-
         /// Spawn a command onto a fresh pseudo-terminal and stream its
         /// output back as coalesced `on_event` Msgs — a spawn with a
         /// different transport: same argv budgets, same key space, the
@@ -6509,23 +6490,28 @@ pub fn Effects(comptime Msg: type) type {
             self.startRealPty(slot, options);
         }
 
-        /// Write bytes toward the pty child's stdin. Fire-and-forget on
-        /// purpose (keystrokes): an unknown or already-exited key is
-        /// dropped silently — the exit was already on its way, the
-        /// cancel-race rule — and refused payloads (over
-        /// `max_effect_pty_write_bytes`, or a full outbound buffer
-        /// against a child that stopped reading) count into the exit
-        /// event's `dropped_writes`, never silence. Under session
-        /// replay writes are inert: the replayed update re-issues them
-        /// deterministically and the journaled output already contains
-        /// their consequences.
-        pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) void {
-            const slot = self.findPtySlot(key) orelse return;
-            if (bytes.len == 0) return;
+        /// Write bytes toward the pty child's stdin, all-or-nothing.
+        /// RETURNS whether the whole payload was accepted: false means it
+        /// was refused (an unknown/exited key, a payload over
+        /// `max_effect_pty_write_bytes`, or a full outbound buffer/record
+        /// ring against a child that stopped reading) and, being
+        /// all-or-nothing, no prefix was queued. A fire-and-forget caller
+        /// (a keystroke) may ignore the result — a refusal still counts
+        /// into the exit event's `dropped_writes`, never silence — while a
+        /// caller that must not lose bytes (a large paste) retains the
+        /// payload on false and retries as the child reads and the FIFO
+        /// drains. The truth is a single admission decision, so the caller
+        /// never has to model the byte and record limits itself. Under
+        /// session replay writes are inert (true, nothing queued): the
+        /// replayed update re-issues them deterministically and the
+        /// journaled output already contains their consequences.
+        pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) bool {
+            const slot = self.findPtySlot(key) orelse return false;
+            if (bytes.len == 0) return true;
             if (slot.fake) {
                 if (bytes.len > max_effect_pty_write_bytes) {
                     slot.dropped_writes +|= 1;
-                    return;
+                    return false;
                 }
                 // Capture for `ptyWrittenBytes`, oldest dropped past
                 // the window (an inspection seam, not a delivery).
@@ -6542,10 +6528,10 @@ pub fn Effects(comptime Msg: type) type {
                     @memcpy(slot.write_capture[slot.write_capture_len .. slot.write_capture_len + bytes.len], bytes);
                     slot.write_capture_len += bytes.len;
                 }
-                return;
+                return true;
             }
-            if (comptime !pty_transport.supported) return;
-            const shared = slot.shared orelse return;
+            if (comptime !pty_transport.supported) return false;
+            const shared = slot.shared orelse return false;
             shared.mutex.lock();
             const accepted = accepted: {
                 if (!shared.open or shared.generation != slot.generation) break :accepted false;
@@ -6582,6 +6568,7 @@ pub fn Effects(comptime Msg: type) type {
             };
             shared.mutex.unlock();
             if (accepted) pty_transport.nudge(slot.wake_pipe[1]);
+            return accepted;
         }
 
         /// Push a new grid size to the pty so the child receives

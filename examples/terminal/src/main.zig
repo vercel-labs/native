@@ -51,11 +51,11 @@ const grid_command_budget: usize = 1700;
 /// the grid far more than its clamped cell count can fill.
 const grid_text_reserve: usize = 4096;
 
-/// The pending-input ring size. Generous headroom (4x the pty's 64 KiB
-/// stdin FIFO) so only a paste far larger than this, into a child that
-/// never reads, reaches the drop path — and even then the drop is
-/// counted and shown, never silent.
-const input_buffer_bytes: usize = 256 * 1024;
+/// The pending-outbound ring size. Generous headroom (4x the pty's
+/// 64 KiB stdin FIFO) so only a paste or reply burst far larger than
+/// this, into a child that never reads, reaches the drop path — and even
+/// then the drop is counted and shown, never silent.
+const outbound_buffer_bytes: usize = 256 * 1024;
 
 /// The default interactive shell per platform — a deterministic pick so
 /// a replayed update issues the identical spawn (reading $SHELL here
@@ -108,21 +108,22 @@ pub const Model = struct {
     /// The window's traffic-light inset so the header clears it.
     chrome_leading: f32 = 0,
 
-    /// Pending outbound input (typed keys and pastes), a ring drained to
-    /// the pty as its 64 KiB stdin FIFO frees up. A large paste into a
-    /// child that is not reading would otherwise lose its tail: the FIFO
-    /// fills and further writes are refused. Buffering here and flushing
-    /// against `ptyOutboundFree` keeps every byte, in order. Query
-    /// replies do NOT ride this ring — they are urgent (a child may block
-    /// on a DSR answer) and are written directly, with the flush leaving
-    /// FIFO headroom for them.
-    input_buffer: [input_buffer_bytes]u8 = undefined,
-    input_head: usize = 0,
-    input_len: usize = 0,
-    /// Input bytes dropped because the pending ring was full (a paste far
-    /// larger than the ring into a child that never reads). Surfaced on
-    /// the status line — never a silent loss.
-    input_dropped: u64 = 0,
+    /// Pending outbound bytes toward the child's stdin — typed keys,
+    /// pastes, AND emulator query replies, in one stream-ordered ring
+    /// drained as the pty's 64 KiB stdin FIFO accepts them. A single
+    /// queue is why nothing is lost: `ptyWrite` reports acceptance (it
+    /// alone knows the byte- and record-ring limits), so a refused write
+    /// is retried from here rather than dropped, and a reply cannot be
+    /// discarded before it lands. Ordering is the child's own stdin
+    /// order — a keystroke after a paste, a reply after the output that
+    /// provoked it — exactly what a real terminal delivers.
+    outbound_buffer: [outbound_buffer_bytes]u8 = undefined,
+    outbound_head: usize = 0,
+    outbound_len: usize = 0,
+    /// Bytes dropped because the pending ring was full (a paste far
+    /// larger than the ring, or a reply burst, into a child that never
+    /// reads). Surfaced on the status line — never a silent loss.
+    outbound_dropped: u64 = 0,
 
     /// Input flows to the pty from the moment it is spawned — not only
     /// after the first output batch flips the phase to `.live`. A shell
@@ -145,10 +146,10 @@ pub const Msg = union(enum) {
     copy_selection,
     restart,
     /// The frame pump asks the update loop (which holds `fx`) to push
-    /// more pending input now that a frame elapsed — the child may have
-    /// read and freed FIFO space without producing output to trigger a
-    /// flush.
-    flush_input,
+    /// more pending outbound bytes now that a frame elapsed — the child
+    /// may have read and freed FIFO space without producing output to
+    /// trigger a flush.
+    flush_outbound,
 };
 
 const TerminalApp = native_sdk.UiApp(Model, Msg);
@@ -164,11 +165,11 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // a lingering `selecting` flag would show a caret over no selection
     // AND make the new shell reject all typed text until Escape.
     model.selecting = false;
-    // Drop any input still queued for the session that just ended — a
+    // Drop any bytes still queued for the session that just ended — a
     // restarted shell must not receive the dead one's unsent keystrokes.
-    model.input_head = 0;
-    model.input_len = 0;
-    model.input_dropped = 0;
+    model.outbound_head = 0;
+    model.outbound_len = 0;
+    model.outbound_dropped = 0;
     // Hard-reset the emulator so a restarted shell starts from a clean
     // terminal — no leftover mode (application-cursor, reverse video),
     // scrollback, palette override, or partial escape sequence from the
@@ -192,14 +193,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.output_bytes += event.bytes.len;
                 feedOutput(model, fx, event.bytes);
                 // The child produced output, so it is reading: its stdin
-                // FIFO likely has room now — push any pending input.
-                flushInput(model, fx);
+                // FIFO likely has room now — push any pending outbound.
+                flushOutbound(model, fx);
             },
             .exit => {
                 model.phase = if (event.reason == .rejected or event.reason == .spawn_failed) .failed else .ended;
                 model.exit_code = event.code;
                 model.exit_reason = event.reason;
                 model.dropped_writes = event.dropped_writes;
+                // The child is gone: bytes still queued can never land, so
+                // drop them rather than spin retrying against a dead key
+                // (a restart resets these anyway).
+                model.outbound_head = 0;
+                model.outbound_len = 0;
             },
         },
         .key => |event| handleKey(model, fx, event),
@@ -207,7 +213,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (model.selecting or !model.acceptsInput()) return;
             if (event.text.len == 0) return;
             model.session.scrollToBottom();
-            enqueueInput(model, fx, event.text);
+            enqueueOutbound(model, fx, event.text);
         },
         .viewport => |size| {
             // Commit the new size only once the emulator actually took
@@ -218,9 +224,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             model.cols = size.cols;
             model.rows = size.rows;
             fx.ptyResize(shell_key, size.cols, size.rows);
-            flushInput(model, fx);
+            flushOutbound(model, fx);
         },
-        .flush_input => flushInput(model, fx),
+        .flush_outbound => flushOutbound(model, fx),
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
             if (result.outcome != .ok) model.copied_bytes = 0;
@@ -240,62 +246,42 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
     }
 }
 
-/// Enqueue typed or pasted input into the pending ring, then flush what
-/// the pty's stdin FIFO can take. A large paste is not submitted all at
-/// once: `flushInput` paces it against the FIFO's free space so the tail
-/// is never dropped. Bytes that overrun the (large) ring are counted,
-/// not silently lost. Ordering is preserved — a keystroke typed after a
-/// pending paste lands after it in the stream.
-fn enqueueInput(model: *Model, fx: *Fx, bytes: []const u8) void {
-    const cap = model.input_buffer.len;
+/// Append outbound bytes (typed keys, pastes, or query replies) to the
+/// pending ring in stream order, then flush what the pty's stdin FIFO
+/// will take. A large payload is not submitted all at once: `flushOutbound`
+/// paces it as the child reads, so the tail is never dropped. Bytes that
+/// overrun the (large) ring are counted, not silently lost.
+fn enqueueOutbound(model: *Model, fx: *Fx, bytes: []const u8) void {
+    const cap = model.outbound_buffer.len;
     var i: usize = 0;
     while (i < bytes.len) : (i += 1) {
-        if (model.input_len == cap) {
-            model.input_dropped += bytes.len - i;
+        if (model.outbound_len == cap) {
+            model.outbound_dropped += bytes.len - i;
             break;
         }
-        model.input_buffer[(model.input_head + model.input_len) % cap] = bytes[i];
-        model.input_len += 1;
+        model.outbound_buffer[(model.outbound_head + model.outbound_len) % cap] = bytes[i];
+        model.outbound_len += 1;
     }
-    flushInput(model, fx);
+    flushOutbound(model, fx);
 }
 
-/// Push as much pending input to the pty as its stdin FIFO will accept,
-/// in per-write-bound chunks. Stops when the FIFO is full (retried on
-/// the next output, resize, or frame) so a non-reading child pauses the
-/// stream instead of losing its tail. Leaves FIFO headroom for query
-/// replies (written directly, `writeResponses`) so bulk input can never
-/// starve an urgent DSR/DA answer the child may be blocking on — which
-/// would deadlock the drain.
-fn flushInput(model: *Model, fx: *Fx) void {
-    const cap = model.input_buffer.len;
-    while (model.input_len > 0) {
-        const free = fx.ptyOutboundFree(shell_key);
-        const reserve = grid.Session.response_capacity;
-        const usable = if (free > reserve) free - reserve else 0;
-        if (usable == 0) break;
-        const run_to_end = cap - model.input_head;
+/// Push as much pending outbound as the pty's stdin FIFO will accept, in
+/// per-write-bound chunks. `ptyWrite` reports acceptance — it alone knows
+/// the byte- and record-ring limits — so a refused chunk stays in the
+/// ring and is retried on the next output, resize, or frame: a
+/// non-reading child pauses the stream instead of losing its tail, and a
+/// reply is never removed before it actually lands.
+fn flushOutbound(model: *Model, fx: *Fx) void {
+    const cap = model.outbound_buffer.len;
+    while (model.outbound_len > 0) {
+        const run_to_end = cap - model.outbound_head;
         const n = @min(
-            @min(usable, native_sdk.max_effect_pty_write_bytes),
-            @min(model.input_len, run_to_end),
+            native_sdk.max_effect_pty_write_bytes,
+            @min(model.outbound_len, run_to_end),
         );
-        fx.ptyWrite(shell_key, model.input_buffer[model.input_head .. model.input_head + n]);
-        model.input_head = (model.input_head + n) % cap;
-        model.input_len -= n;
-    }
-}
-
-/// Write query replies straight to the pty, in per-write-bound chunks.
-/// Replies are small and urgent (the child may be blocking on one), so
-/// they bypass the pending-input ring and land in the FIFO headroom
-/// `flushInput` reserves for them.
-fn writeResponses(fx: *Fx, bytes: []const u8) void {
-    const chunk = native_sdk.max_effect_pty_write_bytes;
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const end = @min(offset + chunk, bytes.len);
-        fx.ptyWrite(shell_key, bytes[offset..end]);
-        offset = end;
+        if (!fx.ptyWrite(shell_key, model.outbound_buffer[model.outbound_head .. model.outbound_head + n])) break;
+        model.outbound_head = (model.outbound_head + n) % cap;
+        model.outbound_len -= n;
     }
 }
 
@@ -315,24 +301,26 @@ fn feedOutput(model: *Model, fx: *Fx, bytes: []const u8) void {
     while (offset < bytes.len) {
         const end = @min(offset + slice_bytes, bytes.len);
         model.session.feed(bytes[offset..end]);
-        flushResponses(model, fx);
+        moveResponsesToOutbound(model, fx);
         offset = end;
     }
     // A zero-length batch never reaches here (the engine coalesces only
     // non-empty reads), but a batch that produced no output still drains
     // any answer a prior partial sequence completed.
-    if (bytes.len == 0) flushResponses(model, fx);
+    if (bytes.len == 0) moveResponsesToOutbound(model, fx);
 }
 
-/// Terminal answers to queries (DSR, DA1) the last feed produced go
-/// back to the pty — the emulator's write-back seam routed through the
-/// same journaled command channel as typed input.
-fn flushResponses(model: *Model, fx: *Fx) void {
+/// Move the emulator's query answers (DSR, DA1, ...) into the pending
+/// outbound ring, in stream order after whatever input preceded them,
+/// then flush. Routing them through the SAME ring as typed input is what
+/// makes them lossless: a reply refused by a full FIFO stays queued and
+/// retries, never cleared before it lands (which would hang a child
+/// blocking on it). The sub-sliced feed keeps each move well under the
+/// emulator's reply buffer, so it rarely overflows; a genuine overflow
+/// counts into `responses_dropped` rather than tearing a reply.
+fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
     const pending = model.session.pendingResponses();
-    // Chunk like typed input: a batch that pipelined many queries can
-    // produce more than the per-write bound of replies, which a single
-    // ptyWrite would refuse whole — leaving the child waiting forever.
-    if (pending.len > 0) writeResponses(fx, pending);
+    if (pending.len > 0) enqueueOutbound(model, fx, pending);
     model.session.clearResponses();
 }
 
@@ -448,7 +436,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     session.scrollToBottom();
     // Through the pending ring like committed text, so an encoded key
     // typed while a paste is still draining lands after it in the stream.
-    enqueueInput(model, fx, buffer[0..writer.end]);
+    enqueueOutbound(model, fx, buffer[0..writer.end]);
 }
 
 fn keyIs(key: []const u8, name: []const u8) bool {
@@ -577,9 +565,9 @@ fn statusView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
     // large capacity-paced ring), say so plainly rather than let a byte
     // vanish silently.
     const replies_dropped = model.session.responses_dropped;
-    const input_dropped = model.input_dropped;
-    const tally = if (replies_dropped > 0 or input_dropped > 0)
-        ui.fmt("{d} batches / {d} bytes - {d} replies, {d} input dropped", .{ model.output_batches, model.output_bytes, replies_dropped, input_dropped })
+    const outbound_dropped = model.outbound_dropped;
+    const tally = if (replies_dropped > 0 or outbound_dropped > 0)
+        ui.fmt("{d} batches / {d} bytes - {d} replies, {d} outbound dropped", .{ model.output_batches, model.output_bytes, replies_dropped, outbound_dropped })
     else
         ui.fmt("{d} batches / {d} bytes", .{ model.output_batches, model.output_bytes });
     return ui.row(.{ .height = status_height, .padding = 6, .gap = 12, .cross = .center }, .{
@@ -641,10 +629,10 @@ fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
         @intFromFloat(@max(2, inner.height / session.cell_height)),
     );
     if (proposed.x == model.cols and proposed.y == model.rows) {
-        // No resize this frame: if input is still queued (a large paste
+        // No resize this frame: if bytes are still queued (a large paste
         // draining, or a child that read without echoing), nudge the
         // update loop to push more now that the FIFO may have freed.
-        if (model.input_len > 0) return .flush_input;
+        if (model.outbound_len > 0) return .flush_outbound;
         return null;
     }
     return .{ .viewport = .{ .cols = proposed.x, .rows = proposed.y } };
