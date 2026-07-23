@@ -126,6 +126,10 @@ fn initFx(model: *Model, fx: *Fx) void {
 
 fn spawnShell(model: *Model, fx: *Fx) void {
     model.phase = .starting;
+    // Leave selection mode: reset() clears the emulator's selection, so
+    // a lingering `selecting` flag would show a caret over no selection
+    // AND make the new shell reject all typed text until Escape.
+    model.selecting = false;
     // Hard-reset the emulator so a restarted shell starts from a clean
     // terminal — no leftover mode (application-cursor, reverse video),
     // scrollback, palette override, or partial escape sequence from the

@@ -463,19 +463,29 @@ fn relocateAboveStdio(fd: c_int) ?c_int {
 
 /// Resolve exec status from the self-pipe read end. A failure byte (the
 /// child's errno report) means exec FAILED; a clean EOF (every writer
-/// closed via CLOEXEC on a successful exec) means it SUCCEEDED. On Linux
-/// the pipe's CLOEXEC is atomic (`pipe2`), so no concurrent fork can
-/// inherit the write end and delay EOF — the read BLOCKS for a reliable
-/// verdict, so even a slow `execve` (an interpreter on a sluggish
-/// filesystem) is awaited and correctly reported. On Darwin there is no
-/// atomic-CLOEXEC pipe primitive, so a concurrent fork on another thread
-/// COULD inherit the write end in the pipe()->fcntl window and hold EOF
-/// open; there a bounded poll treats a timeout as success (no failure
-/// byte arrived, so our own exec succeeded) to guarantee the spawn
-/// thread never hangs — the documented Darwin residual, the same
-/// tradeoff every macOS terminal makes without atomic CLOEXEC.
+/// closed) means it SUCCEEDED.
+///
+/// The read BLOCKS — up to a generous bound — so a slow `execve` (an
+/// interpreter on a sluggish filesystem or automount) is awaited and its
+/// eventual failure byte correctly reported, rather than assumed
+/// successful. The bound exists because CLOEXEC does NOT keep a
+/// concurrent `fork` on another thread from TRANSIENTLY inheriting the
+/// write end: `O_CLOEXEC` closes the inherited copy on that child's
+/// `exec`, not its `fork`, so EOF is delayed until every concurrent
+/// forker has exec'd. In this toolkit those forkers (the spawn/fetch
+/// workers, other pty spawns) all exec promptly, so EOF normally arrives
+/// at once; the bound is the safety net for a forker that is descheduled
+/// or slow to exec, capping a pathological wait instead of hanging the
+/// spawn thread forever. A timeout therefore means "no failure reported"
+/// — our own child exec'd (an inherited writer merely delayed EOF) — and
+/// is treated as success. The only misclassification is an `execve` that
+/// both blocks AND fails past the bound (an extreme filesystem
+/// pathology); the alternative (an unbounded block, or a timeout so
+/// short it races a slow failure) is worse. The bound is uniform across
+/// platforms — a self-pipe cannot distinguish "success, EOF delayed" from
+/// "exec still pending" without it.
 fn execFailed(fd: c_int) bool {
-    const timeout_ms: c_int = if (builtin.os.tag == .linux) -1 else 5000;
+    const timeout_ms: c_int = 10_000;
     var fds = [1]Pollfd{.{ .fd = fd, .events = pollin, .revents = 0 }};
     while (true) {
         const r = c.poll(&fds, 1, timeout_ms);
@@ -483,7 +493,7 @@ fn execFailed(fd: c_int) bool {
             if (errnoValue() == eintr) continue;
             return false;
         }
-        if (r == 0) return false; // timeout (Darwin only): exec succeeded
+        if (r == 0) return false; // timeout: no failure reported => success
         // Readable or hung up: a byte present is failure; a clean EOF
         // (readable, zero bytes) is success.
         if (fds[0].revents & pollin != 0) {

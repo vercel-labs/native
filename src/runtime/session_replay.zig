@@ -469,15 +469,25 @@ fn resolveBlob(
 fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len > 0) return true;
     if (record.pty_blob_len > runtime_effects.max_effect_pty_chunk_bytes) return true;
-    return switch (record.pty_kind) {
+    switch (record.pty_kind) {
         // The recorder journals output ONLY for a non-empty batch, so
         // its blob is always non-empty — a zero-length output blob is
         // damage that would otherwise replay a synthetic empty output
         // event and diverge the fingerprint.
-        .output => record.pty_blob_len == 0,
-        // Exits carry neither payload nor blob.
-        .exit => record.pty_blob_len > 0,
-    };
+        .output => if (record.pty_blob_len == 0) return true,
+        // Exits carry neither payload nor blob, and their code/signal
+        // must obey the delivered contract (`signal != 0` iff the reason
+        // is `.signaled`; `code == -1` for every reason but `.exited`).
+        // A hand-edited `.cancelled` with code 0 or signal 9 would
+        // otherwise dispatch an event violating that contract.
+        .exit => {
+            if (record.pty_blob_len > 0) return true;
+            const signaled = record.exit_reason == .signaled;
+            if (signaled != (record.pty_signal != 0)) return true;
+            if (record.exit_reason != .exited and record.code != runtime_effects.effect_error_exit_code) return true;
+        },
+    }
+    return false;
 }
 
 /// Recorder truth for pty provenance: output records always carry
