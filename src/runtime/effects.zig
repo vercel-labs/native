@@ -6713,12 +6713,14 @@ pub fn Effects(comptime Msg: type) type {
                 // its slot, but its staged executor-truth terminal keeps
                 // the key occupied until delivery — and REPLAY keeps that
                 // same window occupied as a parked slot, where a write
-                // consumes a verdict. Journal the refusal here so the two
-                // verdict streams stay aligned: live refuses against the
-                // staged terminal, replay consumes the recorded refusal
-                // against the park. A key with no spawn at all refuses
-                // with no verdict on both sides (no slot, no park).
-                if (bytes.len > 0 and !self.replay and self.stagedPtyOccupiesKey(key)) {
+                // consumes a verdict. Journal the refusal AND count it
+                // into the staged terminal's tally (this terminal has no
+                // slot left to carry drops to delivery), so the verdict
+                // streams stay aligned and the delivered exit reports the
+                // refusal — never silence. A key with no spawn at all
+                // refuses with no verdict on both sides (no slot, no
+                // park).
+                if (bytes.len > 0 and !self.replay and self.countRefusalOnStagedPtyTerminal(key)) {
                     self.journalNote(.{
                         .kind = .pty,
                         .key = key,
@@ -10610,6 +10612,25 @@ pub fn Effects(comptime Msg: type) type {
             while (index < self.pending_pty_len) : (index += 1) {
                 const entry = &storage[(self.pending_pty_head + index) % storage.len];
                 if (!entry.regenerates and entry.retire_slot == null and entry.event.key == key) return true;
+            }
+            return false;
+        }
+
+        /// Count one refused write into the staged executor-truth
+        /// terminal occupying `key` — the synchronous start-failure
+        /// window, whose slot was already released so no slot tally can
+        /// carry the drop to delivery. Returns whether such a terminal
+        /// was found (the `stagedPtyOccupiesKey` predicate, with the
+        /// count folded into the same walk).
+        fn countRefusalOnStagedPtyTerminal(self: *Self, key: u64) bool {
+            const storage = self.pendingPtyStorage();
+            var index: usize = 0;
+            while (index < self.pending_pty_len) : (index += 1) {
+                const entry = &storage[(self.pending_pty_head + index) % storage.len];
+                if (!entry.regenerates and entry.retire_slot == null and entry.event.key == key) {
+                    entry.event.dropped_writes +|= 1;
+                    return true;
+                }
             }
             return false;
         }

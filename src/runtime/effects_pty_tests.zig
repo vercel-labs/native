@@ -253,7 +253,11 @@ test "a write against a synchronously failed spawn journals the verdict replay's
         try testing.expect(!fx.ptyWrite(91, "same dispatch"));
         try testing.expectEqual(@as(u32, 1), capture.write_records);
         try testing.expectEqual(@as(i32, 0), capture.last_code);
-        _ = try expectExit(&fx, 91, .spawn_failed);
+        // The refusal LANDS in the delivered exit: the staged terminal
+        // has no slot left to carry drops, so the count rides the
+        // staged entry itself — never silence.
+        const exit = try expectExit(&fx, 91, .spawn_failed);
+        try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
         // Past the terminal's delivery the key is free: no slot, no
         // staged terminal — a write refuses with NO verdict (replay's
         // retired park matches).
@@ -263,7 +267,8 @@ test "a write against a synchronously failed spawn journals the verdict replay's
 
     // REPLAY: the same dispatch stream — the parked spawn holds the
     // key, the write consumes the journaled refusal, the fed
-    // spawn_failed retires the park, and the feeds settle exactly.
+    // spawn_failed (carrying the journaled tally) retires the park,
+    // and the feeds settle exactly.
     {
         var fx = DirectFx.init(testing.allocator);
         defer fx.deinit();
@@ -271,8 +276,9 @@ test "a write against a synchronously failed spawn journals the verdict replay's
         fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(91, false);
         try testing.expect(!fx.ptyWrite(91, "same dispatch"));
-        try fx.feedPtyExit(91, -1, 0, .spawn_failed, 0);
-        _ = try expectExit(&fx, 91, .spawn_failed);
+        try fx.feedPtyExit(91, -1, 0, .spawn_failed, 1);
+        const exit = try expectExit(&fx, 91, .spawn_failed);
+        try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
         try testing.expect(!fx.ptyWrite(91, "after delivery"));
         try fx.settleReplayFeeds();
     }
