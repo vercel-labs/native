@@ -690,8 +690,12 @@ typedef struct {
     double offset_y;
     int set_offset;
     /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
-     * the scroller bounce past them (vertical elasticity). */
+     * the scroller bounce past them (armed per axis via the grants). */
     int rubber_band;
+    /* Which axes the region grants: elasticity and scroller chrome arm
+     * only on granted axes; an ungranted axis never moves or bounces. */
+    int scrolls_x;
+    int scrolls_y;
 } native_sdk_appkit_scroll_driver_t;
 
 /* One native context-menu entry. */

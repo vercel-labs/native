@@ -90,8 +90,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, environ_map: *std.process.E
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-drag", value);
     } else if (std.mem.eql(u8, command, "widget-wheel")) {
-        if (args.len != 4) return usage();
-        const value = try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ args[1], args[2], args[3] });
+        // The optional fourth token is the horizontal delta (per-axis
+        // routing applies, like a real trackpad gesture with both).
+        if (args.len != 4 and args.len != 5) return usage();
+        const value = try std.mem.join(allocator, " ", args[1..]);
         defer allocator.free(value);
         try sendCommand(allocator, io, "widget-wheel", value);
     } else if (std.mem.eql(u8, command, "widget-key")) {
@@ -450,7 +452,7 @@ fn printUsage() void {
         \\  widget-context-press <view-label> <widget-id>   (right-click: context menu, or on_hold when the route has none)
         \\  widget-context-menu <view-label> <widget-id> <item-index>   (invoke a declared context-menu item; snapshots list them as context_menu=[...])
         \\  widget-drag <view-label> <widget-id> <start-x-ratio> <end-x-ratio> [start-y-ratio end-y-ratio]
-        \\  widget-wheel <view-label> <widget-id> <delta-y>
+        \\  widget-wheel <view-label> <widget-id> <delta-y> [delta-x]
         \\  widget-key <view-label> <key> [text]
         \\  widget-pinch <view-label> <scale> [x y]   (trackpad pinch: <scale> is the gesture's final multiplicative zoom, e.g. 1.5 zooms in; anchor defaults to the view center)
         \\  shortcut <id>

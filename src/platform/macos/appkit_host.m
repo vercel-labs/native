@@ -5947,6 +5947,20 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // rubber-band, overlay scroller); the resulting contentOffset
         // flows back through the clip-view bounds-change notification.
         [driver scrollWheel:event];
+        // Split the RESIDUAL axis: a component the locked driver cannot
+        // travel still belongs to some outer region, so exactly that
+        // component forwards to the wire, where the runtime's per-axis
+        // routing finds the nearest region scrolling it (and pushes any
+        // native driver's resulting offset back through set_offset).
+        // This is how one diagonal gesture scrolls a vertical list AND
+        // the horizontal timeline around it. No double-application is
+        // possible — the driver has no travel on the forwarded axis,
+        // and the wire event carries only that axis.
+        const double residualX = NativeSdkScrollDriverScrollsHorizontally(driver) ? 0 : -event.scrollingDeltaX;
+        const double residualY = NativeSdkScrollDriverScrollsVertically(driver) ? 0 : -event.scrollingDeltaY;
+        if (residualX != 0 || residualY != 0) {
+            [self queueScrollInputEvent:event deltaX:residualX deltaY:residualY];
+        }
         return;
     }
     [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
@@ -6320,15 +6334,16 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         // against anything but the actual frame races with relayout.
         // Elasticity rides the same reconcile: a region's edge behavior
         // (pin at the edges vs bounce past them) is per-region state the
-        // runtime owns.
-        NSScrollElasticity elasticity = desired.rubber_band ? NSScrollElasticityAllowed : NSScrollElasticityNone;
-        if (driver.verticalScrollElasticity != elasticity) driver.verticalScrollElasticity = elasticity;
-        // Horizontal elasticity follows the same per-region flag but
-        // stays AUTOMATIC when allowed: a bouncing region whose content
-        // never exceeds its width (a vertical list) must not rubber-band
-        // sideways on stray delta_x.
-        NSScrollElasticity horizontalElasticity = desired.rubber_band ? NSScrollElasticityAutomatic : NSScrollElasticityNone;
+        // runtime owns, armed ONLY on axes the region grants — an
+        // ungranted axis must never bounce or report a native offset the
+        // runtime would ignore and fight back.
+        NSScrollElasticity verticalElasticity = (desired.rubber_band && desired.scrolls_y) ? NSScrollElasticityAllowed : NSScrollElasticityNone;
+        if (driver.verticalScrollElasticity != verticalElasticity) driver.verticalScrollElasticity = verticalElasticity;
+        NSScrollElasticity horizontalElasticity = (desired.rubber_band && desired.scrolls_x) ? NSScrollElasticityAllowed : NSScrollElasticityNone;
         if (driver.horizontalScrollElasticity != horizontalElasticity) driver.horizontalScrollElasticity = horizontalElasticity;
+        // Scroller chrome follows the grants the same way.
+        if (driver.hasVerticalScroller != (desired.scrolls_y != 0)) driver.hasVerticalScroller = desired.scrolls_y != 0;
+        if (driver.hasHorizontalScroller != (desired.scrolls_x != 0)) driver.hasHorizontalScroller = desired.scrolls_x != 0;
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));

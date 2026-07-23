@@ -256,6 +256,8 @@ const AppKitScrollDriver = extern struct {
     offset_y: f64,
     set_offset: c_int,
     rubber_band: c_int,
+    scrolls_x: c_int,
+    scrolls_y: c_int,
 };
 
 const AppKitContextMenuItem = extern struct {
@@ -1635,6 +1637,8 @@ fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.Wind
             .offset_y = driver.offset_y,
             .set_offset = if (driver.set_offset) 1 else 0,
             .rubber_band = if (driver.rubber_band) 1 else 0,
+            .scrolls_x = if (driver.scrolls_x) 1 else 0,
+            .scrolls_y = if (driver.scrolls_y) 1 else 0,
         };
     }
     if (native_sdk_appkit_set_gpu_surface_scroll_drivers(self.host, window_id, label.ptr, label.len, &specs, count) == 0) return error.ViewNotFound;

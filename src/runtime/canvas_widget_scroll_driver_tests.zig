@@ -624,6 +624,8 @@ test "a two-axis region's driver carries both content dimensions and follows off
     try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_x);
     try std.testing.expectEqual(@as(f32, 12), drivers[0].offset_y);
     try std.testing.expect(drivers[0].set_offset);
+    try std.testing.expect(drivers[0].scrolls_x);
+    try std.testing.expect(drivers[0].scrolls_y);
 
     // A driver report with both offsets lands on both axes: the widget
     // adopts the offsets and the descendants translate to match.
@@ -679,6 +681,8 @@ test "a horizontal-only region's driver pins its vertical range" {
     try std.testing.expectEqual(@as(usize, 1), drivers.len);
     try std.testing.expectEqual(@as(f32, 460), drivers[0].content_size.width);
     try std.testing.expectEqual(@as(f32, 72), drivers[0].content_size.height);
+    try std.testing.expect(drivers[0].scrolls_x);
+    try std.testing.expect(!drivers[0].scrolls_y);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
         .window_id = 1,

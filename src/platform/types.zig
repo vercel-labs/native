@@ -1852,9 +1852,17 @@ pub const GpuSurfaceScrollDriver = struct {
     set_offset: bool = false,
     /// Edge behavior for this region's native scroller: false (the
     /// default) pins scrolling at the content edges, true lets the OS
-    /// scroller bounce past them (vertical elasticity). Reconciled on
-    /// every push like the frame and content size.
+    /// scroller bounce past them. Reconciled on every push like the
+    /// frame and content size, and armed per axis through the grants
+    /// below.
     rubber_band: bool = false,
+    /// Which axes the region GRANTS (`canvas.widgetScrollsAxis`): the
+    /// host arms elasticity and scroller chrome only on granted axes.
+    /// Distinct from having range right now — a granted axis with short
+    /// content keeps its scroller parked but may still bounce, while an
+    /// ungranted axis must never move, bounce, or grow a scroller.
+    scrolls_x: bool = false,
+    scrolls_y: bool = true,
 };
 
 /// A native scroll driver reported a new content offset (the user

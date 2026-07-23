@@ -115,6 +115,8 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                     // scroll-physics token): off pins the OS scroller at
                     // the content edges, on lets it bounce.
                     .rubber_band = canvas.widgetScrollPhysics(node.widget, view.widget_tokens.scroll).overscroll == .rubber_band,
+                    .scrolls_x = canvas.widgetScrollsAxis(node.widget, .horizontal),
+                    .scrolls_y = canvas.widgetScrollsAxis(node.widget, .vertical),
                 };
                 ids[count] = node.widget.id;
                 offsets[count] = offset;
