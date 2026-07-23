@@ -896,13 +896,21 @@ pub fn pipePair() Error![2]c_int {
 /// Create a pipe with both ends close-on-exec (and, when `nonblock`,
 /// non-blocking). On Linux the flags are set ATOMICALLY at creation via
 /// `pipe2`, closing the concurrent-fork inheritance window entirely; on
-/// Darwin (no `pipe2`) the flags are applied with `fcntl` immediately
-/// after, and the exec self-pipe's poll timeout is the net for the
-/// residual sub-syscall window. A failed setup closes both ends and
-/// aborts. CLOEXEC is load-bearing (an inherited exec-pipe writer would
-/// delay EOF; an inherited wake pipe would leak); non-blocking is
-/// load-bearing on the wake pipe (a full pipe must never block the UI
-/// thread inside `nudge`).
+/// Darwin there is no `pipe2`, so the flags are applied with `fcntl`
+/// immediately after — an irreducible sub-syscall window on that OS.
+/// Every caller here runs under the pty spawn lock, which closes the
+/// window against pty forks; the residual is a fork the lock cannot
+/// cover (a job spawn's process start, an embedder fork on a foreign
+/// thread) landing inside it. That residual is bounded on every axis:
+/// the inherited copy dies at that child's exec; a job child whose exec
+/// itself wedges holds an exec-pipe writer only until it resolves,
+/// costing at most the half-second probe (whose unresolved verdict
+/// carries to the reap and stays CORRECT); and a held wake pipe merely
+/// outlives its session's close until that exec. A failed setup closes
+/// both ends and aborts. CLOEXEC is load-bearing (an inherited
+/// exec-pipe writer would delay EOF; an inherited wake pipe would
+/// leak); non-blocking is load-bearing on the wake pipe (a full pipe
+/// must never block the UI thread inside `nudge`).
 fn makePipe(nonblock: bool) Error![2]c_int {
     var fds: [2]c_int = undefined;
     if (comptime builtin.os.tag == .linux) {

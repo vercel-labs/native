@@ -391,7 +391,33 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     ),
                 else => false,
             };
-            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless)
+            // A WIDGET-owned sequence whose owning editor vanished (a
+            // rebuild removed it mid-composition) can resolve NOWHERE:
+            // its commit or cancel is swallowed — routing it to the
+            // newly focused editor would resolve a composition that
+            // editor never saw, and the target-less fallback would type
+            // it into a consumer that never composed it. The stale pin
+            // clears either way; a fresh set_composition simply reopens
+            // ownership at the focused editor.
+            const ime_widget_owner_orphaned = switch (input_event.kind) {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => blk: {
+                    const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
+                    if (self.views[index].kind != .gpu_surface) break :blk false;
+                    const owner = self.views[index].canvas_widget_ime_owner_id;
+                    if (owner == 0) break :blk false;
+                    const alive = alive: {
+                        if (self.views[index].widgetLayoutTree().findById(owner)) |node| {
+                            break :alive canvas.isWidgetTextEntry(node.widget);
+                        }
+                        break :alive false;
+                    };
+                    if (alive) break :blk false;
+                    self.views[index].canvas_widget_ime_owner_id = 0;
+                    break :blk input_event.kind != .ime_set_composition;
+                },
+                else => false,
+            };
+            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -418,6 +444,19 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     }
                 }
             }
+            // The target-less committed-text claim is decided NOW —
+            // against the tree the input actually routed through —
+            // because the app dispatches below may rebuild it: a Space
+            // that pressed a focused button whose command removes that
+            // button must still count as claimed, or the same physical
+            // keystroke would double into a command AND a literal space
+            // through `on_text`.
+            const committed_text_claimed = blk: {
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    break :blk targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                }
+                break :blk false;
+            };
             // The refresh batch stays open across the app dispatches
             // below: a click's pointer-up used to emit once for the
             // widget-state change and once more for the Msg-driven
@@ -479,7 +518,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             if (widget_text_input_event) |text_input_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
-            } else if (!widget_surface_dismissed) {
+            } else if (!widget_surface_dismissed and !ime_widget_owner_orphaned) {
                 // No focused text widget consumed this text: committed
                 // text still reaches the app as a TARGET-LESS text event
                 // — the key_down fallback's typing twin, for apps that
@@ -582,7 +621,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 if (committed) |text| {
                     if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                         if (self.views[index].kind == .gpu_surface and self.views[index].focused and
-                            !targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event))
+                            !committed_text_claimed)
                         {
                             try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                                 .window_id = input_event.window_id,
