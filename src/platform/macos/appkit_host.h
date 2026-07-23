@@ -688,7 +688,8 @@ typedef struct {
     double content_height;
     double offset_x;
     double offset_y;
-    int set_offset;
+    int set_offset_x;
+    int set_offset_y;
     /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
      * the scroller bounce past them (armed per axis via the grants). */
     int rubber_band;

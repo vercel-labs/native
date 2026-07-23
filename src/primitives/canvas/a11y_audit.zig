@@ -207,10 +207,17 @@ fn widgetClipsForAudit(widget: Widget) bool {
     return widget_tree.widgetClipsContent(widget) or widget.layout.virtualized;
 }
 
-/// Scroll scopes scroll vertically by design: content below the fold is
-/// reachable after a scroll, so only a horizontal full-clip counts.
+/// Whether a scroll scope carries content into view along each axis:
+/// content past a granted axis's fold is reachable after a scroll, so a
+/// full-clip on that axis never counts. A horizontal-only shelf grants
+/// x and NOT y — an offscreen-right tile is reachable, a below-viewport
+/// one is genuinely stranded.
 fn scopeScrollsVertically(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.virtualized;
+    return (widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized;
+}
+
+fn scopeScrollsHorizontally(widget: Widget) bool {
+    return widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized;
 }
 
 fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *FindingSink) void {
@@ -221,14 +228,17 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
 
     const frame = node.frame.normalized();
     var current = node_index;
-    // Once the walk crosses a vertically scrolling scope, the widget's
-    // layout-space y is scroll content, not screen geometry: scrolling
-    // carries it into every OUTER scope's band, so only horizontal
-    // full-clips count from there up (below-the-fold rows in a long
-    // scroll region — windowed virtual lists included — are reachable
-    // by design; a pane column clipping the scroll's frame must not
-    // re-flag them).
+    // Once the walk crosses a scrolling scope, the widget's layout-space
+    // position ALONG THAT AXIS is scroll content, not screen geometry:
+    // scrolling carries it into every OUTER scope's band, so full-clips
+    // on that axis stop counting from there up (below-the-fold rows in
+    // a long scroll region — windowed virtual lists included — and
+    // offscreen-right tiles on a horizontal shelf are reachable by
+    // design; a pane clipping the scroll's frame must not re-flag
+    // them). Each axis tracks independently: a horizontal shelf forgives
+    // x overhang while a below-viewport button inside it stays flagged.
     var scrolls_vertically = false;
+    var scrolls_horizontally = false;
     while (true) {
         // Anchored floating widgets escape every ancestor clip (the
         // routing layer keeps focus targets inside open overlays live).
@@ -240,13 +250,15 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
             const outside_x = frame.maxX() <= scope.x or frame.x >= scope.maxX();
             const outside_y = frame.maxY() <= scope.y or frame.y >= scope.maxY();
             const vertical_scroll_scope = scrolls_vertically or scopeScrollsVertically(parent.widget);
-            const unreachable_here = if (vertical_scroll_scope) outside_x else (outside_x or outside_y);
+            const horizontal_scroll_scope = scrolls_horizontally or scopeScrollsHorizontally(parent.widget);
+            const unreachable_here = (outside_x and !horizontal_scroll_scope) or (outside_y and !vertical_scroll_scope);
             if (unreachable_here) {
                 sink.append(.{ .rule = .focus_unreachable, .node_index = node_index, .other_index = parent_index });
                 return;
             }
         }
         if (scopeScrollsVertically(parent.widget)) scrolls_vertically = true;
+        if (scopeScrollsHorizontally(parent.widget)) scrolls_horizontally = true;
         current = parent_index;
     }
 }

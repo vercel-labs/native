@@ -58,7 +58,8 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
 
     // The install pushed one driver: region frame, rebased content extent
     // (viewport 72, content 120 -> max offset 48 -> content height 120),
-    // the source offset, and set_offset (a fresh driver adopts it).
+    // the source offset, and the set-offset flags (a fresh driver
+    // adopts both axes).
     try std.testing.expect(harness.null_platform.scroll_driver_set_count >= 1);
     try std.testing.expectEqualStrings("canvas", harness.null_platform.scrollDriverLabel());
     const drivers = harness.null_platform.scrollDrivers();
@@ -68,7 +69,7 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expectEqual(@as(f32, 180), drivers[0].content_size.width);
     try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
     try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_y);
-    try std.testing.expect(drivers[0].set_offset);
+    try std.testing.expect(drivers[0].set_offset_y);
     // Edge behavior defaults off: the native scroller pins at the
     // content edges unless the region (or the scroll-physics token)
     // opts into rubber-band.
@@ -371,7 +372,7 @@ test "driver-scrolled offsets survive rebuilds until the source offset changes" 
     try std.testing.expectEqual(@as(f32, 40), retained.nodes[0].widget.value);
     try std.testing.expect(harness.null_platform.scroll_driver_set_offset_count > pushes_before);
     try std.testing.expectEqual(@as(f32, 40), harness.null_platform.scrollDrivers()[0].offset_y);
-    try std.testing.expect(harness.null_platform.scrollDrivers()[0].set_offset);
+    try std.testing.expect(harness.null_platform.scrollDrivers()[0].set_offset_y);
 }
 
 test "scroll drivers stay unpublished without platform support" {
@@ -623,7 +624,8 @@ test "a two-axis region's driver carries both content dimensions and follows off
     try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
     try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_x);
     try std.testing.expectEqual(@as(f32, 12), drivers[0].offset_y);
-    try std.testing.expect(drivers[0].set_offset);
+    try std.testing.expect(drivers[0].set_offset_x);
+    try std.testing.expect(drivers[0].set_offset_y);
     try std.testing.expect(drivers[0].scrolls_x);
     try std.testing.expect(drivers[0].scrolls_y);
 

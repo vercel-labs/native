@@ -3435,15 +3435,22 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 @implementation NativeSdkScrollDriverView
 
 - (NSView *)hitTest:(NSPoint)point {
-    // Scroll-wheel events route to the driver through the ordinary hit
-    // test so AppKit's own (responsive) scrolling machinery handles them
-    // — a programmatically forwarded scrollWheel: is ignored by that
-    // path. Everything else passes through to the canvas beneath, except
-    // the overlay scrollers themselves (the knob stays grabbable).
+    // Wheel events deliberately do NOT hit the driver: they fall
+    // through to the surface, whose scrollWheel: resolves the gesture's
+    // dominant axis against every driver under the pointer, locks the
+    // gesture, forwards it to the winner, and splits any residual axis
+    // to the engine wire — per-axis routing that direct NSScrollView
+    // delivery cannot perform (NSScrollView consumes whole events, so a
+    // diagonal gesture over a nested vertical list would swallow the
+    // horizontal component its ancestor owns). The forwarded event
+    // skips AppKit's concurrent responsive-scrolling fast path, but the
+    // scroller still owns feel — momentum, rubber-band, and the overlay
+    // scroller all run from forwarded events (the responder-chain
+    // fallback always relied on exactly that). Everything else passes
+    // through to the canvas beneath, except the overlay scrollers
+    // themselves (the knob stays grabbable).
     NSView *hit = [super hitTest:point];
     if (!hit) return nil;
-    NSEvent *current = NSApp.currentEvent;
-    if (current && current.type == NSEventTypeScrollWheel) return hit;
     NSView *candidate = hit;
     while (candidate && candidate != self) {
         if ([candidate isKindOfClass:[NSScroller class]]) return hit;
@@ -6350,13 +6357,24 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         if (driver.documentView && !NSEqualSizes(driver.documentView.frame.size, contentSize)) {
             [driver.documentView setFrameSize:contentSize];
         }
-        if (created || desired.set_offset) [self applyScrollDriverOffset:driver offsetX:desired.offset_x offsetY:desired.offset_y];
+        if (created || desired.set_offset_x || desired.set_offset_y) {
+            [self applyScrollDriverOffset:driver
+                                  offsetX:desired.offset_x
+                                     setX:(created || desired.set_offset_x)
+                                  offsetY:desired.offset_y
+                                     setY:(created || desired.set_offset_y)];
+        }
     }
 }
 
-- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetX:(double)offsetX offsetY:(double)offsetY {
+// Per-axis programmatic offset write: an axis the runtime did not move
+// keeps the native scroller's CURRENT origin, so a vertical write can
+// never drag a stale horizontal offset over native motion whose
+// coalesced report is still in flight (and vice versa).
+- (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetX:(double)offsetX setX:(BOOL)setX offsetY:(double)offsetY setY:(BOOL)setY {
+    const NSPoint current = driver.contentView.bounds.origin;
     self.applyingScrollDriverOffset = YES;
-    [driver.contentView setBoundsOrigin:NSMakePoint(offsetX, offsetY)];
+    [driver.contentView setBoundsOrigin:NSMakePoint(setX ? offsetX : current.x, setY ? offsetY : current.y)];
     [driver reflectScrolledClipView:driver.contentView];
     self.applyingScrollDriverOffset = NO;
     // A queued (frame-coalesced) report for THIS driver predates the

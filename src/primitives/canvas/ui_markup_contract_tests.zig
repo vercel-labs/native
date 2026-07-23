@@ -969,9 +969,15 @@ test "a contract round-trips through the ZON artifact" {
     try testing.expectEqualStrings("wave", parsed.app_icons[0]);
     try testing.expectEqualStrings("wave-pulse", parsed.app_icons[1]);
     // Artifacts from before the app_icons field parse with the default
-    // (no registered icons) - the additive-with-default contract.
+    // (no registered icons) - the additive-with-default contract. The
+    // FORMAT VERSION is a separate gate: parsing tolerates missing
+    // fields, and the reader (tools/native-sdk markup check) refuses
+    // any format it does not know — format 1 classified the retired
+    // one-axis scroll record as a scroll_state payload, which would be
+    // a false pass today.
     const legacy = try contract.parseArtifact(arena, ".{ .format = 1 }");
     try testing.expectEqual(@as(usize, 0), legacy.app_icons.len);
+    try testing.expect(legacy.format != contract.format_version);
     try testing.expectEqualStrings(model_contract.model_type, parsed.model_type);
     try testing.expectEqual(model_contract.model.scalars.len, parsed.model.scalars.len);
     try testing.expectEqual(model_contract.iterables.len, parsed.iterables.len);

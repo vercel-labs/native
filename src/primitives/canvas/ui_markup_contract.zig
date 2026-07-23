@@ -46,8 +46,11 @@ pub const ValueKind = expr.ValueKind;
 
 /// Bumped when the artifact layout or its checking semantics change; a
 /// reader refuses versions it does not know (loudly, degrading to
-/// structural checks — never a false pass).
-pub const format_version: u32 = 1;
+/// structural checks — never a false pass). Version 2: the scroll-state
+/// payload class became TWO-AXIS — a format-1 artifact classified the
+/// retired four-field record as `.scroll_state`, which both engines now
+/// reject, so accepting the stale artifact would be a false pass.
+pub const format_version: u32 = 2;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).

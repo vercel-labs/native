@@ -17,10 +17,12 @@
 //!   record and the existing "runtime offset wins until the source
 //!   changes" rebuild reconciliation keeps working unchanged.
 //!
-//! `set_offset` is only forced when the runtime's offset diverged from
-//! the last driver-reported offset (keyboard scroll, automation wheel,
-//! source-side programmatic scroll, clamp after content shrink): pushing
-//! unconditionally would snap the OS scroller back mid-gesture.
+//! `set_offset_x`/`set_offset_y` are only forced when that axis's
+//! runtime offset diverged from the last driver-reported offset
+//! (keyboard scroll, automation wheel, source-side programmatic scroll,
+//! clamp after content shrink): pushing unconditionally — or pushing
+//! the OTHER axis along for the ride — would snap the OS scroller back
+//! mid-gesture.
 
 const std = @import("std");
 const geometry = @import("geometry");
@@ -99,9 +101,8 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                     if (canvas.widgetScrollsAxis(node.widget, .vertical)) node.widget.value else 0,
                 );
                 const tracked = trackedScrollDriverOffset(view, node.widget.id);
-                const push = tracked == null or
-                    @abs(tracked.?.dy - offset.dy) > scroll_driver_offset_epsilon or
-                    @abs(tracked.?.dx - offset.dx) > scroll_driver_offset_epsilon;
+                const push_x = tracked == null or @abs(tracked.?.dx - offset.dx) > scroll_driver_offset_epsilon;
+                const push_y = tracked == null or @abs(tracked.?.dy - offset.dy) > scroll_driver_offset_epsilon;
 
                 drivers[count] = .{
                     .id = node.widget.id,
@@ -109,7 +110,8 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                     .content_size = .{ .width = content_width, .height = content_height },
                     .offset_x = offset.dx,
                     .offset_y = offset.dy,
-                    .set_offset = push,
+                    .set_offset_x = push_x,
+                    .set_offset_y = push_y,
                     // Per-region edge behavior, resolved the same way the
                     // engine physics resolve it (region override onto the
                     // scroll-physics token): off pins the OS scroller at

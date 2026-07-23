@@ -1845,11 +1845,15 @@ pub const GpuSurfaceScrollDriver = struct {
     /// x-rightward).
     offset_x: f32 = 0,
     offset_y: f32 = 0,
-    /// True when the runtime changed an offset from a non-driver source
-    /// (keyboard scroll, programmatic scroll, rebuild clamp): the host
-    /// must write `offset_x`/`offset_y` into the native scroller. False
-    /// leaves the native scroller alone — the driver owns the offsets.
-    set_offset: bool = false,
+    /// True when the runtime changed that axis's offset from a
+    /// non-driver source (keyboard scroll, programmatic scroll, rebuild
+    /// clamp): the host must write that offset into the native
+    /// scroller. False leaves the axis alone — the driver owns it. Per
+    /// axis, so a programmatic vertical write can never push a stale
+    /// horizontal offset over native motion whose coalesced report is
+    /// still in flight (and vice versa).
+    set_offset_x: bool = false,
+    set_offset_y: bool = false,
     /// Edge behavior for this region's native scroller: false (the
     /// default) pins scrolling at the content edges, true lets the OS
     /// scroller bounce past them. Reconciled on every push like the
@@ -2529,7 +2533,7 @@ pub const PlatformServices = struct {
     update_widget_accessibility_fn: ?*const fn (context: ?*anyopaque, snapshot: WidgetAccessibilitySnapshot) anyerror!void = null,
     /// Reconcile the native scroll drivers for a gpu-surface view against
     /// the full desired set: create missing drivers, update frames /
-    /// content extents / (when `set_offset`) offsets, remove drivers whose
+    /// content extents / (per set-offset flag) offsets, remove drivers whose
     /// id is absent. Idempotent — the runtime calls this on every layout
     /// install and every presented frame. Null on platforms without
     /// native scroll drivers (GTK / Win32 / null default), which keeps

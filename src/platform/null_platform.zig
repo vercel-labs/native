@@ -689,8 +689,9 @@ pub const NullPlatform = struct {
     scroll_drivers: [max_gpu_surface_scroll_drivers]GpuSurfaceScrollDriver = undefined,
     scroll_driver_count: usize = 0,
     scroll_driver_set_count: usize = 0,
-    /// Lifetime count of driver entries pushed with `set_offset = true`
-    /// (the runtime forcing its offset into the native scroller).
+    /// Lifetime count of driver entries pushed with a set-offset flag
+    /// on EITHER axis (the runtime forcing an offset into the native
+    /// scroller).
     scroll_driver_set_offset_count: usize = 0,
     /// Whether this modeled host presents native context menus. On by
     /// default (the recorder below stands in for the OS menu); tests
@@ -2805,7 +2806,7 @@ pub const NullPlatform = struct {
         @memcpy(self.scroll_drivers[0..count], drivers[0..count]);
         self.scroll_driver_count = count;
         for (drivers) |driver| {
-            if (driver.set_offset) self.scroll_driver_set_offset_count += 1;
+            if (driver.set_offset_x or driver.set_offset_y) self.scroll_driver_set_offset_count += 1;
         }
     }
 
