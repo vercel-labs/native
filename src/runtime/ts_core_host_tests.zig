@@ -2429,9 +2429,10 @@ test "a duplicate pty key rejects the new spawn through its event arm (the spawn
     try std.testing.expectEqual(mini_core.PtyState.exit, Host.model().pty_state);
     try std.testing.expectEqual(mini_core.PtyReason.rejected, Host.model().pty_reason);
     // A STAGED rejection is delivered a frame after it is issued, past a
-    // frame-arena reset: its key is the self-contained empty slice, never
-    // a dangling copy of the wire key.
-    try std.testing.expectEqualStrings("", Host.model().pty_key);
+    // frame-arena reset, yet still carries the app's requested key — from
+    // the durable reject ring, never a dangling frame-arena copy — so the
+    // refusal is correlated with the "shell" spawn that caused it.
+    try std.testing.expectEqualStrings("shell", Host.model().pty_key);
 
     // The surviving session still delivers normally.
     try fx.feedPtyExit(shell_pty_key, 0, 0, .exited, 0);

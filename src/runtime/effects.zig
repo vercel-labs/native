@@ -6189,6 +6189,14 @@ pub fn Effects(comptime Msg: type) type {
                 .key = key,
                 .line_len = @intCast(staged_len),
                 .pty_kind = .output,
+                // A non-exit event carries the -1 code sentinel, matching
+                // the live drain's `EffectPtyEvent` default (whose `code`
+                // is `effect_error_exit_code`). Without this the Entry's
+                // own `code` default of 0 would make a replayed output
+                // batch deliver code 0 where the live run delivered -1 —
+                // a deterministic-state divergence for an app that folds
+                // the code into its model.
+                .code = effect_error_exit_code,
             };
             if (staged_len > entry.line_bytes.len) {
                 const heap = self.allocator.alloc(u8, staged_len) catch return error.EffectQueueFull;

@@ -38,6 +38,10 @@ fn expectOutput(fx: *DirectFx, key: u64, bytes: []const u8) !void {
     try testing.expectEqual(key, msg.pty.key);
     try testing.expectEqual(effects_mod.EffectPtyEventKind.output, msg.pty.kind);
     try testing.expectEqualStrings(bytes, msg.pty.bytes);
+    // A non-exit event carries the -1 code sentinel — the live drain's
+    // default. A fed (replay) output batch must match it, or an app that
+    // folds the code into its model diverges on replay.
+    try testing.expectEqual(effects_mod.effect_error_exit_code, msg.pty.code);
 }
 
 fn expectExit(fx: *DirectFx, key: u64, reason: effects_mod.EffectExitReason) !effects_mod.EffectPtyEvent {

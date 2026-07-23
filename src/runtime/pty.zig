@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const clock = @import("clock.zig");
 
 /// Serializes `ptsname`'s shared static buffer across every pty spawn in
 /// the process (spawns can originate from independent runtime instances
@@ -489,10 +490,30 @@ fn relocateAboveStdio(fd: c_int) ?c_int {
 /// platforms — a self-pipe cannot distinguish "success, EOF delayed" from
 /// "exec still pending" without it.
 fn execFailed(fd: c_int) bool {
-    const timeout_ms: c_int = 10_000;
+    const timeout_ns: u64 = 10 * std.time.ns_per_s;
+    // The bound is a DEADLINE, not a per-poll timeout: `poll` restarts
+    // with a fresh timeout on every EINTR, so a fixed per-call timeout
+    // would let signals arriving less than the bound apart defer the
+    // timeout forever, blocking the spawn thread indefinitely. Recompute
+    // the remaining time against a monotonic start so the total wait
+    // stays capped no matter how many signals interrupt it. A missing
+    // monotonic clock (not expected on macOS/Linux) resolves to "no
+    // failure reported" rather than risk an unbounded wait.
+    const start = clock.monotonicNanoseconds();
     var fds = [1]Pollfd{.{ .fd = fd, .events = pollin, .revents = 0 }};
     while (true) {
-        const r = c.poll(&fds, 1, timeout_ms);
+        const now = clock.monotonicNanoseconds();
+        // A zero read is the clock's unavailable sentinel (not expected on
+        // macOS/Linux); resolve to "no failure reported" rather than risk
+        // an unbounded EINTR-retry loop. `-%` keeps a clock that appears
+        // to move backwards bounded too (it maps to a huge elapsed).
+        const elapsed = now -% start;
+        if (now == 0 or elapsed >= timeout_ns) return false; // deadline: success
+        const remaining_ms: c_int = @intCast(@min(
+            @as(u64, @intCast(std.math.maxInt(c_int))),
+            (timeout_ns - elapsed) / std.time.ns_per_ms,
+        ));
+        const r = c.poll(&fds, 1, remaining_ms);
         if (r < 0) {
             if (errnoValue() == eintr) continue;
             return false;

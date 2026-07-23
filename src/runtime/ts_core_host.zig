@@ -625,6 +625,37 @@ pub fn TsCoreHost(comptime core: type) type {
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
+        /// Durable backing for the key on a STAGED spawn-rejection Msg.
+        /// A rejection (duplicate wire key, or the table full) is staged
+        /// now and delivered a later frame, past a frame-arena reset — so
+        /// its key cannot ride the frame arena the live event path uses.
+        /// It also has no live `PtyEntry` to borrow durable storage from
+        /// (a duplicate collides with a DIFFERENT session's entry; a
+        /// table-full spawn gets none). This process-static ring is that
+        /// storage: each rejection copies its requested key into the next
+        /// slot and the Msg references it. Sized well beyond any realistic
+        /// count of keyed rejections staged before one drain (the stage
+        /// delivers every frame, and a handful of refused spawns per frame
+        /// is the ceiling in practice); the ring is never dangling, so the
+        /// worst a pathological over-`ring`-length burst does is reuse an
+        /// already-delivered slot — never a corrupt key.
+        const pty_reject_key_ring_len: usize = 4 * runtime_effects.max_effect_ptys;
+        var pty_reject_keys: [pty_reject_key_ring_len][max_wire_key_bytes]u8 = undefined;
+        var pty_reject_key_lens: [pty_reject_key_ring_len]usize = @splat(0);
+        var pty_reject_key_cursor: usize = 0;
+
+        /// Copy a rejected spawn's requested key into the durable ring and
+        /// return the durable slice, so the staged rejection Msg carries
+        /// the app's own key (correlating the refusal with its command)
+        /// without a frame-arena reference. An empty key stays empty.
+        fn stageRejectKey(key: []const u8) []const u8 {
+            if (key.len == 0) return "";
+            const slot = pty_reject_key_cursor % pty_reject_key_ring_len;
+            pty_reject_key_cursor +%= 1;
+            @memcpy(pty_reject_keys[slot][0..key.len], key);
+            pty_reject_key_lens[slot] = key.len;
+            return pty_reject_keys[slot][0..key.len];
+        }
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -1820,19 +1851,20 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
         ) void {
             if (key.len > 0 and findPty(key) != null) {
-                // The rejection is STAGED (delivered a later frame), so it
-                // carries an empty key — the wire key points into this
-                // dispatch's command buffer and the frame arena, both gone
-                // by delivery; a self-contained Msg is the staging rule.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, "", .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // The rejection is STAGED (delivered a later frame), so its
+                // key must be self-contained: the wire key points into this
+                // dispatch's command buffer, gone by delivery, so copy it
+                // into the durable ring and reference that. The app's key
+                // rides the refusal, correlating it with its command.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, stageRejectKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
             const index = freePtyIndex() orelse {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
                 // vocabulary for every refusal, never a crash. Staged, so
-                // the key is empty (self-contained across the frame reset).
-                fx.stageLoopMsg(msgFromTagPty(event_tag, "", .{ .key = 0, .kind = .exit, .reason = .rejected }));
+                // the requested key rides the durable ring, not the arena.
+                fx.stageLoopMsg(msgFromTagPty(event_tag, stageRejectKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];
@@ -1916,7 +1948,8 @@ pub fn TsCoreHost(comptime core: type) type {
             const entry = &ptys[index];
             const wire_key = entry.wireKey();
             if (event.kind == .exit) entry.used = false;
-            return msgFromTagPty(entry.event_tag, wire_key, event);
+            // Live delivery is same-frame, so the key rides the frame arena.
+            return msgFromTagPty(entry.event_tag, wire_key, false, event);
         }
 
         /// The wire `cancel` record: first match wins across the four
@@ -2641,7 +2674,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the staged rejection Msgs that must be self-contained across
         /// the frame reset — carry the static empty slice, the channel
         /// record's rule.
-        fn msgFromTagPty(tag: u8, wire_key: []const u8, event: runtime_effects.EffectPtyEvent) Msg {
+        fn msgFromTagPty(tag: u8, wire_key: []const u8, key_durable: bool, event: runtime_effects.EffectPtyEvent) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
                     if (comptime ptyArmShape(arm.type)) {
@@ -2659,18 +2692,21 @@ pub fn TsCoreHost(comptime core: type) type {
                             } else if (comptime std.mem.eql(u8, f.name, "droppedWrites")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_writes) else @intCast(event.dropped_writes);
                             } else if (comptime std.mem.eql(u8, f.name, "key")) {
-                                // The app's own session key, copied into the
-                                // frame arena like every routed payload — valid
-                                // because a live event routes and delivers
-                                // within one frame. Two sessions sharing one
-                                // event arm are told apart by this field, never
-                                // the engine key. A STAGED rejection (issued
-                                // now, delivered a later frame) must NOT reach
-                                // this copy: it passes an empty wire key so the
-                                // Msg is self-contained across the frame reset,
-                                // the bytes field's rule.
+                                // The app's own session key, so two sessions
+                                // sharing one event arm are told apart by this
+                                // field (never the engine key). A LIVE event
+                                // routes and delivers within one frame, so its
+                                // key copies into the frame arena like every
+                                // routed payload. A STAGED rejection (issued
+                                // now, delivered a later frame, past a frame
+                                // reset) passes `key_durable = true` with a key
+                                // already in the durable reject ring, so it is
+                                // referenced directly — a frame-arena copy there
+                                // would dangle by delivery.
                                 if (wire_key.len == 0) {
                                     @field(payload, f.name) = "";
+                                } else if (key_durable) {
+                                    @field(payload, f.name) = wire_key;
                                 } else {
                                     const copy = core.rt.frameAlloc(u8, wire_key.len);
                                     @memcpy(copy, wire_key);
