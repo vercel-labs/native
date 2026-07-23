@@ -1,3 +1,4 @@
+pub const layout_fingerprint = @import("layout_fingerprint.zig");
 pub const protocol = @import("protocol.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const server = @import("server.zig");

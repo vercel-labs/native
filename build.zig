@@ -195,6 +195,16 @@ pub fn build(b: *std.Build) void {
     eject_components_mod.addImport("native_sdk", desktop_mod);
     const eject_components_tests = testArtifact(b, eject_components_mod);
 
+    // corewire, the contract-sidecar shim generator (tools/corewire):
+    // std-only unit suites for the sidecar reader/validator, the shim
+    // emitter, the extractor, and the canonical value encoding. The
+    // conformance suite — both lanes per ts-core fixture, compared by
+    // layout fingerprint and model-contract artifact — rides the ts-core
+    // e2e block, since it needs node and the transpiler toolchain.
+    const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
+    const corewire_extract_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/extract.zig"));
+    const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+
     // Transpiled-core end-to-end suite: tests/ts-core/fixture.ts is
     // emitted by the repo's own transpiler AT BUILD TIME (never a
     // committed Zig snapshot) and driven through the real runtime via
@@ -451,6 +461,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(eject_components_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_extract_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the transpiled-core end-to-end suites (requires node)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
@@ -461,6 +474,9 @@ pub fn build(b: *std.Build) void {
         // no build inputs/outputs to hash, so always run it.
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
+        const sidecar_conformance_step = b.step("sidecar-conformance", "Prove corewire-generated mirrors fingerprint-identical to transpiler output (requires node)");
+        sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
         ts_core_e2e_step.dependOn(&host_e2e_run.step);
         ts_core_e2e_step.dependOn(&soundboard_e2e_run.step);
         ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
@@ -471,6 +487,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&monitor_e2e_run.step);
         test_step.dependOn(&scaffold_ide_e2e_run.step);
         test_step.dependOn(&ai_chat_e2e_run.step);
+        test_step.dependOn(&sidecar_conformance_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
@@ -2831,6 +2848,11 @@ const TsCoreE2eArtifacts = struct {
     /// paths, and builds keep working with node_modules deleted.
     scaffold_ide: *std.Build.Step.Compile,
     ai_chat: *std.Build.Step.Compile,
+    /// Sidecar-shim conformance (tests/sidecar): every fixture built
+    /// through BOTH lanes — the transpiler and corewire's generated
+    /// mirror — and compared by layout fingerprint and model-contract
+    /// artifact.
+    sidecar_conformance: *std.Build.Step.Compile,
 };
 
 fn tsCoreE2eArtifact(
@@ -2913,13 +2935,119 @@ fn tsCoreE2eArtifact(
     ai_chat_mod.addImport("native_sdk", desktop_mod);
     ai_chat_mod.addImport("ts_ai_chat_core", ai_chat_core_mod);
 
+    // Sidecar-shim conformance: pair every fixture's transpiled module
+    // with a corewire-generated mirror. The markup fixture's sidecar is
+    // the committed hand-written one (independent ground truth for the
+    // schema); the rest are extracted from the transpiled modules at
+    // build time, so corpus fixtures cannot go stale against their
+    // sidecars.
+    const corewire_mod = b.createModule(.{
+        .root_source_file = b.path("tools/corewire/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const corewire_exe = b.addExecutable(.{
+        .name = "corewire",
+        .root_module = corewire_mod,
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+    });
+    const extract_mod = module(b, target, optimize, "tools/corewire/extract.zig");
+
+    const conformance_mod = module(b, target, optimize, "tests/sidecar/conformance_tests.zig");
+    conformance_mod.addImport("native_sdk", desktop_mod);
+    conformance_mod.addImport("ts_markup_core", markup_fixture_mod);
+    conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    const conformance_fixtures = [_]struct {
+        ts_import: []const u8,
+        shim_import: []const u8,
+        core_mod: *std.Build.Module,
+        entry: []const u8,
+    }{
+        .{ .ts_import = "ts_host_core", .shim_import = "shim_host_core", .core_mod = fixture_mod, .entry = "tests/ts-core/fixture.ts" },
+        .{ .ts_import = "ts_soundboard_core", .shim_import = "shim_soundboard_core", .core_mod = soundboard_core_mod, .entry = "examples/soundboard-ts/src/core.ts" },
+        .{ .ts_import = "ts_monitor_core", .shim_import = "shim_monitor_core", .core_mod = monitor_core_mod, .entry = "examples/system-monitor-ts/src/core.ts" },
+        .{ .ts_import = "ts_ai_chat_core", .shim_import = "shim_ai_chat_core", .core_mod = ai_chat_core_mod, .entry = "examples/ai-chat-ts/src/core.ts" },
+    };
+    for (conformance_fixtures) |fixture| {
+        const sidecar_json = sidecarExtractJson(b, target, optimize, extract_mod, fixture.core_mod, fixture.entry);
+        conformance_mod.addImport(fixture.ts_import, fixture.core_mod);
+        conformance_mod.addImport(fixture.shim_import, sidecarShimModule(b, target, optimize, corewire_exe, sidecar_json));
+    }
+
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
+        .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
     };
+}
+
+/// One fixture's generated-mirror module: run corewire over the
+/// sidecar, stage the emitted core_shim.zig as core.zig beside its two
+/// staged runtime files (shim_rt.zig, core_abi.zig) — the same staging
+/// shape the transpiler lane gives its emitted core and rt.zig.
+fn sidecarShimModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    corewire_exe: *std.Build.Step.Compile,
+    sidecar_json: std.Build.LazyPath,
+) *std.Build.Module {
+    const generate = b.addRunArtifact(corewire_exe);
+    generate.addArg("--sidecar");
+    generate.addFileArg(sidecar_json);
+    generate.addArg("--out");
+    const generated = generate.addOutputFileArg("core_shim.zig");
+    const staged = b.addWriteFiles();
+    const shim_root = staged.addCopyFile(generated, "core.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    return b.createModule(.{
+        .root_source_file = shim_root,
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Extract a fixture's contract sidecar from its transpiled module
+/// (tools/corewire/extract.zig) — a generated one-line main per
+/// fixture, so corpus sidecars regenerate whenever the fixture or the
+/// transpiler changes.
+fn sidecarExtractJson(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    extract_mod: *std.Build.Module,
+    core_mod: *std.Build.Module,
+    entry: []const u8,
+) std.Build.LazyPath {
+    const root = b.addWriteFiles().add("extract_main.zig", b.fmt(
+        \\//! Generated by the build: extract the contract sidecar from a
+        \\//! transpiled fixture core (see tools/corewire/extract.zig).
+        \\const std = @import("std");
+        \\const extract = @import("extract");
+        \\const core = @import("ts_core");
+        \\pub fn main(init: std.process.Init) !void {{
+        \\    try extract.emitMain(core, "{s}", init);
+        \\}}
+        \\
+    , .{entry}));
+    const mod = b.createModule(.{
+        .root_source_file = root,
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addImport("extract", extract_mod);
+    mod.addImport("ts_core", core_mod);
+    const exe = b.addExecutable(.{
+        .name = "sidecar-extract",
+        .root_module = mod,
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+    });
+    const run = b.addRunArtifact(exe);
+    return run.addOutputFileArg("core.contract.json");
 }
 
 /// Transpile one TS fixture core at build time and pair the emitted
