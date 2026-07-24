@@ -237,6 +237,22 @@ pub const TerminalPaintOptions = struct {
     glyph_budget: usize = 0,
 };
 
+/// The painter's command-id base for a caller's `id_base` (typically a
+/// widget id): a multiplicative spread across the u64 space giving each
+/// grid a stable, high-entropy namespace for its rows/runs/decorations.
+/// A caller that emits its OWN commands around the grid (a widget's
+/// focus ring) must derive its ids from THIS base at an offset the
+/// painter leaves free (see `reserved_id_offset`), so the two id schemes
+/// never collide on the same object.
+pub fn paintIdBase(id: u64) u64 {
+    return id *% 0x9E37_79B9_7F4A_7C15;
+}
+
+/// An id offset the painter never emits (its own commands stay within
+/// `id_base +% [0, 0x4_0000_00ff]`): callers layering commands over the
+/// grid claim ids at `paintIdBase(id) +% reserved_id_offset + n`.
+pub const reserved_id_offset: u64 = 0x5_0000_0000;
+
 /// Distinct-code-point probe set backing `glyph_budget`: open-addressed,
 /// power-of-two slots, zero meaning empty (a stored value is `cp + 1` so
 /// U+0000 never aliases an empty slot). Sized at twice the runtime's
@@ -294,6 +310,47 @@ fn rowTextBytes(row: TerminalRow) usize {
     return total;
 }
 
+/// Rounded-corner code points that draw through `strokePath` and so
+/// consume the builder's path-element store (three elements each). Every
+/// other box glyph paints as `fillRect`s and consumes none.
+fn cellPathElements(cell: TerminalCell) usize {
+    if (cell.wide == .spacer or cell.cp == 0) return 0;
+    return switch (cell.cp) {
+        0x256D, 0x256E, 0x256F, 0x2570 => 3,
+        else => 0,
+    };
+}
+
+fn rowPathElements(row: TerminalRow) usize {
+    var total: usize = 0;
+    for (row.cells) |cell| total += cellPathElements(cell);
+    return total;
+}
+
+/// An UPPER BOUND on the display-list commands one row emits, assuming
+/// no runs merge (the pathological worst case): a background run per
+/// cell that carries one, plus the cell's ink — eight commands for a
+/// pure-double box joint, two (text run + underline) for a styled
+/// character, none for an empty cell — plus one selection wash. Real
+/// rows merge runs and cost far less; this bound is what the per-row
+/// preflight checks so a row is only started when it can finish whole,
+/// and it is content-accurate (a cheap ASCII row costs ~2/column, not a
+/// flat worst-case-per-column reserve that would starve wide grids).
+fn rowCommandCost(row: TerminalRow) usize {
+    var total: usize = 1; // the selection wash
+    for (row.cells) |cell| {
+        if (cell.wide == .spacer) continue;
+        if (cell.bg != null) total += 1;
+        if (cell.cp == 0) continue;
+        if (box.isBoxDrawing(cell.cp)) {
+            total += 9; // eight geometry commands plus a possible underline
+        } else {
+            total += 2; // the text run plus its underline
+        }
+    }
+    return total;
+}
+
 fn colorEql(a: canvas.Color, b: canvas.Color) bool {
     return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a;
 }
@@ -309,7 +366,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // The command-id namespace: a per-grid-stable spread of the caller's
     // base across the u64 space, leaving the low 48 bits for row/run
     // slots exactly like the widget part-id convention leaves slots.
-    const id_base = options.id_base *% 0x9E37_79B9_7F4A_7C15;
+    const id_base = paintIdBase(options.id_base);
 
     // Fixed prologue/epilogue overhead (background fill, clip push,
     // scrollbar thumb, clip pop): a positive budget below it can seat no
@@ -338,25 +395,16 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     const cell_w = metrics.width;
     const cell_h = metrics.height;
 
-    // Worst case for one row, when no runs merge (every cell a distinct
-    // style): a background run (1) PLUS the densest ink. The densest ink
-    // is a pure-double box joint (╬ ╪ ╫ and the double tees) — two
-    // parallel bars for each of its four sides, EIGHT commands — so nine
-    // per column bounds a double-joint row on its own colored background;
-    // a styled text cell (background + text + underline = three) stays
-    // well under it. Reserve nine per column so the LAST painted row can
-    // never push the list past the budget even when it is all double
-    // joints; a cheap text row simply degrades a few rows earlier, which
-    // is safe. The id STRIDE stays eight (a box cell's own commands); the
-    // background run rides a separate id range. The cursor, caret,
-    // scrollbar, and clip push/pop (+8) fit under the same reserve.
+    // The id stride between box cells: a pure-double joint (╬ ╪ ╫ and the
+    // double tees) emits up to eight commands, so a shorter stride would
+    // collide adjacent double cells' ids.
     const commands_per_cell: usize = 8;
-    const cols_actual: usize = if (grid.rows.len > 0) grid.rows[0].cells.len else max_cols;
-    const row_reserve: usize = cols_actual * (commands_per_cell + 1) + 8;
-    const row_ceiling: usize = if (options.command_budget > row_reserve)
-        options.command_budget - row_reserve
-    else
-        0;
+    // The command budget is checked PER ROW against that row's actual
+    // upper-bound cost (`rowCommandCost`), not a flat worst-case-per-
+    // column reserve: a cheap ASCII row costs ~2/column, so a wide grid
+    // paints its rows instead of reserving them all away. The epilogue
+    // (cursor, caret, scrollbar thumb, clip pop) rides this fixed slack.
+    const epilogue_reserve: usize = 8;
     // The display-list TEXT store is a separate budget from the command
     // count: a screen of multi-codepoint graphemes (emoji) can exhaust
     // its bytes long before the command budget. Each row is emitted
@@ -401,15 +449,22 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // blank background.
     var painted_rows: usize = 0;
     for (grid.rows, 0..) |row, row_index| {
-        // Command-count stop: once within one row's worst case of the
-        // command ceiling, stop painting further rows.
-        if (options.command_budget > 0 and builder.displayList().commands.len >= row_ceiling) break;
+        // Command-count stop, ATOMIC per row: this row's actual
+        // upper-bound cost plus the epilogue must fit the budget, so a
+        // cheap wide row paints while a genuinely too-dense row (and
+        // everything after it) is skipped whole — never started and torn.
+        if (options.command_budget > 0 and
+            builder.len + rowCommandCost(row) + epilogue_reserve > options.command_budget) break;
         // Text-store stop, ATOMIC per row: measure this row's exact text
         // bytes against the builder's LIVE cumulative counter (which the
         // grid's own emitted runs and every earlier widget both advance)
         // and stop BEFORE the row if the store cannot hold it — never
         // emit a row's first runs and then fail mid-row.
         if (builder.text_byte_len + rowTextBytes(row) > text_ceiling) break;
+        // Path-element stop, ATOMIC per row: rounded corners stroke into
+        // the builder's path-element store, so a row of them is skipped
+        // BEFORE the store cannot hold it rather than tearing mid-row.
+        if (builder.path_element_len + rowPathElements(row) > builder.path_elements.len) break;
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on
@@ -418,6 +473,14 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             glyphs_counted += rowNewGlyphs(row, &glyph_seen);
             if (glyphs_counted > glyph_budget) break;
         }
+        // Row-atomic rollback snapshot: the preflights above make a tear
+        // unreachable, but if a builder store is ever exhausted mid-row
+        // anyway, these restore points drop the partial row's commands
+        // whole (see the `row_torn` handling below) so nothing half a row
+        // ever reaches the glass.
+        const row_start_len = builder.len;
+        const row_start_paths = builder.path_element_len;
+        const row_start_text = builder.text_byte_len;
         const row_y = origin_y + @as(f32, @floatFromInt(row_index)) * cell_h;
         // Rows STARTING at or past the frame's bottom paint nothing
         // visible; a row straddling the edge still paints and the clip
@@ -593,6 +656,21 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                     row_torn = true;
                     break;
                 };
+                // A box/block cell can still carry SGR underline: the
+                // geometry replaces the glyph, not its decoration, so an
+                // underlined `─` or `█` keeps its underline like any other
+                // styled cell (0xd000 id range, clear of the box geometry
+                // and text ranges).
+                if (underline) {
+                    builder.fillRect(.{
+                        .id = row_id + 0xd000 + @as(u64, @intCast(x)),
+                        .rect = geometry.RectF.init(rect.x, row_y + cell_h - 2, rect.width, 1),
+                        .fill = .{ .color = fg },
+                    }) catch {
+                        row_torn = true;
+                        break;
+                    };
+                }
                 x += span - 1;
                 continue;
             }
@@ -611,9 +689,15 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             text_len += take;
             run_len += if (cell.wide == .wide) 2 else 1;
         }
-        // A torn row is not painted content: stop here so the cursor and
-        // caret never draw over the cells the tear dropped.
-        if (row_torn) break;
+        // A torn row is not painted content: roll the builder back to the
+        // row's start so no partial row reaches the glass, then stop (the
+        // suppressed cursor/caret rely on `painted_rows` not advancing).
+        if (row_torn) {
+            builder.len = row_start_len;
+            builder.path_element_len = row_start_paths;
+            builder.text_byte_len = row_start_text;
+            break;
+        }
         painted_rows = row_index + 1;
     }
 

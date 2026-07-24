@@ -50,7 +50,11 @@ pub const ValueKind = expr.ValueKind;
 /// payload class became TWO-AXIS — a format-1 artifact classified the
 /// retired four-field record as `.scroll_state`, which both engines now
 /// reject, so accepting the stale artifact would be a false pass.
-pub const format_version: u32 = 2;
+/// Version 3: the `terminal_state` payload class arrived and `on-terminal`
+/// gained a bare-tag rule — a format-2 artifact classified a four-field
+/// terminal message as `.unsupported` and would reject valid `<terminal>`
+/// markup, so a stale artifact must force regeneration rather than pass.
+pub const format_version: u32 = 3;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).
@@ -879,6 +883,11 @@ const Checker = struct {
             return;
         }
         if (std.mem.eql(u8, event, "terminal")) {
+            // The runtime supplies the TerminalState payload, so the tag
+            // is BARE: an authored `:{binding}` would be silently
+            // discarded, which is the teaching error (dead data), not a
+            // pass.
+            if (expression.payload.len > 0) return self.failAttr(node, attribute, markup.on_terminal_payload_message);
             const found = tag orelse return self.failAttr(node, attribute, markup.on_terminal_payload_message);
             if (found.payload != .terminal_state) return self.failAttr(node, attribute, markup.on_terminal_payload_message);
             return;
@@ -1228,6 +1237,18 @@ const Checker = struct {
                 if (expression != .binding) continue;
                 const resolved = try self.resolveBinding(node, expression.binding, true);
                 try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.media_surface_surface_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "pty")) {
+                // Terminal pty keys are model integers (engine parity —
+                // the surface/image binding shape exactly): resolve the
+                // binding so an undefined field is caught here and a
+                // valid one is marked used (never a false dead-state
+                // finding), and a non-integer is the teaching error.
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.terminal_pty_message);
                 continue;
             }
             if (std.mem.eql(u8, attribute.name, "icon") or

@@ -762,10 +762,21 @@ pub const WidgetOverscroll = enum {
 /// reconcile rule: echo the `on-terminal` state's `scrollback` back
 /// here and the runtime-owned position survives rebuilds; change it
 /// model-side to scroll programmatically. `grid` is the RESOLVED
-/// viewport snapshot the producer (the app loop's terminal session
-/// store) published for the key — producer-owned, outliving the build
-/// that references it; null until a session exists, which paints the
-/// honest empty surface.
+/// viewport snapshot the producer published for the key.
+///
+/// LIFETIME: `grid` is a BORROWED pointer, not copied into a retained
+/// tree the way `text`/`spans` are — so the producer must own it for at
+/// least as long as any retained tree built from this widget, since a
+/// focus/hover repaint re-emits from the retained tree without a
+/// rebuild. The sanctioned producer is the framework's terminal-session
+/// store (installed via `Ui.TerminalGridLookup`), whose grids live in
+/// stable per-session storage across frames and are freed only when the
+/// session ends and the widget unmounts — so the runtime flow satisfies
+/// the contract by construction. It is `null` whenever no lookup is
+/// installed (every app- or test-built tree today), which paints the
+/// honest empty surface; a direct builder caller that sets it must honor
+/// the same outlive-the-retained-tree contract, exactly as it must for a
+/// borrowed `text` slice.
 pub const TerminalBinding = struct {
     pty: u64 = 0,
     scrollback: u32 = 0,

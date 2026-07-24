@@ -1904,6 +1904,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 if (!std.mem.eql(u8, node.name, "terminal")) {
                     return self.failVoid(node, markup.on_terminal_element_message);
                 }
+                // Bare tag only: the runtime supplies the TerminalState,
+                // so an authored payload would be silently discarded.
+                if (expression.payload.len > 0) return self.failVoid(node, markup.on_terminal_payload_message);
                 options.on_terminal = terminalConstructor(expression.tag) orelse {
                     return self.failVoid(node, markup.on_terminal_payload_message);
                 };

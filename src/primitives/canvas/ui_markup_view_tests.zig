@@ -2875,6 +2875,26 @@ test "the terminal element binds its pty key, scrollback echo, and view-state ha
     try testing.expectEqual(@as(u16, 24), msg.term_state.rows);
 }
 
+test "on-terminal requires a bare tag: an authored payload is refused" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The runtime supplies the TerminalState, so `term_state:{offset}`
+    // is dead data — refused with the payload teaching, not silently
+    // discarded.
+    const source =
+        \\<column>
+        \\  <terminal pty="{shell}" label="Shell" on-terminal="term_state:{offset}"/>
+        \\</column>
+    ;
+    var view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, source);
+    var ui = TerminalElementUi.init(arena);
+    const model = TerminalElementModel{};
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.on_terminal_payload_message, view.diagnostic.message);
+}
+
 test "the video element lowers to the playback surface with house chrome and records the declaration" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

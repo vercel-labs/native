@@ -1969,6 +1969,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime std.mem.eql(u8, event, "terminal")) {
                 comptime {
                     if (!std.mem.eql(u8, node.name, "terminal")) fail(node, markup.on_terminal_element_message);
+                    // Bare tag only: the runtime supplies the payload, so
+                    // an authored one would be silently discarded.
+                    if (expression.payload.len > 0) fail(node, markup.on_terminal_payload_message);
                 }
                 options.on_terminal = comptime (terminalConstructor(expression.tag) orelse fail(node, markup.on_terminal_payload_message));
                 return;

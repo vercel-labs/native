@@ -1290,8 +1290,19 @@ fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         });
     }
     if (widget.state.focused) {
+        // The ring id must be disjoint from whatever the surface below
+        // emitted. A BOUND terminal's grid owns the painter's id space
+        // (`paintIdBase(widget.id)` spread across the u64 range), which a
+        // `widgetPartId(widget.id, 2)` ring can alias; take the ring from
+        // the painter's own reserved offset so the two never collide. The
+        // UNBOUND surface uses `widgetPartId(widget.id, 1)`, so its ring
+        // stays the adjacent part slot.
+        const ring_id = if (widget.terminal.grid != null)
+            canvas.terminal_grid.paintIdBase(widget.id) +% canvas.terminal_grid.reserved_id_offset
+        else
+            widgetPartId(widget.id, 2);
         try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
-            .id = widgetPartId(widget.id, 2),
+            .id = ring_id,
             .rect = widget_render_style.focusRingRect(frame, tokens),
             .radius = widget_render_style.focusRingRadius(widgetRadius(widget, 0), tokens),
             .stroke = .{

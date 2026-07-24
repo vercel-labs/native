@@ -389,6 +389,74 @@ test "the terminal widget paints its bound grid and the honest empty surface unb
     try testing.expectEqual(@as(usize, 0), texts);
 }
 
+test "a wide cheap terminal paints its rows under the widget command budget" {
+    // 198 columns of plain ASCII across several rows: the per-row cost
+    // preflight must let these cheap rows paint (a flat worst-case-per-
+    // column reserve would seat none). Regression for the over-reserve
+    // that blanked wide grids.
+    var storage: [6][198]grid_model.TerminalCell = undefined;
+    for (&storage) |*row_cells| {
+        for (row_cells) |*entry| entry.* = cell('a', "a", white);
+    }
+    var rows: [6]grid_model.TerminalRow = undefined;
+    for (&rows, 0..) |*r, i| r.* = .{ .cells = &storage[i] };
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 1600, 200),
+        .tokens = .{},
+        .command_budget = 1792,
+    });
+    var text_rows: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |t| if (std.mem.eql(u8, t.text, "a" ** 198)) {
+                text_rows += 1;
+            },
+            else => {},
+        }
+    }
+    // Every row's run merges to one draw_text; all six must paint.
+    try testing.expectEqual(@as(usize, 6), text_rows);
+}
+
+test "a focused bound terminal's ring id never collides with a grid command" {
+    const row_cells = comptime asciiRow("shell", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
+    const grid = baseGrid(&rows);
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const focused = canvas.Widget{
+        // A high-entropy id in the range where the multiplicative spread
+        // could alias a widgetPartId ring slot.
+        .id = 0x2af6_89b9_153d_e19a,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .state = .{ .focused = true },
+        .terminal = .{ .pty = 1, .grid = &grid },
+    };
+    try canvas.emitWidgetTree(&builder, focused, .{});
+    var ring_id: canvas.ObjectId = 0;
+    for (builder.displayList().commands) |command| {
+        if (command == .stroke_rect) ring_id = command.stroke_rect.id;
+    }
+    try testing.expect(ring_id != 0);
+    // No other command shares the ring's id.
+    var collisions: usize = 0;
+    for (builder.displayList().commands) |command| {
+        const id = switch (command) {
+            .fill_rect => |c| c.id,
+            .draw_text => |c| c.id,
+            .push_clip => |c| c.id,
+            .stroke_path => |c| c.id,
+            else => continue,
+        };
+        if (id == ring_id) collisions += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), collisions);
+}
+
 test "a focused terminal wears the house focus ring" {
     var commands: [16]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
