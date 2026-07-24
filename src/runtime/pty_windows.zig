@@ -349,7 +349,9 @@ pub const Pty = struct {
             st.write_pending = false;
         }
         closeConsole(st);
-        _ = win.CloseHandle(st.out_read);
+        // The close fallback may already have broken the read end (its
+        // INVALID sentinel); everything else closes exactly once here.
+        if (st.out_read != win.INVALID_HANDLE_VALUE) _ = win.CloseHandle(st.out_read);
         _ = win.CloseHandle(st.in_write);
         _ = win.CloseHandle(st.read_event);
         _ = win.CloseHandle(st.write_event);
@@ -440,15 +442,31 @@ fn drainDiscard(st: *State, stop_on_quiet: bool) void {
 /// the documented ClosePseudoConsole deadlock. The helper captures
 /// only the HPCON VALUE (the object the call consumes; `resize` is
 /// fenced off by `console_closed` under the lock), never the session
-/// state, so it needs no join and cannot dangle. If the thread cannot
-/// spawn, the close falls back inline behind the callers' quiet-pipe
-/// checks — the bounded, OOM-only residual.
+/// state, so it needs no join and cannot dangle.
+///
+/// If the thread cannot spawn (resource exhaustion), the fallback
+/// BREAKS THE OUTPUT PIPE first — cancel and reap the armed read so
+/// its buffer is quiescent, mark the manufactured EOF, close the read
+/// handle — and only then closes inline: with the pipe broken,
+/// conhost's writes fail fast instead of filling it, so the inline
+/// call cannot meet the deadlock (the cost is any unflushed tail,
+/// which the thread-exhausted process was about to lose anyway).
+/// io-thread only (the fallback owns the read machinery).
 fn closeConsole(st: *State) void {
     st.hpc_lock.lock();
     defer st.hpc_lock.unlock();
     if (st.console_closed) return;
     st.console_closed = true;
     const thread = std.Thread.spawn(.{}, closeConsoleThreadMain, .{st.hpc}) catch {
+        if (st.read_pending) {
+            _ = win.CancelIoEx(st.out_read, &st.read_overlapped);
+            var n: win.DWORD = 0;
+            _ = win.GetOverlappedResult(st.out_read, &st.read_overlapped, &n, 1);
+            st.read_pending = false;
+        }
+        st.read_eof = true;
+        _ = win.CloseHandle(st.out_read);
+        st.out_read = win.INVALID_HANDLE_VALUE;
         win.ClosePseudoConsole(st.hpc);
         return;
     };
@@ -547,6 +565,13 @@ fn maybeCloseConsole(st: *State) void {
     if (win.WaitForSingleObject(st.read_event, 0) == win.WAIT_OBJECT_0) return;
     var avail: win.DWORD = 0;
     if (win.PeekNamedPipe(st.out_read, null, 0, null, &avail, null) != 0 and avail != 0) return;
+    // Re-probe the read event AFTER the peek: a completion landing
+    // between the two hands its bytes to the armed read — the pipe
+    // peeks empty exactly then — and means conhost just started
+    // emitting, so the grace must restart rather than the console
+    // close. (The residual sliver between this probe and the close is
+    // covered by conhost's flush-on-close plus the post-close drain.)
+    if (win.WaitForSingleObject(st.read_event, 0) == win.WAIT_OBJECT_0) return;
     closeConsole(st);
 }
 
@@ -655,34 +680,45 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     const resolved = resolveExecutable(arena, options.argv[0], options.env) orelse
         return error.PtyCommandNotFound;
     const is_batch = endsWithIgnoreCase(resolved, ".cmd") or endsWithIgnoreCase(resolved, ".bat");
+    var interpreter: []const u8 = resolved;
     if (is_batch) {
         // A batch target's command line is REPARSED by cmd.exe with
-        // its own metacharacter grammar, which no CRT quoting can
-        // neutralize — `safe&whoami` as one argument would splice a
-        // second command, and a `%X%` in the SCRIPT PATH itself would
-        // expand before cmd resolves it. Bytes the cmd grammar can
-        // reinterpret refuse the spawn whole (the argv-NUL teaching
-        // applied): mutating them would run a different command line
-        // than the caller declared.
+        // its own metacharacter grammar, which no quoting scheme can
+        // neutralize losslessly (`%` expands inside and outside quotes,
+        // `^` escapes outside them, `!` follows the child's own
+        // delayed-expansion setting) — `safe&whoami` as one argument
+        // would splice a second command, and a `%X%` in the SCRIPT
+        // PATH itself would expand before cmd resolves it. Bytes the
+        // cmd grammar can reinterpret refuse the spawn whole (the
+        // argv-NUL teaching applied, and the mainstream standard-
+        // library answer to batch argument injection): mutating them
+        // would run a different command line than the caller declared.
+        // The restriction is part of the documented Windows semantics.
         if (std.mem.indexOfAny(u8, resolved, batch_hostile_bytes) != null) return error.PtyArgvInvalid;
         for (options.argv[1..]) |arg| {
             if (std.mem.indexOfAny(u8, arg, batch_hostile_bytes) != null) return error.PtyArgvInvalid;
         }
+        // The command processor is EXPLICIT — resolved through the same
+        // caller-env PATH policy as any spawn — and invoked with /d, so
+        // a machine's AutoRun registry entries cannot splice commands
+        // around (or in place of) the requested script the way they
+        // would under CreateProcess's implicit batch rewrite.
+        interpreter = resolveExecutable(arena, "cmd.exe", options.env) orelse
+            return error.PtyCommandNotFound;
     }
-    const command_line_w = buildCommandLineW(arena, resolved, options.argv, is_batch) catch |err| switch (err) {
+    const command_line_w = buildCommandLineW(arena, interpreter, resolved, options.argv, is_batch) catch |err| switch (err) {
         error.InvalidWtf8 => return error.PtyArgvInvalid,
         error.OutOfMemory => return error.PtyEnvironTooLarge,
     };
-    // The application name rides its own argument for direct
-    // executables — the command line's module token is MAX_PATH-bound,
-    // lpApplicationName is not, so a long-path .exe still starts. Batch
-    // files keep the null application name deliberately: that is the
-    // CreateProcessW form that reroutes them through cmd.exe (cmd
-    // itself imposes the MAX_PATH bound on scripts).
-    const app_name_w: ?[*:0]const u16 = if (is_batch) null else app: {
-        const len = std.unicode.calcWtf16LeLen(resolved) catch return error.PtyArgvInvalid;
+    // The application name always rides its own argument (never the
+    // command line's MAX_PATH-bound module token, so a long-path .exe
+    // still starts; cmd itself imposes the MAX_PATH bound on scripts):
+    // the resolved executable directly, or the explicit interpreter
+    // for a batch target.
+    const app_name_w: [*:0]const u16 = app: {
+        const len = std.unicode.calcWtf16LeLen(interpreter) catch return error.PtyArgvInvalid;
         const wide = arena.allocSentinel(u16, len, 0) catch return error.PtyEnvironTooLarge;
-        _ = std.unicode.wtf8ToWtf16Le(wide, resolved) catch return error.PtyArgvInvalid;
+        _ = std.unicode.wtf8ToWtf16Le(wide, interpreter) catch return error.PtyArgvInvalid;
         break :app wide.ptr;
     };
     const env_block_w = buildEnvironmentBlockW(arena, options.env, options.term) catch |err| switch (err) {
@@ -827,13 +863,21 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
 /// pseudoconsole, deliberately: a fast child (already terminated by
 /// the failing branch) may have filled the output pipe, and a conhost
 /// blocked mid-write would block `ClosePseudoConsole` behind it —
-/// breaking the pipe first turns those writes into immediate failures,
-/// so the close can never wait on a reader this error path does not
-/// have.
+/// breaking the pipe first turns those writes into immediate failures.
+/// The close itself still rides a detached helper: conhost's own
+/// client shutdown can take its OS-bounded beat (a terminated-but-
+/// wedged child), and a spawn failure must deliver its verdict to the
+/// loop thread now, not after that beat. Inline on helper-spawn
+/// failure — with the pipes already broken, the inline call waits only
+/// on that same OS-bounded shutdown, never a full pipe.
 fn failSpawnCleanup(hpc: win.HPCON, out_server: win.HANDLE, in_server: win.HANDLE) void {
     _ = win.CloseHandle(out_server);
     _ = win.CloseHandle(in_server);
-    win.ClosePseudoConsole(hpc);
+    const thread = std.Thread.spawn(.{}, closeConsoleThreadMain, .{hpc}) catch {
+        win.ClosePseudoConsole(hpc);
+        return;
+    };
+    thread.detach();
 }
 
 /// Windows process objects self-release; there is no zombie table to
@@ -988,9 +1032,8 @@ fn systemPathFallback(env: ?[]const EnvVar, buf: []u8) []const u8 {
 
 /// The executable-extension allowlist for EXTENSION-LESS names: the
 /// runnable suffixes first (`.exe`, `.cmd`, `.bat`, `.com` — the
-/// shapes `CreateProcessW` can start; `.cmd`/`.bat` route through
-/// cmd.exe via the null-application-name command line, which is
-/// exactly how the spawn passes them), the bare spelling LAST — so a
+/// shapes the spawn can start; `.cmd`/`.bat` route through the
+/// explicit `cmd.exe /d /s /c` form), the bare spelling LAST — so a
 /// same-named plain file next to a real `tool.exe` or `tool.cmd`
 /// cannot mask them (the CreateProcess/PATHEXT ordering, where an
 /// extension-less name means its runnable suffixes before itself).
@@ -1056,39 +1099,50 @@ fn lookupEnvIgnoreCase(env: ?[]const EnvVar, name: []const u8) ?[]const u8 {
 /// quotes (cmd's quote rules differ from the CRT's), and line breaks.
 const batch_hostile_bytes = "&|<>^%!\"\r\n";
 
-/// Build the mutable UTF-16 command line `CreateProcessW` parses. The
-/// first token is the CALLER's argv[0] spelling for direct executables
-/// (the module comes from `lpApplicationName`, so a multicall binary
-/// observes the name it was invoked by — POSIX argv[0] parity); a
-/// batch target's first token is the RESOLVED path instead, because
-/// the null-application-name form reroutes it through cmd.exe by
-/// parsing exactly that token. Arguments use the standard
-/// CommandLineToArgvW-inverse quoting for executables; batch arguments
-/// (already refused down to bytes cmd cannot reinterpret) take plain
-/// space-guarding quotes with NO backslash doubling — cmd reads
-/// backslashes literally, so the CRT's trailing-run doubling would
-/// hand a script `\\` where the caller said `\`.
+/// Build the mutable UTF-16 command line `CreateProcessW` parses.
+///
+/// Direct executables: the first token is the CALLER's argv[0]
+/// spelling (the module comes from `lpApplicationName`, so a multicall
+/// binary observes the name it was invoked by — POSIX argv[0] parity),
+/// and arguments use the standard CommandLineToArgvW-inverse quoting,
+/// so a conforming child recovers each byte-exactly.
+///
+/// Batch targets: `"<cmd.exe>" /d /s /c ""<script>" "arg"..."` — the
+/// explicit, AutoRun-disabled interpreter form (/s pins the standard
+/// quote treatment; the outer quote pair is what /s strips). Every
+/// argument is ALWAYS quoted — a bare `foo)` token could close a block
+/// in cmd's reparse, and quotes make delimiters and grouping bytes
+/// literal — with NO backslash doubling: cmd reads backslashes
+/// literally, so the CRT's trailing-run doubling would hand a script
+/// `\\` where the caller said `\`. (The bytes quoting cannot make
+/// literal were refused at admission.)
 fn buildCommandLineW(
     arena: std.mem.Allocator,
+    interpreter: []const u8,
     resolved: []const u8,
     argv: []const []const u8,
     is_batch: bool,
 ) (error{ InvalidWtf8, OutOfMemory })![:0]u16 {
     var line: std.ArrayList(u8) = .empty;
     try line.append(arena, '"');
-    try line.appendSlice(arena, if (is_batch) resolved else argv[0]);
+    try line.appendSlice(arena, if (is_batch) interpreter else argv[0]);
     try line.append(arena, '"');
+    if (is_batch) {
+        try line.appendSlice(arena, " /d /s /c \"\"");
+        try line.appendSlice(arena, resolved);
+        try line.append(arena, '"');
+    }
     for (argv[1..]) |arg| {
         try line.append(arena, ' ');
         if (is_batch) {
-            const needs_quotes = arg.len == 0 or std.mem.indexOfAny(u8, arg, " \t") != null;
-            if (needs_quotes) try line.append(arena, '"');
+            try line.append(arena, '"');
             try line.appendSlice(arena, arg);
-            if (needs_quotes) try line.append(arena, '"');
+            try line.append(arena, '"');
             continue;
         }
         try appendQuotedArg(arena, &line, arg);
     }
+    if (is_batch) try line.append(arena, '"');
     const wide_len = std.unicode.calcWtf16LeLen(line.items) catch return error.InvalidWtf8;
     const wide = try arena.allocSentinel(u16, wide_len, 0);
     _ = try std.unicode.wtf8ToWtf16Le(wide, line.items);
