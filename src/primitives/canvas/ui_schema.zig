@@ -655,14 +655,16 @@ pub const container_role_names = [_][]const u8{
 };
 
 /// Whether markup can put element children inside this element: text
-/// leaves hold a single text run and the icon leaf holds nothing (both
-/// enforced by the validator), so a container role there is provably
-/// misuse. Other leaves (separator, value controls) structurally accept
-/// children, so the lint stays quiet about them.
+/// leaves hold a single text run, and the icon and terminal leaves hold
+/// nothing (all enforced by the validator), so a container role there is
+/// provably misuse. Other leaves (separator, value controls)
+/// structurally accept children, so the lint stays quiet about them.
 pub fn elementHoldsChildren(entry: *const ElementInfo) bool {
     if (entry.takes_children) return true;
     if (entry.takes_text) return false;
-    return !std.mem.eql(u8, entry.name, "icon");
+    if (std.mem.eql(u8, entry.name, "icon")) return false;
+    if (std.mem.eql(u8, entry.name, "terminal")) return false;
+    return true;
 }
 
 // ---------------------------------------------------------------- lookups

@@ -1978,7 +1978,12 @@ pub fn Ui(comptime Msg: type) type {
         /// source-wins rule) and `options.on_terminal` hears it change
         /// (`canvas.TerminalState`). Size it like a media surface:
         /// definite width/height or flex grow — the runtime derives the
-        /// pty's cols/rows FROM the frame the layout resolves.
+        /// pty's cols/rows FROM the frame the layout resolves. The text
+        /// channel is RUNTIME-OWNED (the live screen text rides it for
+        /// assistive tech and the session fingerprint): an authored
+        /// `text` would be overwritten every frame, so name the terminal
+        /// with `semantics.label` (markup `label=`, which its a11y lint
+        /// requires).
         pub fn terminal(self: *Self, options: ElementOptions) Node {
             return self.el(.terminal, options, .{});
         }

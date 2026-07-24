@@ -6,11 +6,12 @@
 //! every cell, so adjacent pieces join seamlessly at any size.
 //!
 //! Coverage: the full light/heavy line set (dashes render solid), the
-//! pure-double lines/corners/tees/crosses (mixed single-double variants
-//! fall back to their single shapes; a double tee's crossing bar rides
-//! through the joint rather than breaking — the one simplification),
-//! rounded corners as true quarter arcs, diagonals, half lines, block
-//! elements, shades, and quadrants.
+//! pure-double lines and corners (corners as two NESTED L joins, the
+//! double frame a terminal face draws), double tees/crosses with the
+//! crossing bar riding through the joint rather than breaking (the one
+//! simplification; mixed single-double variants fall back to their
+//! single shapes), rounded corners as true quarter arcs, diagonals,
+//! half lines, block elements, shades, and quadrants.
 
 const std = @import("std");
 const canvas = @import("root.zig");
@@ -165,6 +166,65 @@ fn lineSides(cp: u21) ?Sides {
 }
 
 /// Paint one box-drawing cell (or a merged horizontal run of the same
+/// A pure-double corner's turn: which vertical and horizontal side the
+/// two nested L joins open toward.
+const DoubleCorner = struct { down: bool, right: bool };
+
+fn doubleCorner(cp: u21) ?DoubleCorner {
+    return switch (cp) {
+        0x2554 => .{ .down = true, .right = true }, // ╔
+        0x2557 => .{ .down = true, .right = false }, // ╗
+        0x255A => .{ .down = false, .right = true }, // ╚
+        0x255D => .{ .down = false, .right = false }, // ╝
+        else => null,
+    };
+}
+
+/// Two nested L joins: the OUTER horizontal bar (the one on the closed
+/// side of the turn) meets the OUTER vertical bar at the outer
+/// intersection and the inner pair meets at the inner one, so `╔═╗`
+/// renders the double frame a terminal face draws — no bar rides
+/// through the joint, no inward stubs. Four bars, four commands.
+fn paintDoubleCorner(builder: *canvas.Builder, id_base: u64, keyed: bool, rect: geometry.RectF, corner: DoubleCorner, t: f32, color: canvas.Color) !void {
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    // Bar centerlines: vertical bars at cx +- t, horizontal at cy +- t.
+    // The OUTER pair sits opposite the openings (a down+right corner's
+    // outer bars are the top horizontal and the left vertical).
+    const outer_x = if (corner.right) cx - t else cx + t;
+    const inner_x = if (corner.right) cx + t else cx - t;
+    const outer_y = if (corner.down) cy - t else cy + t;
+    const inner_y = if (corner.down) cy + t else cy - t;
+    var id = id_base;
+    // Horizontal bars run toward the horizontal opening, starting at
+    // their matching vertical bar's far edge so each joint is solid.
+    for ([2][2]f32{ .{ outer_y, outer_x }, .{ inner_y, inner_x } }) |pair| {
+        const bar_y = pair[0];
+        const from_x = pair[1];
+        const x0 = if (corner.right) from_x - t / 2 else rect.x;
+        const x1 = if (corner.right) rect.x + rect.width else from_x + t / 2;
+        try builder.fillRect(.{
+            .id = if (keyed) id else 0,
+            .rect = geometry.RectF.init(x0, bar_y - t / 2, x1 - x0, t),
+            .fill = .{ .color = color },
+        });
+        id +%= 1;
+    }
+    // Vertical bars run toward the vertical opening the same way.
+    for ([2][2]f32{ .{ outer_x, outer_y }, .{ inner_x, inner_y } }) |pair| {
+        const bar_x = pair[0];
+        const from_y = pair[1];
+        const y0 = if (corner.down) from_y - t / 2 else rect.y;
+        const y1 = if (corner.down) rect.y + rect.height else from_y + t / 2;
+        try builder.fillRect(.{
+            .id = if (keyed) id else 0,
+            .rect = geometry.RectF.init(bar_x - t / 2, y0, t, y1 - y0),
+            .fill = .{ .color = color },
+        });
+        id +%= 1;
+    }
+}
+
 /// seamless code point) as geometry filling `rect` edge-to-edge. Emits
 /// at most four commands with ids `id_base..id_base+3`; `thickness` is
 /// the light-line weight in canvas points.
@@ -179,6 +239,20 @@ pub fn paint(
     const t = @max(1, thickness);
     const cx = rect.x + rect.width / 2;
     const cy = rect.y + rect.height / 2;
+    // The anonymous-id convention (`widgetPartId` returns 0 for id 0):
+    // a zero base emits EVERY command with id 0 — no derived 1..3 ids
+    // that would collide across an identity-less grid's cells.
+    const keyed = id_base != 0;
+
+    // Pure-double corners draw as two NESTED L joins — the outer pair of
+    // bars turning at the outer intersection, the inner pair at the
+    // inner one — the shape a real terminal face draws, instead of both
+    // bars riding through the joint (which reads as a hash crossing with
+    // inward stubs).
+    if (doubleCorner(cp)) |corner| {
+        try paintDoubleCorner(builder, id_base, keyed, rect, corner, t, color);
+        return;
+    }
 
     if (lineSides(cp)) |sides| {
         var id = id_base;
@@ -186,21 +260,21 @@ pub fn paint(
         // for a double): the common border pieces cost a single command
         // and are seamless by construction.
         if (sides.up == .none and sides.down == .none and sides.left == sides.right and sides.left != .none) {
-            _ = try paintSegment(builder, id, sides.left, t, .{ .x = rect.x, .y = cy, .len = rect.width, .horizontal = true }, color);
+            _ = try paintSegment(builder, id, keyed, sides.left, t, .{ .x = rect.x, .y = cy, .len = rect.width, .horizontal = true }, color);
             return;
         }
         if (sides.left == .none and sides.right == .none and sides.up == sides.down and sides.up != .none) {
-            _ = try paintSegment(builder, id, sides.up, t, .{ .x = cx, .y = rect.y, .len = rect.height, .horizontal = false }, color);
+            _ = try paintSegment(builder, id, keyed, sides.up, t, .{ .x = cx, .y = rect.y, .len = rect.height, .horizontal = false }, color);
             return;
         }
         // Doubles draw as two parallel light lines at center +/- t; the
         // single weights draw one centered bar (heavy at double width).
         // Every segment overlaps the cell center so joints are solid,
         // and runs to the cell edge so neighbors abut exactly.
-        if (sides.left != .none) id = try paintSegment(builder, id, sides.left, t, .{ .x = rect.x, .y = cy, .len = cx - rect.x + barHalf(sides.left, t), .horizontal = true }, color);
-        if (sides.right != .none) id = try paintSegment(builder, id, sides.right, t, .{ .x = cx - barHalf(sides.right, t), .y = cy, .len = rect.x + rect.width - cx + barHalf(sides.right, t), .horizontal = true }, color);
-        if (sides.up != .none) id = try paintSegment(builder, id, sides.up, t, .{ .x = cx, .y = rect.y, .len = cy - rect.y + barHalf(sides.up, t), .horizontal = false }, color);
-        if (sides.down != .none) id = try paintSegment(builder, id, sides.down, t, .{ .x = cx, .y = cy - barHalf(sides.down, t), .len = rect.y + rect.height - cy + barHalf(sides.down, t), .horizontal = false }, color);
+        if (sides.left != .none) id = try paintSegment(builder, id, keyed, sides.left, t, .{ .x = rect.x, .y = cy, .len = cx - rect.x + barHalf(sides.left, t), .horizontal = true }, color);
+        if (sides.right != .none) id = try paintSegment(builder, id, keyed, sides.right, t, .{ .x = cx - barHalf(sides.right, t), .y = cy, .len = rect.x + rect.width - cx + barHalf(sides.right, t), .horizontal = true }, color);
+        if (sides.up != .none) id = try paintSegment(builder, id, keyed, sides.up, t, .{ .x = cx, .y = rect.y, .len = cy - rect.y + barHalf(sides.up, t), .horizontal = false }, color);
+        if (sides.down != .none) id = try paintSegment(builder, id, keyed, sides.down, t, .{ .x = cx, .y = cy - barHalf(sides.down, t), .len = rect.y + rect.height - cy + barHalf(sides.down, t), .horizontal = false }, color);
         return;
     }
 
@@ -241,7 +315,7 @@ pub fn paint(
                     elements[2] = .{ .verb = .quad_to, .points = .{ .{ .x = cx, .y = cy }, .{ .x = cx + r / 2, .y = cy }, geometry.PointF.zero() } };
                 },
             }
-            try builder.strokePath(.{ .id = id_base, .elements = elements, .stroke = .{ .fill = .{ .color = color }, .width = t }, .cap = .butt });
+            try builder.strokePath(.{ .id = if (keyed) id_base else 0, .elements = elements, .stroke = .{ .fill = .{ .color = color }, .width = t }, .cap = .butt });
             // The straight remainder to the horizontal edge.
             const run: geometry.RectF = switch (cp) {
                 0x256D => geometry.RectF.init(cx + r / 2, cy - t / 2, rect.x + rect.width - (cx + r / 2), t),
@@ -249,14 +323,14 @@ pub fn paint(
                 0x256F => geometry.RectF.init(rect.x, cy - t / 2, cx - r / 2 - rect.x, t),
                 else => geometry.RectF.init(cx + r / 2, cy - t / 2, rect.x + rect.width - (cx + r / 2), t),
             };
-            try builder.fillRect(.{ .id = id_base +% 1, .rect = run, .fill = .{ .color = color } });
+            try builder.fillRect(.{ .id = if (keyed) id_base +% 1 else 0, .rect = run, .fill = .{ .color = color } });
         },
         // Diagonals.
-        0x2571 => try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
-        0x2572 => try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
+        0x2571 => try builder.drawLine(.{ .id = if (keyed) id_base else 0, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
+        0x2572 => try builder.drawLine(.{ .id = if (keyed) id_base else 0, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
         0x2573 => {
-            try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
-            try builder.drawLine(.{ .id = id_base +% 1, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
+            try builder.drawLine(.{ .id = if (keyed) id_base else 0, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
+            try builder.drawLine(.{ .id = if (keyed) id_base +% 1 else 0, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
         },
         // Block elements: fractional rects, edge-to-edge.
         0x2580 => try fillFraction(builder, id_base, rect, color, 1, .top, 0.5),
@@ -286,19 +360,19 @@ pub fn paint(
             const hh = rect.height / 2;
             var id = id_base;
             if (quads & 0b0001 != 0) {
-                try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x, rect.y, hw, hh), .fill = .{ .color = color } });
+                try builder.fillRect(.{ .id = if (keyed) id else 0, .rect = geometry.RectF.init(rect.x, rect.y, hw, hh), .fill = .{ .color = color } });
                 id +%= 1;
             }
             if (quads & 0b0010 != 0) {
-                try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x + hw, rect.y, hw, hh), .fill = .{ .color = color } });
+                try builder.fillRect(.{ .id = if (keyed) id else 0, .rect = geometry.RectF.init(rect.x + hw, rect.y, hw, hh), .fill = .{ .color = color } });
                 id +%= 1;
             }
             if (quads & 0b0100 != 0) {
-                try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x, rect.y + hh, hw, hh), .fill = .{ .color = color } });
+                try builder.fillRect(.{ .id = if (keyed) id else 0, .rect = geometry.RectF.init(rect.x, rect.y + hh, hw, hh), .fill = .{ .color = color } });
                 id +%= 1;
             }
             if (quads & 0b1000 != 0) {
-                try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x + hw, rect.y + hh, hw, hh), .fill = .{ .color = color } });
+                try builder.fillRect(.{ .id = if (keyed) id else 0, .rect = geometry.RectF.init(rect.x + hw, rect.y + hh, hw, hh), .fill = .{ .color = color } });
             }
         },
         else => {},
@@ -331,7 +405,7 @@ fn barHalf(weight: Weight, t: f32) f32 {
     };
 }
 
-fn paintSegment(builder: *canvas.Builder, id: u64, weight: Weight, t: f32, seg: Segment, color: canvas.Color) !u64 {
+fn paintSegment(builder: *canvas.Builder, id: u64, keyed: bool, weight: Weight, t: f32, seg: Segment, color: canvas.Color) !u64 {
     switch (weight) {
         .none => return id,
         .light, .heavy => {
@@ -340,7 +414,7 @@ fn paintSegment(builder: *canvas.Builder, id: u64, weight: Weight, t: f32, seg: 
                 geometry.RectF.init(seg.x, seg.y - w / 2, seg.len, w)
             else
                 geometry.RectF.init(seg.x - w / 2, seg.y, w, seg.len);
-            try builder.fillRect(.{ .id = id, .rect = rect, .fill = .{ .color = color } });
+            try builder.fillRect(.{ .id = if (keyed) id else 0, .rect = rect, .fill = .{ .color = color } });
             return id +% 1;
         },
         .double => {
@@ -353,7 +427,7 @@ fn paintSegment(builder: *canvas.Builder, id: u64, weight: Weight, t: f32, seg: 
                     geometry.RectF.init(seg.x, seg.y + offset - t / 2, seg.len, t)
                 else
                     geometry.RectF.init(seg.x + offset - t / 2, seg.y, t, seg.len);
-                try builder.fillRect(.{ .id = next, .rect = rect, .fill = .{ .color = color } });
+                try builder.fillRect(.{ .id = if (keyed) next else 0, .rect = rect, .fill = .{ .color = color } });
                 next +%= 1;
             }
             return next;

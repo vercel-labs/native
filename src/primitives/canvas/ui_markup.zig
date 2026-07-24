@@ -1276,6 +1276,7 @@ pub const terminal_pty_message = "pty on terminal takes the model-owned pty effe
 pub const terminal_pty_element_message = "pty is only supported on terminal - it binds the pty effect key whose session the terminal renders; anywhere else it would be silently inert";
 pub const terminal_missing_pty_message = "terminal requires pty={binding} naming the model-owned u64 pty effect key its session rides - without one the terminal can never attach a session (dead markup, same policy as media-surface without surface)";
 pub const terminal_children_message = "terminal is a leaf - it takes no children";
+pub const terminal_text_attr_message = "terminal's text channel is runtime-owned (the live screen rides it for assistive tech), so a text attribute would be overwritten every frame - name the terminal with label instead";
 pub const scrollback_element_message = "scrollback is only supported on terminal - it is the scrollback offset in rows above the live screen (echo on-terminal's scrollback back here, the scroll value reconcile shape); anywhere else it would be silently inert";
 pub const on_terminal_element_message = "on-terminal is only supported on terminal - the runtime emits terminal view state for terminal elements, so the handler belongs on the terminal element itself";
 pub const on_terminal_payload_message = "on-terminal takes a bare Msg tag whose payload is the post-change terminal view state (a canvas.TerminalState variant, like term_state: canvas.TerminalState, or a declared record of its scrollback/history/cols/rows fields for transpiled cores)";
@@ -3031,6 +3032,14 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 // terminal no child slots, so nested content would
                 // silently vanish - rejected instead.
                 if (node.children.len > 0) return errorAt(node.children[0], terminal_children_message);
+                // The text channel is runtime-owned (the live screen
+                // text rides it), so an authored text attribute would be
+                // overwritten every frame — and worse, it would satisfy
+                // the accessible-name lint with a name the runtime then
+                // replaces. The name comes from label.
+                if (node.attrEntry("text")) |attribute| {
+                    return attrError(node, attribute, terminal_text_attr_message);
+                }
             }
             if (std.mem.eql(u8, node.name, "image")) {
                 // An image leaf without its id binding can never draw:

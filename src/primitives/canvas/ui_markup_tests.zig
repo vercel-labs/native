@@ -812,6 +812,12 @@ test "the terminal element requires its pty binding and scopes its vocabulary" {
         .{ .source = "<column>\n  <panel pty=\"{shell}\"/>\n</column>", .message = markup.terminal_pty_element_message },
         .{ .source = "<column>\n  <panel scrollback=\"3\"/>\n</column>", .message = markup.scrollback_element_message },
         .{ .source = "<column>\n  <panel on-terminal=\"term_state\"/>\n</column>", .message = markup.on_terminal_element_message },
+        // The text channel is runtime-owned (the live screen rides it),
+        // so an authored text would be clobbered every frame.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" text=\"Build shell\"/>\n</column>", .message = markup.terminal_text_attr_message },
+        // A container role promises child structure a terminal leaf can
+        // never hold.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\" role=\"list\"/>\n</column>", .message = markup.a11y_container_role_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena, case.source);

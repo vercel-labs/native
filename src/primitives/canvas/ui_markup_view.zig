@@ -1595,6 +1595,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyPtyAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal")) {
+                    // The terminal's text channel is runtime-owned (the
+                    // live screen); an authored value would clobber it
+                    // and rename the control every frame.
+                    return self.failVoid(node, markup.terminal_text_attr_message);
+                }
                 if (markup.videoFlagAttrName(attribute.name)) {
                     // The video element's flags, video-scoped (its own
                     // build consumed them): anywhere else they would be

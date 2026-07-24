@@ -238,20 +238,42 @@ pub const TerminalPaintOptions = struct {
 };
 
 /// The painter's command-id base for a caller's `id_base` (typically a
-/// widget id): a multiplicative spread across the u64 space giving each
-/// grid a stable, high-entropy namespace for its rows/runs/decorations.
+/// widget id): the widget part-id convention scaled up. `widgetPartId`
+/// reserves the low 4 bits for a widget's part slots (`id *% 16 + slot`,
+/// slots < 16), making distinct widgets' parts DISJOINT BY CONSTRUCTION;
+/// the grid needs a larger slot space (rows x runs x decorations), so it
+/// reserves the low 24 bits (`id *% 2^24 + offset`, every painter offset
+/// < 2^24) — the same shape, the same disjointness guarantee between two
+/// terminals, and the same accepted residual (ids agreeing modulo the
+/// shifted range, astronomically unlikely for hash-derived widget ids).
+/// An id of 0 is the framework's ANONYMOUS convention (`widgetPartId`
+/// returns 0 for it): the painter then emits EVERY command with id 0 —
+/// no retained identity, no cross-widget collisions.
 /// A caller that emits its OWN commands around the grid (a widget's
 /// focus ring) must derive its ids from THIS base at an offset the
-/// painter leaves free (see `reserved_id_offset`), so the two id schemes
-/// never collide on the same object.
+/// painter leaves free (see `reserved_id_offset`).
 pub fn paintIdBase(id: u64) u64 {
-    return id *% 0x9E37_79B9_7F4A_7C15;
+    return id *% (1 << 24);
 }
 
 /// An id offset the painter never emits (its own commands stay within
-/// `id_base +% [0, 0x4_0000_00ff]`): callers layering commands over the
-/// grid claim ids at `paintIdBase(id) +% reserved_id_offset + n`.
-pub const reserved_id_offset: u64 = 0x5_0000_0000;
+/// `id_base + [0, 0x61_ffff]`): callers layering commands over the grid
+/// claim ids at `paintIdBase(id) + reserved_id_offset + n` (n < 2^16,
+/// keeping the whole namespace under the 2^24 stride).
+pub const reserved_id_offset: u64 = 0x62_0000;
+
+/// The paint's command-id derivation: keyed grids take `base + offset`
+/// (offsets < 2^24, disjoint per widget by the `paintIdBase` stride);
+/// an anonymous grid (caller id 0) emits every command with id 0, the
+/// `widgetPartId` convention for identity-less widgets.
+const CommandIds = struct {
+    base: u64,
+    keyed: bool,
+
+    fn at(self: CommandIds, offset: u64) u64 {
+        return if (self.keyed) self.base +% offset else 0;
+    }
+};
 
 /// Distinct-code-point probe set backing `glyph_budget`: open-addressed,
 /// power-of-two slots, zero meaning empty (a stored value is `cp + 1` so
@@ -389,7 +411,9 @@ fn rowCommandCost(row: TerminalRow) usize {
                     if (next.cp != cell.cp or !colorEql(next.fg, cell.fg) or next.underline != cell.underline) break;
                     if (next.bg != null) total += 1;
                 }
-                total += 2; // the merged geometry plus a possible underline
+                // A merged run's worst-case ink: a double piece (═)
+                // paints TWO parallel bars, plus a possible underline.
+                total += 3;
                 i += span - 1;
             } else {
                 total += 9; // a joint: up to eight geometry commands plus an underline
@@ -413,10 +437,10 @@ fn colorEql(a: canvas.Color, b: canvas.Color) bool {
 pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPaintOptions) !void {
     const tokens = options.tokens;
     const metrics = cellMetrics(tokens);
-    // The command-id namespace: a per-grid-stable spread of the caller's
-    // base across the u64 space, leaving the low 48 bits for row/run
-    // slots exactly like the widget part-id convention leaves slots.
-    const id_base = paintIdBase(options.id_base);
+    // The command-id namespace (see `paintIdBase`): the widget part-id
+    // convention with a 24-bit slot space. An anonymous caller (id 0)
+    // keeps the framework's unkeyed convention — every command id 0.
+    const ids = CommandIds{ .base = paintIdBase(options.id_base), .keyed = options.id_base != 0 };
 
     // Fixed prologue/epilogue overhead (background fill, clip push,
     // scrollbar thumb, clip pop): if the builder — with whatever earlier
@@ -431,7 +455,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
 
     // The terminal surface: full-bleed background under the grid.
     try builder.fillRect(.{
-        .id = id_base,
+        .id = ids.at(0x61_0000),
         .rect = options.background_frame orelse options.frame,
         .fill = .{ .color = grid.background },
     });
@@ -440,7 +464,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // after a shrink the producer may still hold the pre-resize grid,
     // and unclipped rows or wide cells would paint past the region. The
     // clip makes the stale frame degrade to a cropped grid.
-    try builder.pushClip(.{ .id = id_base +% 0x4_0000_0000, .rect = options.frame });
+    try builder.pushClip(.{ .id = ids.at(0x61_0001), .rect = options.frame });
 
     const origin_x = options.frame.x;
     const origin_y = options.frame.y;
@@ -539,7 +563,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // visible; a row straddling the edge still paints and the clip
         // crops it, so content reaches the very edge without spilling.
         if (row_y >= options.frame.y + options.frame.height) break;
-        const row_id = id_base +% (@as(u64, @intCast(row_index)) << 16);
+        const row_id = @as(u64, @intCast(row_index)) << 16;
 
         // Background runs: contiguous cells sharing a non-default bg
         // (the producer already extended a wide primary's background
@@ -553,7 +577,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 const same = if (bg) |next| colorEql(color, next) else false;
                 if (!same) {
                     try builder.fillRect(.{
-                        .id = row_id +% 1 +% run_start,
+                        .id = ids.at(row_id + 1 + run_start),
                         .rect = geometry.RectF.init(
                             origin_x + @as(f32, @floatFromInt(run_start)) * cell_w,
                             row_y,
@@ -580,7 +604,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 0.30,
             );
             try builder.fillRect(.{
-                .id = row_id +% 0x4000,
+                .id = ids.at(row_id + 0x4000),
                 .rect = geometry.RectF.init(
                     origin_x + @as(f32, @floatFromInt(range[0])) * cell_w,
                     row_y,
@@ -648,7 +672,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                     break;
                 };
                 try builder.drawText(.{
-                    .id = row_id +% 0x8000 +% run_x,
+                    .id = ids.at(row_id + 0x8000 + run_x),
                     .font_id = tokens.typography.mono_font_id,
                     .size = metrics.font_size,
                     // `origin` is the BASELINE, not the glyph top: the
@@ -667,7 +691,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 });
                 if (run_underline) {
                     try builder.fillRect(.{
-                        .id = row_id +% 0xc000 +% run_x,
+                        .id = ids.at(row_id + 0xc000 + run_x),
                         .rect = geometry.RectF.init(
                             origin_x + @as(f32, @floatFromInt(run_x)) * cell_w,
                             row_y + cell_h - 2,
@@ -707,7 +731,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // four-wide stride would collide the ids of adjacent
                 // double cells and fail the retained diff with
                 // DuplicateObjectId.
-                box.paint(builder, row_id +% 0x6000 +% @as(u64, @intCast(x)) *% commands_per_cell, rect, box_cp, fg, box_thickness) catch {
+                box.paint(builder, ids.at(row_id + 0x6000 + @as(u64, @intCast(x)) * commands_per_cell), rect, box_cp, fg, box_thickness) catch {
                     row_torn = true;
                     break;
                 };
@@ -718,7 +742,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // and text ranges).
                 if (underline) {
                     builder.fillRect(.{
-                        .id = row_id +% 0xd000 +% @as(u64, @intCast(x)),
+                        .id = ids.at(row_id + 0xd000 + @as(u64, @intCast(x))),
                         .rect = geometry.RectF.init(rect.x, row_y + cell_h - 2, rect.width, 1),
                         .fill = .{ .color = fg },
                     }) catch {
@@ -780,7 +804,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             .block => geometry.RectF.init(cursor_x, cursor_y, cell_w, cell_h),
         };
         try builder.fillRect(.{
-            .id = id_base +% 0x1_0000_0000,
+            .id = ids.at(0x61_0002),
             .rect = rect,
             .fill = .{ .color = cursor_color },
         });
@@ -792,7 +816,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         const head_x = origin_x + @as(f32, @floatFromInt(head.x)) * cell_w;
         const head_y = origin_y + @as(f32, @floatFromInt(head.y)) * cell_h;
         try builder.strokeRect(.{
-            .id = id_base +% 0x2_0000_0000,
+            .id = ids.at(0x61_0003),
             .rect = geometry.RectF.init(head_x, head_y, cell_w, cell_h),
             .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
         });
@@ -811,7 +835,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             const thumb_h = @max(24, track_h * (visible / total));
             const thumb_y = options.frame.y + (track_h - thumb_h) * (offset / @max(1, total - visible));
             try builder.fillRect(.{
-                .id = id_base +% 0x3_0000_0000,
+                .id = ids.at(0x61_0004),
                 .rect = geometry.RectF.init(
                     options.frame.x + options.frame.width - 5,
                     thumb_y,

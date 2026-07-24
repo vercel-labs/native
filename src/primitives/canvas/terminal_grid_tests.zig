@@ -423,6 +423,121 @@ test "id_base near the u64 ceiling wraps instead of trapping" {
     try testing.expect(builder.displayList().commands.len > 0);
 }
 
+test "an underlined merged double run stays within the command budget" {
+    // A merged ═ paints TWO bars plus its underline; the cost estimate
+    // must charge all three or a row of unmergeable underlined doubles
+    // (alternating colors break every merge) overruns the ceiling.
+    var cells: [320]grid_model.TerminalCell = undefined;
+    for (&cells, 0..) |*c, i| {
+        c.* = .{ .cp = 0x2550, .fg = if (i % 2 == 0) white else red, .underline = true };
+    }
+    const rows = [_]grid_model.TerminalRow{
+        .{ .cells = &cells },
+        .{ .cells = &cells },
+    };
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 2600, 80),
+        .tokens = .{},
+        .command_budget = 1000,
+    });
+    // Whatever painted, the ceiling held.
+    try testing.expect(builder.displayList().commands.len <= 1000);
+}
+
+test "an anonymous grid keeps the unkeyed convention: every command id 0" {
+    const cells = [_]grid_model.TerminalCell{
+        cell('x', "x", white),
+        .{ .cp = 0x256C, .fg = white }, // ╬
+        .{ .cp = 0x2596, .fg = white }, // quadrant
+        .{ .cp = 0x256D, .fg = white }, // rounded corner
+    };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells, .selection = .{ 0, 1 } }};
+    var grid = baseGrid(&rows);
+    grid.cursor = .{ .x = 0, .y = 0 };
+
+    var commands: [128]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(grid, &commands, .{
+        .frame = geometry.RectF.init(0, 0, 200, 40),
+        .tokens = .{},
+        .id_base = 0,
+    });
+    for (builder.displayList().commands) |command| {
+        const id = switch (command) {
+            .fill_rect => |c| c.id,
+            .stroke_rect => |c| c.id,
+            .draw_text => |c| c.id,
+            .push_clip => |c| c.id,
+            .stroke_path => |c| c.id,
+            .draw_line => |c| c.id,
+            else => continue,
+        };
+        try testing.expectEqual(@as(canvas.ObjectId, 0), id);
+    }
+}
+
+test "two keyed grids in one builder never share a nonzero command id" {
+    const row_cells = comptime asciiRow("ab", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
+    var grid = baseGrid(&rows);
+    grid.cursor = .{ .x = 0, .y = 0 };
+
+    var commands: [128]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // The adversarial pair: id B chosen so B's base lands inside A's
+    // old wide-offset namespace. Under the strided scheme both stay
+    // disjoint by construction.
+    try grid_model.paint(grid, &builder, .{ .frame = geometry.RectF.init(0, 0, 100, 40), .tokens = .{}, .id_base = 1 });
+    try grid_model.paint(grid, &builder, .{ .frame = geometry.RectF.init(0, 60, 100, 40), .tokens = .{}, .id_base = 0x64dd_ccf4_0000_0001 });
+    var seen: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer seen.deinit(testing.allocator);
+    for (builder.displayList().commands) |command| {
+        const id = switch (command) {
+            .fill_rect => |c| c.id,
+            .stroke_rect => |c| c.id,
+            .draw_text => |c| c.id,
+            .push_clip => |c| c.id,
+            else => continue,
+        };
+        if (id == 0) continue;
+        for (seen.items) |prior| try testing.expect(prior != id);
+        try seen.append(testing.allocator, id);
+    }
+}
+
+test "pure-double corners draw nested L joins, never through-bars" {
+    const cells = [_]grid_model.TerminalCell{.{ .cp = 0x2554, .fg = white }}; // ╔
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 40, 40),
+        .tokens = .{},
+    });
+    // Background + exactly four bars (two nested Ls).
+    var bar_fills: usize = 0;
+    var min_x: f32 = 1000;
+    var min_y: f32 = 1000;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rect => |fill| {
+                // Skip the full-bleed background.
+                if (fill.rect.width >= 40) continue;
+                bar_fills += 1;
+                min_x = @min(min_x, fill.rect.x);
+                min_y = @min(min_y, fill.rect.y);
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 4), bar_fills);
+    // ╔ opens down+right: no bar reaches the cell's left or top edge —
+    // the old through-bars did (their stubs crossed the joint).
+    try testing.expect(min_x > 0);
+    try testing.expect(min_y > 0);
+}
+
 test "clampGrid trades rows for columns under the cell ceiling" {
     const clamped = grid_model.clampGrid(400, 100);
     try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);

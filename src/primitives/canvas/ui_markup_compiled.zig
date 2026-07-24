@@ -1677,6 +1677,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime std.mem.eql(u8, attribute.name, "pty")) {
                     applyPtyAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal"))) {
+                    // Runtime-owned text channel (interpreter and
+                    // validator parity).
+                    comptime fail(node, markup.terminal_text_attr_message);
                 } else if (comptime markup.videoFlagAttrName(attribute.name)) {
                     // The video element's flags, video-scoped (its own
                     // build consumed them): anywhere else they would be
