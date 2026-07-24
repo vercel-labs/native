@@ -13,6 +13,7 @@ test {
     _ = @import("ui_markup_huge_model_tests.zig");
     _ = @import("ui_markup_huge_document_tests.zig");
     _ = @import("chart_tests.zig");
+    _ = @import("terminal_grid_tests.zig");
     _ = @import("render_tests.zig");
     _ = @import("reference_tests.zig");
     _ = @import("vector_tests.zig");

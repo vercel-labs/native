@@ -482,6 +482,28 @@ pub const max_text_spans_per_paragraph = text_spans.max_text_spans_per_paragraph
 pub const max_text_span_runs_per_paragraph = text_spans.max_text_span_runs_per_paragraph;
 pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per_paragraph;
 
+// The terminal grid — the `.terminal` widget's resolved cell model and
+// painter (real text runs, geometric box drawing, selection, cursor,
+// scrollback indicator) — lives in `terminal_grid.zig`; the box-drawing
+// geometry in `terminal_box.zig`.
+pub const terminal_grid = @import("terminal_grid.zig");
+pub const terminal_box = @import("terminal_box.zig");
+pub const TerminalGrid = terminal_grid.TerminalGrid;
+pub const TerminalRow = terminal_grid.TerminalRow;
+pub const TerminalCell = terminal_grid.TerminalCell;
+pub const TerminalWide = terminal_grid.TerminalWide;
+pub const TerminalCursor = terminal_grid.TerminalCursor;
+pub const TerminalCursorShape = terminal_grid.TerminalCursorShape;
+pub const TerminalCellPos = terminal_grid.TerminalCellPos;
+pub const TerminalScrollbar = terminal_grid.TerminalScrollbar;
+pub const TerminalState = terminal_grid.TerminalState;
+pub const TerminalCellMetrics = terminal_grid.TerminalCellMetrics;
+pub const terminalCellMetrics = terminal_grid.cellMetrics;
+pub const clampTerminalGrid = terminal_grid.clampGrid;
+pub const max_terminal_cols = terminal_grid.max_cols;
+pub const max_terminal_rows = terminal_grid.max_rows;
+pub const max_terminal_cells = terminal_grid.max_cells;
+
 // Chart plot data for the `.chart` widget kind (series, downsampling,
 // domain) lives in `chart.zig`.
 pub const chart = @import("chart.zig");
