@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
 
     const desktop_mod = module(b, target, optimize, "src/root.zig");
     desktop_mod.addImport("geometry", geometry_mod);
+    desktop_mod.addImport("ghostty-vt", ghosttyVtModule(b, target, optimize));
     desktop_mod.addImport("app_dirs", app_dirs_mod);
     desktop_mod.addImport("assets", assets_mod);
     desktop_mod.addImport("trace", trace_mod);
@@ -421,6 +422,7 @@ pub fn build(b: *std.Build) void {
     }
     const pins_native_mod = module(b, host_target, optimize, "src/root.zig");
     pins_native_mod.addImport("geometry", host_geometry_mod);
+    pins_native_mod.addImport("ghostty-vt", ghosttyVtModule(b, host_target, optimize));
     pins_native_mod.addImport("app_dirs", host_app_dirs_mod);
     pins_native_mod.addImport("assets", host_assets_mod);
     pins_native_mod.addImport("trace", host_trace_mod);
@@ -2821,6 +2823,23 @@ pub fn build(b: *std.Build) void {
         cef_bundle_script.step.dependOn(&cef_bundle_auto.step);
     }
     cef_bundle_step.dependOn(&cef_bundle_script.step);
+}
+
+/// libghostty-vt (Ghostty's extracted VT core) as a module: the
+/// emulator behind the runtime's framework-owned terminal sessions.
+/// Pure Zig (simd off, no emitted artifacts); wired into every NATIVE
+/// instantiation of the framework module — the wasm docs preview skips
+/// it, and the pty-supported comptime gate keeps the import unresolved
+/// there.
+fn ghosttyVtModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const ghostty = b.dependency("ghostty", .{
+        .target = target,
+        .optimize = optimize,
+        .simd = false,
+        .@"emit-xcframework" = false,
+        .@"emit-macos-app" = false,
+    });
+    return ghostty.module("ghostty-vt");
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {

@@ -183,8 +183,8 @@ pub fn cellMetrics(tokens: canvas.DesignTokens) TerminalCellMetrics {
 }
 
 /// Clamp a proposed grid to the canvas budgets: the glyph budget bounds
-/// total cells, so very wide viewports trade rows for columns honestly
-/// instead of overflowing the frame.
+/// total cells, so a very wide viewport trades rows for columns to stay
+/// under the cell ceiling instead of overflowing the frame.
 pub fn clampGrid(proposed_cols: usize, proposed_rows: usize) TerminalCellPos {
     var c = std.math.clamp(proposed_cols, 2, max_cols);
     var r = std.math.clamp(proposed_rows, 2, max_rows);
@@ -440,8 +440,8 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
 
         // Text runs: contiguous cells sharing a foreground, flushed on
         // color or decoration change (bold/italic render with the one
-        // mono face — weight axes come with registered companions,
-        // stated honestly in the docs).
+        // mono face — weight axes require registered companion faces,
+        // a limitation the docs state outright).
         var run_len: usize = 0;
         var run_x: usize = 0;
         var run_fg: canvas.Color = grid.foreground;
