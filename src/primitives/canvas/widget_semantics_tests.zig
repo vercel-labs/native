@@ -1111,30 +1111,24 @@ test "a contain video surface pillarboxes a narrow stream on black" {
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
 
-    // The placeholder stays the deterministic base fill (goldens and
-    // replay screenshots skip the texture and show it inside the quad).
+    // The letterbox field: black across the WHOLE frame at the frame's
+    // radius — the silhouette is exact by construction.
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| {
             try expectRect(frame, fill.rect);
-            try std.testing.expectEqual(Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) }, fill.fill);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
         },
         else => return error.TestUnexpectedResult,
     }
-    // The remainder bars: opaque black over exactly the frame minus the
-    // fitted quad — left and right for a pillarbox.
+    // The deterministic placeholder, confined to the quad: goldens and
+    // replay screenshots (which skip the texture) show it exactly where
+    // the picture goes, inside the black field.
     switch (display_list.commands[1]) {
         .fill_rounded_rect => |fill| {
-            try expectRect(geometry.RectF.init(0, 4, 8, 16), fill.rect);
-            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[2]) {
-        .fill_rounded_rect => |fill| {
-            try expectRect(geometry.RectF.init(24, 4, 8, 16), fill.rect);
-            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), fill.rect);
+            try std.testing.expectEqual(Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) }, fill.fill);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -1142,7 +1136,7 @@ test "a contain video surface pillarboxes a narrow stream on black" {
     // centered — the engine computed it, no host fit math required.
     // `image_src` keeps its ordinary source-crop meaning (untouched
     // here, so null).
-    switch (display_list.commands[3]) {
+    switch (display_list.commands[2]) {
         .draw_image => |draw| {
             try std.testing.expectEqual(canvas.mediaSurfaceTextureImageId(5), draw.image_id);
             try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
@@ -1183,16 +1177,23 @@ test "a contain video surface letterboxes a wide stream on black" {
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    // Black field over the frame, placeholder confined to the quad.
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
     switch (display_list.commands[1]) {
-        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(8, 0, 16, 8), fill.rect),
+        .fill_rounded_rect => |fill| {
+            try expectRect(geometry.RectF.init(8, 8, 16, 8), fill.rect);
+            try std.testing.expectEqual(Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) }, fill.fill);
+        },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[2]) {
-        .fill_rounded_rect => |fill| try expectRect(geometry.RectF.init(8, 16, 16, 8), fill.rect),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[3]) {
         .draw_image => |draw| try expectRect(geometry.RectF.init(8, 8, 16, 8), draw.dst),
         else => return error.TestUnexpectedResult,
     }
@@ -1247,12 +1248,13 @@ test "a contain video surface with matching aspect fills the frame barless" {
     }
 }
 
-test "bars thinner than the corner radius keep the frame's mask on the quad" {
-    // A 2.25:1 stream into a 2:1 box leaves ~0.9px letterbox bars —
-    // thinner than the 6px corner radius. Dropping the mask there would
-    // paint the picture's square corners OUTSIDE the surface's rounded
-    // silhouette (a hairline bar cannot cover a 6px corner), so the
-    // frame's radius stays on the draw.
+test "bars thinner than the corner radius shrink the quad's mask to the tangent radius" {
+    // A 2.25:1 stream into a 2:1 box leaves ~0.89px letterbox bars —
+    // thinner than the 6px corner radius. The quad's mask is the TIGHT
+    // inset radius, max(0, 6 - bar) ~ 5.11: internally tangent to the
+    // frame's corner circle, so the picture never paints outside the
+    // rounded silhouette (a hairline bar cannot cover a 6px corner)
+    // and never loses more corner than the silhouette demands.
     const frame = geometry.RectF.init(0, 0, 32, 16);
     const widget = Widget{
         .id = 9,
@@ -1269,23 +1271,63 @@ test "bars thinner than the corner radius keep the frame's mask on the quad" {
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    // Placeholder + two hairline bars + the quad.
-    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
-    switch (display_list.commands[3]) {
+    // Black field + placeholder quad + the picture quad.
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    const bar: f32 = (16.0 - 32.0 * 16.0 / 36.0) * 0.5;
+    switch (display_list.commands[2]) {
         .draw_image => |draw| {
             try std.testing.expect(draw.dst.height < frame.height);
-            try std.testing.expectEqual(@as(f32, 6), draw.radius.top_left);
-            try std.testing.expectEqual(@as(f32, 6), draw.radius.bottom_right);
+            try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, draw.radius.top_left, 0.0001);
+            try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, draw.radius.bottom_right, 0.0001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The placeholder stand-in carries the same tight mask.
+    switch (display_list.commands[1]) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(@as(f32, 6) - bar, fill.radius.top_left, 0.0001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a declared source crop drives the fitted quad's aspect, never the full stream" {
+    // A square crop out of a 16:9 stream into a 2:1 box: the CROP is
+    // what draws, so the quad is square (16x16 centered) and the crop
+    // stretches into it undistorted — fitting to the full stream's
+    // 16:9 and flattening the square crop into it would distort.
+    const frame = geometry.RectF.init(0, 0, 32, 16);
+    const crop = geometry.RectF.init(100, 40, 240, 240);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 1600, .height = 900 },
+        .image_src = crop,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try expectRect(geometry.RectF.init(8, 0, 16, 16), draw.dst);
+            try std.testing.expectEqual(@as(?geometry.RectF, crop), draw.src);
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
         },
         else => return error.TestUnexpectedResult,
     }
 }
 
-test "a rounded pillarboxed video quad drops the radius mask; its bars keep the silhouette" {
-    // A rounded surface with side bars: the picture quad sits between
-    // the bars, so masking it with the frame radius would notch the
-    // picture's own corners — the quad emits unmasked, and each bar
-    // rounds only its outer corners.
+test "a rounded pillarboxed surface keeps its silhouette on the black field and unmasks the deep-set quad" {
+    // Bars (8px) wider than the corner radius (6): the black field
+    // carries the frame's rounding — the silhouette lives there, never
+    // approximated per bar — and the quad's tight mask relaxes to
+    // square (max(0, 6 - 8) = 0): its corners sit fully inside the
+    // frame's straight edges, so no picture is notched.
     const frame = geometry.RectF.init(0, 4, 32, 16);
     const widget = Widget{
         .id = 9,
@@ -1302,27 +1344,23 @@ test "a rounded pillarboxed video quad drops the radius mask; its bars keep the 
     var builder = Builder.init(&commands);
     try layout.emitDisplayList(&builder, .{});
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+            try std.testing.expectEqual(@as(f32, 6), fill.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
     switch (display_list.commands[1]) {
         .fill_rounded_rect => |fill| {
-            // Left bar: rounded on the frame's left corners only.
-            try std.testing.expectEqual(@as(f32, 6), fill.radius.top_left);
-            try std.testing.expectEqual(@as(f32, 6), fill.radius.bottom_left);
-            try std.testing.expectEqual(@as(f32, 0), fill.radius.top_right);
-            try std.testing.expectEqual(@as(f32, 0), fill.radius.bottom_right);
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), fill.rect);
+            try std.testing.expectEqual(@as(f32, 0), fill.radius.top_left);
         },
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[2]) {
-        .fill_rounded_rect => |fill| {
-            // Right bar: the mirror.
-            try std.testing.expectEqual(@as(f32, 0), fill.radius.top_left);
-            try std.testing.expectEqual(@as(f32, 6), fill.radius.top_right);
-            try std.testing.expectEqual(@as(f32, 6), fill.radius.bottom_right);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[3]) {
         .draw_image => |draw| {
             try std.testing.expectEqual(@as(f32, 0), draw.radius.top_left);
             try std.testing.expectEqual(@as(f32, 0), draw.radius.bottom_right);
