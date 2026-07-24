@@ -13,6 +13,13 @@ pub fn build(b: *std.Build) void {
         // Keep the vt module pure Zig: the SIMD paths pull vendored C++
         // dependencies the terminal example does not need.
         .simd = false,
+        // Only the vt MODULE is consumed: ghostty's own macOS app and
+        // xcframework artifacts default ON for Darwin hosts and their
+        // CONFIGURE step resolves the iOS libc — which aborts on a
+        // machine with only the command-line tools. Neither artifact is
+        // wanted here on any host.
+        .@"emit-xcframework" = false,
+        .@"emit-macos-app" = false,
     });
     const vt = ghostty.module("ghostty-vt");
     app_module.addImport("ghostty-vt", vt);
