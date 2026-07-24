@@ -194,6 +194,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
                 self.widget_revision += 1;
+                self.canvas_widget_layout_adoptions +%= 1;
                 return;
             }
 
@@ -268,6 +269,15 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 }
             }
 
+            // ADOPTION begins here: the pool resets below are
+            // destructive, and a later per-node failure (an invalid
+            // command name escapes the pre-validation) leaves a TORN
+            // retained tree — so the witness the ui-app hover currency
+            // samples must move at this boundary, not at the
+            // function's successful return. Everything above —
+            // node/anchored/pool-budget validation — rejects with the
+            // previous tree fully applied and the witness unmoved.
+            self.canvas_widget_layout_adoptions +%= 1;
             self.widget_layout_node_count = 0;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;

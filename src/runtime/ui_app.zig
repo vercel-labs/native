@@ -4251,24 +4251,44 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (self.hover_msg_slots[position] == hover_msg_slot_refused) continue;
                 const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
                 // Copy-then-swap: the replacement lands in a FRESH slot
-                // (the spare guarantees one is free) and the old capture
-                // releases only after it succeeded — a failed allocation
-                // must never destroy the still-valid capture it was
-                // refreshing.
-                const fresh = self.claimHoverSlot();
+                // (the pool sizing guarantees one is free) and the old
+                // capture releases only after it succeeded — a failed
+                // allocation must never destroy the still-valid capture
+                // it was refreshing.
+                const fresh = self.claimHoverSlot() orelse {
+                    refreshed = false;
+                    ui_app_log.warn("hover-leave capture refresh failed: no free capture slot - retrying at the next rebuild or drain", .{});
+                    if (first_error == null) first_error = error.OutOfMemory;
+                    continue;
+                };
                 self.captureHoverLeave(fresh, leave_msg) catch |err| {
-                    // OutOfMemory: keep the old capture, retry at the
-                    // next commit or drain — the generation stays
-                    // behind — and surface the failure LOUD: if the
-                    // element unmounts before a retry lands, its
-                    // refreshed leave is lost, and that must never be
-                    // silent. An unownable rebind keeps the old
-                    // capture too (the promise the enter earned).
                     self.releaseHoverSlot(fresh);
-                    if (err == error.OutOfMemory) {
-                        refreshed = false;
-                        ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
-                        if (first_error == null) first_error = err;
+                    switch (err) {
+                        error.OutOfMemory => {
+                            // Transient: keep the old capture, retry at
+                            // the next commit or drain — the generation
+                            // stays behind — and surface the failure
+                            // LOUD: if the element unmounts before a
+                            // retry lands, its refreshed leave is lost,
+                            // and that must never be silent.
+                            refreshed = false;
+                            ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
+                            if (first_error == null) first_error = err;
+                        },
+                        error.HoverCapturePayloadUnsupported => {
+                            // A rebind to an unownable payload. An
+                            // entry with a standing capture keeps it
+                            // quietly (the promise the enter earned);
+                            // an entry that never had one — entered
+                            // with no leave bound, then given one no
+                            // copy can own — is marked so the
+                            // degradation is WARNED once, not silent,
+                            // and not re-warned every generation.
+                            if (self.hover_msg_slots[position] == hover_msg_slot_none) {
+                                self.hover_msg_slots[position] = hover_msg_slot_unowned;
+                                ui_app_log.warn("on_hover_leave rebind cannot be owned (a single-item pointer): the standing element's leave degrades to live-tree resolution, and an unmount loses it - bind a slice or scalar payload instead", .{});
+                            }
+                        },
                     }
                     continue;
                 };
@@ -4318,11 +4338,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return true;
         }
 
-        /// One capture slot per possible mirror entry PLUS one spare:
-        /// a capture refresh copies into a fresh slot before releasing
-        /// the old one, so a failed allocation can never destroy the
-        /// still-valid capture it was replacing.
-        const hover_msg_slot_count: usize = canvas.max_widget_depth + 1;
+        /// The capture-slot pool covers BOTH populations a transition
+        /// can hold at once — the departing chain's captures (released
+        /// only after each leave Msg is consumed) and the standing
+        /// mirror's (a mid-batch rebuild's refresh can fill every
+        /// entry before the first leave releases) — plus one in-flight
+        /// swap slot, so a legitimate deep handoff between disjoint
+        /// branches can never exhaust it. `claimHoverSlot` still
+        /// degrades like an allocation failure rather than trapping if
+        /// the accounting is ever wrong.
+        const hover_msg_slot_count: usize = canvas.max_widget_depth * 2 + 1;
 
         /// The "no capture slot" sentinel in `hover_msg_slots` (the slot
         /// space is `hover_msg_slot_count`, far below it).
@@ -4336,6 +4361,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// entries dispatch nothing on exit and are skipped by the
         /// capture refresh.
         const hover_msg_slot_refused: u8 = 0xFE;
+
+        /// The "entered, but the leave rebind is unownable" marker: the
+        /// enter already dispatched (with no leave bound, or an ownable
+        /// one), then a rebuild bound a payload no copy can own. The
+        /// leave degrades to live-tree resolution — silence on unmount
+        /// — warned ONCE at the rebind; the refresh keeps re-attempting
+        /// it, so a later ownable rebind upgrades to a real capture.
+        const hover_msg_slot_unowned: u8 = 0xFD;
 
         /// Capture a leave Msg for later delivery into `slot`: a DEEP
         /// copy whose payload slices live in the slot's own arena (any
@@ -4362,16 +4395,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             };
         }
 
-        /// Claim a free capture slot. The slot space matches the chain
-        /// depth and every mirror entry holds at most one slot, so a
-        /// free slot always exists for an entering listener.
-        fn claimHoverSlot(self: *Self) u8 {
+        /// Claim a free capture slot, or null when none is free — the
+        /// pool is sized so that never happens for legitimate
+        /// transitions (see `hover_msg_slot_count`), and callers treat
+        /// null exactly like a transient allocation failure: defer and
+        /// retry, never trap.
+        fn claimHoverSlot(self: *Self) ?u8 {
             for (&self.hover_msg_slot_used, 0..) |*used, slot| {
                 if (used.*) continue;
                 used.* = true;
                 return @intCast(slot);
             }
-            unreachable;
+            return null;
         }
 
         /// Release a slot: reset its arena (the captured Msg was already
@@ -4405,7 +4440,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .error_union => |info| if (value) |payload| @as(T, try deepCopyMsgValue(info.payload, payload, allocator, indirections)) else |err| @as(T, err),
                 .array => |info| blk: {
                     var out: T = undefined;
-                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator, indirections);
+                    for (0..info.len) |index| out[index] = try deepCopyMsgValue(info.child, value[index], allocator, indirections);
+                    // A sentinel-terminated array carries one element
+                    // past its length: stamp it, never leave it
+                    // undefined.
+                    if (comptime std.meta.sentinel(T)) |sentinel| out[info.len] = sentinel;
                     break :blk out;
                 },
                 .@"struct" => |info| blk: {
@@ -4718,7 +4757,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 };
                 const enter_msg = live.msgFor(id, .hover_enter);
                 if (live.msgFor(id, .hover_leave)) |leave_msg| {
-                    const slot = self.claimHoverSlot();
+                    const slot = self.claimHoverSlot() orelse {
+                        // Pool pressure degrades like allocation
+                        // pressure: defer this id and the entering tail
+                        // to the next drain.
+                        self.unwindHoverEnters(&entering_at, position);
+                        if (first_error == null) first_error = error.OutOfMemory;
+                        break;
+                    };
                     self.captureHoverLeave(slot, leave_msg) catch |err| switch (err) {
                         error.OutOfMemory => {
                             // Transient: an enter whose paired leave

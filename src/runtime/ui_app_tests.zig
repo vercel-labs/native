@@ -6376,6 +6376,7 @@ const AlignedModel = struct {
     bytes: [64]u8 align(64) = [_]u8{'a'} ** 64,
     show_row: bool = true,
     left_len: usize = 0,
+    z_payload: [4]u8 = [_]u8{0} ** 4,
 
     fn payload(model: *const AlignedModel) []align(64) const u8 {
         return @alignCast(model.bytes[0..8]);
@@ -6385,6 +6386,7 @@ const AlignedModel = struct {
 const AlignedMsg = union(enum) {
     entered,
     left: []align(64) const u8,
+    left_z: [3:0]u8,
     hide,
 };
 
@@ -6397,6 +6399,11 @@ fn alignedUpdate(model: *AlignedModel, msg: AlignedMsg) void {
     switch (msg) {
         .entered => {},
         .left => |bytes| model.left_len = bytes.len,
+        .left_z => |arr| {
+            // Record the declared elements AND the sentinel storage the
+            // copy must have stamped.
+            model.z_payload = .{ arr[0], arr[1], arr[2], arr[3] };
+        },
         .hide => model.show_row = false,
     }
 }
@@ -6409,6 +6416,11 @@ fn alignedView(ui: *AlignedApp.Ui, model: *const AlignedModel) AlignedApp.Ui.Nod
             .on_hover_enter = .entered,
             .on_hover_leave = .{ .left = model.payload() },
         }, .{ui.text(.{}, "Aligned row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left_z = .{ 'x', 'y', 'z' } },
+        }, .{ui.text(.{}, "Sentinel row")}),
     });
 }
 
@@ -6601,11 +6613,13 @@ test "repeated re-entry with rebuilding edge handlers never exhausts capture slo
 const PtrModel = struct {
     entered: u32 = 0,
     anchor: u32 = 7,
+    bind_ptr: bool = true,
 };
 
 const PtrMsg = union(enum) {
     entered,
     left_ptr: *const u32,
+    bind_ptr_now,
 };
 
 /// Markup-free like the aligned probe: a single-item-pointer payload is
@@ -6616,6 +6630,7 @@ fn ptrUpdate(model: *PtrModel, msg: PtrMsg) void {
     switch (msg) {
         .entered => model.entered += 1,
         .left_ptr => {},
+        .bind_ptr_now => model.bind_ptr = true,
     }
 }
 
@@ -6624,7 +6639,7 @@ fn ptrView(ui: *PtrApp.Ui, model: *const PtrModel) PtrApp.Ui.Node {
         ui.row(.{
             .height = 40,
             .on_hover_enter = .entered,
-            .on_hover_leave = .{ .left_ptr = &model.anchor },
+            .on_hover_leave = if (model.bind_ptr) PtrMsg{ .left_ptr = &model.anchor } else null,
         }, .{ui.text(.{}, "Pointer row")}),
     });
 }
@@ -6672,4 +6687,72 @@ test "an unownable leave payload disables the pair: no enter, no dangling leave"
     // payload ownable); with the same binding it refuses identically.
     try hoverMove(harness, app, 50, 20);
     try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+}
+
+test "a sentinel-terminated array payload captures with its sentinel stamped" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Hover the sentinel row, unmount, and read the delivered array's
+    // FULL storage: the declared elements and the zero sentinel one
+    // past them — never undefined bytes.
+    try hoverMove(harness, app, 50, 60);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqualSlices(u8, &.{ 'x', 'y', 'z', 0 }, &app_state.model.z_payload);
+}
+
+test "an unownable leave rebind on a standing element degrades loudly, never traps" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    app_state.model.bind_ptr = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave bound: the enter dispatches (an ownable-free
+    // pair is fine).
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // A rebuild BINDS an unownable leave while the element stands: the
+    // refresh degrades with a warning (once) and the mirror settles —
+    // subsequent rebuilds and moves neither trap nor re-enter.
+    try app_state.dispatch(&harness.runtime, 1, .bind_ptr_now);
+    try hoverMove(harness, app, 55, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // The exit resolves the leave from the live tree (the element still
+    // stands), so the standing pair still closes — through live
+    // resolution rather than a capture.
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
 }
