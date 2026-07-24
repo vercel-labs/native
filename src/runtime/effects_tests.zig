@@ -357,7 +357,7 @@ test "a cancel that races the natural exit still reports cancelled and drops lin
     try std.testing.expectEqual(effects_mod.EffectExitReason.cancelled, h.app_state.model.exit_reason.?);
 }
 
-test "queue overflow refuses fed lines loudly and truncates over-long lines" {
+test "queue overflow drops lines with a carried drop count and truncates over-long lines" {
     var h = try Harness.create();
     defer h.destroy();
     const fx = &h.app_state.effects;

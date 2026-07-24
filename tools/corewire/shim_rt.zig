@@ -366,11 +366,12 @@ pub fn assertVoidPayload(payload: []const u8) void {
 pub const channel_out_guard = [1]u8{0};
 
 /// Assemble a channel entry's returned envelope from the out pair,
-/// closing every non-writing shape loudly BEFORE a slice forms: an
-/// entry that wrote neither slot yields the guard at length zero
-/// (refused downstream as a short envelope), and an entry that wrote a
-/// length without a pointer — the guard address with a nonzero length —
-/// refuses here, never an out-of-bounds read of the guard.
+/// closing every non-writing shape BEFORE a slice forms: an entry that
+/// wrote neither slot yields the guard at length zero (refused
+/// downstream as a short envelope), and an entry that wrote a length
+/// without a pointer — the guard address with a nonzero length —
+/// panics here with a teaching, never an out-of-bounds read of the
+/// guard.
 pub fn channelEnvelopeBytes(ptr: [*]const u8, len: usize) []const u8 {
     if (len != 0 and ptr == @as([*]const u8, @ptrCast(&channel_out_guard))) {
         @panic("a channel entry wrote an envelope length without an envelope pointer — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");
@@ -390,11 +391,11 @@ pub const ChannelEnvelope = struct {
 
 /// Split a channel entry's bytes envelope — [produced u8][tag u8]
 /// [payload…]. A malformed envelope is a contract violation, never a
-/// silent no-message, so every framing fault refuses loudly: fewer than
-/// the two header bytes, a produced byte past 1, or payload bytes
-/// behind a nothing-produced header. (The tag byte is meaningless when
-/// nothing was produced; a tag past the declared arms is the generated
-/// unpacker's refusal — it owns the arm table.)
+/// silent no-message, so every framing fault panics with a teaching:
+/// fewer than the two header bytes, a produced byte past 1, or payload
+/// bytes behind a nothing-produced header. (The tag byte is meaningless
+/// when nothing was produced; a tag past the declared arms is the
+/// generated unpacker's refusal — it owns the arm table.)
 pub fn channelEnvelope(bytes: []const u8) ChannelEnvelope {
     if (bytes.len < 2) {
         @panic("a channel entry returned fewer than the envelope's two header bytes ([produced u8][tag u8]) — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");

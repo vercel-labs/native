@@ -1094,8 +1094,8 @@ const Emitter = struct {
                 \\/// [payload…]: the header says whether a message was produced, the
                 \\/// wire tag picks the arm, and the payload rides the canonical
                 \\/// value encoding of that arm's mirror payload type. Malformed
-                \\/// framing refuses loudly in shim_rt.channelEnvelope; a tag past
-                \\/// the declared arms refuses here.
+                \\/// framing panics with a teaching in shim_rt.channelEnvelope; a
+                \\/// tag past the declared arms panics here.
                 \\fn msgFromEnvelope(envelope: []const u8) ?{f} {{
                 \\    const header = shim_rt.channelEnvelope(envelope);
                 \\    if (!header.produced) return null;
@@ -1495,7 +1495,8 @@ test "channel glue speaks the sidecar's message union name" {
     // out-pointer pair; the wrapper hands the whole buffer to the
     // unpacker (no status return, no out-record). The out state is
     // DEFINED before the call: an entry that returns without writing
-    // yields the zero-length envelope, refused loudly downstream.
+    // yields the zero-length envelope, which the envelope reader
+    // refuses as short.
     try testing.expect(std.mem.indexOf(u8, generated, "var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;\n    var out_len: usize = 0;\n    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "shim_rt.channelEnvelope(envelope)") != null);
