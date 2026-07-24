@@ -358,6 +358,14 @@ pub fn assertVoidPayload(payload: []const u8) void {
     }
 }
 
+/// The defined pre-call state for a channel entry's out-pointer pair:
+/// the generated wrappers point at this byte with length zero before
+/// calling, so an entry that returns without writing both slots — a
+/// contract violation — yields a zero-length envelope that
+/// channelEnvelope refuses with its short-buffer teaching, never a
+/// slice of an undefined pointer.
+pub const channel_out_guard = [1]u8{0};
+
 /// A channel entry's split bytes envelope: whether a message was
 /// produced, the produced arm's declaration-order wire tag, and the arm
 /// payload bytes (canonical value encoding of the arm's mirror payload

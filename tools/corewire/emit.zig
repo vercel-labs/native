@@ -986,7 +986,7 @@ const Emitter = struct {
                 \\/// Menus, shortcuts, and chrome tabs dispatch through the core's
                 \\/// exported command mapper.
                 \\pub fn commandMsg(name: []const u8) ?{f} {{
-                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.command_msg(name.ptr, name.len, &out_ptr, &out_len);
                 \\    return msgFromEnvelope(out_ptr[0..out_len]);
@@ -1009,7 +1009,7 @@ const Emitter = struct {
                 \\
                 \\pub fn frameMsg(model: *const {f}, frame: FrameEvent) ?{f} {{
                 \\    _ = model;
-                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.frame_msg(frame.width, frame.height, frame.timestampMs, frame.intervalMs, &out_ptr, &out_len);
                 \\    return msgFromEnvelope(out_ptr[0..out_len]);
@@ -1031,7 +1031,7 @@ const Emitter = struct {
                 \\}};
                 \\
                 \\pub fn keyMsg(key: KeyEvent) ?{f} {{
-                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);
                 \\    return msgFromEnvelope(out_ptr[0..out_len]);
@@ -1056,7 +1056,7 @@ const Emitter = struct {
                 \\}};
                 \\
                 \\pub fn pinchMsg(pinch: PinchEvent) ?{f} {{
-                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out_ptr, &out_len);
                 \\    return msgFromEnvelope(out_ptr[0..out_len]);
@@ -1493,8 +1493,10 @@ test "channel glue speaks the sidecar's message union name" {
     try testing.expect(std.mem.indexOf(u8, generated, "@FieldType(Event, \"label_set\")") != null);
     // The channel entry returns the bytes envelope on the ordinary
     // out-pointer pair; the wrapper hands the whole buffer to the
-    // unpacker (no status return, no out-record).
-    try testing.expect(std.mem.indexOf(u8, generated, "abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);") != null);
+    // unpacker (no status return, no out-record). The out state is
+    // DEFINED before the call: an entry that returns without writing
+    // yields the zero-length envelope, refused loudly downstream.
+    try testing.expect(std.mem.indexOf(u8, generated, "var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;\n    var out_len: usize = 0;\n    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "return msgFromEnvelope(out_ptr[0..out_len]);") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "shim_rt.channelEnvelope(envelope)") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "if (!header.produced) return null;") != null);
