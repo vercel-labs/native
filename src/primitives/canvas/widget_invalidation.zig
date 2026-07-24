@@ -37,6 +37,7 @@ const strokeBounds = drawing_model.strokeBounds;
 const shadowBounds = drawing_model.shadowBounds;
 const rectsEqual = equality_model.rectsEqual;
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const optionalSizesEqual = equality_model.optionalSizesEqual;
 const sizesEqual = equality_model.sizesEqual;
 const insetsEqual = equality_model.insetsEqual;
 const optionalColorsEqual = equality_model.optionalColorsEqual;
@@ -264,6 +265,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.image_fit != next.widget.image_fit or
         previous.widget.image_sampling != next.widget.image_sampling or
         previous.widget.image_opacity != next.widget.image_opacity or
+        !optionalSizesEqual(previous.widget.stream_size, next.widget.stream_size) or
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
         !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);

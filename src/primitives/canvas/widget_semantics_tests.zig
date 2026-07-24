@@ -1146,7 +1146,10 @@ test "a contain video surface pillarboxes a narrow stream on black" {
         .draw_image => |draw| {
             try std.testing.expectEqual(canvas.mediaSurfaceTextureImageId(5), draw.image_id);
             try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
-            try std.testing.expectEqual(ImageFit.contain, draw.fit);
+            // The quad IS the fit: the draw stretches into it, so a
+            // decoder whose true dimensions round off the report can
+            // never open a host-side contain seam inside the quad.
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
             try std.testing.expectEqual(@as(?geometry.RectF, null), draw.src);
         },
         else => return error.TestUnexpectedResult,
@@ -1235,6 +1238,44 @@ test "a contain video surface with matching aspect fills the frame barless" {
         .draw_image => |draw| {
             try expectRect(frame, draw.dst);
             try std.testing.expectEqual(@as(f32, 6), draw.radius.top_left);
+            // Known geometry always stretches into the engine's quad —
+            // the barless exact-aspect case seams just like the boxed
+            // ones if a host re-fits the real texture.
+            try std.testing.expectEqual(ImageFit.stretch, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "bars thinner than the corner radius keep the frame's mask on the quad" {
+    // A 2.25:1 stream into a 2:1 box leaves ~0.9px letterbox bars —
+    // thinner than the 6px corner radius. Dropping the mask there would
+    // paint the picture's square corners OUTSIDE the surface's rounded
+    // silhouette (a hairline bar cannot cover a 6px corner), so the
+    // frame's radius stays on the draw.
+    const frame = geometry.RectF.init(0, 0, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 36, .height = 16 },
+        .style = .{ .radius = 6 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    // Placeholder + two hairline bars + the quad.
+    try std.testing.expectEqual(@as(usize, 4), display_list.commandCount());
+    switch (display_list.commands[3]) {
+        .draw_image => |draw| {
+            try std.testing.expect(draw.dst.height < frame.height);
+            try std.testing.expectEqual(@as(f32, 6), draw.radius.top_left);
+            try std.testing.expectEqual(@as(f32, 6), draw.radius.bottom_right);
         },
         else => return error.TestUnexpectedResult,
     }

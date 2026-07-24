@@ -1225,12 +1225,8 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
         .radius = radius,
         .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
     });
-    // The fitted quad: pre-computed here from the REPORTED dimensions,
-    // so hosts draw into an already-aspect-true rect (a host's own
-    // contain math against the real texture is then a no-op). The draw
-    // keeps `.contain` rather than a stretch into the quad: a texture
-    // whose true aspect ever disagrees with the report letterboxes
-    // inside the quad instead of distorting.
+    // The fitted quad, pre-computed here from the REPORTED dimensions:
+    // one authority for the geometry, no host fit math required.
     const stream_size = mediaSurfaceStreamSize(widget);
     const dst = if (stream_size) |size|
         canvas.containDestinationRect(frame, size.width, size.height)
@@ -1252,20 +1248,42 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     // cover surface outside its bounds, over its siblings.
     const clips_image = widget.image_fit == .cover;
     if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = frame });
+    // A bar-inset quad normally drops the radius mask: its corners sit
+    // inside the frame (in the bars' black), and the frame's radius
+    // there would notch the PICTURE's corners instead of the surface's.
+    // But when a bar is THINNER than the corner radius, the quad's
+    // corners reach into the frame's rounded corners — the mask stays
+    // on, or the picture would paint square corners outside the
+    // surface's silhouette (a hairline bar cannot cover a 20px corner).
+    const fitted = letterboxed or pillarboxed;
+    const bar_extent = if (letterboxed)
+        (frame.height - dst.height) * 0.5
+    else if (pillarboxed)
+        (frame.width - dst.width) * 0.5
+    else
+        0;
+    const max_corner = @max(@max(radius.top_left, radius.top_right), @max(radius.bottom_left, radius.bottom_right));
+    const masks_quad = !fitted or bar_extent < max_corner;
     try builder.drawImage(.{
         .id = widgetPartId(widget.id, 2),
         .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
         .src = widget.image_src,
         .dst = dst,
         .opacity = widget.image_opacity,
-        .fit = widget.image_fit,
+        // A pre-fitted quad draws STRETCH: the quad is the fit, computed
+        // once from the reported dimensions. A second host-side contain
+        // against the real texture would open sub-pixel seams whenever a
+        // decoder's true dimensions round off the report (macOS floors
+        // scaled decode sizes) — a hairline of backdrop instead of
+        // picture. The sub-percent aspect nudge stretch absorbs is
+        // invisible; the seam is not. Applies whenever the stream
+        // geometry is known (a barless exact-aspect quad seams the same
+        // way); without it the widget's own fit passes through.
+        .fit = if (stream_size != null) .stretch else widget.image_fit,
         .sampling = widget.image_sampling,
         // The render plan flattens clip stacks to rects, so a rounded
-        // surface masks on the draw itself (the avatar convention). A
-        // bar-inset quad drops the mask: its corners sit inside the
-        // frame (in the bars' black), and the frame's radius there
-        // would notch the PICTURE's corners instead of the surface's.
-        .radius = if (letterboxed or pillarboxed) Radius{} else radius,
+        // surface masks on the draw itself (the avatar convention).
+        .radius = if (masks_quad) radius else Radius{},
     });
     if (clips_image) try builder.popClip();
 }

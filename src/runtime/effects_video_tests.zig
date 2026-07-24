@@ -1118,7 +1118,8 @@ fn expectPlaybackSurfaceFit(harness: *core.TestHarness(), frame: geometry.RectF,
         },
         .draw_image => |draw| {
             if (draw.image_id != canvas.mediaSurfaceTextureImageId(canvas.video_playback_surface_id)) continue;
-            try std.testing.expectEqual(canvas.ImageFit.contain, draw.fit);
+            // The engine's quad is the fit; the draw stretches into it.
+            try std.testing.expectEqual(canvas.ImageFit.stretch, draw.fit);
             try std.testing.expectEqual(expected, draw.dst);
             saw_quad = true;
         },

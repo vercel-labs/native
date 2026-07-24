@@ -244,6 +244,14 @@ pub fn sizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
     return a.width == b.width and a.height == b.height;
 }
 
+pub fn optionalSizesEqual(a: ?geometry.SizeF, b: ?geometry.SizeF) bool {
+    if (a) |left| {
+        if (b) |right| return sizesEqual(left, right);
+        return false;
+    }
+    return b == null;
+}
+
 pub fn insetsEqual(a: geometry.InsetsF, b: geometry.InsetsF) bool {
     return a.top == b.top and
         a.right == b.right and

@@ -473,6 +473,22 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
             return error.MediaSurfaceChannelsExhausted;
         }
 
+        /// Forget the retained (adopted) texture for `surface_id`, if
+        /// any: the runtime entry empties (the placeholder shows until
+        /// the next adoption), the host's copied side-channel texture is
+        /// removed best-effort (the unregister convention: unsupported
+        /// seams and never-uploaded ids are no-ops), and views repaint.
+        /// Loop-thread-only, like the entry table it edits.
+        fn purgeRetainedMediaSurfaceTexture(self: *Runtime, surface_id: u64) void {
+            for (self.media_surface_entries[0..self.media_surface_count]) |*entry| {
+                if (entry.surface_id != surface_id or entry.fingerprint == 0) continue;
+                entry.* = .{ .surface_id = surface_id };
+                self.options.platform.services.removeGpuSurfaceImage(canvas.mediaSurfaceTextureImageId(surface_id)) catch {};
+                runtime_canvas_images.RuntimeCanvasImages(Runtime).noteCanvasImagesChanged(self);
+                return;
+            }
+        }
+
         /// Adopt staged producer frames, paced by the compositor: the
         /// gpu-surface frame dispatch calls this once per frame event,
         /// so a burst of pushes between presents collapses to ONE
@@ -622,6 +638,19 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         fn mediaSurfaceBindingAcquire(context: *anyopaque, surface_id: u64) anyerror!platform.VideoFrameSink {
             const self: *Runtime = @ptrCast(@alignCast(context));
             const producer = try acquireMediaSurfaceProducer(self, surface_id);
+            // A video claim starts from the placeholder: the PREVIOUS
+            // playback's retained last frame is a different stream's
+            // pixels, and compositing it under the new stream's fitted
+            // geometry mis-fits visibly (a portrait replacement's LOADED
+            // report rebuilds the quad while a stale landscape texture
+            // is still on the glass). VIDEO-CHANNEL-ONLY: generic
+            // producers (`acquireMediaSurfaceProducer` direct) keep the
+            // adoption-boundary dedup — a re-claim staging the SAME
+            // bytes stays free of copies and repaints. Presentation
+            // chrome only — display lists, goldens, and session
+            // fingerprints never see textures — so the purge cannot
+            // perturb replay identity.
+            purgeRetainedMediaSurfaceTexture(self, surface_id);
             return producer.frameSink();
         }
 

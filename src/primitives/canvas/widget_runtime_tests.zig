@@ -443,6 +443,41 @@ test "widget layout diff tracks added removed and layout changes by id" {
     try expectRect(geometry.RectF.init(10, 50, 100, 20), invalidations[2].dirty_bounds);
 }
 
+test "widget layout diff marks a stream-size-only change paint dirty" {
+    // The LOADED report changes only `stream_size` on the video's media
+    // surface — same frame, same image id — but the rendering flips
+    // from a full-frame draw to bars plus a fitted quad, so the diff
+    // must invalidate or retained-pixel consumers keep the stale paint.
+    const previous_widget = Widget{
+        .id = 2,
+        .kind = .media_surface,
+        .frame = geometry.RectF.init(10, 10, 100, 40),
+        .image_id = 5,
+        .image_fit = .contain,
+    };
+    var next_widget = previous_widget;
+    next_widget.stream_size = .{ .width = 640, .height = 360 };
+
+    var previous_nodes: [1]WidgetLayoutNode = undefined;
+    var next_nodes: [1]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_widget, geometry.RectF.init(0, 0, 180, 100), &previous_nodes);
+    const next = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.changed, invalidations[0].kind);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+
+    // And identical stream sizes stay quiet: no phantom repaints per
+    // rebuild while a video plays.
+    var same_nodes: [1]WidgetLayoutNode = undefined;
+    const same = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &same_nodes);
+    const quiet = try WidgetLayoutTree.diff(next, same, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 0), quiet.len);
+}
+
 test "widget layout diff includes paint overdraw in dirty bounds" {
     const panel_child = [_]Widget{.{
         .id = 2,
