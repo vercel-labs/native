@@ -1289,6 +1289,43 @@ test "bars thinner than the corner radius shrink the quad's mask to the tangent 
     }
 }
 
+test "an unbounded style radius clamps to the frame before the tangent mask" {
+    // Radius 100 on a 32x16 surface: renderers clamp every corner to
+    // half the short side (8). The tangent math must start from that
+    // effective value — from the raw 100, an 8px-bar quad would carry
+    // mask radius 92, which renderers clamp to 8 on the 16x16 quad and
+    // round the picture into a circle. Effective 8 minus the 8px bar
+    // is 0: a square quad, exactly the silhouette's demand.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 240, .height = 240 },
+        .style = .{ .radius = 100 },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqual(@as(f32, 8), fill.radius.top_left),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[2]) {
+        .draw_image => |draw| {
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
+            try std.testing.expectEqual(@as(f32, 0), draw.radius.top_left);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "a declared source crop drives the fitted quad's aspect, never the full stream" {
     // A square crop out of a 16:9 stream into a 2:1 box: the CROP is
     // what draws, so the quad is square (16x16 centered) and the crop
@@ -1317,6 +1354,34 @@ test "a declared source crop drives the fitted quad's aspect, never the full str
             try expectRect(geometry.RectF.init(8, 0, 16, 16), draw.dst);
             try std.testing.expectEqual(@as(?geometry.RectF, crop), draw.src);
             try std.testing.expectEqual(ImageFit.stretch, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A crop hanging past the stream bounds fits by its CLIPPED extent
+    // — the same clip every renderer applies against the texture — and
+    // the draw samples exactly that clipped region, so the visible
+    // strip is never stretched to the unclipped request's proportions.
+    const hanging = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = geometry.RectF.init(0, 0, 32, 16),
+        .image_id = 5,
+        .image_fit = .contain,
+        .stream_size = .{ .width = 100, .height = 100 },
+        .image_src = geometry.RectF.init(80, 0, 40, 100),
+    };
+    var hanging_nodes: [1]WidgetLayoutNode = undefined;
+    const hanging_layout = try layoutWidgetTree(hanging, geometry.RectF.init(0, 0, 32, 16), &hanging_nodes);
+    var hanging_commands: [6]CanvasCommand = undefined;
+    var hanging_builder = Builder.init(&hanging_commands);
+    try hanging_layout.emitDisplayList(&hanging_builder, .{});
+    switch (hanging_builder.displayList().commands[2]) {
+        .draw_image => |draw| {
+            // 20x100 clipped content into 32x16: height-bound, width
+            // 16 * 20/100 = 3.2, centered.
+            try expectRectApprox(geometry.RectF.init(14.4, 0, 3.2, 16), draw.dst);
+            try std.testing.expectEqual(@as(?geometry.RectF, geometry.RectF.init(80, 0, 20, 100)), draw.src);
         },
         else => return error.TestUnexpectedResult,
     }

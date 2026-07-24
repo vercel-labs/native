@@ -135,7 +135,6 @@ test "a video-channel claim purges the previous playback's retained texture" {
 
     const binding = harness.runtime.mediaSurfaceBinding();
     const sink = try binding.acquire_fn(binding.context, surface_id);
-    defer binding.release_fn(binding.context, sink);
     try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImages().len);
     // The host's copied side-channel texture went with it (the
@@ -151,6 +150,14 @@ test "a video-channel claim purges the previous playback's retained texture" {
     try dispatchFrame(harness, app, 2);
     const adopted = harness.runtime.adoptedMediaSurfaceTexture(surface_id).?;
     try std.testing.expect(adopted.fingerprint != 0);
+
+    // The video RELEASE purges too: stop/replace/failure tell the UI
+    // "no playback" and the rebuild drops the surface's contain stamp,
+    // so a retained frame would composite stretched-distorted. The
+    // stopped surface returns to its placeholder.
+    binding.release_fn(binding.context, sink);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImages().len);
 }
 
 test "unchanged frames short-circuit damage; changed frames invalidate and repaint" {

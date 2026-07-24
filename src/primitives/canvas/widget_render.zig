@@ -1215,16 +1215,36 @@ fn mediaSurfaceQuadRadius(radius: Radius, bar: f32) Radius {
 fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
     const frame = widget.frame.normalized();
-    const radius = Radius.all(widget.style.radius orelse 0);
+    // The frame's EFFECTIVE corner radius: renderers clamp every corner
+    // to half the rect's short side, so the tangent-mask math below must
+    // start from the same value — an unbounded style radius (100 on a
+    // 32x16 surface) otherwise derives an inset-quad mask far past the
+    // real silhouette and renderers clamp THAT into a circular picture.
+    const radius = Radius.all(std.math.clamp(
+        widget.style.radius orelse 0,
+        0,
+        @min(frame.width, frame.height) * 0.5,
+    ));
     // The fitted quad, computed once here: one authority for the
     // geometry. The content's aspect is the source CROP's when one is
-    // declared (the crop is what draws), the stream's otherwise.
+    // declared — clipped to the stream bounds first, exactly the clip
+    // every renderer applies to the crop against the texture, so the
+    // quad's aspect always matches what actually draws (an out-of-range
+    // crop must not stretch its clipped remainder) — and the stream's
+    // otherwise.
     const stream_size = mediaSurfaceStreamSize(widget);
+    var draw_src = widget.image_src;
     const content_size: ?geometry.SizeF = if (stream_size) |stream| blk: {
         if (widget.image_src) |src| {
-            const crop = src.normalized();
-            if (crop.width > 0 and crop.height > 0) {
-                break :blk geometry.SizeF.init(crop.width, crop.height);
+            const clipped = geometry.RectF.intersection(
+                src.normalized(),
+                geometry.RectF.init(0, 0, stream.width, stream.height),
+            );
+            if (!clipped.isEmpty()) {
+                // The clipped crop is also what the draw samples, so
+                // host-side clipping becomes a no-op by construction.
+                draw_src = clipped;
+                break :blk geometry.SizeF.init(clipped.width, clipped.height);
             }
         }
         break :blk stream;
@@ -1280,7 +1300,7 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     try builder.drawImage(.{
         .id = widgetPartId(widget.id, 2),
         .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
-        .src = widget.image_src,
+        .src = draw_src,
         .dst = dst,
         .opacity = widget.image_opacity,
         // Known geometry draws STRETCH: the quad is the fit, computed

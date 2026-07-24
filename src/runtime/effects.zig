@@ -6418,8 +6418,10 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Stop playback, release the player AND the surface claim. No
         /// event echoes; the channel goes idle, later platform
-        /// stragglers are swallowed, and the surface keeps its last
-        /// adopted frame until another producer claims it.
+        /// stragglers are swallowed, and the surface returns to its
+        /// placeholder (the release purges the adopted frame - a
+        /// stopped player must not freeze-frame under "no playback"
+        /// chrome).
         pub fn stopVideo(self: *Self) void {
             if (!self.video.active) return;
             const fake = self.video.fake;
@@ -8941,7 +8943,12 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Release the channel's media-surface claim, if one is held.
-        /// Idempotent; the runtime keeps the last adopted frame.
+        /// Idempotent. The runtime purges the claim's adopted frame on
+        /// this video-channel release (states that release — stop,
+        /// replace, failure — tell the UI "no playback", and a rebuild
+        /// there drops the surface's contain stamp, so a retained frame
+        /// would composite distorted); paused and naturally-completed
+        /// playbacks keep their claim and their freeze-frame.
         fn releaseVideoSink(self: *Self) void {
             if (self.video.sink.push_fn == null) return;
             const sink = self.video.sink;

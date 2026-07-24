@@ -652,14 +652,16 @@ test "decoded frames reach the claimed surface through the platform sink" {
 
     // Stop releases the claim. A decode thread still holding the sink
     // (the platform unloads asynchronously) pushes into inert
-    // process-lived memory and hears the released claim — while the
-    // runtime keeps the last adopted frame (a stopped player keeps its
-    // final picture until another producer claims the surface).
+    // process-lived memory and hears the released claim — and the
+    // runtime purges the adopted frame with the video release: the
+    // stopped surface returns to its placeholder (its contain stamp
+    // leaves with the snapshot, so a retained frame would composite
+    // distorted under "no playback" chrome).
     const stale_sink = np.video.sink;
     try h.app_state.dispatch(&h.harness.runtime, 1, .stop);
     const late = solidFrame(.{ 9, 9, 9, 255 });
     try std.testing.expectError(error.MediaSurfaceReleased, stale_sink.push(2, 2, &late));
-    try std.testing.expect(h.harness.runtime.adoptedMediaSurfaceTexture(clip_surface) != null);
+    try std.testing.expect(h.harness.runtime.adoptedMediaSurfaceTexture(clip_surface) == null);
 }
 
 test "a new load replaces the playback whole: player, claim, and key" {

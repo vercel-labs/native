@@ -655,10 +655,26 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         }
 
         fn mediaSurfaceBindingRelease(context: *anyopaque, sink: platform.VideoFrameSink) void {
-            _ = context;
+            const self: *Runtime = @ptrCast(@alignCast(context));
             const slot: *MediaSurfaceSlot = @ptrCast(@alignCast(sink.context orelse return));
+            // The released claim's surface id, read while the claim is
+            // still ours (generation-checked under the data mutex): the
+            // purge below needs it after `release` clears the slot.
+            slot.mutex.lock();
+            const surface_id = if (slot.active and slot.generation == sink.generation) slot.surface_id else 0;
+            slot.mutex.unlock();
             const producer = MediaSurfaceProducer{ .slot = slot, .generation = sink.generation, .surface_id = 0 };
             producer.release();
+            // A video release ends the picture: the channel releases on
+            // stop, replace, and failure — states whose UI story is "no
+            // playback" — and a rebuild there also drops the surface's
+            // CONTAIN stamp, so a retained last frame would composite
+            // stretched-distorted over the placeholder geometry. Purge
+            // it (video-channel-only, like the acquire-side purge; the
+            // same presentation-only determinism argument applies). A
+            // paused or naturally-completed playback keeps its claim,
+            // so the freeze-frame stays for those.
+            if (surface_id != 0) purgeRetainedMediaSurfaceTexture(self, surface_id);
         }
 
         /// Disarm every wake binding this runtime armed: after this
