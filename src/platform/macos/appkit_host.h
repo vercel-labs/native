@@ -680,6 +680,9 @@ typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t item_i
  * coordinates itself. */
 typedef struct {
     uint64_t driver_id;
+    /* The nearest ancestor driver's id (0 = none): wheel-owner
+     * resolution is restricted to the hit region and its ancestors. */
+    uint64_t parent_driver_id;
     double x;
     double y;
     double width;

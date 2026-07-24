@@ -246,6 +246,7 @@ extern fn native_sdk_appkit_delete_credential(host: *AppKitHost, service: [*]con
 
 const AppKitScrollDriver = extern struct {
     driver_id: u64,
+    parent_driver_id: u64,
     x: f64,
     y: f64,
     width: f64,
@@ -1628,6 +1629,7 @@ fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.Wind
     for (drivers[0..count], 0..) |driver, index| {
         specs[index] = .{
             .driver_id = driver.id,
+            .parent_driver_id = driver.parent_id,
             .x = driver.frame.x,
             .y = driver.frame.y,
             .width = driver.frame.width,

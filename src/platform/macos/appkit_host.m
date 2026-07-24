@@ -342,6 +342,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * overlay knob stays grabbable). */
 @interface NativeSdkScrollDriverView : NSScrollView
 @property(nonatomic, assign) uint64_t driverId;
+@property(nonatomic, assign) uint64_t parentDriverId;
 /* The region's axis grants (the runtime's widgetScrollsAxis), pushed on
  * every reconcile: the wheel winner-resolution's fallback rule needs
  * grants, not range — a granted axis with short content still owns a
@@ -583,6 +584,16 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableArray<NativeSdkScrollDriverView *> *scrollDrivers;
 @property(nonatomic, assign) NSPoint wheelGesturePoint;
 @property(nonatomic, assign) BOOL wheelGestureActive;
+/* Sub-half-point residual remainders carried across events (precise
+ * trackpads emit fractional deltas; dropping them per event would lose
+ * a whole axis of slow diagonal input). */
+@property(nonatomic, assign) double wheelResidualCarryX;
+@property(nonatomic, assign) double wheelResidualCarryY;
+/* Driver ids the WIRE has scrolled during this gesture: once the engine
+ * applies relative deltas to a region, later ABSOLUTE native reports
+ * from the same region would erase them, so a wire-scrolled region
+ * never becomes the native recipient again until the gesture ends. */
+@property(nonatomic, strong) NSMutableSet *wireBoundDriverIds;
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
@@ -633,7 +644,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)emitInputEventWithKind:(NSInteger)kind event:(NSEvent *)event button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)queuePointerMotionInputEvent:(NSEvent *)event kind:(NSInteger)kind button:(NSInteger)button;
 - (void)emitQueuedPointerMotionInputEvent;
-- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY;
+- (void)queueScrollInputEvent:(NSEvent *)event atPoint:(NSPoint)point deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitQueuedScrollInputEvent;
 - (void)emitPinchInputEventWithKind:(NSInteger)kind event:(NSEvent *)event magnification:(double)magnification;
 - (void)emitPinchChangeForEvent:(NSEvent *)event;
@@ -5961,16 +5972,16 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (void)scrollWheel:(NSEvent *)event {
     if (self.scrollDrivers.count == 0) {
-        [self queueScrollInputEvent:event deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
+        [self queueScrollInputEvent:event atPoint:[self convertPoint:event.locationInWindow fromView:nil] deltaX:-event.scrollingDeltaX deltaY:-event.scrollingDeltaY];
         return;
     }
     // Gesture anchoring: owners resolve at the point where the GESTURE
-    // began (so momentum keeps working the same regions after the
-    // pointer wanders), re-evaluated EVERY event against the drivers'
-    // live offsets — which is what hands an axis to the ancestor the
-    // moment the inner region saturates, mirroring the engine's
-    // per-event walk. Legacy wheels (no phases) resolve at the live
-    // pointer.
+    // began (so momentum and residuals keep working the same regions
+    // after the pointer wanders — the wire emissions below carry the
+    // same anchor), re-evaluated EVERY event against the drivers' live
+    // offsets — which is what hands an axis to the ancestor the moment
+    // the inner region saturates, mirroring the engine's per-event
+    // walk. Legacy wheels (no phases) resolve at the live pointer.
     const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
     NSPoint point;
     if (legacy) {
@@ -5979,30 +5990,40 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
             self.wheelGesturePoint = [self convertPoint:event.locationInWindow fromView:nil];
             self.wheelGestureActive = YES;
+            self.wheelResidualCarryX = 0;
+            self.wheelResidualCarryY = 0;
+            [self.wireBoundDriverIds removeAllObjects];
         }
         point = self.wheelGestureActive ? self.wheelGesturePoint : [self convertPoint:event.locationInWindow fromView:nil];
         if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
             self.wheelGestureActive = NO;
         }
     }
+    if (!self.wireBoundDriverIds) self.wireBoundDriverIds = [[NSMutableSet alloc] init];
 
     const double canvasDx = -event.scrollingDeltaX;
     const double canvasDy = -event.scrollingDeltaY;
+    NSArray *chain = [self wheelCandidateChainAtPoint:point];
     NativeSdkScrollDriverView *ownerX = nil;
     NativeSdkScrollDriverView *ownerY = nil;
-    [self resolveWheelOwnersAtPoint:point canvasDx:canvasDx canvasDy:canvasDy ownerX:&ownerX ownerY:&ownerY];
+    [self resolveWheelOwnersInChain:chain canvasDx:canvasDx canvasDy:canvasDy ownerX:&ownerX ownerY:&ownerY];
 
     // The native recipient: the dominant axis's owner, else the other
     // axis's. Nothing native (phase bookkeeping, zero deltas, no owner)
-    // goes to the wire whole.
+    // goes to the wire whole — offsets flushed first (one clock).
     const BOOL dominantVertical = fabs(canvasDy) >= fabs(canvasDx);
     NativeSdkScrollDriverView *native = dominantVertical ? (ownerY ?: ownerX) : (ownerX ?: ownerY);
     if (!native) {
-        // Offsets first (one clock), like every wire hand-off below.
         [self emitQueuedScrollDriverEvent];
-        [self queueScrollInputEvent:event deltaX:canvasDx deltaY:canvasDy];
+        [self queueScrollInputEvent:event atPoint:point deltaX:canvasDx deltaY:canvasDy];
         return;
     }
+
+    // A region the WIRE already scrolled this gesture can never take
+    // native events again before the gesture ends: the engine applied
+    // relative deltas the region's next ABSOLUTE report would erase.
+    // Its axes stay on the wire instead.
+    const BOOL nativeWireBound = [self.wireBoundDriverIds containsObject:@(native.driverId)];
 
     // CROSS-OWNER events cannot ride one NSScrollView: when the other
     // axis belongs to a DIFFERENT region and the native recipient would
@@ -6012,18 +6033,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // flagship nested case (vertical list in a horizontal timeline)
     // never hits this: the list cannot travel x, so its dy stays native
     // and dx rides the residual below.
+    BOOL crossOwnerConflict = NO;
     if (ownerX && ownerY && ownerX != ownerY) {
-        const BOOL nativeEatsOther = (native == ownerY)
+        crossOwnerConflict = (native == ownerY)
             ? NativeSdkScrollDriverTakesHorizontal(native, canvasDx)
             : NativeSdkScrollDriverTakesVertical(native, canvasDy);
-        if (nativeEatsOther) {
-            // Offsets first (one clock): the wire routing consults the
-            // runtime's offsets, so any coalesced driver report must
-            // land before the deltas that depend on it.
-            [self emitQueuedScrollDriverEvent];
-            [self queueScrollInputEvent:event deltaX:canvasDx deltaY:canvasDy];
-            return;
-        }
+    }
+    if (nativeWireBound || crossOwnerConflict) {
+        if (ownerX) [self.wireBoundDriverIds addObject:@(ownerX.driverId)];
+        if (ownerY) [self.wireBoundDriverIds addObject:@(ownerY.driverId)];
+        [self emitQueuedScrollDriverEvent];
+        [self queueScrollInputEvent:event atPoint:point deltaX:canvasDx deltaY:canvasDy];
+        return;
     }
 
     // The OS scroller owns input + physics for its axes (momentum,
@@ -6034,7 +6055,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // 20 forwards exactly 15 — belongs to the axis's owner (or dies
     // when no region owns the axis, the engine's no-taker rule). An
     // elastic axis the recipient owns absorbs its whole component: the
-    // excursion is the point.
+    // excursion is the point. Sub-half-point remainders CARRY across
+    // events instead of dropping, so a slow precise-trackpad axis
+    // accumulates into real motion; the carry resets per gesture.
     const NSPoint before = native.contentView.bounds.origin;
     [native scrollWheel:event];
     const NSPoint after = native.contentView.bounds.origin;
@@ -6042,15 +6065,33 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     double residualY = canvasDy - (after.y - before.y);
     if (!ownerX || (native == ownerX && NativeSdkScrollDriverElasticHorizontally(native))) residualX = 0;
     if (!ownerY || (native == ownerY && NativeSdkScrollDriverElasticVertically(native))) residualY = 0;
-    if (fabs(residualX) < 0.5) residualX = 0;
-    if (fabs(residualY) < 0.5) residualY = 0;
-    if (residualX != 0 || residualY != 0) {
+    self.wheelResidualCarryX += residualX;
+    self.wheelResidualCarryY += residualY;
+    double emitX = 0;
+    double emitY = 0;
+    if (fabs(self.wheelResidualCarryX) >= 0.5) {
+        emitX = self.wheelResidualCarryX;
+        self.wheelResidualCarryX = 0;
+    }
+    if (fabs(self.wheelResidualCarryY) >= 0.5) {
+        emitY = self.wheelResidualCarryY;
+        self.wheelResidualCarryY = 0;
+    }
+    if (emitX != 0 || emitY != 0) {
+        // The wire will scroll whatever region the engine's walk picks
+        // for these deltas — anyone on the chain except the native
+        // recipient. Bind them all so a later ownership flip cannot
+        // hand a wire-scrolled region a native stream whose absolute
+        // report would erase the engine's work.
+        for (NativeSdkScrollDriverView *driver in chain) {
+            if (driver != native) [self.wireBoundDriverIds addObject:@(driver.driverId)];
+        }
         // Offsets first (one clock): flush the coalesced report proving
         // what the native scroller just consumed, so the runtime routes
         // the residual against live truth instead of a full-looking
         // inner region.
         [self emitQueuedScrollDriverEvent];
-        [self queueScrollInputEvent:event deltaX:residualX deltaY:residualY];
+        [self queueScrollInputEvent:event atPoint:point deltaX:emitX deltaY:emitY];
     }
 }
 
@@ -6258,10 +6299,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                           deltaY:0];
 }
 
-- (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY {
+// The POINT is caller-supplied: driver hand-offs pass the gesture's
+// anchor so residual and saturated-momentum deltas route to the same
+// regions the native side resolved, however far the pointer wandered.
+- (void)queueScrollInputEvent:(NSEvent *)event atPoint:(NSPoint)point deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0 || !event) return;
     if (deltaX == 0 && deltaY == 0) return;
-    self.pendingScrollPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    self.pendingScrollPoint = point;
     self.pendingScrollDeltaX += deltaX;
     self.pendingScrollDeltaY += deltaY;
     self.pendingScrollModifiers = NativeSdkModifierFlagsForEvent(event);
@@ -6440,6 +6484,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         if (driver.hasHorizontalScroller != (desired.scrolls_x != 0)) driver.hasHorizontalScroller = desired.scrolls_x != 0;
         driver.grantsX = desired.scrolls_x != 0;
         driver.grantsY = desired.scrolls_y != 0;
+        driver.parentDriverId = desired.parent_driver_id;
         NSRect target = NSMakeRect(desired.x, self.bounds.size.height - desired.y - desired.height, desired.width, desired.height);
         if (!NSEqualRects(driver.frame, target)) driver.frame = target;
         NSSize contentSize = NSMakeSize(MAX(desired.content_width, 1), MAX(desired.content_height, 1));
@@ -6519,10 +6564,42 @@ static BOOL NativeSdkScrollDriverTakesHorizontal(NativeSdkScrollDriverView *driv
     return NativeSdkScrollDriverElasticHorizontally(driver) || NativeSdkScrollDriverCanConsumeHorizontally(driver, canvasDelta);
 }
 
-// Resolve each axis's OWNER independently at `viewPoint` — the engine's
-// per-axis walk restated over the native drivers. Driver specs ride in
-// layout pre-order (outermost first, deepest last): an axis routes to
-// the DEEPEST region under the point that can consume its delta right
+// The wheel CANDIDATE CHAIN at a point: the deepest driver under the
+// point (specs ride layout pre-order, so the last containing entry is
+// the hit region) plus its ancestors by parent id — the widget-tree
+// containment chain the engine's route walks. Restricting owner
+// resolution to this chain keeps a geometrically overlapping but
+// UNRELATED region (a background scroller behind a floating surface)
+// from stealing an axis the engine would never give it. Ordered
+// outermost first, like the spec array.
+- (NSArray *)wheelCandidateChainAtPoint:(NSPoint)viewPoint {
+    NativeSdkScrollDriverView *hit = nil;
+    for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
+        if (NSPointInRect(viewPoint, driver.frame)) hit = driver;
+    }
+    if (!hit) return @[];
+    NSMutableArray *chain = [[NSMutableArray alloc] init];
+    NativeSdkScrollDriverView *current = hit;
+    while (current) {
+        [chain insertObject:current atIndex:0];
+        uint64_t parentId = current.parentDriverId;
+        NativeSdkScrollDriverView *parent = nil;
+        if (parentId != 0) {
+            for (NativeSdkScrollDriverView *candidate in self.scrollDrivers) {
+                if (candidate.driverId == parentId) {
+                    parent = candidate;
+                    break;
+                }
+            }
+        }
+        current = parent;
+    }
+    return chain;
+}
+
+// Resolve each axis's OWNER independently over the candidate chain —
+// the engine's per-axis walk restated over the native drivers: an axis
+// routes to the DEEPEST chain region that can consume its delta right
 // now (direction-aware, so a saturated inner region hands an outward
 // swipe to its ancestor), falling back to the OUTERMOST region granted
 // that axis — which bounces if elastic (rubber-band needs no range,
@@ -6531,7 +6608,7 @@ static BOOL NativeSdkScrollDriverTakesHorizontal(NativeSdkScrollDriverView *driv
 // region owns the axis. Elastic-take deliberately never outranks a
 // consumer: an elastic inner list that saturates while its parent still
 // has range hands the axis over instead of bouncing forever.
-- (void)resolveWheelOwnersAtPoint:(NSPoint)viewPoint
+- (void)resolveWheelOwnersInChain:(NSArray *)chain
                          canvasDx:(double)canvasDx
                          canvasDy:(double)canvasDy
                            ownerX:(NativeSdkScrollDriverView **)ownerX
@@ -6540,8 +6617,7 @@ static BOOL NativeSdkScrollDriverTakesHorizontal(NativeSdkScrollDriverView *driv
     NativeSdkScrollDriverView *fallbackX = nil;
     NativeSdkScrollDriverView *consumerY = nil;
     NativeSdkScrollDriverView *fallbackY = nil;
-    for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
-        if (!NSPointInRect(viewPoint, driver.frame)) continue;
+    for (NativeSdkScrollDriverView *driver in chain) {
         if (canvasDx != 0 && driver.grantsX) {
             if (NativeSdkScrollDriverCanConsumeHorizontally(driver, canvasDx)) consumerX = driver;
             if (!fallbackX) fallbackX = driver;

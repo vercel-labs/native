@@ -106,6 +106,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
 
                 drivers[count] = .{
                     .id = node.widget.id,
+                    .parent_id = nearestAncestorDriverId(view, node_index),
                     .frame = frame,
                     .content_size = .{ .width = content_width, .height = content_height },
                     .offset_x = offset.dx,
@@ -185,6 +186,17 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
     // window mounts. Legacy virtualized containers stay model-driven.
     if (node.widget.layout.virtualized) return canvas.widgetVirtualRuntimeScrolled(node.widget);
     return true;
+}
+
+/// The widget id of the nearest ancestor node that is itself
+/// driver-eligible, or 0 at the top of the scrollable chain.
+fn nearestAncestorDriverId(view: anytype, node_index: usize) u64 {
+    var current = view.widget_layout_nodes[node_index].parent_index;
+    while (current) |index| {
+        if (canvasWidgetScrollDriverEligible(view.widget_layout_nodes[index])) return view.widget_layout_nodes[index].widget.id;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return 0;
 }
 
 fn trackedScrollDriverOffset(view: anytype, driver_id: u64) ?geometry.OffsetF {

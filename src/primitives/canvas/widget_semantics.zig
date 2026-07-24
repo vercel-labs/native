@@ -510,6 +510,16 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
+        // A subtree anchored DIRECTLY to the scroll region stays
+        // stationary under scrolling (its anchor base never moves), so
+        // `frame + offset` is not a content-space position for it —
+        // counting it would inflate the range on every scroll. Deeper
+        // anchored subtrees ride their in-content anchors and keep
+        // their historical contribution.
+        if (node.widget.layout.anchor != null and node.parent_index == scroll_index) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
         bottom = @max(bottom, node.frame.maxY() + offset);
         // A disclosure widget's own frame is authoritative for how far
         // its content currently reaches: concealed content lays out at

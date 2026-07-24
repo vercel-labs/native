@@ -249,9 +249,19 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
             const scope = parent.frame.normalized();
             const outside_x = frame.maxX() <= scope.x or frame.x >= scope.maxX();
             const outside_y = frame.maxY() <= scope.y or frame.y >= scope.maxY();
+            const parent_scrolls_horizontally = scopeScrollsHorizontally(parent.widget);
             const vertical_scroll_scope = scrolls_vertically or scopeScrollsVertically(parent.widget);
-            const horizontal_scroll_scope = scrolls_horizontally or scopeScrollsHorizontally(parent.widget);
-            const unreachable_here = (outside_x and !horizontal_scroll_scope) or (outside_y and !vertical_scroll_scope);
+            const horizontal_scroll_scope = scrolls_horizontally or parent_scrolls_horizontally;
+            // A horizontal scroll forgives only what scrolling can
+            // REVEAL. Offsets clamp at zero, so content wholly BEFORE
+            // the origin in content space (layout x plus the region's
+            // own offset, checkable exactly at the immediate scope) is
+            // stranded on the leading side forever.
+            const stranded_leading_x = parent_scrolls_horizontally and !scrolls_horizontally and
+                frame.maxX() + parent.widget.value_x <= scope.x;
+            const unreachable_here = (outside_x and !horizontal_scroll_scope) or
+                (outside_y and !vertical_scroll_scope) or
+                stranded_leading_x;
             if (unreachable_here) {
                 sink.append(.{ .rule = .focus_unreachable, .node_index = node_index, .other_index = parent_index });
                 return;

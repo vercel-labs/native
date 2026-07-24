@@ -453,6 +453,12 @@ fn auditNodeContainerEscape(
     if (horizontal_checked) {
         overrun_x = @max(overrun_x, overrunPast(frame.maxX(), scope.maxX()));
         overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x));
+    } else if (scope_index) |index| {
+        // A horizontal scroll scope forgives trailing overhang (the
+        // scroll reveals it) but not content stranded BEFORE the
+        // origin: offsets clamp at zero, so anything the region's own
+        // offset cannot explain on the leading side is damage.
+        overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x + layout.nodes[index].widget.value_x));
     }
     var overrun_y: f32 = 0;
     if (vertical_checked) {

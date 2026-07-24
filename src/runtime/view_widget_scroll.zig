@@ -436,14 +436,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.layout.virtualized) {
                 return @max(viewport.height, canvas.virtualWidgetScrollContentExtentWithTokens(self.widget_layout_nodes[scroll_index].widget, viewport.height, self.widget_tokens));
             }
-            const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
-            const offset = self.widget_layout_nodes[scroll_index].widget.value;
-            var bottom = viewport.maxY();
-            var index = scroll_index + 1;
-            while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > scroll_depth) : (index += 1) {
-                bottom = @max(bottom, self.widget_layout_nodes[index].frame.maxY() + offset);
-            }
-            return @max(0, bottom - viewport.y);
+            return canvas_widget_runtime.canvasWidgetLayoutScrollContentExtent(
+                self.widget_layout_nodes[0..self.widget_layout_node_count],
+                scroll_index,
+                viewport,
+            );
         }
 
         /// The horizontal content extent: how far the region's mounted

@@ -763,20 +763,25 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     };
 }
 
-/// Assistive scroll steps page EVERY axis the region grants: vertical
-/// regions page vertically exactly as before, a horizontal-only region
-/// pages its one axis (width-derived step), and a `both` region carries
-/// a page step on each axis — the per-axis clamp then moves only the
-/// axes with scrollable range, so a `both` viewport whose content only
-/// overflows sideways still answers increment/decrement.
+/// Assistive scroll steps page ONE axis — the region's primary:
+/// vertical wherever the vertical axis is granted (every pre-axis
+/// region, and `both` regions, whose exposed scroll semantics are
+/// vertical-primary), the horizontal axis only on horizontal-only
+/// regions (width-derived step). A diagonal step would move the
+/// viewport on an axis the assistive node never exposed. The runtime's
+/// accessibility-action path refines the `both` case further with live
+/// extents (`canvasWidgetStepKey` picks the horizontal keys when only
+/// that axis has range); this widget-level derivation has no extents
+/// and keeps the declared primary.
 fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) geometry.OffsetF {
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
     const sign: f32 = if (direction == .increment) 1 else -1;
-    const horizontal = widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes.scrollsHorizontally();
-    const vertical = !horizontal or widget.scroll_axes.scrollsVertically();
-    const page_step_x: f32 = if (horizontal) @max(@max(24, viewport.width * 0.35), viewport.width * 0.85) else 0;
-    const page_step_y: f32 = if (vertical) @max(@max(24, viewport.height * 0.35), viewport.height * 0.85) else 0;
-    return geometry.OffsetF.init(sign * page_step_x, sign * page_step_y);
+    if (widgetScrollKeymapHorizontalOnly(widget)) {
+        const page_step_x = @max(@max(24, viewport.width * 0.35), viewport.width * 0.85);
+        return geometry.OffsetF.init(sign * page_step_x, 0);
+    }
+    const page_step_y = @max(@max(24, viewport.height * 0.35), viewport.height * 0.85);
+    return geometry.OffsetF.init(0, sign * page_step_y);
 }
 
 pub fn semanticActions(widget: Widget) WidgetActions {

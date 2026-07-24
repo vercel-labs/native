@@ -1034,8 +1034,20 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
     const offset = scroll_node.widget.value;
     var bottom = viewport.maxY();
     var index = scroll_index + 1;
-    while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        // A subtree anchored DIRECTLY to the scroll region stays
+        // stationary while content scrolls (its anchor base never
+        // moves), so `frame + offset` is not a content-space position
+        // for it — counting it would grow the scroll range on every
+        // scroll, an unbounded feedback loop into blank space. Deeper
+        // anchored subtrees translate with their in-content anchors and
+        // keep their historical (constant) contribution.
+        if (nodes[index].widget.layout.anchor != null and nodes[index].parent_index == scroll_index) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         bottom = @max(bottom, nodes[index].frame.maxY() + offset);
+        index += 1;
     }
     return @max(0, bottom - viewport.y);
 }

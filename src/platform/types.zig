@@ -1860,6 +1860,13 @@ pub const GpuSurfaceScrollDriver = struct {
     /// frame and content size, and armed per axis through the grants
     /// below.
     rubber_band: bool = false,
+    /// The nearest ANCESTOR driver's id (0 = none): the widget-tree
+    /// containment chain, pushed so the host can restrict wheel-owner
+    /// resolution to the hit region and its ancestors — geometric
+    /// overlap alone would let an unrelated background region behind a
+    /// floating surface steal an axis the engine's route would never
+    /// give it.
+    parent_id: u64 = 0,
     /// Which axes the region GRANTS (`canvas.widgetScrollsAxis`): the
     /// host arms elasticity and scroller chrome only on granted axes.
     /// Distinct from having range right now — a granted axis with short

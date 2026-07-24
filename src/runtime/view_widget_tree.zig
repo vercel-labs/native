@@ -1079,17 +1079,25 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         /// Whether a BOTH-axes scroll region's assistive step must take
         /// the horizontal keys: the vertical axis has no range while
-        /// the horizontal one does (the same live-axis rule its scroll
-        /// semantics report through). Vertical-capable regions with
-        /// vertical range — and horizontal-only regions, whose keymap
-        /// already maps the page keys sideways — keep the page keys.
+        /// the horizontal one does. The extents come from the SEMANTICS
+        /// metrics — the same derivation the assistive node reports its
+        /// primary axis through, concealed-disclosure and anchored
+        /// exclusions included — so the key an increment synthesizes
+        /// can never disagree with the axis the node advertised.
+        /// Vertical-capable regions with vertical range — and
+        /// horizontal-only regions, whose keymap already maps the page
+        /// keys sideways — keep the page keys.
         fn canvasWidgetStepAxisHorizontal(self: *const RuntimeView, index: usize) bool {
             const node = self.widget_layout_nodes[index];
             if (node.widget.kind != .scroll_view or node.widget.scroll_axes != .both) return false;
             const viewport = node.frame.inset(node.widget.layout.padding).normalized();
             if (viewport.isEmpty()) return false;
-            const state = self.canvasWidgetScrollState(index, node, viewport);
-            return state.axis(.vertical).maxOffset() <= 0 and state.axis(.horizontal).maxOffset() > 0;
+            const layout = self.widgetLayoutTree();
+            const vertical = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .vertical, viewport);
+            const horizontal = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .horizontal, viewport);
+            const vertical_range = vertical.present and vertical.content_extent > vertical.viewport_extent;
+            const horizontal_range = horizontal.present and horizontal.content_extent > horizontal.viewport_extent;
+            return !vertical_range and horizontal_range;
         }
 
         pub fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {

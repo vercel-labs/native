@@ -734,6 +734,7 @@ pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
 pub const widgetVirtualRuntimeScrolled = @import("widget_tree.zig").widgetVirtualRuntimeScrolled;
 pub const widgetScrollPhysics = @import("widget_tree.zig").widgetScrollPhysics;
 pub const widgetScrollsAxis = @import("widget_tree.zig").widgetScrollsAxis;
+pub const widgetScrollAxisMetrics = @import("widget_semantics.zig").widgetScrollAxisMetrics;
 pub const isWidgetHiddenInAncestors = @import("widget_tree.zig").isWidgetHiddenInAncestors;
 /// The disclosure family (widget_tree.zig): collapsible widgets whose
 /// content lays out at full size and REVEALS, plus the settled/concealed

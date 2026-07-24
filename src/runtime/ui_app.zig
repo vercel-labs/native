@@ -1005,9 +1005,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// axis the reach was measured on: a region whose primary axis
         /// changes — content growing sideways after a vertical fire —
         /// must not have the stale axis's latch suppress the fresh one).
-        reach_end_fired: [canvas.max_virtual_windows]ReachLatch = [_]ReachLatch{.{}} ** canvas.max_virtual_windows,
+        reach_end_fired: [max_reach_latches]ReachLatch = [_]ReachLatch{.{}} ** max_reach_latches,
         /// The approach-START mirror (`on_reach_start` hysteresis).
-        reach_start_fired: [canvas.max_virtual_windows]ReachLatch = [_]ReachLatch{.{}} ** canvas.max_virtual_windows,
+        reach_start_fired: [max_reach_latches]ReachLatch = [_]ReachLatch{.{}} ** max_reach_latches,
         /// Retained offset tables for VARIABLE-extent virtual lists,
         /// claimed per list identity during builds (`Ui.virtualWindow`
         /// through the extent source) and patched by the post-layout
@@ -2161,7 +2161,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         /// One (id, axis) hysteresis latch: the axis rides along so a
-        /// region whose primary axis changes re-arms honestly.
+        /// region whose primary axis changes re-arms honestly. Two
+        /// slots per declarable window — the (id, axis) key space is
+        /// twice the id space.
+        const max_reach_latches = canvas.max_virtual_windows * 2;
+
         const ReachLatch = struct {
             id: canvas.ObjectId = 0,
             axis: canvas.ScrollAxis = .vertical,
@@ -2204,8 +2208,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (remaining > axis_state.viewport_extent * reach_end_fire_ratio) return false;
             if (self.reachEndFired(id, reach.axis)) return false;
-            self.markReachEndFired(id, reach.axis);
-            return true;
+            // Fire only when the latch STORES: an unstorable latch
+            // (table full — a degenerate tree) would otherwise fire on
+            // every observation, the exact storm the hysteresis exists
+            // to prevent. Silence is the safer failure.
+            return self.markReachEndFired(id, reach.axis);
         }
 
         fn reachEndFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
@@ -2215,13 +2222,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return false;
         }
 
-        fn markReachEndFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
+        fn markReachEndFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
             for (&self.reach_end_fired) |*slot| {
                 if (slot.id == 0 or (slot.id == id and slot.axis == axis)) {
                     slot.* = .{ .id = id, .axis = axis };
-                    return;
+                    return true;
                 }
             }
+            return false;
         }
 
         fn clearReachEndFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
@@ -2251,8 +2259,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             if (remaining > axis_state.viewport_extent * reach_start_fire_ratio) return false;
             if (self.reachStartFired(id, reach.axis)) return false;
-            self.markReachStartFired(id, reach.axis);
-            return true;
+            // Fire only when the latch stores (the reach-end rule).
+            return self.markReachStartFired(id, reach.axis);
         }
 
         fn reachStartFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
@@ -2262,13 +2270,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return false;
         }
 
-        fn markReachStartFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
+        fn markReachStartFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
             for (&self.reach_start_fired) |*slot| {
                 if (slot.id == 0 or (slot.id == id and slot.axis == axis)) {
                     slot.* = .{ .id = id, .axis = axis };
-                    return;
+                    return true;
                 }
             }
+            return false;
         }
 
         fn clearReachStartFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
