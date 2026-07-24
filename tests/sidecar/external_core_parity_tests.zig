@@ -19,6 +19,12 @@
 //! side: a collect between dispatches leaves the observable snapshot
 //! byte-identical.
 //!
+//! The channel entries ride the bytes envelope ([produced u8][tag u8]
+//! [payload…]): the second test drives both lanes' channel functions
+//! over gating and producing events — the archive's entries return the
+//! envelope, the generated mirror unpacks it — and every produced
+//! message dispatches through both lanes as a full cycle.
+//!
 //! The conformance suite (conformance_tests.zig) proves the two lanes'
 //! REFLECTION surfaces identical with no compiled core present; this
 //! suite is the executable half, and only builds when a caller
@@ -158,4 +164,91 @@ test "a compiled core archive matches the transpiler lane byte-for-byte over the
     try testing.expectEqualSlices(u8, try referenceSnapshot(ts_model, arena), rawSnapshot());
     ts_core.rt.frameReset();
     shim_core.rt.frameReset();
+}
+
+/// One dispatch cycle in both lanes over one channel-produced message:
+/// the two lanes' messages must be one value (compared by canonical
+/// bytes in the mirror's layout), and the cycle's command and snapshot
+/// bytes must match — a channel Msg round-trips through the matching
+/// dispatch entry byte-identically.
+fn channelParityCycle(
+    arena: std.mem.Allocator,
+    ts_model: *const ts_core.Model,
+    shim_model: *const shim_core.Model,
+    ts_msg: ts_core.Msg,
+    shim_msg: shim_core.Msg,
+) !struct { ts: *const ts_core.Model, shim: *const shim_core.Model } {
+    const converted = try convertValue(shim_core.Msg, ts_msg, arena);
+    try testing.expectEqualSlices(
+        u8,
+        corewire_rt.encodeAlloc(shim_core.Msg, converted, arena),
+        corewire_rt.encodeAlloc(shim_core.Msg, shim_msg, arena),
+    );
+    const ts_out = ts_core.update(ts_model, ts_msg);
+    const next_ts = ts_core.commitModelRoot(ts_out.model);
+    const shim_out = shim_core.update(shim_model, shim_msg);
+    const next_shim = shim_core.commitModelRoot(shim_out.model);
+    try testing.expectEqualSlices(u8, ts_out.cmd, shim_out.cmd);
+    try testing.expectEqualSlices(u8, try referenceSnapshot(next_ts, arena), rawSnapshot());
+    ts_core.rt.frameReset();
+    shim_core.rt.frameReset();
+    return .{ .ts = next_ts, .shim = next_shim };
+}
+
+test "channel entries match the transpiler lane through the bytes envelope" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A fresh boot in both lanes (init is the deterministic re-init
+    // seam, so this test stands alone).
+    ts_core.rt.resetAll();
+    shim_core.rt.resetAll();
+    var ts_model = ts_core.commitModelRoot(ts_core.initialModel());
+    var shim_model = shim_core.commitModelRoot(shim_core.initialModel());
+    ts_core.rt.frameReset();
+    shim_core.rt.frameReset();
+
+    // Gating parity: a chorded key, an unchanged frame, and a begin
+    // pinch produce nothing in either lane (the archive's entry returns
+    // the two-byte nothing-produced envelope).
+    try testing.expect(ts_core.keyMsg(.{ .key = "space", .shift = false, .control = true, .alt = false, .super = false }) == null);
+    try testing.expect(shim_core.keyMsg(.{ .key = "space", .shift = false, .control = true, .alt = false, .super = false }) == null);
+    try testing.expect(ts_core.frameMsg(ts_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16 }) == null);
+    try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16 }) == null);
+    try testing.expect(ts_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .begin, .scale = 0, .x = 1, .y = 2 }) == null);
+    try testing.expect(shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .begin, .scale = 0, .x = 1, .y = 2 }) == null);
+
+    // The presented-frame channel produces the resize at boot width,
+    // and the dispatched cycle updates the model so the same frame then
+    // gates (the idle law, proven across the round trip).
+    {
+        const ts_msg = ts_core.frameMsg(ts_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16 }) orelse return error.TestUnexpectedResult;
+        const shim_msg = shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16 }) orelse return error.TestUnexpectedResult;
+        const next = try channelParityCycle(arena, ts_model, shim_model, ts_msg, shim_msg);
+        ts_model = next.ts;
+        shim_model = next.shim;
+        try testing.expect(ts_core.frameMsg(ts_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16 }) == null);
+        try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16 }) == null);
+    }
+
+    // The key-fallback channel: a bare arm rides the header-only
+    // envelope.
+    {
+        const ts_msg = ts_core.keyMsg(.{ .key = "space", .shift = false, .control = false, .alt = false, .super = false }) orelse return error.TestUnexpectedResult;
+        const shim_msg = shim_core.keyMsg(.{ .key = "space", .shift = false, .control = false, .alt = false, .super = false }) orelse return error.TestUnexpectedResult;
+        const next = try channelParityCycle(arena, ts_model, shim_model, ts_msg, shim_msg);
+        ts_model = next.ts;
+        shim_model = next.shim;
+    }
+
+    // The pinch channel: a flattened record payload (factor, source
+    // identity) crosses the envelope and dispatches.
+    {
+        const ts_msg = ts_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .change, .scale = 0.25, .x = 1, .y = 2 }) orelse return error.TestUnexpectedResult;
+        const shim_msg = shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .change, .scale = 0.25, .x = 1, .y = 2 }) orelse return error.TestUnexpectedResult;
+        const next = try channelParityCycle(arena, ts_model, shim_model, ts_msg, shim_msg);
+        ts_model = next.ts;
+        shim_model = next.shim;
+    }
 }
