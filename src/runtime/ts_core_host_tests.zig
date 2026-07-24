@@ -1768,13 +1768,21 @@ test "audio_play decodes whole and events route the six-field arm by name" {
     try std.testing.expectEqual(@as(usize, 32), Host.model().bands.len);
     try std.testing.expectEqualSlices(u8, full[0..32], Host.model().bands);
 
+    // Audio scalars clamp into the exact-integer delivery window at the
+    // feed boundary (the video clamp's twin): whatever a host reports,
+    // integer-classed Msg fields and the mirrors only ever see values
+    // below 2^53.
+    try fx.feedAudioEvent(.position, std.math.maxInt(u64), 183_000, true);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(f64, 9007199254740991), Host.model().position_ms);
+
     // completed does NOT close the stream (apps start the next track
     // from it); the entry keeps routing.
     try fx.feedAudioEvent(.completed, 183_000, 183_000, false);
     Host.drain(fx);
     try std.testing.expectEqual(mini_core.AudioState.completed, Host.model().audio_state);
     try std.testing.expect(!Host.model().playing);
-    try std.testing.expectEqual(@as(i64, 5), Host.model().audio_events);
+    try std.testing.expectEqual(@as(i64, 6), Host.model().audio_events);
 }
 
 test "audio_ctl verbs drive the engine channel, gated by the wire key" {

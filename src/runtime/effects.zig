@@ -7806,8 +7806,8 @@ pub fn Effects(comptime Msg: type) type {
             const event = self.applyAudioEvent(.{
                 .key = 0,
                 .kind = kind,
-                .position_ms = platform_event.position_ms,
-                .duration_ms = platform_event.duration_ms,
+                .position_ms = clampAudioScalar(platform_event.position_ms),
+                .duration_ms = clampAudioScalar(platform_event.duration_ms),
                 .playing = platform_event.playing,
                 .buffering = platform_event.buffering,
                 .bands = platform_event.bands,
@@ -7875,8 +7875,8 @@ pub fn Effects(comptime Msg: type) type {
                 .event = .{
                     .key = self.audio.key,
                     .kind = kind,
-                    .position_ms = position_ms,
-                    .duration_ms = duration_ms,
+                    .position_ms = clampAudioScalar(position_ms),
+                    .duration_ms = clampAudioScalar(duration_ms),
                     .playing = playing,
                     .buffering = buffering,
                 },
@@ -7896,8 +7896,8 @@ pub fn Effects(comptime Msg: type) type {
                 .event = .{
                     .key = self.audio.key,
                     .kind = .spectrum,
-                    .position_ms = position_ms,
-                    .duration_ms = duration_ms,
+                    .position_ms = clampAudioScalar(position_ms),
+                    .duration_ms = clampAudioScalar(duration_ms),
                     .playing = true,
                     .bands = bands,
                 },
@@ -11217,6 +11217,16 @@ pub fn Effects(comptime Msg: type) type {
         /// One video scalar into the exact-integer delivery window
         /// (see `max_effect_video_scalar_exclusive`).
         fn clampVideoScalar(value: u64) u64 {
+            return @min(value, max_effect_video_scalar_exclusive - 1);
+        }
+
+        /// Audio's twin of the video scalar clamp: positions and
+        /// durations clamp into the same exact-integer delivery window
+        /// at every entry (live platform events and the fed
+        /// fake/replay path alike), whatever a host reports — so the
+        /// mirrors, the journal, and integer-classed Msg fields only
+        /// ever see values below 2^53.
+        fn clampAudioScalar(value: u64) u64 {
             return @min(value, max_effect_video_scalar_exclusive - 1);
         }
 

@@ -65,6 +65,17 @@ fn referenceSnapshot(model: *const ts_core.Model, arena: std.mem.Allocator) ![]c
     return corewire_rt.encodeAlloc(shim_core.Model, converted, arena);
 }
 
+/// The selection sample follows the supplied sidecar's classes: a
+/// signed focus keeps the negative-value coverage, an unsigned one
+/// exercises a backward selection (anchor past focus) instead.
+const selection_sample = blk: {
+    const Selection = @FieldType(@FieldType(shim_core.Msg, "draft_edit"), "set_selection");
+    if (carriesNegatives(@FieldType(Selection, "focus"))) {
+        break :blk Selection{ .anchor = 1, .focus = -2 };
+    }
+    break :blk Selection{ .anchor = 3, .focus = 1 };
+};
+
 /// The scripted sequence: every dispatch entry class the fixture's
 /// contract declares — bare arms, i64- and f64-classed numbers, bytes,
 /// the text-input union (each payload family), and the three record
@@ -81,7 +92,7 @@ const script = [_]shim_core.Msg{
     .{ .draft_edit = .{ .insert_text = "hi" } },
     .{ .draft_edit = .delete_backward },
     .{ .draft_edit = .{ .move_caret = .{ .direction = .next_word, .extend = true } } },
-    .{ .draft_edit = .{ .set_selection = .{ .anchor = 1, .focus = -2 } } },
+    .{ .draft_edit = .{ .set_selection = selection_sample } },
     .{ .draft_edit = .{ .set_composition = .{ .text = "ab", .cursor = 1 } } },
     .{ .draft_edit = .{ .set_composition = .{ .text = "", .cursor = null } } },
     .{ .draft_edit = .clear },
