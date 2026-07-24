@@ -12,7 +12,10 @@
 //! tell the two lanes apart:
 //!
 //! - bytes spell `[]const u8`; numbers spell `f64` or `i64` per the
-//!   sidecar's per-slot class; enums are `enum(u8)` with explicit
+//!   sidecar's per-slot class — `u64` where the slot's integer_slots
+//!   attestation refines the i64 spelling to the unsigned class, so the
+//!   decoder reads the slot's 8 wire bytes unsigned; every non-attested
+//!   numeric slot stays f64. Enums are `enum(u8)` with explicit
 //!   declaration-order values; node references spell `*const T`.
 //! - The message union is `union(enum)` in sidecar arm order — the arm
 //!   index IS the wire tag.
@@ -464,6 +467,57 @@ const Emitter = struct {
         });
     }
 
+    // ------------------------------------------- attested integer class
+    //
+    // The sidecar's one integer TypeRef spelling is i64; the matching
+    // integer_slots entry may refine it to the u64 class, and the
+    // mirror must decode what the attestation says (8-byte unsigned LE
+    // instead of two's complement). The reader validates the bijection
+    // before emission ever runs, so a lookup miss here simply means the
+    // slot keeps its i64 spelling.
+
+    fn attestedClass(self: *Emitter, slot: []const u8) ?sidecar_mod.IntegerClass {
+        for (self.sidecar.integer_slots) |entry| {
+            if (std.mem.eql(u8, entry.slot, slot)) return entry.class;
+        }
+        return null;
+    }
+
+    /// The Zig spelling of an i64-spelled slot, per its attestation.
+    fn integerSpelling(self: *Emitter, slot: ?[]const u8) []const u8 {
+        const path = slot orelse return "i64";
+        const class = self.attestedClass(path) orelse return "i64";
+        return @tagName(class);
+    }
+
+    /// The exact-crossing conversion for an integer-classed dispatch
+    /// payload (the scalar entries carry f64): the signed guard or its
+    /// unsigned twin, per the slot's attested class.
+    fn exactCall(self: *Emitter, slot: []const u8, inner: []const u8) Error![]const u8 {
+        const converter = if (self.attestedClass(slot) == .u64) "exactF64Unsigned" else "exactF64";
+        return std.fmt.allocPrint(self.arena, "shim_rt.{s}({s})", .{ converter, inner });
+    }
+
+    /// A slot path in the sidecar's grammar: `<Container>.<member>`.
+    fn slotPath(self: *Emitter, container: []const u8, member: []const u8) Error![]const u8 {
+        return std.fmt.allocPrint(self.arena, "{s}.{s}", .{ container, member });
+    }
+
+    /// A number_bytes arm's number-field slot path:
+    /// `<msgName>.<arm>.<field>`.
+    fn numberBytesSlot(self: *Emitter, arm: []const u8, field: []const u8) Error![]const u8 {
+        return std.fmt.allocPrint(self.arena, "{s}.{s}.{s}", .{ self.sidecar.msg.name, arm, field });
+    }
+
+    /// The Zig spelling of a number descriptor's payload, per class and
+    /// attestation.
+    fn numberSpelling(self: *Emitter, class: sidecar_mod.NumberClass, slot: []const u8) Error![]const u8 {
+        return switch (class) {
+            .f64 => "f64",
+            .i64 => self.integerSpelling(slot),
+        };
+    }
+
     // --------------------------------------------------- mirror types
 
     /// Inline a table entry only when the pattern matches AND the entry
@@ -491,7 +545,7 @@ const Emitter = struct {
             if (nameListed(inlined, entry.name)) continue;
             try self.print("\npub const {f} = struct {{", .{ident(entry.name)});
             for (entry.fields) |field| {
-                try self.print("\n    {f}: {s},", .{ ident(field.name), try self.spellRef(field.type, entry.name, field.name) });
+                try self.print("\n    {f}: {s},", .{ ident(field.name), try self.spellRef(field.type, entry.name, field.name, try self.slotPath(entry.name, field.name)) });
             }
             try self.raw("\n};\n");
         }
@@ -502,7 +556,7 @@ const Emitter = struct {
                 if (arm.payload == .void) {
                     try self.print("\n    {f},", .{ident(arm.name)});
                 } else {
-                    try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellRef(arm.payload, entry.name, arm.name) });
+                    try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellRef(arm.payload, entry.name, arm.name, try self.slotPath(entry.name, arm.name)) });
                 }
             }
             try self.raw("\n};\n");
@@ -510,16 +564,20 @@ const Emitter = struct {
     }
 
     /// The one TypeRef-to-Zig-spelling authority. `container`/`member`
-    /// name the reference site so synthesized entries inline here.
-    fn spellRef(self: *Emitter, ref: TypeRef, container: []const u8, member: []const u8) Error![]const u8 {
+    /// name the reference site so synthesized entries inline here;
+    /// `slot` is the site's slot path in the sidecar's grammar (null
+    /// where no path form exists), consulted for the attested integer
+    /// class. Slice elements have no slot path — the format-1 grammar
+    /// cannot attest them, so they always keep the i64 spelling.
+    fn spellRef(self: *Emitter, ref: TypeRef, container: []const u8, member: []const u8, slot: ?[]const u8) Error![]const u8 {
         return switch (ref) {
             .bool => "bool",
             .f64 => "f64",
-            .i64 => "i64",
+            .i64 => self.integerSpelling(slot),
             .bytes => "[]const u8",
             .void => "void",
-            .optional => |inner| try std.fmt.allocPrint(self.arena, "?{s}", .{try self.spellRef(inner.*, container, member)}),
-            .slice => |elem| try std.fmt.allocPrint(self.arena, "[]const {s}", .{try self.spellRef(elem.*, container, member)}),
+            .optional => |inner| try std.fmt.allocPrint(self.arena, "?{s}", .{try self.spellRef(inner.*, container, member, slot)}),
+            .slice => |elem| try std.fmt.allocPrint(self.arena, "[]const {s}", .{try self.spellRef(elem.*, container, member, null)}),
             .node => |name| try std.fmt.allocPrint(self.arena, "*const {s}", .{try self.spellNamed(name, container, member)}),
             .value => |name| try self.spellNamed(name, container, member),
             .enum_ref, .union_ref => |name| try std.fmt.allocPrint(self.arena, "{f}", .{ident(name)}),
@@ -536,7 +594,7 @@ const Emitter = struct {
         try text.appendSlice(self.arena, "struct {");
         for (entry.fields, 0..) |field, index| {
             if (index > 0) try text.appendSlice(self.arena, ",");
-            const piece = try std.fmt.allocPrint(self.arena, " {f}: {s}", .{ ident(field.name), try self.spellRef(field.type, entry.name, field.name) });
+            const piece = try std.fmt.allocPrint(self.arena, " {f}: {s}", .{ ident(field.name), try self.spellRef(field.type, entry.name, field.name, try self.slotPath(entry.name, field.name)) });
             try text.appendSlice(self.arena, piece);
         }
         try text.appendSlice(self.arena, " }");
@@ -552,11 +610,11 @@ const Emitter = struct {
         };
         try self.print("\npub const {f} = struct {{", .{ident(model.name)});
         for (model.fields) |field| {
-            try self.print("\n    {f}: {s},", .{ ident(field.name), try self.spellRef(field.type, model.name, field.name) });
+            try self.print("\n    {f}: {s},", .{ ident(field.name), try self.spellRef(field.type, model.name, field.name, try self.slotPath(model.name, field.name)) });
         }
         if (self.sidecar.model_helpers.len > 0) try self.raw("\n");
         for (self.sidecar.model_helpers, 0..) |helper, index| {
-            const returns = try self.spellRef(helper.returns, "helpers", helper.name);
+            const returns = try self.spellRef(helper.returns, "helpers", helper.name, try std.fmt.allocPrint(self.arena, "helpers.{s}.return", .{helper.name}));
             if (helper.arena) {
                 // The build-arena scalar form: the view build hands its
                 // arena; the decoded result lives there.
@@ -575,7 +633,7 @@ const Emitter = struct {
                 var params: std.ArrayListUnmanaged(u8) = .empty;
                 var tuple: std.ArrayListUnmanaged(u8) = .empty;
                 for (helper.params, 0..) |param, param_index| {
-                    const spelled = try self.spellRef(param, "helpers", helper.name);
+                    const spelled = try self.spellRef(param, "helpers", helper.name, try std.fmt.allocPrint(self.arena, "helpers.{s}.params[{d}]", .{ helper.name, param_index }));
                     try params.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", p{d}: {s}", .{ param_index, spelled }));
                     if (param_index > 0) try tuple.appendSlice(self.arena, ", ");
                     try tuple.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "p{d}", .{param_index}));
@@ -605,17 +663,17 @@ const Emitter = struct {
             switch (arm.payload) {
                 .void => try self.print("\n    {f},", .{ident(arm.name)}),
                 .bytes => try self.print("\n    {f}: []const u8,", .{ident(arm.name)}),
-                .number => |class| try self.print("\n    {f}: {s},", .{ ident(arm.name), @tagName(class) }),
+                .number => |class| try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.numberSpelling(class, try self.slotPath(self.sidecar.msg.name, arm.name)) }),
                 // The two-field family carries no field-order fact; the
                 // mirror declares the number field first, the emitted
                 // convention of every producer of this shape. A record
                 // declared bytes-first must ride the record family (its
                 // table entry carries order explicitly) — see
                 // SCHEMA-GAPS.md.
-                .number_bytes => |desc| try self.print("\n    {f}: struct {{ {f}: {s}, {f}: []const u8 }},", .{ ident(arm.name), ident(desc.number_field), @tagName(desc.number_class), ident(desc.bytes_field) }),
+                .number_bytes => |desc| try self.print("\n    {f}: struct {{ {f}: {s}, {f}: []const u8 }},", .{ ident(arm.name), ident(desc.number_field), try self.numberSpelling(desc.number_class, try self.numberBytesSlot(arm.name, desc.number_field)), ident(desc.bytes_field) }),
                 .record => |name| try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellNamed(name, self.sidecar.msg.name, arm.name) }),
                 .union_ref, .enum_ref => |name| try self.print("\n    {f}: {f},", .{ ident(arm.name), ident(name) }),
-                .scalar => |ref| try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellRef(ref, self.sidecar.msg.name, arm.name) }),
+                .scalar => |ref| try self.print("\n    {f}: {s},", .{ ident(arm.name), try self.spellRef(ref, self.sidecar.msg.name, arm.name, try self.slotPath(self.sidecar.msg.name, arm.name)) }),
             }
         }
         try self.unboundDecl(self.sidecar.msg.unbound);
@@ -798,12 +856,12 @@ const Emitter = struct {
             .bytes => try self.print("        .{s} => |payload| abi.dispatch_bytes({d}, payload.ptr, payload.len, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
             .number => |class| switch (class) {
                 .f64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, payload, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
-                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, shim_rt.exactF64(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
+                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, {s}, &cmd_ptr, &cmd_len),\n", .{ name, tag, try self.exactCall(try self.slotPath(self.sidecar.msg.name, arm.name), "payload") }),
             },
             .number_bytes => |desc| {
                 const number_expr = switch (desc.number_class) {
                     .f64 => try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(desc.number_field)}),
-                    .i64 => try std.fmt.allocPrint(self.arena, "shim_rt.exactF64(payload.{f})", .{ident(desc.number_field)}),
+                    .i64 => try self.exactCall(try self.numberBytesSlot(arm.name, desc.number_field), try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(desc.number_field)})),
                 };
                 try self.print("        .{s} => |payload| abi.dispatch_number_bytes({d}, {s}, payload.{f}.ptr, payload.{f}.len, &cmd_ptr, &cmd_len),\n", .{ name, tag, number_expr, ident(desc.bytes_field), ident(desc.bytes_field) });
             },
@@ -822,7 +880,7 @@ const Emitter = struct {
                         if (index > 0) try scalars.appendSlice(self.arena, ", ");
                         const record = sidecar_mod.findStruct(self.sidecar.types, type_name).?;
                         const expr = switch (record.fields[field].type) {
-                            .i64 => try std.fmt.allocPrint(self.arena, "shim_rt.exactF64(payload.{f})", .{ident(record.fields[field].name)}),
+                            .i64 => try self.exactCall(try self.slotPath(type_name, record.fields[field].name), try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(record.fields[field].name)})),
                             else => try std.fmt.allocPrint(self.arena, "payload.{f}", .{ident(record.fields[field].name)}),
                         };
                         try scalars.appendSlice(self.arena, expr);
@@ -835,7 +893,7 @@ const Emitter = struct {
             .scalar => |ref| switch (ref) {
                 .bool => try self.print("        .{s} => |payload| abi.dispatch_bool({d}, @intFromBool(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
                 .f64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, payload, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
-                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, shim_rt.exactF64(payload), &cmd_ptr, &cmd_len),\n", .{ name, tag }),
+                .i64 => try self.print("        .{s} => |payload| abi.dispatch_number({d}, {s}, &cmd_ptr, &cmd_len),\n", .{ name, tag, try self.exactCall(try self.slotPath(self.sidecar.msg.name, arm.name), "payload") }),
                 .bytes => try self.print("        .{s} => |payload| abi.dispatch_bytes({d}, payload.ptr, payload.len, &cmd_ptr, &cmd_len),\n", .{ name, tag }),
                 else => self.diags.flag("msg.arms", "arm \"{s}\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)", .{arm.name}),
             },
@@ -1387,6 +1445,87 @@ test "emission is deterministic and carries the mirror surface" {
     // A bare-model init emits the pointer-returning shape.
     try testing.expect(std.mem.indexOf(u8, first, "pub fn initialModel() *const Model {") != null);
     try testing.expect(std.mem.indexOf(u8, first, "pub const UpdateResult = struct { model: *const Model, cmd: rt.Cmd };") != null);
+}
+
+test "u64-attested slots generate the unsigned twin; i64 and f64 slots are untouched" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Every slot-path form the grammar can attest, classes mixed: the
+    // attested class decides the mirror's decode width per slot, and
+    // nothing leaks across slots.
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}}",
+        "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}},\n        {\"name\": \"delta\", \"type\": {\"kind\": \"i64\"}},\n        {\"name\": \"ratio\", \"type\": {\"kind\": \"f64\"}}",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"tick\", \"payload\": {\"kind\": \"number\", \"class\": \"i64\"}},\n      {\"name\": \"stepped\", \"payload\": {\"kind\": \"number\", \"class\": \"i64\"}},\n      {\"name\": \"fetched\", \"payload\": {\"kind\": \"number_bytes\", \"number_field\": \"status\", \"number_class\": \"i64\", \"bytes_field\": \"body\"}}",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"peak\", \"params\": [], \"returns\": {\"kind\": \"i64\"}, \"arena\": false}]",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        \\{"slot": "Model.count", "class": "u64"},
+        \\    {"slot": "Model.delta", "class": "i64"},
+        \\    {"slot": "Msg.tick", "class": "u64"},
+        \\    {"slot": "Msg.stepped", "class": "i64"},
+        \\    {"slot": "Msg.fetched.status", "class": "u64"},
+        \\    {"slot": "helpers.peak.return", "class": "u64"}
+        ,
+    );
+    const generated = try emitFromJson(arena, source);
+    // Mirror spellings follow the attestation, slot by slot.
+    try testing.expect(std.mem.indexOf(u8, generated, "count: u64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "delta: i64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "ratio: f64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "tick: u64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "stepped: i64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "fetched: struct { status: u64, body: []const u8 },") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub fn peak(self: *const Model) u64 {") != null);
+    // Dispatch narrows through the matching exactness guard.
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_number(0, shim_rt.exactF64Unsigned(payload), &cmd_ptr, &cmd_len)") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_number(1, shim_rt.exactF64(payload), &cmd_ptr, &cmd_len)") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_number_bytes(2, shim_rt.exactF64Unsigned(payload.status), payload.body.ptr, payload.body.len, &cmd_ptr, &cmd_len)") != null);
+    // The generated module stays valid Zig.
+    const source_z = try arena.dupeZ(u8, generated);
+    const tree = try std.zig.Ast.parse(arena, source_z, .zig);
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "the empty integer_slots list decodes nothing differently" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The f64-only sequencing: every numeric slot spelled f64, the
+    // empty list attested — the mirror carries f64 slots and no
+    // integer narrowing anywhere.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}}", "{\"name\": \"count\", \"type\": {\"kind\": \"f64\"}}");
+    source = try std.mem.replaceOwned(u8, arena, source, "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}", "{\"name\": \"picked\", \"payload\": {\"kind\": \"number\", \"class\": \"f64\"}}");
+    source = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "");
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "count: f64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "picked: f64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_number(0, payload, &cmd_ptr, &cmd_len)") != null);
+    // No integer narrowing and no integer-spelled mirror slot anywhere
+    // (the identity constants' own u64 plumbing is not a mirror slot).
+    try testing.expect(std.mem.indexOf(u8, generated, "exactF64") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, ": i64,") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, ": u64,") == null);
 }
 
 test "the emitted shim parses as Zig" {
