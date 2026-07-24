@@ -388,13 +388,33 @@ pub const Pty = struct {
 /// discipline: these paths already deliver no further output.
 /// io-thread only (it owns the read machinery).
 fn drainAndCloseConsole(st: *State) void {
+    // Drain to a quiet moment FIRST: if the detached closer cannot
+    // spawn, `closeConsole`'s inline fallback runs on this reader
+    // thread, and it must never meet a full pipe (the documented
+    // ClosePseudoConsole wait). With the pipe just emptied, only a
+    // writer refilling 128 KiB inside the fallback's window could
+    // block it — the OOM-corner residual the closeConsole doc names.
+    drainDiscard(st, true);
     closeConsole(st);
+    // Then keep draining while conhost tears down — its final flush,
+    // or CTRL_CLOSE writers among surviving descendants — until the
+    // broken pipe or the bound (the detached closer finishes whenever
+    // conhost does).
+    drainDiscard(st, false);
+    st.read_off = 0;
+    st.read_len = 0;
+}
+
+/// Bounded discard-drain of the output pipe. `stop_on_quiet` stops at
+/// the first observation of an idle armed read over an empty pipe;
+/// otherwise only EOF, a read failure, or the bound ends it.
+fn drainDiscard(st: *State, stop_on_quiet: bool) void {
     const start_ns = clock.monotonicNanoseconds();
     const clock_ok = start_ns != 0;
     var iterations: usize = 0;
     while (!st.read_eof and !st.read_failed) : (iterations += 1) {
         const elapsed_ns = if (clock_ok) clock.monotonicNanoseconds() -% start_ns else iterations * 10 * std.time.ns_per_ms;
-        if (elapsed_ns >= 500 * std.time.ns_per_ms) break;
+        if (elapsed_ns >= 400 * std.time.ns_per_ms) break;
         // Discard whatever the last completion or a sync arm landed.
         st.read_off = 0;
         st.read_len = 0;
@@ -403,10 +423,12 @@ fn drainAndCloseConsole(st: *State) void {
         if (!st.read_pending) continue; // spurious: re-arm next round
         if (win.WaitForSingleObject(st.read_event, 10) == win.WAIT_OBJECT_0) {
             completeRead(st);
+            continue;
         }
+        if (!stop_on_quiet) continue;
+        var avail: win.DWORD = 0;
+        if (win.PeekNamedPipe(st.out_read, null, 0, null, &avail, null) == 0 or avail == 0) return;
     }
-    st.read_off = 0;
-    st.read_len = 0;
 }
 
 /// Close the pseudoconsole exactly once (idempotent, lock-guarded
@@ -637,15 +659,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         // A batch target's command line is REPARSED by cmd.exe with
         // its own metacharacter grammar, which no CRT quoting can
         // neutralize — `safe&whoami` as one argument would splice a
-        // second command. Bytes the cmd grammar can reinterpret refuse
-        // the spawn whole (the argv-NUL teaching applied): mutating
-        // them would run a different command line than the caller
-        // declared.
+        // second command, and a `%X%` in the SCRIPT PATH itself would
+        // expand before cmd resolves it. Bytes the cmd grammar can
+        // reinterpret refuse the spawn whole (the argv-NUL teaching
+        // applied): mutating them would run a different command line
+        // than the caller declared.
+        if (std.mem.indexOfAny(u8, resolved, batch_hostile_bytes) != null) return error.PtyArgvInvalid;
         for (options.argv[1..]) |arg| {
-            if (std.mem.indexOfAny(u8, arg, "&|<>^%!\"\r\n") != null) return error.PtyArgvInvalid;
+            if (std.mem.indexOfAny(u8, arg, batch_hostile_bytes) != null) return error.PtyArgvInvalid;
         }
     }
-    const command_line_w = buildCommandLineW(arena, resolved, options.argv) catch |err| switch (err) {
+    const command_line_w = buildCommandLineW(arena, resolved, options.argv, is_batch) catch |err| switch (err) {
         error.InvalidWtf8 => return error.PtyArgvInvalid,
         error.OutOfMemory => return error.PtyEnvironTooLarge,
     };
@@ -799,10 +823,17 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     return .{ .state = state };
 }
 
+/// Spawn-failure cleanup. The pipe ends close BEFORE the
+/// pseudoconsole, deliberately: a fast child (already terminated by
+/// the failing branch) may have filled the output pipe, and a conhost
+/// blocked mid-write would block `ClosePseudoConsole` behind it —
+/// breaking the pipe first turns those writes into immediate failures,
+/// so the close can never wait on a reader this error path does not
+/// have.
 fn failSpawnCleanup(hpc: win.HPCON, out_server: win.HANDLE, in_server: win.HANDLE) void {
-    win.ClosePseudoConsole(hpc);
     _ = win.CloseHandle(out_server);
     _ = win.CloseHandle(in_server);
+    win.ClosePseudoConsole(hpc);
 }
 
 /// Windows process objects self-release; there is no zombie table to
@@ -955,12 +986,15 @@ fn systemPathFallback(env: ?[]const EnvVar, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}\\System32;{s}", .{ root, root }) catch "C:\\Windows\\System32;C:\\Windows";
 }
 
-/// The executable-extension allowlist candidates share: as spelled,
-/// then `.exe`, `.cmd`, `.bat`, `.com` — the shapes `CreateProcessW`
-/// can start directly (`.cmd`/`.bat` route through cmd.exe via the
-/// null-application-name command line, which is exactly how the spawn
-/// passes them).
-const executable_extensions = [_][]const u8{ "", ".exe", ".cmd", ".bat", ".com" };
+/// The executable-extension allowlist for EXTENSION-LESS names: the
+/// runnable suffixes first (`.exe`, `.cmd`, `.bat`, `.com` — the
+/// shapes `CreateProcessW` can start; `.cmd`/`.bat` route through
+/// cmd.exe via the null-application-name command line, which is
+/// exactly how the spawn passes them), the bare spelling LAST — so a
+/// same-named plain file next to a real `tool.exe` or `tool.cmd`
+/// cannot mask them (the CreateProcess/PATHEXT ordering, where an
+/// extension-less name means its runnable suffixes before itself).
+const executable_extensions = [_][]const u8{ ".exe", ".cmd", ".bat", ".com", "" };
 
 fn probeWithExtensions(arena: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]const u8 {
     // A name that already carries an extension is probed AS SPELLED
@@ -974,23 +1008,23 @@ fn probeWithExtensions(arena: std.mem.Allocator, dir: []const u8, name: []const 
             std.fmt.allocPrint(arena, "{s}{s}", .{ name, ext }) catch return null
         else
             std.fmt.allocPrint(arena, "{s}\\{s}{s}", .{ dir, name, ext }) catch return null;
-        if (executableAt(candidate)) return candidate;
+        if (executableAt(arena, candidate)) return candidate;
     }
     return null;
 }
 
 /// Existence-and-not-a-directory probe (Windows has no X_OK; being a
 /// readable file is the closest honest analog, and `CreateProcessW`
-/// delivers the final verdict synchronously either way).
-fn executableAt(path: []const u8) bool {
+/// delivers the final verdict synchronously either way). The wide
+/// copy sizes to the CANDIDATE — a PATH component can outgrow any
+/// fixed stack buffer (`\\?\` prefixed directories), and the arena
+/// already owns the spawn's transient conversions.
+fn executableAt(arena: std.mem.Allocator, path: []const u8) bool {
     if (comptime !is_windows) return false;
-    // Bounded by the argv byte budget the candidate was built from
-    // (a full max_path_bytes-wide buffer would put ~200 KiB on the
-    // loop thread's stack for no reachable input).
-    var wide: [pty.max_argv_bytes]u16 = undefined;
-    const len = std.unicode.wtf8ToWtf16Le(wide[0 .. wide.len - 1], path) catch return false;
-    wide[len] = 0;
-    const attrs = win.GetFileAttributesW(wide[0..len :0].ptr);
+    const len = std.unicode.calcWtf16LeLen(path) catch return false;
+    const wide = arena.allocSentinel(u16, len, 0) catch return false;
+    _ = std.unicode.wtf8ToWtf16Le(wide, path) catch return false;
+    const attrs = win.GetFileAttributesW(wide.ptr);
     if (attrs == win.INVALID_FILE_ATTRIBUTES) return false;
     return attrs & win.FILE_ATTRIBUTE_DIRECTORY == 0;
 }
@@ -1017,25 +1051,42 @@ fn lookupEnvIgnoreCase(env: ?[]const EnvVar, name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Bytes cmd.exe's reparse can reinterpret inside a batch command
+/// line: command splicers, redirections, escapes, variable expansion,
+/// quotes (cmd's quote rules differ from the CRT's), and line breaks.
+const batch_hostile_bytes = "&|<>^%!\"\r\n";
+
 /// Build the mutable UTF-16 command line `CreateProcessW` parses. The
-/// first token is the RESOLVED path, always quoted — unambiguous under
-/// the null-application-name form (which is what lets `.cmd`/`.bat`
-/// route through cmd.exe), at the documented cost that a
-/// GetCommandLine-reading child sees the resolved path where POSIX
-/// argv[0] kept the caller's spelling. Remaining arguments use the
-/// standard CommandLineToArgvW-inverse quoting, so a conforming child
-/// recovers each argument byte-exactly.
+/// first token is the CALLER's argv[0] spelling for direct executables
+/// (the module comes from `lpApplicationName`, so a multicall binary
+/// observes the name it was invoked by — POSIX argv[0] parity); a
+/// batch target's first token is the RESOLVED path instead, because
+/// the null-application-name form reroutes it through cmd.exe by
+/// parsing exactly that token. Arguments use the standard
+/// CommandLineToArgvW-inverse quoting for executables; batch arguments
+/// (already refused down to bytes cmd cannot reinterpret) take plain
+/// space-guarding quotes with NO backslash doubling — cmd reads
+/// backslashes literally, so the CRT's trailing-run doubling would
+/// hand a script `\\` where the caller said `\`.
 fn buildCommandLineW(
     arena: std.mem.Allocator,
     resolved: []const u8,
     argv: []const []const u8,
+    is_batch: bool,
 ) (error{ InvalidWtf8, OutOfMemory })![:0]u16 {
     var line: std.ArrayList(u8) = .empty;
     try line.append(arena, '"');
-    try line.appendSlice(arena, resolved);
+    try line.appendSlice(arena, if (is_batch) resolved else argv[0]);
     try line.append(arena, '"');
     for (argv[1..]) |arg| {
         try line.append(arena, ' ');
+        if (is_batch) {
+            const needs_quotes = arg.len == 0 or std.mem.indexOfAny(u8, arg, " \t") != null;
+            if (needs_quotes) try line.append(arena, '"');
+            try line.appendSlice(arena, arg);
+            if (needs_quotes) try line.append(arena, '"');
+            continue;
+        }
         try appendQuotedArg(arena, &line, arg);
     }
     const wide_len = std.unicode.calcWtf16LeLen(line.items) catch return error.InvalidWtf8;
@@ -1136,30 +1187,48 @@ fn buildEnvironmentBlockW(
 }
 
 /// The environment-block contract's order: name comparison is
-/// case-insensitive in UNICODE order — so the fold walks code points
-/// through the OS's own BMP uppercase table (`toUpperWtf16`, the same
-/// fold std's Windows env-name hashing uses), never bytes. A name that
-/// is not valid WTF-8 falls back to byte order; the block build
-/// refuses such an environment moments later with the
+/// case-insensitive in the order the OS itself compares environment
+/// names — UTF-16 CODE UNITS (a supplementary-plane name sorts by its
+/// surrogate halves, BELOW the private-use BMP range, exactly as
+/// `RtlCompareUnicodeString` would), each unit folded through the OS's
+/// own BMP uppercase table (`toUpperWtf16`, the same fold std's
+/// Windows env-name hashing uses) — never WTF-8 bytes or code points.
+/// A name that is not valid WTF-8 falls back to byte order; the block
+/// build refuses such an environment moments later with the
 /// whole-or-nothing env error, so the fallback never reaches a child.
 fn envNameLessThan(_: void, a: EnvVar, b: EnvVar) bool {
     const view_a = std.unicode.Wtf8View.init(a.name) catch return std.mem.lessThan(u8, a.name, b.name);
     const view_b = std.unicode.Wtf8View.init(b.name) catch return std.mem.lessThan(u8, a.name, b.name);
-    var it_a = view_a.iterator();
-    var it_b = view_b.iterator();
+    var it_a: Wtf16UnitIterator = .{ .inner = view_a.iterator() };
+    var it_b: Wtf16UnitIterator = .{ .inner = view_b.iterator() };
     while (true) {
-        const cp_a = it_a.nextCodepoint() orelse return it_b.nextCodepoint() != null;
-        const cp_b = it_b.nextCodepoint() orelse return false;
-        const upper_a = upperCodepoint(cp_a);
-        const upper_b = upperCodepoint(cp_b);
+        const unit_a = it_a.next() orelse return it_b.next() != null;
+        const unit_b = it_b.next() orelse return false;
+        const upper_a = std.os.windows.toUpperWtf16(unit_a);
+        const upper_b = std.os.windows.toUpperWtf16(unit_b);
         if (upper_a != upper_b) return upper_a < upper_b;
     }
 }
 
-fn upperCodepoint(cp: u21) u21 {
-    if (std.math.cast(u16, cp)) |unit| return std.os.windows.toUpperWtf16(unit);
-    return cp;
-}
+/// WTF-8 code points re-emitted as WTF-16 code units (supplementary
+/// planes as their surrogate pair; WTF-8's unpaired surrogates pass
+/// through as themselves).
+const Wtf16UnitIterator = struct {
+    inner: std.unicode.Wtf8Iterator,
+    pending_low: ?u16 = null,
+
+    fn next(self: *Wtf16UnitIterator) ?u16 {
+        if (self.pending_low) |low| {
+            self.pending_low = null;
+            return low;
+        }
+        const cp = self.inner.nextCodepoint() orelse return null;
+        if (cp < 0x10000) return @intCast(cp);
+        const offset = cp - 0x10000;
+        self.pending_low = @intCast(0xDC00 + (offset & 0x3FF));
+        return @intCast(0xD800 + (offset >> 10));
+    }
+};
 
 /// Monotonic counter distinguishing concurrent spawns' pipe names
 /// (pipe names are a global namespace; the pid alone is not unique
@@ -1591,6 +1660,12 @@ test "windows env-block order folds case beyond ascii" {
     // of another orders first.
     try std.testing.expect(envNameLessThan({}, .{ .name = "path", .value = "" }, .{ .name = "PATHEXT", .value = "" }));
     try std.testing.expect(!envNameLessThan({}, .{ .name = "TERM", .value = "" }, .{ .name = "term", .value = "" }));
+    // UTF-16 code-unit order, the OS's own: a supplementary-plane name
+    // (U+10000, surrogate halves 0xD800/0xDC00) sorts BELOW a
+    // private-use BMP name (U+E000) even though its code point is
+    // larger.
+    try std.testing.expect(envNameLessThan({}, .{ .name = "\u{10000}", .value = "" }, .{ .name = "\u{E000}", .value = "" }));
+    try std.testing.expect(!envNameLessThan({}, .{ .name = "\u{E000}", .value = "" }, .{ .name = "\u{10000}", .value = "" }));
 }
 
 test "windows executable probing appends extensions only to extension-less names" {
