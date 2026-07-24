@@ -1001,10 +1001,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         virtual_windows: [canvas.max_virtual_windows]canvas.VirtualWindowRecord = [_]canvas.VirtualWindowRecord{.{}} ** canvas.max_virtual_windows,
         virtual_window_count: usize = 0,
         /// Scroll regions whose `on_reach_end` fired and has not re-armed
-        /// (the approach-end hysteresis state, keyed by widget id).
-        reach_end_fired_ids: [canvas.max_virtual_windows]canvas.ObjectId = [_]canvas.ObjectId{0} ** canvas.max_virtual_windows,
+        /// (the approach-end hysteresis state, keyed by widget id AND the
+        /// axis the reach was measured on: a region whose primary axis
+        /// changes — content growing sideways after a vertical fire —
+        /// must not have the stale axis's latch suppress the fresh one).
+        reach_end_fired: [max_reach_latches]ReachLatch = [_]ReachLatch{.{}} ** max_reach_latches,
         /// The approach-START mirror (`on_reach_start` hysteresis).
-        reach_start_fired_ids: [canvas.max_virtual_windows]canvas.ObjectId = [_]canvas.ObjectId{0} ** canvas.max_virtual_windows,
+        reach_start_fired: [max_reach_latches]ReachLatch = [_]ReachLatch{.{}} ** max_reach_latches,
         /// Retained offset tables for VARIABLE-extent virtual lists,
         /// claimed per list identity during builds (`Ui.virtualWindow`
         /// through the extent source) and patched by the post-layout
@@ -2157,6 +2160,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return false;
         }
 
+        /// One (id, axis) hysteresis latch: the axis rides along so a
+        /// region whose primary axis changes re-arms honestly. Two
+        /// slots per declarable window — the (id, axis) key space is
+        /// twice the id space.
+        const max_reach_latches = canvas.max_virtual_windows * 2;
+
+        const ReachLatch = struct {
+            id: canvas.ObjectId = 0,
+            axis: canvas.ScrollAxis = .vertical,
+        };
+
+        const ReachAxis = struct {
+            state: canvas.ScrollAxisState,
+            axis: canvas.ScrollAxis,
+        };
+
+        /// The axis reach-end/reach-start measure: the vertical axis
+        /// wherever it has scrollable range (every pre-axis region, so
+        /// existing apps see identical behavior), otherwise the
+        /// horizontal one — a horizontal timeline's `on-reach-end` is
+        /// its right edge. One rule for both signals so "the end" and
+        /// "the start" always name the same axis.
+        fn reachAxisState(scroll_state: canvas.ScrollState) ReachAxis {
+            const vertical = scroll_state.axis(.vertical);
+            if (vertical.maxOffset() > 0) return .{ .state = vertical, .axis = .vertical };
+            const horizontal = scroll_state.axis(.horizontal);
+            if (horizontal.maxOffset() > 0) return .{ .state = horizontal, .axis = .horizontal };
+            return .{ .state = vertical, .axis = .vertical };
+        }
+
         /// Approach-end hysteresis (`on_reach_end`): fire when a scroll
         /// lands within `reach_end_fire_ratio` viewports of the content
         /// end and the region is armed; re-arm once the offset sits more
@@ -2165,37 +2198,43 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// under the unchanged offset. One Msg per approach, never a
         /// fetch storm from a user riding the end of the list.
         fn reachEndShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
-            const remaining = scroll_state.content_extent - scroll_state.viewport_extent - scroll_state.offset;
-            if (remaining > scroll_state.viewport_extent * reach_end_rearm_ratio) {
-                self.clearReachEndFired(id);
+            const reach = reachAxisState(scroll_state);
+            const axis_state = reach.state;
+            if (id == 0 or axis_state.viewport_extent <= 0) return false;
+            const remaining = axis_state.content_extent - axis_state.viewport_extent - axis_state.offset;
+            if (remaining > axis_state.viewport_extent * reach_end_rearm_ratio) {
+                self.clearReachEndFired(id, reach.axis);
                 return false;
             }
-            if (remaining > scroll_state.viewport_extent * reach_end_fire_ratio) return false;
-            if (self.reachEndFired(id)) return false;
-            self.markReachEndFired(id);
-            return true;
+            if (remaining > axis_state.viewport_extent * reach_end_fire_ratio) return false;
+            if (self.reachEndFired(id, reach.axis)) return false;
+            // Fire only when the latch STORES: an unstorable latch
+            // (table full — a degenerate tree) would otherwise fire on
+            // every observation, the exact storm the hysteresis exists
+            // to prevent. Silence is the safer failure.
+            return self.markReachEndFired(id, reach.axis);
         }
 
-        fn reachEndFired(self: *const Self, id: canvas.ObjectId) bool {
-            for (self.reach_end_fired_ids) |fired| {
-                if (fired == id) return true;
+        fn reachEndFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
+            for (self.reach_end_fired) |fired| {
+                if (fired.id == id and fired.axis == axis) return true;
             }
             return false;
         }
 
-        fn markReachEndFired(self: *Self, id: canvas.ObjectId) void {
-            for (&self.reach_end_fired_ids) |*slot| {
-                if (slot.* == 0 or slot.* == id) {
-                    slot.* = id;
-                    return;
+        fn markReachEndFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
+            for (&self.reach_end_fired) |*slot| {
+                if (slot.id == 0 or (slot.id == id and slot.axis == axis)) {
+                    slot.* = .{ .id = id, .axis = axis };
+                    return true;
                 }
             }
+            return false;
         }
 
-        fn clearReachEndFired(self: *Self, id: canvas.ObjectId) void {
-            for (&self.reach_end_fired_ids) |*slot| {
-                if (slot.* == id) slot.* = 0;
+        fn clearReachEndFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
+            for (&self.reach_end_fired) |*slot| {
+                if (slot.id == id and slot.axis == axis) slot.* = .{};
             }
         }
 
@@ -2210,37 +2249,40 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// only moves on scroll OBSERVATIONS, so a programmatic jump out
         /// of the band re-arms on the next user scroll, not instantly.
         fn reachStartShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            if (id == 0 or scroll_state.viewport_extent <= 0) return false;
-            const remaining = scroll_state.offset;
-            if (remaining > scroll_state.viewport_extent * reach_start_rearm_ratio) {
-                self.clearReachStartFired(id);
+            const reach = reachAxisState(scroll_state);
+            const axis_state = reach.state;
+            if (id == 0 or axis_state.viewport_extent <= 0) return false;
+            const remaining = axis_state.offset;
+            if (remaining > axis_state.viewport_extent * reach_start_rearm_ratio) {
+                self.clearReachStartFired(id, reach.axis);
                 return false;
             }
-            if (remaining > scroll_state.viewport_extent * reach_start_fire_ratio) return false;
-            if (self.reachStartFired(id)) return false;
-            self.markReachStartFired(id);
-            return true;
+            if (remaining > axis_state.viewport_extent * reach_start_fire_ratio) return false;
+            if (self.reachStartFired(id, reach.axis)) return false;
+            // Fire only when the latch stores (the reach-end rule).
+            return self.markReachStartFired(id, reach.axis);
         }
 
-        fn reachStartFired(self: *const Self, id: canvas.ObjectId) bool {
-            for (self.reach_start_fired_ids) |fired| {
-                if (fired == id) return true;
+        fn reachStartFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
+            for (self.reach_start_fired) |fired| {
+                if (fired.id == id and fired.axis == axis) return true;
             }
             return false;
         }
 
-        fn markReachStartFired(self: *Self, id: canvas.ObjectId) void {
-            for (&self.reach_start_fired_ids) |*slot| {
-                if (slot.* == 0 or slot.* == id) {
-                    slot.* = id;
-                    return;
+        fn markReachStartFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
+            for (&self.reach_start_fired) |*slot| {
+                if (slot.id == 0 or (slot.id == id and slot.axis == axis)) {
+                    slot.* = .{ .id = id, .axis = axis };
+                    return true;
                 }
             }
+            return false;
         }
 
-        fn clearReachStartFired(self: *Self, id: canvas.ObjectId) void {
-            for (&self.reach_start_fired_ids) |*slot| {
-                if (slot.* == id) slot.* = 0;
+        fn clearReachStartFired(self: *Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) void {
+            for (&self.reach_start_fired) |*slot| {
+                if (slot.id == id and slot.axis == axis) slot.* = .{};
             }
         }
 
@@ -5422,4 +5464,3 @@ const ContextMenuPin = struct {
     window_id: ?platform.WindowId,
     arena_index: usize,
 };
-

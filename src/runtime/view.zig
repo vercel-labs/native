@@ -421,7 +421,7 @@ pub const RuntimeView = struct {
     /// the last offset it reported (or was pushed), so the sync only
     /// forces `set_offset` when a non-driver source moved the offset.
     scroll_driver_ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined,
-    scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]f32 = undefined,
+    scroll_driver_offsets: [platform.max_gpu_surface_scroll_drivers]geometry.OffsetF = undefined,
     scroll_driver_count: usize = 0,
     canvas_widget_focused_id: canvas.ObjectId = 0,
     canvas_widget_focus_visible_id: canvas.ObjectId = 0,
@@ -632,16 +632,19 @@ pub const RuntimeView = struct {
     pub const canvasWidgetKineticScrollActive = CanvasWidgetScrollMethods.canvasWidgetKineticScrollActive;
     pub const applyCanvasWidgetScrollRoute = CanvasWidgetScrollMethods.applyCanvasWidgetScrollRoute;
     pub const deepestCanvasWidgetScrollIndex = CanvasWidgetScrollMethods.deepestCanvasWidgetScrollIndex;
+    pub const deepestCanvasWidgetScrollIndexForAxis = CanvasWidgetScrollMethods.deepestCanvasWidgetScrollIndexForAxis;
     pub const canvasWidgetScrollState = CanvasWidgetScrollMethods.canvasWidgetScrollState;
     pub const canvasWidgetScrollStateById = CanvasWidgetScrollMethods.canvasWidgetScrollStateById;
     pub const noteCanvasWidgetScrollEvent = CanvasWidgetScrollMethods.noteCanvasWidgetScrollEvent;
-    pub const canvasWidgetScrollCanConsume = CanvasWidgetScrollMethods.canvasWidgetScrollCanConsume;
+    pub const canvasWidgetScrollCanConsumeAxis = CanvasWidgetScrollMethods.canvasWidgetScrollCanConsumeAxis;
     pub const applyCanvasWidgetScroll = CanvasWidgetScrollMethods.applyCanvasWidgetScroll;
+    pub const applyCanvasWidgetScrollAxis = CanvasWidgetScrollMethods.applyCanvasWidgetScrollAxis;
     pub const applyCanvasWidgetTextareaScroll = CanvasWidgetScrollMethods.applyCanvasWidgetTextareaScroll;
     pub const applyCanvasWidgetScrollDriverOffset = CanvasWidgetScrollMethods.applyCanvasWidgetScrollDriverOffset;
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
+    pub const canvasWidgetScrollContentExtentX = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtentX;
     pub const translateCanvasWidgetScrollDescendants = CanvasWidgetScrollMethods.translateCanvasWidgetScrollDescendants;
     pub const scrollCanvasTextInputCaretIntoView = CanvasWidgetScrollMethods.scrollCanvasTextInputCaretIntoView;
 

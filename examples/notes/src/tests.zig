@@ -1376,7 +1376,7 @@ test "the note list scroll offset round-trips through the model" {
     var model = model_mod.initialModel(testClock(&clock));
 
     // The runtime delivers the applied offset; the model stores it…
-    main.update(&model, .{ .note_list_scrolled = .{ .offset = 42, .viewport_extent = 500, .content_extent = 900 } }, &fx);
+    main.update(&model, .{ .note_list_scrolled = .{ .offset_y = 42, .viewport_extent_y = 500, .content_extent_y = 900 } }, &fx);
     try testing.expectEqual(@as(f32, 42), model.note_list_scroll);
 
     // …and the rebuilt tree echoes it back through the scroll's value,

@@ -691,6 +691,7 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, driver.window_id);
             try cursor.writeStr(driver.label);
             try cursor.writeInt(u64, driver.driver_id);
+            try cursor.writeF32(driver.offset_x);
             try cursor.writeF32(driver.offset_y);
             try cursor.writeInt(u64, driver.timestamp_ns);
         },
@@ -937,11 +938,13 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             const window_id = try cursor.readInt(u64);
             const label = try cursor.readStr();
             const driver_id = try cursor.readInt(u64);
+            const offset_x = try cursor.readF32();
             const offset_y = try cursor.readF32();
             break :blk .{ .gpu_surface_scroll_driver = .{
                 .window_id = window_id,
                 .label = label,
                 .driver_id = driver_id,
+                .offset_x = offset_x,
                 .offset_y = offset_y,
                 .timestamp_ns = try cursor.readInt(u64),
             } };
@@ -1528,10 +1531,12 @@ test "event codec round-trips every payload variant" {
         const decoded = try roundTripEvent(.{ .gpu_surface_scroll_driver = .{
             .label = "canvas",
             .driver_id = 88,
+            .offset_x = 7.25,
             .offset_y = -12.5,
             .timestamp_ns = 4,
         } });
         try testing.expectEqual(@as(f32, -12.5), decoded.gpu_surface_scroll_driver.offset_y);
+        try testing.expectEqual(@as(f32, 7.25), decoded.gpu_surface_scroll_driver.offset_x);
     }
     {
         const decoded = try roundTripEvent(.{ .context_menu_action = .{ .view_label = "canvas", .token = 5, .item_id = 2 } });

@@ -1934,7 +1934,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 comptime {
                     if (!std.mem.eql(u8, node.name, "scroll")) fail(node, markup.on_scroll_element_message);
                 }
-                options.on_scroll = comptime (scrollConstructor(expression.tag) orelse fail(node, markup.on_scroll_payload_message));
+                options.on_scroll = comptime (scrollConstructor(expression.tag) orelse
+                    // The retired one-axis record gets the migration
+                    // teaching (it names the new per-axis fields) instead
+                    // of the generic payload rejection.
+                    fail(node, if (legacyScrollTag(expression.tag)) markup.on_scroll_legacy_payload_message else markup.on_scroll_payload_message));
                 return;
             }
             if (comptime std.mem.eql(u8, event, "resize")) {
@@ -2029,6 +2033,21 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     }
                 }
                 return null;
+            }
+        }
+
+        /// Whether `tag` names an arm carrying the RETIRED one-axis
+        /// scroll record — recognized only so the on-scroll rejection
+        /// can teach the two-axis migration by field name.
+        fn legacyScrollTag(comptime tag: []const u8) bool {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    if (interpreter.declaredLegacyScrollStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return true;
+                    }
+                }
+                return false;
             }
         }
 

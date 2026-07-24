@@ -477,7 +477,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // Echo the applied scroll offset back through the model: the next
         // rebuild lays the preview at exactly this value, so scrolling
         // never fights the reconcile.
-        .doc_scrolled => |state| model.doc_scroll = state.offset,
+        .doc_scrolled => |state| model.doc_scroll = state.offset_y,
         .chrome_changed => |chrome| {
             model.chrome_leading = chrome.insets.left;
             model.chrome_trailing = chrome.insets.right;

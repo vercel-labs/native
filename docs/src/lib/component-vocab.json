@@ -433,6 +433,14 @@
       "doc": "scroll only: edge behavior of the region. none pins scrolling at the content edges (the shipped default via the ScrollPhysics.overscroll token), rubber_band lets this region bounce past them, default follows the token. Honored by the engine's scroll physics and the native OS scroller alike."
     },
     {
+      "name": "axis",
+      "doc": "scroll only: which axes the region scrolls - vertical (the default), horizontal, or both. Horizontal grants opt the region into wheel/trackpad delta-x, the bottom-edge scrollbar, and the horizontal keymap; in a nested tree each wheel axis routes independently to the nearest ancestor scrolling that axis. Virtualized scrolls stay vertical (a horizontal grant there is a teaching error)."
+    },
+    {
+      "name": "value-x",
+      "doc": "scroll only, beside axis=\"horizontal\" or axis=\"both\": the horizontal scroll offset - the sideways counterpart of value, following the same source-wins reconcile rule (echo on-scroll's offset_x back to keep user scrolling; move it model-side to scroll programmatically). Without a horizontal axis grant it is a teaching error (it would be silently inert)."
+    },
+    {
       "name": "resize-duration",
       "doc": "split only: layout-tween duration in milliseconds (a plain number or one {binding}). Nonzero makes the bound value a TARGET - a rebuild that moves it lays both panes out at the target ONCE, then the runtime slides the rendered boundary there one presented frame at a time under the panes' clips (content never re-wraps mid-flight), dispatching ONE on-resize echo at settle with the applied fraction. 0 (and absent) snaps, today's behavior. A divider DRAG keeps live per-step reflow and echoes. Reduced-motion appearances snap automatically - apps declare nothing extra."
     },
@@ -504,7 +512,7 @@
     },
     {
       "name": "on-scroll",
-      "doc": "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll offset/viewport/content extents after wheel, kinetic, keyboard, and accessibility scrolls."
+      "doc": "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll two-axis state (offset_x/offset_y, velocity_x/velocity_y, viewport_extent_x/viewport_extent_y, content_extent_x/content_extent_y) after wheel, kinetic, keyboard, and accessibility scrolls."
     },
     {
       "name": "on-dismiss",

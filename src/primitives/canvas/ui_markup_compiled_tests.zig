@@ -391,11 +391,11 @@ test "compiled on-scroll binds the ScrollState constructor identically to the in
 
     // Both engines dispatch the same typed scroll Msg for the container.
     const feed = fixture.findByKind(compiled.root, .scroll_view).?;
-    const state = canvas.ScrollState{ .offset = 40, .viewport_extent = 80, .content_extent = 200 };
-    try testing.expectEqual(@as(f32, 40), compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset);
+    const state = canvas.ScrollState{ .offset_y = 40, .viewport_extent_y = 80, .content_extent_y = 200 };
+    try testing.expectEqual(@as(f32, 40), compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset_y);
     try testing.expectEqual(
-        interpreted.msgForScroll(feed.id, state).?.feed_scrolled.offset,
-        compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset,
+        interpreted.msgForScroll(feed.id, state).?.feed_scrolled.offset_y,
+        compiled.msgForScroll(feed.id, state).?.feed_scrolled.offset_y,
     );
 
     // And the same approach-end Msg (`on-reach-end`, the infinite-scroll
@@ -2173,11 +2173,13 @@ test "compiled on-scroll binds a declared scroll-state mirror identically to the
     // Both engines translate the runtime state into the DECLARED record:
     // float fields widen exactly, integer-classed fields round.
     const region = fixture.findByKind(compiled.root, .scroll_view).?;
-    const state = canvas.ScrollState{ .offset = 41.5, .velocity = -3.25, .viewport_extent = 480.4, .content_extent = 2000.6 };
+    const state = canvas.ScrollState{ .offset_x = 12.5, .offset_y = 41.5, .velocity_y = -3.25, .viewport_extent_x = 320.2, .viewport_extent_y = 480.4, .content_extent_x = 960.7, .content_extent_y = 2000.6 };
     const compiled_msg = compiled.msgForScroll(region.id, state).?;
-    try testing.expectEqual(@as(f64, 41.5), compiled_msg.library_scrolled.offset);
-    try testing.expectEqual(@as(i64, 480), compiled_msg.library_scrolled.viewportExtent);
-    try testing.expectEqual(@as(i64, 2001), compiled_msg.library_scrolled.contentExtent);
+    try testing.expectEqual(@as(f64, 41.5), compiled_msg.library_scrolled.offsetY);
+    try testing.expectEqual(@as(f64, 12.5), compiled_msg.library_scrolled.offsetX);
+    try testing.expectEqual(@as(i64, 480), compiled_msg.library_scrolled.viewportExtentY);
+    try testing.expectEqual(@as(i64, 2001), compiled_msg.library_scrolled.contentExtentY);
+    try testing.expectEqual(@as(i64, 961), compiled_msg.library_scrolled.contentExtentX);
     try testing.expectEqual(
         interpreted.msgForScroll(region.id, state).?,
         compiled.msgForScroll(region.id, state).?,

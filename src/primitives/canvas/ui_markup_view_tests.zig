@@ -675,6 +675,42 @@ test "overscroll on scroll stamps the region's edge behavior" {
     try testing.expectEqual(canvas.ScrollOverscroll.none, canvas.widgetScrollPhysics(tree.root.children[1], physics).overscroll);
 }
 
+test "axis and value-x stamp the region's scroll axes and horizontal offset" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n  <scroll axis=\"both\">\n    <column><text>b</text></column>\n  </scroll>\n  <scroll>\n    <column><text>c</text></column>\n  </scroll>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const shelf = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, shelf.kind);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, shelf.scroll_axes);
+    try testing.expectEqual(@as(f32, 120), shelf.value_x);
+    try testing.expect(canvas.widgetScrollsAxis(shelf, .horizontal));
+    try testing.expect(!canvas.widgetScrollsAxis(shelf, .vertical));
+    const freeform = tree.root.children[1];
+    try testing.expectEqual(canvas.ScrollAxes.both, freeform.scroll_axes);
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .vertical));
+    // The undeclared region keeps the pre-axis default: vertical only.
+    const classic = tree.root.children[2];
+    try testing.expectEqual(canvas.ScrollAxes.vertical, classic.scroll_axes);
+    try testing.expect(!canvas.widgetScrollsAxis(classic, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(classic, .vertical));
+}
+
+test "axis value vocabulary mirrors the live ScrollAxes enum" {
+    // The validator's std-only mirror of the enum's member names; a new
+    // member cannot ship without its markup spelling.
+    const fields = @typeInfo(canvas.ScrollAxes).@"enum".fields;
+    try testing.expectEqual(fields.len, canvas.ui_markup.axis_value_names.len);
+    inline for (fields, 0..) |field, index| {
+        try testing.expectEqualStrings(field.name, canvas.ui_markup.axis_value_names[index]);
+    }
+}
+
 test "overscroll value vocabulary mirrors the live WidgetOverscroll enum" {
     // The validator's std-only mirror of the enum's member names; a new
     // member cannot ship without its markup spelling.
@@ -4349,10 +4385,14 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
 /// independently (the number tier): float fields widen exactly, integer
 /// fields round.
 pub const MirrorScrollState = struct {
-    offset: f64,
-    velocity: f64,
-    viewportExtent: i64,
-    contentExtent: i64,
+    offsetX: f64,
+    offsetY: f64,
+    velocityX: f64,
+    velocityY: f64,
+    viewportExtentX: i64,
+    viewportExtentY: i64,
+    contentExtentX: i64,
+    contentExtentY: i64,
 };
 
 pub const MirrorControlsModel = struct {
@@ -4371,18 +4411,27 @@ pub const MirrorControlsMsg = union(enum) {
 
 test "declaredScrollStateRecord accepts the emitted mirror shape and rejects near-misses" {
     try testing.expect(markup_view.declaredScrollStateRecord(MirrorScrollState));
-    // The canvas struct itself matches structurally too (four f32 fields).
+    // The canvas struct itself matches structurally too (eight f32 fields).
     try testing.expect(markup_view.declaredScrollStateRecord(canvas.ScrollState));
     // A Zig-declared mirror in the canvas spelling stays accepted.
-    try testing.expect(markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64 }));
     // Near-misses stay out: a missing field, a renamed field, a non-numeric
     // field, an extra field, a spelling mix.
-    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64 }));
-    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_size: f64 }));
-    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: []const u8, velocity: f64, viewport_extent: f64, content_extent: f64 }));
-    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64, extra: f64 }));
-    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, contentExtent: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_size_y: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: []const u8, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64, extra: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, contentExtentY: f64 }));
     try testing.expect(!markup_view.declaredScrollStateRecord(i64));
+    // The RETIRED one-axis record is not a scroll-state record anymore -
+    // it classifies as the legacy shape so on-scroll teaches the
+    // per-axis migration by name (either spelling, never a mix).
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewportExtent: i64, contentExtent: i64 }));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(MirrorScrollState));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(canvas.ScrollState));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, contentExtent: f64 }));
 }
 
 test "valueArmClass classifies exactly the value-carrying arm shapes" {
@@ -4411,17 +4460,25 @@ test "the interpreter binds on-scroll to a declared mirror record and translates
     const tree = try ui.finalize(try view.build(&ui, &model));
     const region = findByKind(tree.root, .scroll_view).?;
     const msg = tree.msgForScroll(region.id, .{
-        .offset = 41.5,
-        .velocity = -3.25,
-        .viewport_extent = 480.4,
-        .content_extent = 2000.6,
+        .offset_x = 12.5,
+        .offset_y = 41.5,
+        .velocity_x = 1.5,
+        .velocity_y = -3.25,
+        .viewport_extent_x = 320.2,
+        .viewport_extent_y = 480.4,
+        .content_extent_x = 960.7,
+        .content_extent_y = 2000.6,
     }).?;
     // Float fields widen exactly; integer-classed fields round to the
     // nearest whole number.
-    try testing.expectEqual(@as(f64, 41.5), msg.library_scrolled.offset);
-    try testing.expectEqual(@as(f64, -3.25), msg.library_scrolled.velocity);
-    try testing.expectEqual(@as(i64, 480), msg.library_scrolled.viewportExtent);
-    try testing.expectEqual(@as(i64, 2001), msg.library_scrolled.contentExtent);
+    try testing.expectEqual(@as(f64, 12.5), msg.library_scrolled.offsetX);
+    try testing.expectEqual(@as(f64, 41.5), msg.library_scrolled.offsetY);
+    try testing.expectEqual(@as(f64, 1.5), msg.library_scrolled.velocityX);
+    try testing.expectEqual(@as(f64, -3.25), msg.library_scrolled.velocityY);
+    try testing.expectEqual(@as(i64, 320), msg.library_scrolled.viewportExtentX);
+    try testing.expectEqual(@as(i64, 480), msg.library_scrolled.viewportExtentY);
+    try testing.expectEqual(@as(i64, 961), msg.library_scrolled.contentExtentX);
+    try testing.expectEqual(@as(i64, 2001), msg.library_scrolled.contentExtentY);
 }
 
 test "the interpreter binds slider on-change value arms and keeps the void static form" {

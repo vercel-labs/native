@@ -226,8 +226,10 @@ const Harness = struct {
         try self.harness.runtime.dispatchAutomationCommand(self.app, command);
     }
 
-    fn scrollState(self: *Harness) canvas.ScrollState {
-        return self.harness.runtime.views[0].canvasWidgetScrollStateById(timeline_id).?;
+    /// The timeline's VERTICAL axis state — the feed is a vertical
+    /// virtual list, so every assertion here reads that axis.
+    fn scrollState(self: *Harness) canvas.ScrollAxisState {
+        return self.harness.runtime.views[0].canvasWidgetScrollStateById(timeline_id).?.axis(.vertical);
     }
 
     fn root(self: *Harness) canvas.Widget {

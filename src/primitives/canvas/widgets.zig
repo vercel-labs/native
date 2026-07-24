@@ -20,6 +20,7 @@ const TextRange = text_model.TextRange;
 const TextSelection = text_model.TextSelection;
 const CanvasRenderAnimation = canvas.CanvasRenderAnimation;
 const BlurTokenRef = token_model.BlurTokenRef;
+const ScrollAxes = token_model.ScrollAxes;
 const Easing = token_model.Easing;
 const MotionDuration = token_model.MotionDuration;
 const MotionTokens = token_model.MotionTokens;
@@ -847,6 +848,22 @@ pub const Widget = struct {
     text_selection: ?TextSelection = null,
     text_composition: ?TextRange = null,
     value: f32 = 0,
+    /// The HORIZONTAL scroll offset of a horizontal-capable
+    /// `.scroll_view` (`value_x:` in the builder, `value-x=` in markup)
+    /// — the horizontal counterpart of the retained offset that rides
+    /// `value`. Follows the same source-wins reconcile rule: the
+    /// runtime-owned offset (user scrolling) survives rebuilds while
+    /// the source offset is unchanged; a source-side change
+    /// (programmatic scroll) wins. Meaningless on every other kind.
+    value_x: f32 = 0,
+    /// Which axes a `.scroll_view` scrolls (`axis:` in the builder,
+    /// `axis=` in markup). Vertical — the pre-axis behavior — is the
+    /// default; `horizontal` and `both` opt the region into wheel
+    /// `delta_x`, the horizontal scrollbar, and the horizontal keymap.
+    /// Virtualized regions ignore the horizontal grant (windowed
+    /// virtualization prices rows, not columns). Meaningless on every
+    /// other kind.
+    scroll_axes: ScrollAxes = .vertical,
     layer: ?i32 = null,
     /// Modal surfaces (dialog/drawer/sheet) paint a token-driven scrim
     /// (dim + backdrop blur) across the whole tree behind them. False

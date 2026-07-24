@@ -809,7 +809,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "search_edit":
       return { ...model, search: searchApply(model.search, msg.edit) };
     case "table_scrolled":
-      return { ...model, tableScroll: msg.scroll.offset };
+      return { ...model, tableScroll: msg.scroll.offsetY };
     case "sort_cpu":
       return sortedBy(model, "cpu");
     case "sort_mem":

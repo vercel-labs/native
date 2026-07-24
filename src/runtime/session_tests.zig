@@ -64,6 +64,13 @@ const SessionModel = struct {
     /// re-derive the same enter/leave containment edges.
     hover_enters: u32 = 0,
     hover_leaves: u32 = 0,
+    /// The two-axis shelf's `on_scroll` mirror: a recorded diagonal
+    /// wheel must replay to the identical per-axis offsets — the
+    /// journal records only the raw scroll input event (both deltas),
+    /// and replay re-derives the same per-axis routing and physics.
+    shelf_offset_x: f32 = 0,
+    shelf_offset_y: f32 = 0,
+    shelf_scrolls: u32 = 0,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -95,6 +102,7 @@ const SessionMsg = union(enum) {
     exited: effects_mod.EffectExit,
     tick: effects_mod.EffectTimer,
     audio_event: effects_mod.EffectAudio,
+    shelf_scrolled: canvas.ScrollState,
 };
 
 const SessionApp = ui_app_mod.UiApp(SessionModel, SessionMsg);
@@ -121,6 +129,11 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
                 .interval_ms = 100,
                 .on_fire = SessionApp.Effects.timerMsg(.tick),
             });
+        },
+        .shelf_scrolled => |scroll_state| {
+            model.shelf_offset_x = scroll_state.offset_x;
+            model.shelf_offset_y = scroll_state.offset_y;
+            model.shelf_scrolls += 1;
         },
         .start_audio => fx.playAudio(.{
             .key = 9,
@@ -195,6 +208,10 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
         ui.text(.{}, ui.fmt("Query {s} ({d}) Name {s} ({d})", .{ model.queryText(), model.query_edits, model.nameText(), model.name_edits })),
         ui.text(.{}, ui.fmt("Zoom {d:.4} ({d}/{d})", .{ model.zoom, model.pinch_begins, model.pinch_ends })),
         ui.text(.{}, ui.fmt("Hover {d}/{d}", .{ model.hover_enters, model.hover_leaves })),
+        // A BOTH-axes scroll region wider and taller than its viewport:
+        // the recorded diagonal wheel below scrolls it on both axes.
+        ui.scroll(.{ .height = 60, .axis = .both, .on_scroll = SessionApp.Ui.scrollMsg(.shelf_scrolled) }, ui.el(.panel, .{ .width = 600, .height = 200 }, .{})),
+        ui.text(.{}, ui.fmt("Shelf {d:.1},{d:.1} ({d})", .{ model.shelf_offset_x, model.shelf_offset_y, model.shelf_scrolls })),
         ui.button(.{ .on_press = .increment, .on_hover_enter = .hover_enter, .on_hover_leave = .hover_leave }, "Increment"),
     });
 }
@@ -490,6 +507,28 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
         .y = 2,
     } });
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    // A DIAGONAL wheel over the both-axes shelf: one recorded scroll
+    // input event carrying both deltas. Per-axis routing applies both
+    // (the shelf grants both axes), and the on_scroll observation
+    // mirrors the applied offsets into the model — replay must land on
+    // the identical pair from the raw journaled event alone.
+    var shelf_frame: ?geometry.RectF = null;
+    for ((try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| {
+        if (node.widget.kind == .scroll_view) shelf_frame = node.frame;
+    }
+    const shelf = shelf_frame.?;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .x = shelf.x + shelf.width * 0.5,
+        .y = shelf.y + shelf.height * 0.5,
+        .delta_x = 30,
+        .delta_y = 24,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(f32, 30), app_state.model.shelf_offset_x);
+    try std.testing.expectEqual(@as(f32, 24), app_state.model.shelf_offset_y);
 
     recorder.finish();
     try std.testing.expect(!recorder.failed);
@@ -556,6 +595,10 @@ test "a recorded session replays to identical model state and fingerprints" {
     // The hover moves dispatched exactly one containment pair.
     try std.testing.expectEqual(@as(u32, 1), recorded.model.hover_enters);
     try std.testing.expectEqual(@as(u32, 1), recorded.model.hover_leaves);
+    // The diagonal wheel reached both axes of the shelf.
+    try std.testing.expectEqual(@as(f32, 30), recorded.model.shelf_offset_x);
+    try std.testing.expectEqual(@as(f32, 24), recorded.model.shelf_offset_y);
+    try std.testing.expect(recorded.model.shelf_scrolls > 0);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());

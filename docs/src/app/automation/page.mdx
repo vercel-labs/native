@@ -130,8 +130,8 @@ The runtime watches the command queue and processes these actions:
       <td>Dispatch pointer down/drag/up across a retained canvas widget</td>
     </tr>
     <tr>
-      <td><code>widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt;</code></td>
-      <td>Dispatch wheel input at a retained canvas widget</td>
+      <td><code>widget-wheel &lt;view-label&gt; &lt;widget-id&gt; &lt;delta-y&gt; [&lt;delta-x&gt;]</code></td>
+      <td>Dispatch wheel input at a retained canvas widget (the optional <code>delta-x</code> scrolls the horizontal axis)</td>
     </tr>
     <tr>
       <td><code>widget-key &lt;view-label&gt; &lt;key&gt; [&lt;text&gt;]</code></td>

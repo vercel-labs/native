@@ -103,7 +103,7 @@ pub fn layoutWidgetDepth(
         .scroll_view => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
-            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.value, tokens),
+            try layoutScrollChildren(widget.children, content, index, depth, output, len, scrollLayoutOffset(widget), tokens),
         .list => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
@@ -531,7 +531,22 @@ fn widgetInsideVerticalScrollScope(output: []const WidgetLayoutNode, parent_inde
     var current: ?usize = parent_index;
     while (current) |index| {
         const widget = output[index].widget;
-        if (widget.kind == .scroll_view or widget.layout.virtualized) return true;
+        if ((widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized) return true;
+        if (widget.layout.anchor != null) return false;
+        current = output[index].parent_index;
+    }
+    return false;
+}
+
+/// The horizontal twin of `widgetInsideVerticalScrollScope`: inside a
+/// HORIZONTALLY scrolling scope (a `.scroll_view` ancestor granting the
+/// horizontal axis), content wider than the viewport is the operating
+/// mode, so the horizontal overflow diagnostic stays quiet there.
+fn widgetInsideHorizontalScrollScope(output: []const WidgetLayoutNode, parent_index: usize) bool {
+    var current: ?usize = parent_index;
+    while (current) |index| {
+        const widget = output[index].widget;
+        if (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) return true;
         if (widget.layout.anchor != null) return false;
         current = output[index].parent_index;
     }
@@ -549,13 +564,15 @@ fn widgetInsideVerticalScrollScope(output: []const WidgetLayoutNode, parent_inde
 ///   virtualized scroll's content wrapper is sized to the viewport and
 ///   its children legitimately extend past it on every rebuild, which
 ///   used to repeat this line hundreds of times for a perfectly correct
-///   layout. Horizontal overflow still warns there — nothing scrolls
-///   sideways to reveal it.
+///   layout. Horizontal overflow warns there UNLESS a horizontally
+///   scrolling scope encloses it — a `horizontal`/`both` scroll view
+///   exists precisely to reveal sideways content.
 /// - The line names the concrete widget (root-first kind path, label
 ///   snippet, id — the same identity the layout audit prints), because
 ///   a bare kind like "column" is unactionable in any real tree.
 fn logAxisChildrenOverflow(output: []const WidgetLayoutNode, parent_index: usize, axis: LayoutAxis, available_extent: f32, used_extent: f32, overflow: f32) void {
     if (axis == .vertical and widgetInsideVerticalScrollScope(output, parent_index)) return;
+    if (axis == .horizontal and widgetInsideHorizontalScrollScope(output, parent_index)) return;
     if (builtin.is_test) test_axis_overflow_diagnostics += 1;
     if (builtin.mode != .Debug) return;
     var path_buffer: [256]u8 = undefined;
@@ -1014,6 +1031,17 @@ fn preferredGridRowExtent(children: []const Widget, columns: usize, tokens: Desi
     return max_height;
 }
 
+/// The layout-time scroll displacement of a non-virtualized scroll
+/// view: each offset applies only on an axis the region grants, so a
+/// stale `value_x` on a vertical-only region can never shear its
+/// content sideways — and a stale `value` on a horizontal-only one can
+/// never leave it displaced upward.
+fn scrollLayoutOffset(widget: Widget) geometry.OffsetF {
+    const scroll_x = if (widget.scroll_axes.scrollsHorizontally()) widget.value_x else 0;
+    const scroll_y = if (widget.scroll_axes.scrollsVertically()) widget.value else 0;
+    return geometry.OffsetF.init(scroll_x, scroll_y);
+}
+
 fn layoutScrollChildren(
     children: []const Widget,
     content: geometry.RectF,
@@ -1021,10 +1049,10 @@ fn layoutScrollChildren(
     depth: usize,
     output: []WidgetLayoutNode,
     len: *usize,
-    scroll_y: f32,
+    scroll_offset: geometry.OffsetF,
     tokens: DesignTokens,
 ) Error!void {
-    const scrolled_content = content.translate(geometry.OffsetF.init(0, -scroll_y));
+    const scrolled_content = content.translate(geometry.OffsetF.init(-scroll_offset.dx, -scroll_offset.dy));
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child), parent_index, depth + 1, output, len, tokens);

@@ -1862,6 +1862,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failVoid(node, markup.on_scroll_element_message);
                 }
                 options.on_scroll = scrollConstructor(expression.tag) orelse {
+                    // The retired one-axis record gets the migration
+                    // teaching (it names the new per-axis fields) instead
+                    // of the generic payload rejection.
+                    if (legacyScrollTag(expression.tag)) {
+                        return self.failVoid(node, markup.on_scroll_legacy_payload_message);
+                    }
                     return self.failVoid(node, markup.on_scroll_payload_message);
                 };
                 return;
@@ -2020,6 +2026,19 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             return null;
+        }
+
+        /// Whether `tag` names an arm carrying the RETIRED one-axis
+        /// scroll record — recognized only so the on-scroll rejection
+        /// can teach the two-axis migration by field name.
+        fn legacyScrollTag(tag: []const u8) bool {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                if (comptime reflect.declaredLegacyScrollStateRecord(field.type)) {
+                    if (std.mem.eql(u8, field.name, tag)) return true;
+                }
+            }
+            return false;
         }
 
         fn resizeConstructor(tag: []const u8) ?Ui.ValueMsgFn {
@@ -2369,6 +2388,7 @@ pub const typeScanQuota = reflect.typeScanQuota;
 pub const Pointee = reflect.Pointee;
 pub const declaredTextInputUnion = reflect.declaredTextInputUnion;
 pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
+pub const declaredLegacyScrollStateRecord = reflect.declaredLegacyScrollStateRecord;
 pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;
 pub const isItemFn = reflect.isItemFn;

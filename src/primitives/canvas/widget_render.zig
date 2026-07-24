@@ -510,7 +510,14 @@ fn emitWidgetLayoutNodeContent(
             try builder.popClip();
             // Native scroll drivers own the (OS overlay) scrollbar.
             if (!paint_widget.native_scroll) {
-                try widget_render_scroll.emitScrollViewScrollbar(builder, paint_widget.frame, widgetScrollSemantics(layout, node_index).metrics, tokens, paint_widget.id);
+                try widget_render_scroll.emitScrollViewScrollbars(
+                    builder,
+                    paint_widget.frame,
+                    widgetScrollAxisMetrics(layout, node_index, .vertical),
+                    widgetScrollAxisMetrics(layout, node_index, .horizontal),
+                    tokens,
+                    paint_widget.id,
+                );
             }
             return;
         },
@@ -629,9 +636,18 @@ fn emitWidgetLayoutScrollableChildren(
     try builder.pushClip(clip);
     try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
     try builder.popClip();
-    // Native scroll drivers own the (OS overlay) scrollbar.
+    // Native scroll drivers own the (OS overlay) scrollbar. These are
+    // the virtualized containers — vertical machinery, so only the
+    // vertical bar can exist.
     if (!widget.native_scroll) {
-        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widgetScrollSemantics(layout, parent_index).metrics, tokens, widget.id);
+        try widget_render_scroll.emitScrollViewScrollbars(
+            builder,
+            widget.frame,
+            widgetScrollAxisMetrics(layout, parent_index, .vertical),
+            .{},
+            tokens,
+            widget.id,
+        );
     }
 }
 
@@ -864,7 +880,14 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try builder.popClip();
     // Native scroll drivers own the (OS overlay) scrollbar.
     if (!widget.native_scroll) {
-        try widget_render_scroll.emitScrollViewScrollbar(builder, widget.frame, widget_render_scroll.widgetScrollMetricsForWidget(widget, tokens), tokens, widget.id);
+        try widget_render_scroll.emitScrollViewScrollbars(
+            builder,
+            widget.frame,
+            widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .vertical),
+            widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .horizontal),
+            tokens,
+            widget.id,
+        );
     }
 }
 
@@ -876,6 +899,16 @@ fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTo
 
 fn widgetScrollSemantics(layout: anytype, node_index: usize) widget_semantics.WidgetScrollSemantics {
     return widget_semantics.widgetScrollSemantics(layout, node_index, widget_layout.virtualWidgetScrollContentExtent);
+}
+
+/// Per-axis scrollbar metrics for a layout-walk scroll region (present
+/// = false on an ungranted axis or an empty viewport).
+fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, comptime axis: canvas.ScrollAxis) event_model.WidgetScrollMetrics {
+    if (node_index >= layout.nodes.len) return .{};
+    const node = layout.nodes[node_index];
+    const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+    if (viewport.isEmpty()) return .{};
+    return widget_semantics.widgetScrollAxisMetrics(layout, node_index, widget_layout.virtualWidgetScrollContentExtent, axis, viewport);
 }
 
 fn emitWidgetLayoutClippedChildren(

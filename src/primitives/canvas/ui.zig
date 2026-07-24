@@ -52,6 +52,38 @@ fn warnStackContainerGap(kind: WidgetKind, gap: f32) void {
     );
 }
 
+/// Debug-build diagnostics for scroll-axis combinations that only a
+/// DYNAMIC value can produce (markup validation already rejects the
+/// literal spellings): a horizontal grant on a virtualized region is
+/// ignored — windowed virtualization prices rows, not columns — and a
+/// `value_x` without a horizontal grant is silently inert. Warn and
+/// keep building; the runtime behavior (vertical scrolling, offset
+/// ignored) is well-defined either way.
+fn warnInertScrollAxis(kind: WidgetKind, options: ElementOptionsShape) void {
+    if (builtin.mode != .Debug) return;
+    if (kind != .scroll_view) return;
+    if (options.virtualized and options.axis != .vertical) {
+        ui_log.warn(
+            "axis={s} is ignored on a virtualized scroll: windowed virtualization prices rows, not columns, so the region scrolls vertically",
+            .{@tagName(options.axis)},
+        );
+    }
+    if (options.value_x != 0 and (options.virtualized or !options.axis.scrollsHorizontally())) {
+        ui_log.warn(
+            "value_x does nothing without a horizontal axis grant: declare axis horizontal (or both) on the scroll region, or drop the offset",
+            .{},
+        );
+    }
+}
+
+/// The slice of `ElementOptions` the scroll-axis diagnostic reads —
+/// declared outside the generic `Ui` so the warning helper can too.
+const ElementOptionsShape = struct {
+    virtualized: bool,
+    axis: canvas.ScrollAxes,
+    value_x: f32,
+};
+
 /// Debug-build diagnostic for a set `wrap` on anything but a plain text
 /// leaf. `ElementOptions.wrap` is text-leaf line policy only — rows and
 /// columns never flow-wrap their children (that is the layout system's
@@ -479,6 +511,25 @@ pub fn Ui(comptime Msg: type) type {
             text: []const u8 = "",
             placeholder: []const u8 = "",
             value: f32 = 0,
+            /// HORIZONTAL scroll offset for a horizontal-capable
+            /// `scroll` container (markup `value-x`) — the sideways
+            /// counterpart of `value`. Follows the same source-wins
+            /// reconcile rule: echo the `on_scroll` state's `offset_x`
+            /// back here and the runtime-owned offset survives
+            /// rebuilds; change it model-side to scroll
+            /// programmatically. Meaningless on every other element.
+            value_x: f32 = 0,
+            /// Which axes a `scroll` container scrolls (markup `axis`):
+            /// `.vertical` (the default — every scroll region before
+            /// axis declarations existed), `.horizontal`, or `.both`.
+            /// Horizontal grants opt the region into wheel/trackpad
+            /// `delta_x`, the bottom-edge scrollbar, and the horizontal
+            /// keymap (Left/Right lines, and on horizontal-only regions
+            /// Home/End/PageUp/PageDown too). Virtualized containers
+            /// ignore a horizontal grant — windowed virtualization
+            /// prices rows, not columns. Meaningless on non-scroll
+            /// elements.
+            axis: canvas.ScrollAxes = .vertical,
             checked: bool = false,
             selected: bool = false,
             /// Disclosure state for tree rows (`role = .treeitem`): null
@@ -3001,6 +3052,7 @@ pub fn Ui(comptime Msg: type) type {
         fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
+            warnInertScrollAxis(kind, .{ .virtualized = options.virtualized, .axis = options.axis, .value_x = options.value_x });
             var widget: Widget = .{
                 .kind = kind,
                 .frame = options.frame,
@@ -3015,6 +3067,8 @@ pub fn Ui(comptime Msg: type) type {
                 .autofocus = options.autofocus,
                 .image_id = options.image,
                 .value = options.value,
+                .value_x = options.value_x,
+                .scroll_axes = options.axis,
                 .variant = options.variant,
                 .size = options.size,
                 .state = .{

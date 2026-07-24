@@ -94,6 +94,7 @@ const AppKitEvent = extern struct {
     reduce_motion: c_int,
     high_contrast: c_int,
     timer_id: u64,
+    scroll_driver_offset_x: f64,
     scroll_driver_offset_y: f64,
     menu_item_id: u32,
     /// Host-stamped packet decode/draw durations riding the frame
@@ -191,7 +192,7 @@ extern fn native_sdk_appkit_adopt_view_surface(host: *AppKitHost, window_id: u64
 extern fn native_sdk_appkit_release_view_surface(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_request_gpu_surface_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_appkit_note_gpu_surface_input(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
-extern fn native_sdk_appkit_set_gpu_surface_scroll_drivers(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, drivers: [*]const AppKitScrollDriver, count: usize) c_int;
+extern fn native_sdk_appkit_set_gpu_surface_scroll_drivers(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, drivers: [*]const AppKitScrollDriver, count: usize, occluders: [*]const AppKitScrollOccluder, occluder_count: usize) c_int;
 extern fn native_sdk_appkit_show_context_menu(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const AppKitContextMenuItem, count: usize) c_int;
 extern fn native_sdk_appkit_start_timer(host: *AppKitHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
 extern fn native_sdk_appkit_cancel_timer(host: *AppKitHost, timer_id: u64) void;
@@ -243,17 +244,30 @@ extern fn native_sdk_appkit_set_credential(host: *AppKitHost, service: [*]const 
 extern fn native_sdk_appkit_get_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_delete_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
 
+const AppKitScrollOccluder = extern struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+};
+
 const AppKitScrollDriver = extern struct {
     driver_id: u64,
+    parent_driver_id: u64,
+    occluder_mask: u32,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
     content_width: f64,
     content_height: f64,
+    offset_x: f64,
     offset_y: f64,
-    set_offset: c_int,
+    set_offset_x: c_int,
+    set_offset_y: c_int,
     rubber_band: c_int,
+    scrolls_x: c_int,
+    scrolls_y: c_int,
 };
 
 const AppKitContextMenuItem = extern struct {
@@ -956,6 +970,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .window_id = event.window_id,
             .label = event.view_label[0..event.view_label_len],
             .driver_id = event.widget_id,
+            .offset_x = @floatCast(event.scroll_driver_offset_x),
             .offset_y = @floatCast(event.scroll_driver_offset_y),
             .timestamp_ns = event.timestamp_ns,
         } }),
@@ -1614,7 +1629,7 @@ fn noteGpuSurfaceInput(context: ?*anyopaque, window_id: platform_mod.WindowId, l
     _ = native_sdk_appkit_note_gpu_surface_input(self.host, window_id, label.ptr, label.len);
 }
 
-fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, drivers: []const platform_mod.GpuSurfaceScrollDriver) anyerror!void {
+fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, drivers: []const platform_mod.GpuSurfaceScrollDriver, occluders: []const platform_mod.GpuSurfaceScrollOccluder) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system) return error.UnsupportedService;
     var specs: [platform_mod.max_gpu_surface_scroll_drivers]AppKitScrollDriver = undefined;
@@ -1622,18 +1637,34 @@ fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: platform_mod.Wind
     for (drivers[0..count], 0..) |driver, index| {
         specs[index] = .{
             .driver_id = driver.id,
+            .parent_driver_id = driver.parent_id,
+            .occluder_mask = driver.occluder_mask,
             .x = driver.frame.x,
             .y = driver.frame.y,
             .width = driver.frame.width,
             .height = driver.frame.height,
             .content_width = driver.content_size.width,
             .content_height = driver.content_size.height,
+            .offset_x = driver.offset_x,
             .offset_y = driver.offset_y,
-            .set_offset = if (driver.set_offset) 1 else 0,
+            .set_offset_x = if (driver.set_offset_x) 1 else 0,
+            .set_offset_y = if (driver.set_offset_y) 1 else 0,
             .rubber_band = if (driver.rubber_band) 1 else 0,
+            .scrolls_x = if (driver.scrolls_x) 1 else 0,
+            .scrolls_y = if (driver.scrolls_y) 1 else 0,
         };
     }
-    if (native_sdk_appkit_set_gpu_surface_scroll_drivers(self.host, window_id, label.ptr, label.len, &specs, count) == 0) return error.ViewNotFound;
+    var occluder_specs: [platform_mod.max_gpu_surface_scroll_occluders]AppKitScrollOccluder = undefined;
+    const occluder_count = @min(occluders.len, occluder_specs.len);
+    for (occluders[0..occluder_count], 0..) |occluder, index| {
+        occluder_specs[index] = .{
+            .x = occluder.frame.x,
+            .y = occluder.frame.y,
+            .width = occluder.frame.width,
+            .height = occluder.frame.height,
+        };
+    }
+    if (native_sdk_appkit_set_gpu_surface_scroll_drivers(self.host, window_id, label.ptr, label.len, &specs, count, &occluder_specs, occluder_count) == 0) return error.ViewNotFound;
 }
 
 fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuRequest) anyerror!void {

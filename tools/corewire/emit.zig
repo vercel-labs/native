@@ -48,10 +48,27 @@ const text_input_event_tags = [_][]const u8{
     "set_composition",     "commit_composition", "cancel_composition",
 };
 
-/// The scroll-state field vocabulary, TS spelling (the emitted-core
-/// mirror keeps the author's names) and the canvas spelling.
-const scroll_state_fields_ts = [_][]const u8{ "offset", "velocity", "viewportExtent", "contentExtent" };
-const scroll_state_fields_canvas = [_][]const u8{ "offset", "velocity", "viewport_extent", "content_extent" };
+/// The scroll-state field vocabulary — the TWO-AXIS record, eight
+/// per-axis fields — in the TS spelling (the emitted-core mirror keeps
+/// the author's names) and the canvas spelling. The order is
+/// `canvas.ScrollState`'s declaration order, which is also the ABI
+/// entry's parameter order. The retired one-axis quartet
+/// (`{offset, velocity, viewportExtent, contentExtent}`) is NOT scroll
+/// state anymore: a record carrying it rides the generic record entry,
+/// and the markup engines refuse to bind `on-scroll` to it with a
+/// teaching that names these fields.
+const scroll_state_fields_ts = [_][]const u8{
+    "offsetX",         "offsetY",
+    "velocityX",       "velocityY",
+    "viewportExtentX", "viewportExtentY",
+    "contentExtentX",  "contentExtentY",
+};
+const scroll_state_fields_canvas = [_][]const u8{
+    "offset_x",          "offset_y",
+    "velocity_x",        "velocity_y",
+    "viewport_extent_x", "viewport_extent_y",
+    "content_extent_x",  "content_extent_y",
+};
 
 pub const Error = error{ Refused, OutOfMemory };
 
@@ -932,14 +949,15 @@ const Emitter = struct {
     }
 
     /// Declaration-order field indexes of a scroll-state record, in the
-    /// ABI entry's parameter order (offset, velocity, viewport extent,
-    /// content extent) — or null when the record is not that shape.
-    fn scrollStateFields(self: *Emitter, type_name: []const u8) ?[4]usize {
+    /// ABI entry's parameter order (the eight per-axis scalars,
+    /// offset_x through content_extent_y) — or null when the record is
+    /// not that shape.
+    fn scrollStateFields(self: *Emitter, type_name: []const u8) ?[8]usize {
         const entry = sidecar_mod.findStruct(self.sidecar.types, type_name) orelse return null;
-        if (entry.fields.len != 4) return null;
-        const spellings = [_][4][]const u8{ scroll_state_fields_ts, scroll_state_fields_canvas };
+        if (entry.fields.len != 8) return null;
+        const spellings = [_][8][]const u8{ scroll_state_fields_ts, scroll_state_fields_canvas };
         for (spellings) |names| {
-            var indexes: [4]usize = undefined;
+            var indexes: [8]usize = undefined;
             var all_found = true;
             for (names, 0..) |field_name, position| {
                 indexes[position] = for (entry.fields, 0..) |field, index| {
@@ -1670,6 +1688,83 @@ test "a text-input-named union without the payload shapes rides the record entry
     // No arm may route through the text-input entry (the attestation
     // block still references the symbol; only dispatch matters here).
     try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_text_input(0,") == null);
+}
+
+test "the two-axis scroll-state record dispatches as direct scalars" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The eight per-axis fields in the TS spelling (the emitted-core
+    // mirror keeps the author's names), declaration order: the shape
+    // the markup predicate binds as `on-scroll`, so dispatch must ride
+    // the dedicated scalar entry, never the encoded record entry.
+    const scroll_struct =
+        \\      {"name": "Scroll", "fields": [
+        \\        {"name": "offsetX", "type": {"kind": "f64"}},
+        \\        {"name": "offsetY", "type": {"kind": "f64"}},
+        \\        {"name": "velocityX", "type": {"kind": "f64"}},
+        \\        {"name": "velocityY", "type": {"kind": "f64"}},
+        \\        {"name": "viewportExtentX", "type": {"kind": "f64"}},
+        \\        {"name": "viewportExtentY", "type": {"kind": "f64"}},
+        \\        {"name": "contentExtentX", "type": {"kind": "f64"}},
+        \\        {"name": "contentExtentY", "type": {"kind": "f64"}}
+        \\      ]},
+    ;
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"structs\": [\n",
+        try std.fmt.allocPrint(arena, "\"structs\": [\n{s}\n", .{scroll_struct}),
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}},\n      {\"name\": \"scrolled\", \"payload\": {\"kind\": \"record\", \"name\": \"Scroll\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        generated,
+        "abi.dispatch_scroll_state(1, payload.offsetX, payload.offsetY, payload.velocityX, payload.velocityY, payload.viewportExtentX, payload.viewportExtentY, payload.contentExtentX, payload.contentExtentY, &cmd_ptr, &cmd_len)",
+    ) != null);
+}
+
+test "the retired one-axis scroll quartet rides the record entry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The pre-two-axis shape `{offset, velocity, viewportExtent,
+    // contentExtent}` is an ordinary record now — the markup engines
+    // refuse to bind `on-scroll` to it (with a teaching that names the
+    // per-axis fields), so dispatch must not claim the scalar entry.
+    const legacy_struct =
+        \\      {"name": "Scroll", "fields": [
+        \\        {"name": "offset", "type": {"kind": "f64"}},
+        \\        {"name": "velocity", "type": {"kind": "f64"}},
+        \\        {"name": "viewportExtent", "type": {"kind": "f64"}},
+        \\        {"name": "contentExtent", "type": {"kind": "f64"}}
+        \\      ]},
+    ;
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"structs\": [\n",
+        try std.fmt.allocPrint(arena, "\"structs\": [\n{s}\n", .{legacy_struct}),
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}},\n      {\"name\": \"scrolled\", \"payload\": {\"kind\": \"record\", \"name\": \"Scroll\"}}",
+    );
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_record(1,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_scroll_state(1,") == null);
 }
 
 test "boot references every attested export so the link proves the set" {

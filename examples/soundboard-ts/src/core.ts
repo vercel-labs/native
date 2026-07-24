@@ -899,7 +899,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       // The controlled-scroll echo: the applied offset lands in the
       // model, so the next rebuild's `value` binding never fights the
       // runtime (and page changes reset it to 0 above).
-      return { ...model, libraryScrollTop: msg.scroll.offset };
+      return { ...model, libraryScrollTop: msg.scroll.offsetY };
     case "canvas_resized":
       return { ...model, canvasWidth: msg.width };
     case "url_base_set":

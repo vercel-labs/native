@@ -125,8 +125,9 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// in the canonical value encoding.
         pub const dispatch_text_input = Symbol(fn (tag: u8, event: [*]const u8, event_len: usize, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_text_input");
         /// The declared scroll-state mirror record as direct scalars
-        /// (the hottest markup dispatch: per-frame during scrolls).
-        pub const dispatch_scroll_state = Symbol(fn (tag: u8, offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_scroll_state");
+        /// (the hottest markup dispatch: per-frame during scrolls) —
+        /// the TWO-AXIS record's eight fields in declaration order.
+        pub const dispatch_scroll_state = Symbol(fn (tag: u8, offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_scroll_state");
 
         // -------------------------------------------------- post-cycle
         pub const subscriptions = Symbol(fn (subs: *[*]const u8, subs_len: *usize) callconv(.c) void, "subscriptions");

@@ -883,6 +883,72 @@ test "overscroll validates as scroll-scoped with a closed value vocabulary" {
     }
 }
 
+test "axis and value-x validate as scroll-scoped with the axis grant dependency" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Valid: every vocabulary value on scroll, and value-x beside a
+    // horizontal-capable axis (literal or a binding resolved at build).
+    const valid_sources = [_][]const u8{
+        "<column>\n  <scroll axis=\"vertical\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"both\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"both\" value-x=\"{shelf_x}\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        // A literal VERTICAL axis is legal beside virtualization (it
+        // grants nothing virtualization ignores), and a horizontal
+        // grant is legal beside a literal virtualized="false".
+        "<column>\n  <scroll axis=\"vertical\" virtualized=\"true\" virtual-item-extent=\"24\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+        "<column>\n  <scroll axis=\"horizontal\" virtualized=\"false\">\n    <row><text>a</text></row>\n  </scroll>\n</column>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // Axes exist only where the runtime scrolls.
+        .{
+            .source = "<column>\n  <row axis=\"horizontal\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.axis_element_message,
+        },
+        // Literal values outside the closed vocabulary teach the set.
+        .{
+            .source = "<column>\n  <scroll axis=\"sideways\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.axis_value_message,
+        },
+        // Windowed virtualization is vertical machinery: a horizontal
+        // grant there would be silently ignored.
+        .{
+            .source = "<column>\n  <scroll axis=\"horizontal\" virtualized=\"true\" virtual-item-extent=\"24\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.axis_virtualized_message,
+        },
+        // The horizontal offset exists only where the runtime scrolls
+        // sideways.
+        .{
+            .source = "<column>\n  <row value-x=\"20\">\n    <text>a</text>\n  </row>\n</column>",
+            .message = markup.value_x_element_message,
+        },
+        // An offset on an axis the region never grants is silently
+        // inert: no axis at all, and the explicit vertical default.
+        .{
+            .source = "<column>\n  <scroll value-x=\"20\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.value_x_dependent_attr_message,
+        },
+        .{
+            .source = "<column>\n  <scroll axis=\"vertical\" value-x=\"20\">\n    <column><text>a</text></column>\n  </scroll>\n</column>",
+            .message = markup.value_x_dependent_attr_message,
+        },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expect(info.line > 0);
+    }
+}
+
 test "tooltip-delay validates as tooltip-scoped beside anchor, and anchor accepts tooltip" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

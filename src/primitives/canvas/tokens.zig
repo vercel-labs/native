@@ -715,17 +715,48 @@ pub const ScrollPhysics = struct {
     rubberband_snap_distance: f32 = 0.5,
 };
 
-pub const ScrollState = struct {
+/// Which axes a scroll container scrolls. Vertical is the default —
+/// every scroll region before axis declarations existed scrolled
+/// vertically, and that stays byte-identical. Horizontal opts a region
+/// into wheel/trackpad `delta_x`, the horizontal scrollbar, and the
+/// horizontal keymap; `both` scrolls freely on the two axes at once.
+pub const ScrollAxes = enum {
+    vertical,
+    horizontal,
+    both,
+
+    pub fn scrollsVertically(self: ScrollAxes) bool {
+        return self != .horizontal;
+    }
+
+    pub fn scrollsHorizontally(self: ScrollAxes) bool {
+        return self != .vertical;
+    }
+};
+
+/// One named scroll axis. `ScrollAxisState` carries the physics for a
+/// single axis; `ScrollState` composes the two.
+pub const ScrollAxis = enum {
+    horizontal,
+    vertical,
+};
+
+/// The retained scroll physics of ONE axis: offset, wheel/kinetic
+/// velocity, and the extents that bound them. The two-axis `ScrollState`
+/// is a pair of these; every physics rule (clamping, rubber-band,
+/// kinetic decay) is per-axis, which is how independent-axis routing
+/// stays independent physics.
+pub const ScrollAxisState = struct {
     offset: f32 = 0,
     velocity: f32 = 0,
     viewport_extent: f32 = 0,
     content_extent: f32 = 0,
 
-    pub fn maxOffset(self: ScrollState) f32 {
+    pub fn maxOffset(self: ScrollAxisState) f32 {
         return @max(0, nonNegative(self.content_extent) - nonNegative(self.viewport_extent));
     }
 
-    pub fn clamped(self: ScrollState) ScrollState {
+    pub fn clamped(self: ScrollAxisState) ScrollAxisState {
         var next = self;
         const clamped_offset = std.math.clamp(nonNegative(next.offset), 0, next.maxOffset());
         if (clamped_offset != next.offset) next.velocity = 0;
@@ -733,27 +764,27 @@ pub const ScrollState = struct {
         return next;
     }
 
-    pub fn applyWheel(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
+    pub fn applyWheel(self: ScrollAxisState, delta: f32, physics: ScrollPhysics) ScrollAxisState {
         return self.applyWheelWithRubberband(delta, physics, physics.overscroll == .rubber_band);
     }
 
-    pub fn applyWheelClamped(self: ScrollState, delta: f32, physics: ScrollPhysics) ScrollState {
+    pub fn applyWheelClamped(self: ScrollAxisState, delta: f32, physics: ScrollPhysics) ScrollAxisState {
         return self.applyWheelWithRubberband(delta, physics, false);
     }
 
-    pub fn visualOffset(self: ScrollState) f32 {
+    pub fn visualOffset(self: ScrollAxisState) f32 {
         return std.math.clamp(self.offset, 0, self.maxOffset());
     }
 
-    pub fn overscroll(self: ScrollState) f32 {
+    pub fn overscroll(self: ScrollAxisState) f32 {
         return self.offset - self.visualOffset();
     }
 
-    pub fn needsKineticStep(self: ScrollState, physics: ScrollPhysics) bool {
+    pub fn needsKineticStep(self: ScrollAxisState, physics: ScrollPhysics) bool {
         return @abs(self.velocity) > nonNegative(physics.stop_velocity) or @abs(self.overscroll()) > @max(0.01, nonNegative(physics.rubberband_snap_distance));
     }
 
-    fn applyWheelWithRubberband(self: ScrollState, delta: f32, physics: ScrollPhysics, rubberband: bool) ScrollState {
+    fn applyWheelWithRubberband(self: ScrollAxisState, delta: f32, physics: ScrollPhysics, rubberband: bool) ScrollAxisState {
         var next = self;
         const scaled_delta = delta * physics.wheel_multiplier;
         var effective_delta = scaled_delta;
@@ -771,7 +802,7 @@ pub const ScrollState = struct {
         return if (rubberband) next.rubberbanded(physics) else next.clamped();
     }
 
-    pub fn stepKinetic(self: ScrollState, dt_ms: f32, physics: ScrollPhysics) ScrollState {
+    pub fn stepKinetic(self: ScrollAxisState, dt_ms: f32, physics: ScrollPhysics) ScrollAxisState {
         var next = self;
         const dt_seconds = nonNegative(dt_ms) / 1000.0;
         // With overscroll off there is never an excursion to recover
@@ -805,7 +836,7 @@ pub const ScrollState = struct {
         return next.rubberbanded(physics);
     }
 
-    fn rubberbanded(self: ScrollState, physics: ScrollPhysics) ScrollState {
+    fn rubberbanded(self: ScrollAxisState, physics: ScrollPhysics) ScrollAxisState {
         if (physics.overscroll == .none) return self.clamped();
         const extent = self.rubberbandExtent(physics);
         if (extent <= 0) return self.clamped();
@@ -816,13 +847,85 @@ pub const ScrollState = struct {
         return next;
     }
 
-    fn rubberbandExtent(self: ScrollState, physics: ScrollPhysics) f32 {
+    fn rubberbandExtent(self: ScrollAxisState, physics: ScrollPhysics) f32 {
         const viewport_extent = nonNegative(self.viewport_extent);
         if (viewport_extent <= 0) return 0;
         const ratio_extent = viewport_extent * nonNegative(physics.rubberband_extent_ratio);
         const max_extent = nonNegative(physics.rubberband_max_extent);
         if (max_extent <= 0) return ratio_extent;
         return @min(ratio_extent, max_extent);
+    }
+};
+
+/// The TWO-AXIS scroll state of a scroll container — the record scroll
+/// observation events (`on_scroll`) deliver and retained scroll physics
+/// store. Flat per-axis fields rather than nested axis records so the
+/// declared-record mirror a transpiled TypeScript core emits
+/// (`{offsetX, offsetY, velocityX, velocityY, viewportExtentX,
+/// viewportExtentY, contentExtentX, contentExtentY}`) maps onto this
+/// field-by-field — the same structural matching the one-axis record
+/// used. Vertical-only regions carry live `_y` fields and quiet `_x`
+/// ones (offset 0, content pinned to the viewport width), and the
+/// reverse for horizontal-only regions.
+pub const ScrollState = struct {
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+    velocity_x: f32 = 0,
+    velocity_y: f32 = 0,
+    viewport_extent_x: f32 = 0,
+    viewport_extent_y: f32 = 0,
+    content_extent_x: f32 = 0,
+    content_extent_y: f32 = 0,
+
+    pub fn fromAxes(x: ScrollAxisState, y: ScrollAxisState) ScrollState {
+        return .{
+            .offset_x = x.offset,
+            .offset_y = y.offset,
+            .velocity_x = x.velocity,
+            .velocity_y = y.velocity,
+            .viewport_extent_x = x.viewport_extent,
+            .viewport_extent_y = y.viewport_extent,
+            .content_extent_x = x.content_extent,
+            .content_extent_y = y.content_extent,
+        };
+    }
+
+    /// The named axis as a standalone physics state.
+    pub fn axis(self: ScrollState, comptime which: ScrollAxis) ScrollAxisState {
+        return switch (which) {
+            .horizontal => .{
+                .offset = self.offset_x,
+                .velocity = self.velocity_x,
+                .viewport_extent = self.viewport_extent_x,
+                .content_extent = self.content_extent_x,
+            },
+            .vertical => .{
+                .offset = self.offset_y,
+                .velocity = self.velocity_y,
+                .viewport_extent = self.viewport_extent_y,
+                .content_extent = self.content_extent_y,
+            },
+        };
+    }
+
+    /// This state with the named axis replaced.
+    pub fn withAxis(self: ScrollState, comptime which: ScrollAxis, state: ScrollAxisState) ScrollState {
+        var next = self;
+        switch (which) {
+            .horizontal => {
+                next.offset_x = state.offset;
+                next.velocity_x = state.velocity;
+                next.viewport_extent_x = state.viewport_extent;
+                next.content_extent_x = state.content_extent;
+            },
+            .vertical => {
+                next.offset_y = state.offset;
+                next.velocity_y = state.velocity;
+                next.viewport_extent_y = state.viewport_extent;
+                next.content_extent_y = state.content_extent;
+            },
+        }
+        return next;
     }
 };
 

@@ -196,6 +196,7 @@ const SpringToken = support.SpringToken;
 const BlurTokenRef = support.BlurTokenRef;
 const ScrollPhysics = support.ScrollPhysics;
 const ScrollState = support.ScrollState;
+const ScrollAxisState = support.ScrollAxisState;
 const VirtualListOptions = support.VirtualListOptions;
 const VirtualListRange = support.VirtualListRange;
 const virtualListRange = support.virtualListRange;
@@ -1412,6 +1413,126 @@ test "widget scroll view scrollbars use control visual tokens" {
     }
 }
 
+test "horizontal scroll views draw the bottom-edge scrollbar and two-axis regions reserve the corner" {
+    const tokens: DesignTokens = .{};
+
+    // A horizontal shelf: content reaches x = 460 in a 120-wide
+    // viewport. Only the horizontal bar (part slots 4/5) exists.
+    const tiles = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 40) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 40) },
+    };
+    const shelf = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .value_x = 20,
+        .children = &tiles,
+    };
+    var shelf_nodes: [4]WidgetLayoutNode = undefined;
+    const shelf_layout = try layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 120, 60), &shelf_nodes);
+    // The horizontal offset displaces children leftward at layout time,
+    // exactly as the vertical offset displaces them upward.
+    try expectLayoutFrame(shelf_layout, 2, geometry.RectF.init(-20, 0, 140, 40));
+    try expectLayoutFrame(shelf_layout, 3, geometry.RectF.init(300, 0, 140, 40));
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try shelf_layout.emitDisplayList(&builder, tokens);
+    const display_list = builder.displayList();
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 2)) == null);
+    try std.testing.expect(display_list.findCommandById(widgetPartId(1, 3)) == null);
+    switch (display_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            // Bottom edge: inset 3, thickness 3, full width minus insets.
+            try expectRect(geometry.RectF.init(3, 54, 114, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(1, 5)).?.command) {
+        .fill_rounded_rect => |thumb| {
+            try std.testing.expectEqual(@as(f32, 54), thumb.rect.y);
+            try std.testing.expect(thumb.rect.width < 114);
+            try std.testing.expect(thumb.rect.x > 3);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A both-axes region with overflow on both axes draws BOTH bars,
+    // each track ending short of the shared corner.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 400, 300) }},
+    };
+    var sheet_nodes: [3]WidgetLayoutNode = undefined;
+    const sheet_layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 120, 60), &sheet_nodes);
+    var sheet_commands: [16]CanvasCommand = undefined;
+    var sheet_builder = Builder.init(&sheet_commands);
+    try sheet_layout.emitDisplayList(&sheet_builder, tokens);
+    const sheet_list = sheet_builder.displayList();
+    switch (sheet_list.findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rounded_rect => |track| {
+            // The vertical track gives up thickness + inset (6) at the
+            // bottom corner: 60 - 2*3 - 6 = 48.
+            try expectRect(geometry.RectF.init(114, 3, 3, 48), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (sheet_list.findCommandById(widgetPartId(1, 4)).?.command) {
+        .fill_rounded_rect => |track| {
+            try expectRect(geometry.RectF.init(3, 54, 108, 3), track.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 3)) != null);
+    try std.testing.expect(sheet_list.findCommandById(widgetPartId(1, 5)) != null);
+}
+
+test "a both-axes region whose content only overflows sideways reports horizontal scroll semantics" {
+    // 500-wide content in a 200 x 100 both-axes viewport: no vertical
+    // range, real horizontal range. The assistive node must read the
+    // LIVE axis — scrollable, with the horizontal offset/extents — not
+    // a permanently unscrollable vertical axis.
+    const sheet = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value_x = 60,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 100) }},
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(sheet, geometry.RectF.init(0, 0, 200, 100), &nodes);
+
+    var semantics_buffer: [3]WidgetSemanticsNode = undefined;
+    const semantics = try layout.collectSemantics(&semantics_buffer);
+    try std.testing.expect(semantics[0].scroll.present);
+    try std.testing.expectEqual(@as(f32, 60), semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 200), semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 500), semantics[0].scroll.content_extent);
+    try std.testing.expectApproxEqAbs(@as(f32, 60.0 / 300.0), semantics[0].value.?, 0.001);
+    try std.testing.expect(semantics[0].actions.increment);
+    try std.testing.expect(semantics[0].actions.decrement);
+
+    // With VERTICAL range present the vertical axis stays primary — the
+    // pre-axis behavior for every region that scrolls down.
+    const tall = Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value = 30,
+        .children = &[_]Widget{.{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 500, 400) }},
+    };
+    var tall_nodes: [3]WidgetLayoutNode = undefined;
+    const tall_layout = try layoutWidgetTree(tall, geometry.RectF.init(0, 0, 200, 100), &tall_nodes);
+    var tall_buffer: [3]WidgetSemanticsNode = undefined;
+    const tall_semantics = try tall_layout.collectSemantics(&tall_buffer);
+    try std.testing.expectEqual(@as(f32, 30), tall_semantics[0].scroll.offset);
+    try std.testing.expectEqual(@as(f32, 100), tall_semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 400), tall_semantics[0].scroll.content_extent);
+}
+
 test "widget focus traversal skips scroll clipped children" {
     const children = [_]Widget{
         .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 0, 32), .text = "One" },
@@ -1446,7 +1567,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
         .deceleration_per_second = 0.5,
         .stop_velocity = 1,
     };
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 10,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1471,7 +1592,7 @@ test "scroll state applies wheel deltas kinetic decay and bounds" {
 }
 
 test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band excursions recover" {
-    const start = ScrollState{
+    const start = ScrollAxisState{
         .offset = 250,
         .viewport_extent = 100,
         .content_extent = 360,
@@ -1485,7 +1606,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
     const pinned = start.applyWheel(1000, pinned_physics);
     try std.testing.expectEqual(@as(f32, 260), pinned.offset);
     try std.testing.expectEqual(@as(f32, 0), pinned.velocity);
-    var rolling = ScrollState{
+    var rolling = ScrollAxisState{
         .offset = 250,
         .velocity = 400,
         .viewport_extent = 100,
@@ -1512,7 +1633,7 @@ test "scroll overscroll gates rubber-band: none pins at the edges, rubber_band e
 
     // A stale out-of-range offset on a pinned region self-heals in one
     // kinetic step instead of animating a return.
-    const stale = ScrollState{
+    const stale = ScrollAxisState{
         .offset = 300,
         .viewport_extent = 100,
         .content_extent = 360,

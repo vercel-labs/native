@@ -371,6 +371,9 @@ pub const BlurTokenRef = token_model.BlurTokenRef;
 pub const ScrollPhysics = token_model.ScrollPhysics;
 pub const ScrollOverscroll = token_model.ScrollOverscroll;
 pub const ScrollState = token_model.ScrollState;
+pub const ScrollAxisState = token_model.ScrollAxisState;
+pub const ScrollAxis = token_model.ScrollAxis;
+pub const ScrollAxes = token_model.ScrollAxes;
 pub const VirtualListOptions = token_model.VirtualListOptions;
 pub const VirtualListRange = token_model.VirtualListRange;
 pub const virtualListRange = token_model.virtualListRange;
@@ -730,6 +733,8 @@ pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
 /// and whose children are the built window, not the full item set.
 pub const widgetVirtualRuntimeScrolled = @import("widget_tree.zig").widgetVirtualRuntimeScrolled;
 pub const widgetScrollPhysics = @import("widget_tree.zig").widgetScrollPhysics;
+pub const widgetScrollsAxis = @import("widget_tree.zig").widgetScrollsAxis;
+pub const widgetScrollAxisMetrics = @import("widget_semantics.zig").widgetScrollAxisMetrics;
 pub const isWidgetHiddenInAncestors = @import("widget_tree.zig").isWidgetHiddenInAncestors;
 /// The disclosure family (widget_tree.zig): collapsible widgets whose
 /// content lays out at full size and REVEALS, plus the settled/concealed

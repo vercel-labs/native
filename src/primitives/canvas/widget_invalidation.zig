@@ -260,6 +260,8 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !std.mem.eql(u8, previous.widget.placeholder, next.widget.placeholder) or
         !std.mem.eql(u8, previous.widget.icon, next.widget.icon) or
         previous.widget.value != next.widget.value or
+        previous.widget.value_x != next.widget.value_x or
+        previous.widget.scroll_axes != next.widget.scroll_axes or
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or
         previous.widget.image_fit != next.widget.image_fit or

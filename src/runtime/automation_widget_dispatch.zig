@@ -321,6 +321,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .timestamp_ns = timestamp_ns,
                 .x = point.x,
                 .y = point.y,
+                .delta_x = wheel.delta_x,
                 .delta_y = wheel.delta_y,
             } });
         }

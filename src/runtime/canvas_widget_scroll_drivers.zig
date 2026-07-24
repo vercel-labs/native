@@ -17,10 +17,12 @@
 //!   record and the existing "runtime offset wins until the source
 //!   changes" rebuild reconciliation keeps working unchanged.
 //!
-//! `set_offset` is only forced when the runtime's offset diverged from
-//! the last driver-reported offset (keyboard scroll, automation wheel,
-//! source-side programmatic scroll, clamp after content shrink): pushing
-//! unconditionally would snap the OS scroller back mid-gesture.
+//! `set_offset_x`/`set_offset_y` are only forced when that axis's
+//! runtime offset diverged from the last driver-reported offset
+//! (keyboard scroll, automation wheel, source-side programmatic scroll,
+//! clamp after content shrink): pushing unconditionally — or pushing
+//! the OTHER axis along for the ride — would snap the OS scroller back
+//! mid-gesture.
 
 const std = @import("std");
 const geometry = @import("geometry");
@@ -66,8 +68,53 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
 
             var drivers: [platform.max_gpu_surface_scroll_drivers]platform.GpuSurfaceScrollDriver = undefined;
             var ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined;
-            var offsets: [platform.max_gpu_surface_scroll_drivers]f32 = undefined;
+            var offsets: [platform.max_gpu_surface_scroll_drivers]geometry.OffsetF = undefined;
             var count: usize = 0;
+            // Occluders: floating surfaces and modal catchers that
+            // hit-block regions beneath them, so the host's geometric
+            // wheel routing declines exactly the points the engine's
+            // hit test would give to an overlay's branch. Anchored
+            // TOOLTIPS are excluded (they pass hit-testing through),
+            // as are surfaces hidden by an ancestor or concealed by a
+            // closed disclosure — the same visibility rules the hit
+            // test applies. Frames honor the widget's render transform
+            // (a sliding popover blocks where it is SEEN), and a modal
+            // catcher spans the whole VIEW-LOCAL canvas only when it is
+            // actually modal (`scrim` — the false case is the inline
+            // preview, which floats over nothing). More surfaces than
+            // the budget fails SAFE: one whole-view occluder blocking
+            // every driver, so every wheel rides the wire and the
+            // engine's real hit test decides.
+            var occluders: [platform.max_gpu_surface_scroll_occluders]platform.GpuSurfaceScrollOccluder = undefined;
+            var occluder_nodes: [platform.max_gpu_surface_scroll_occluders]usize = undefined;
+            var occluder_count: usize = 0;
+            var occluder_overflow = false;
+            const layout_tree = view.widgetLayoutTree();
+            const view_local = geometry.RectF.init(0, 0, view.frame.normalized().width, view.frame.normalized().height);
+            for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
+                const anchored_surface = node.widget.layout.anchor != null and node.widget.kind != .tooltip;
+                const modal_surface = switch (node.widget.kind) {
+                    .dialog, .drawer, .sheet => node.widget.scrim,
+                    else => false,
+                };
+                if (!anchored_surface and !modal_surface) continue;
+                if (node.widget.semantics.hidden) continue;
+                if (canvas.isWidgetHiddenInAncestors(layout_tree, node_index)) continue;
+                if (canvas.isWidgetConcealedByDisclosure(layout_tree, node_index)) continue;
+                const frame = if (modal_surface) view_local else transformedOccluderFrame(node.*);
+                if (frame.isEmpty()) continue;
+                if (occluder_count >= occluders.len) {
+                    occluder_overflow = true;
+                    break;
+                }
+                occluders[occluder_count] = .{ .frame = frame };
+                occluder_nodes[occluder_count] = node_index;
+                occluder_count += 1;
+            }
+            if (occluder_overflow) {
+                occluders[0] = .{ .frame = view_local };
+                occluder_count = 1;
+            }
             for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 if (!canvasWidgetScrollDriverEligible(node.*)) continue;
                 node.widget.native_scroll = true;
@@ -80,30 +127,52 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 // Content extent is viewport-relative; rebase it onto the
                 // full region frame so the native max offset
                 // (content_height - frame.height) matches the engine's
-                // (content_extent - viewport.height).
-                const content_height = frame.height + @max(0, content_extent - viewport.height);
-                const offset = node.widget.value;
+                // (content_extent - viewport.height). Each dimension
+                // exceeds the frame only on an axis the region grants;
+                // everywhere else it pins to the frame so the OS
+                // scroller cannot travel along a revoked axis (a
+                // horizontal-only shelf with tall content must not
+                // accept vertical wheel motion natively).
+                const content_height = if (canvas.widgetScrollsAxis(node.widget, .vertical))
+                    frame.height + @max(0, content_extent - viewport.height)
+                else
+                    frame.height;
+                const content_width = if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+                    frame.width + @max(0, view.canvasWidgetScrollContentExtentX(node_index, viewport) - viewport.width)
+                else
+                    frame.width;
+                const offset = geometry.OffsetF.init(
+                    if (canvas.widgetScrollsAxis(node.widget, .horizontal)) node.widget.value_x else 0,
+                    if (canvas.widgetScrollsAxis(node.widget, .vertical)) node.widget.value else 0,
+                );
                 const tracked = trackedScrollDriverOffset(view, node.widget.id);
-                const push = tracked == null or @abs(tracked.? - offset) > scroll_driver_offset_epsilon;
+                const push_x = tracked == null or @abs(tracked.?.dx - offset.dx) > scroll_driver_offset_epsilon;
+                const push_y = tracked == null or @abs(tracked.?.dy - offset.dy) > scroll_driver_offset_epsilon;
 
                 drivers[count] = .{
                     .id = node.widget.id,
+                    .parent_id = nearestAncestorDriverId(view, node_index),
+                    .occluder_mask = if (occluder_overflow) 1 else driverOccluderMask(view, node_index, occluder_nodes[0..occluder_count]),
                     .frame = frame,
-                    .content_size = .{ .width = frame.width, .height = content_height },
-                    .offset_y = offset,
-                    .set_offset = push,
+                    .content_size = .{ .width = content_width, .height = content_height },
+                    .offset_x = offset.dx,
+                    .offset_y = offset.dy,
+                    .set_offset_x = push_x,
+                    .set_offset_y = push_y,
                     // Per-region edge behavior, resolved the same way the
                     // engine physics resolve it (region override onto the
                     // scroll-physics token): off pins the OS scroller at
                     // the content edges, on lets it bounce.
                     .rubber_band = canvas.widgetScrollPhysics(node.widget, view.widget_tokens.scroll).overscroll == .rubber_band,
+                    .scrolls_x = canvas.widgetScrollsAxis(node.widget, .horizontal),
+                    .scrolls_y = canvas.widgetScrollsAxis(node.widget, .vertical),
                 };
                 ids[count] = node.widget.id;
                 offsets[count] = offset;
                 count += 1;
             }
 
-            self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, drivers[0..count]) catch |err| {
+            self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, drivers[0..count], occluders[0..occluder_count]) catch |err| {
                 if (err != error.UnsupportedService) {
                     scroll_driver_log.warn("scroll driver sync failed for view '{s}': {s}", .{ view.label, @errorName(err) });
                 }
@@ -122,10 +191,10 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, event.window_id, event.label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             self.views[index].recordGpuSurfaceInputTimestamp(event.timestamp_ns);
-            recordScrollDriverOffset(&self.views[index], event.driver_id, event.offset_y);
+            recordScrollDriverOffset(&self.views[index], event.driver_id, geometry.OffsetF.init(event.offset_x, event.offset_y));
 
             const node_index = self.views[index].canvasWidgetNodeIndexById(event.driver_id) orelse return;
-            const dirty = try self.views[index].applyCanvasWidgetScrollDriverOffset(node_index, event.offset_y) orelse return;
+            const dirty = try self.views[index].applyCanvasWidgetScrollDriverOffset(node_index, event.offset_x, event.offset_y) orelse return;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try CanvasWidgetEventMethods().reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
@@ -165,14 +234,79 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
     return true;
 }
 
-fn trackedScrollDriverOffset(view: anytype, driver_id: u64) ?f32 {
+/// Which occluders block this driver. An occluder never blocks:
+///   - ITSELF (a directly anchored scroll region is its own surface);
+///   - its own subtree (a scroll region inside an open popover or
+///     modal is above the surface, not beneath it);
+///   - a driver whose anchored ROOT paints LATER in the floating pass
+///     (anchored surfaces paint in tree order above all in-flow
+///     content, so a scroll region inside the topmost of two
+///     overlapping popovers sits above the lower one).
+fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const usize) u32 {
+    const driver_anchor_root = anchoredRootIndex(view, driver_node);
+    var mask: u32 = 0;
+    for (occluder_nodes, 0..) |occluder_node, bit| {
+        if (occluder_node == driver_node) continue;
+        if (driver_anchor_root) |root| {
+            if (occluder_node == root) continue;
+            if (root > occluder_node) continue;
+        }
+        if (nodeIsAncestor(view, occluder_node, driver_node)) continue;
+        mask |= @as(u32, 1) << @intCast(bit);
+    }
+    return mask;
+}
+
+/// The render transform honored: the occluder blocks where the surface
+/// is SEEN (the transformed frame's axis-aligned bounds), not where it
+/// was laid out.
+fn transformedOccluderFrame(node: canvas.WidgetLayoutNode) geometry.RectF {
+    const frame = node.frame.normalized();
+    if (frame.isEmpty()) return frame;
+    const transform = node.widget.transform;
+    if (std.meta.eql(transform, canvas.Affine.identity())) return frame;
+    return transform.transformRect(frame).normalized();
+}
+
+/// The nearest self-or-ancestor node that is an anchored floating root,
+/// or null for in-flow content.
+fn anchoredRootIndex(view: anytype, node_index: usize) ?usize {
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (view.widget_layout_nodes[index].widget.layout.anchor != null) return index;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return null;
+}
+
+fn nodeIsAncestor(view: anytype, ancestor: usize, node: usize) bool {
+    var current = view.widget_layout_nodes[node].parent_index;
+    while (current) |index| {
+        if (index == ancestor) return true;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return false;
+}
+
+/// The widget id of the nearest ancestor node that is itself
+/// driver-eligible, or 0 at the top of the scrollable chain.
+fn nearestAncestorDriverId(view: anytype, node_index: usize) u64 {
+    var current = view.widget_layout_nodes[node_index].parent_index;
+    while (current) |index| {
+        if (canvasWidgetScrollDriverEligible(view.widget_layout_nodes[index])) return view.widget_layout_nodes[index].widget.id;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return 0;
+}
+
+fn trackedScrollDriverOffset(view: anytype, driver_id: u64) ?geometry.OffsetF {
     for (view.scroll_driver_ids[0..view.scroll_driver_count], 0..) |id, index| {
         if (id == driver_id) return view.scroll_driver_offsets[index];
     }
     return null;
 }
 
-fn recordScrollDriverOffset(view: anytype, driver_id: u64, offset: f32) void {
+fn recordScrollDriverOffset(view: anytype, driver_id: u64, offset: geometry.OffsetF) void {
     for (view.scroll_driver_ids[0..view.scroll_driver_count], 0..) |id, index| {
         if (id != driver_id) continue;
         view.scroll_driver_offsets[index] = offset;

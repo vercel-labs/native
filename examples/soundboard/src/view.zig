@@ -70,6 +70,14 @@ const tile_text_height: f32 = 36;
 const detail_cover_size: f32 = 184;
 const content_padding: f32 = 24;
 
+/// The detail page's album rail: fixed-width tiles on a horizontal
+/// scroll region exactly tall enough for one tile. 168 keeps seven
+/// sibling covers wider than the desktop shell's content row at every
+/// regular window width up to ~1300 points, so the rail actually
+/// scrolls where it ships (a rail that fits simply rests).
+const shelf_tile_width: f32 = 168;
+const shelf_height: f32 = tile_padding * 2 + (shelf_tile_width - tile_padding * 2) + cover_text_gap + tile_text_height;
+
 // ---------------------------------------------------- compact constants
 
 /// The compact shell's content padding: tighter than the desktop's 24 —
@@ -294,7 +302,44 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
             detailHeading(ui, model, album, rows.len, .regular),
         }),
         trackList(ui, rows, "Album tracks", .regular),
+        collectionShelf(ui, model, album_id),
     }));
+}
+
+/// The "From the collection" shelf under the track list: every OTHER
+/// album as a sideways rail of the same bare cover tiles the grid uses —
+/// the music-app carousel, so the next record is one press away without
+/// leaving this one. The rail is a HORIZONTAL scroll region: the wheel's
+/// `delta_x` (and Left/Right on the focused rail) scrolls it while
+/// `delta_y` keeps scrolling the page — each axis routes to the nearest
+/// region that scrolls it, so one diagonal trackpad gesture reads as
+/// completely unsurprising. Controlled like every scroll in this app:
+/// the applied `offset_x` echoes into `value_x`, and opening an album
+/// resets the shelf to its leading edge.
+fn collectionShelf(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
+    const cells = model.otherAlbums(ui.arena, album_id);
+    if (cells.len == 0) return ui.el(.stack, .{}, .{});
+    const fit = GridFit{ .columns = 1, .tile_width = shelf_tile_width };
+    const rail_width = @as(f32, @floatFromInt(cells.len)) * (shelf_tile_width + grid_gap) - grid_gap;
+    return ui.column(.{ .gap = 12 }, .{
+        sectionHeading(ui, "From the collection", ui.fmt("{d} more", .{cells.len})),
+        ui.scroll(.{
+            .axis = .horizontal,
+            .height = shelf_height,
+            .value_x = model.shelf_scroll_x,
+            .on_scroll = Ui.scrollMsg(.shelf_scrolled),
+            .semantics = .{ .label = "More albums" },
+        }, ui.row(.{ .width = rail_width, .gap = grid_gap }, ui.eachCtx(TileContext{ .fit = fit, .form = .regular }, cells, albumKey, shelfTile))),
+    });
+}
+
+/// One shelf tile: the grid's bare album tile at the rail's fixed width
+/// (the tile draws its own height from it).
+fn shelfTile(ui: *Ui, context: TileContext, cell: *const model_mod.AlbumCell) Ui.Node {
+    var tile = albumTile(ui, context, cell);
+    tile.widget.layout.min_size.width = shelf_tile_width;
+    tile.widget.layout.max_size.width = shelf_tile_width;
+    return tile;
 }
 
 /// The album detail cover, shared by both shells: the rounded square at

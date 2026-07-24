@@ -297,9 +297,11 @@ typedef struct {
     int high_contrast;
     uint64_t timer_id;
     /* GPU_SURFACE_SCROLL_DRIVER / CONTEXT_MENU_ACTION payloads: widget_id
-     * carries the driver id / menu token; scroll_driver_offset_y the new
-     * content offset (canvas points, y-down, overscroll passes through);
-     * menu_item_id the selected context-menu item (0 = dismissed). */
+     * carries the driver id / menu token; scroll_driver_offset_x/_y the
+     * new content offsets (canvas points, x-rightward, y-down,
+     * overscroll passes through); menu_item_id the selected
+     * context-menu item (0 = dismissed). */
+    double scroll_driver_offset_x;
     double scroll_driver_offset_y;
     uint32_t menu_item_id;
     /* GPU_SURFACE_FRAME payloads: host-stamped durations of the most
@@ -676,19 +678,41 @@ typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t item_i
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
  * canvas points (top-left origin, y-down); the host flips to AppKit
  * coordinates itself. */
+/* A surface that hit-blocks scroll regions beneath it (view-local
+ * canvas points, top-left origin): wheel routing declines a driver
+ * whose occluder mask includes an occluder containing the point. */
+typedef struct {
+    double x;
+    double y;
+    double width;
+    double height;
+} native_sdk_appkit_scroll_occluder_t;
+
 typedef struct {
     uint64_t driver_id;
+    /* The nearest ancestor driver's id (0 = none): wheel-owner
+     * resolution is restricted to the hit region and its ancestors. */
+    uint64_t parent_driver_id;
+    /* Bit i set = occluder i (of the sync call's occluder array) blocks
+     * this region at points it contains. */
+    uint32_t occluder_mask;
     double x;
     double y;
     double width;
     double height;
     double content_width;
     double content_height;
+    double offset_x;
     double offset_y;
-    int set_offset;
+    int set_offset_x;
+    int set_offset_y;
     /* Edge behavior: 0 pins scrolling at the content edges, nonzero lets
-     * the scroller bounce past them (vertical elasticity). */
+     * the scroller bounce past them (armed per axis via the grants). */
     int rubber_band;
+    /* Which axes the region grants: elasticity and scroller chrome arm
+     * only on granted axes; an ungranted axis never moves or bounces. */
+    int scrolls_x;
+    int scrolls_y;
 } native_sdk_appkit_scroll_driver_t;
 
 /* One native context-menu entry. */
@@ -705,7 +729,7 @@ typedef struct {
  * extents / (when set_offset) offsets, remove drivers absent from the
  * list. Idempotent; called every layout install and every presented
  * frame. Returns 1 on success, 0 when the view does not exist. */
-int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count);
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count, const native_sdk_appkit_scroll_occluder_t *occluders, size_t occluder_count);
 
 /* Present a native context menu (NSMenu popUpMenuPositioningItem) at the
  * view-local point on the next main-loop turn. The selection (or
