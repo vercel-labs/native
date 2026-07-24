@@ -731,9 +731,16 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                     .id = row_id + 0x8000 + run_x,
                     .font_id = tokens.typography.mono_font_id,
                     .size = session.font_size,
+                    // `origin` is the BASELINE, not the glyph top: the
+                    // canvas boxes a run as one em of ascent above the
+                    // origin and a quarter below, so centering that
+                    // 1.25em box in the cell puts the baseline at
+                    // row top + (cell - 1.25*size)/2 + size. Anchoring
+                    // the top here instead paints every row one line
+                    // high — and the clip swallows row zero whole.
                     .origin = geometry.PointF.init(
                         origin_x + @as(f32, @floatFromInt(run_x)) * cell_w,
-                        row_y + (cell_h - session.font_size) * 0.5,
+                        row_y + (cell_h - session.font_size * 1.25) * 0.5 + session.font_size,
                     ),
                     .color = run_fg,
                     .text = run_text,

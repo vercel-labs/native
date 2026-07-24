@@ -1258,6 +1258,106 @@ test "a copy over a vanished emulator range reports failure, never a quiet no-op
     try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "painted-output oracle: the prompt and caret reach the surface as pixels" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // The shell prompt arrives (the transport working is NOT the test —
+    // the pixels are).
+    try app_state.effects.feedPtyOutput(1, "demo$ ");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try harness.runtime.dispatchPlatformEvent(app_iface, .frame_requested);
+
+    // Render the retained frame HEADLESS through the same machinery the
+    // damage oracles use, at scale 1 so a pixel is a point.
+    const width: usize = 980;
+    const height: usize = 640;
+    const pixels = try gpa.alloc(u8, width * height * 4);
+    defer gpa.free(pixels);
+    const scratch = try gpa.alloc(u8, width * height * 4);
+    defer gpa.free(scratch);
+    const render_commands = try gpa.alloc(canvas.RenderCommand, 4096);
+    defer gpa.free(render_commands);
+    const render_batches = try gpa.alloc(canvas.RenderBatch, 512);
+    defer gpa.free(render_batches);
+    const resources = try gpa.alloc(canvas.RenderResource, 1024);
+    defer gpa.free(resources);
+    const resource_cache_entries = try gpa.alloc(canvas.RenderResourceCacheEntry, 1024);
+    defer gpa.free(resource_cache_entries);
+    const resource_cache_actions = try gpa.alloc(canvas.RenderResourceCacheAction, 2048);
+    defer gpa.free(resource_cache_actions);
+    const glyphs = try gpa.alloc(canvas.GlyphAtlasEntry, 8192);
+    defer gpa.free(glyphs);
+    const glyph_cache_entries = try gpa.alloc(canvas.GlyphAtlasCacheEntry, 8192);
+    defer gpa.free(glyph_cache_entries);
+    const glyph_cache_actions = try gpa.alloc(canvas.GlyphAtlasCacheAction, 16384);
+    defer gpa.free(glyph_cache_actions);
+    const text_layout_plans = try gpa.alloc(canvas.TextLayoutPlan, 2048);
+    defer gpa.free(text_layout_plans);
+    const text_layout_lines = try gpa.alloc(canvas.TextLine, 4096);
+    defer gpa.free(text_layout_lines);
+    const changes = try gpa.alloc(canvas.DiffChange, 4096);
+    defer gpa.free(changes);
+    _ = try harness.runtime.presentNextCanvasFramePixels(1, "terminal-canvas", .{
+        .frame_index = 2,
+        .surface_size = geometry.SizeF.init(@floatFromInt(width), @floatFromInt(height)),
+        .scale = 1,
+    }, .{
+        .render_commands = render_commands,
+        .render_batches = render_batches,
+        .resources = resources,
+        .resource_cache_entries = resource_cache_entries,
+        .resource_cache_actions = resource_cache_actions,
+        .glyph_atlas_entries = glyphs,
+        .glyph_atlas_cache_entries = glyph_cache_entries,
+        .glyph_atlas_cache_actions = glyph_cache_actions,
+        .text_layout_plans = text_layout_plans,
+        .text_layout_lines = text_layout_lines,
+        .changes = changes,
+    }, pixels, scratch, canvas.Color.rgb8(0, 0, 0));
+    // (i) The prompt's cell band holds INK: pixels that differ from the
+    // grid background. The first text row starts at the grid origin;
+    // sample generously across the first cell row.
+    const session = app_state.model.session;
+    const cell_w: usize = @intFromFloat(@max(1, session.cell_width));
+    const cell_h: usize = @intFromFloat(@max(1, session.cell_height));
+    const grid_x: usize = 12;
+    const grid_y: usize = 48;
+    var band_colors = std.AutoHashMap(u32, void).init(gpa);
+    defer band_colors.deinit();
+    var y: usize = grid_y;
+    while (y < grid_y + cell_h) : (y += 1) {
+        var x: usize = grid_x;
+        while (x < grid_x + cell_w * 8) : (x += 1) {
+            const offset = (y * width + x) * 4;
+            const value = std.mem.readInt(u32, pixels[offset..][0..4], .little);
+            try band_colors.put(value, {});
+        }
+    }
+    // Background alone is one color; ink adds more (glyph coverage is
+    // antialiased, so ink contributes MANY distinct values — demand a
+    // handful so a single stray pixel cannot pass).
+    try testing.expect(band_colors.count() >= 4);
+
+    // (ii) The caret cell paints distinguishably: the cursor sits right
+    // after "demo$ " (column 6) and its wash differs from both the
+    // background and the row's empty cells.
+    const caret_x: usize = @intFromFloat(12.0 + 6.5 * session.cell_width);
+    const caret_y = grid_y + cell_h / 2;
+    const caret_offset = (caret_y * width + caret_x) * 4;
+    const caret_value = std.mem.readInt(u32, pixels[caret_offset..][0..4], .little);
+    const empty_x: usize = @intFromFloat(12.0 + 40.0 * session.cell_width);
+    const empty_offset = (caret_y * width + empty_x) * 4;
+    const empty_value = std.mem.readInt(u32, pixels[empty_offset..][0..4], .little);
+    try testing.expect(caret_value != empty_value);
+}
+
 test "the session fingerprint covers real cells, not just byte counters" {
     const gpa = testing.allocator;
     // Two sessions fed the SAME number of output bytes with different

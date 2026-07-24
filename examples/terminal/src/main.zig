@@ -699,7 +699,7 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
 const TerminalUi = TerminalApp.Ui;
 
 pub fn view(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
-    // The grid panel's accessibility surface IS the viewport text: a
+    // The grid region's accessibility surface IS the viewport text: a
     // terminal's semantic content is its cells, so screen readers hear
     // the real screen — and the session fingerprint (the a11y-tree
     // hash) covers cell state, not just byte counters: two runs with
@@ -707,9 +707,13 @@ pub fn view(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
     const screen = model.session.screenText();
     return ui.column(.{}, .{
         headerView(ui, model),
-        // The grid region: layout space the chrome-painted terminal
-        // fills beneath the widget tree.
-        ui.panel(.{ .grow = 1, .semantics = .{ .label = if (screen.len > 0) screen else "Terminal grid" } }, .{}),
+        // The grid region: PURE layout space the chrome-painted
+        // terminal fills beneath the widget tree — a stack, which
+        // paints nothing. A panel here would draw its surface chrome
+        // (fill, border, shadow, rounded corners) OVER the grid,
+        // blanking the terminal and rounding a surface that must sit
+        // square and edge-to-edge like a real terminal.
+        ui.el(.stack, .{ .grow = 1, .semantics = .{ .label = if (screen.len > 0) screen else "Terminal grid" } }, .{}),
         statusView(ui, model),
     });
 }
@@ -734,7 +738,10 @@ fn headerView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
     return ui.row(.{ .height = header_height, .padding = 10, .gap = 10, .cross = .center, .window_drag = true }, .{
         ui.el(.stack, .{ .width = model.chrome_leading }, .{}),
         ui.text(.{}, "Terminal"),
-        textLeaf(ui, .badge, .{ .semantics = .{ .label = "Session state" } }, phase_label),
+        // The session state is a QUIET label, not a control: it informs
+        // and never invites a press, so it renders as muted text rather
+        // than a pill that reads as a toggle.
+        ui.paragraph(.{ .semantics = .{ .label = "Session state" } }, &.{.{ .text = phase_label, .color = .text_muted, .scale = 0.92 }}),
         ui.spacer(1),
         mutedText(ui, ui.fmt("{d}x{d}", .{ model.cols, model.rows })),
     });
