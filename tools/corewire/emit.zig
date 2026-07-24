@@ -522,34 +522,43 @@ const Emitter = struct {
     // ------------------------------------ host-supplied signed slots
     //
     // Some structural vocabularies are filled by the HOST with values
-    // that go negative: scroll axes during rubber-banding and upward
-    // flicks (offsets, velocities), and selection bounds during
-    // backward selections. A u64 attestation on such a slot could
-    // never carry those values — the generated wiring would trap
+    // that go negative: scroll offsets and velocities during
+    // rubber-banding and upward flicks, and window-chrome geometry in
+    // signed content coordinates. A u64 attestation on such a slot
+    // could never carry those values — the generated wiring would trap
     // converting them — so the checker refuses the attestation at tool
-    // time instead.
+    // time instead. Extents (viewport, content) and selection bounds
+    // stay attestable: the host only ever supplies them non-negative.
+
+    /// The scroll-state axes the host supplies signed, in both
+    /// spellings (the TS mirror's and the canvas core's).
+    const signed_scroll_axes = [_][]const u8{
+        "offsetX",  "offsetY",  "velocityX",  "velocityY",
+        "offset_x", "offset_y", "velocity_x", "velocity_y",
+    };
 
     fn validateIntegerAttestations(self: *Emitter) Error!void {
         for (self.sidecar.types.structs) |entry| {
             if (self.scrollStateFields(entry.name) == null) continue;
             for (entry.fields) |field| {
                 if (field.type != .i64) continue;
+                if (!nameListed(&signed_scroll_axes, field.name)) continue;
                 const slot = try self.slotPath(entry.name, field.name);
                 if (self.attestedClass(slot) == .u64) {
-                    self.diags.flag("integer_slots", "\"{s}\" is a scroll-state axis, and scroll translation supplies signed values (offsets and velocities go negative) — the u64 class cannot carry them; keep scroll-state fields i64 or f64", .{slot});
+                    self.diags.flag("integer_slots", "\"{s}\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64", .{slot});
                 }
             }
         }
-        for (self.sidecar.types.unions) |entry| {
-            if (!self.isTextInputUnion(entry.name)) continue;
-            for (entry.arms) |arm| {
-                if (!std.mem.eql(u8, arm.name, "set_selection")) continue;
-                const record = self.recordOf(arm.payload) orelse continue;
+        if (self.sidecar.channels.chrome_msg) |arm_name| {
+            if (self.channelArmRecord(arm_name)) |record| {
                 for (record.fields) |field| {
-                    if (field.type != .i64) continue;
-                    const slot = try self.slotPath(record.name, field.name);
-                    if (self.attestedClass(slot) == .u64) {
-                        self.diags.flag("integer_slots", "\"{s}\" is a text-selection bound, and backward selections carry signed values — the u64 class cannot carry them; keep selection fields i64 or f64", .{slot});
+                    const nested = self.recordOf(field.type) orelse continue;
+                    for (nested.fields) |geometry| {
+                        if (geometry.type != .i64) continue;
+                        const slot = try self.slotPath(nested.name, geometry.name);
+                        if (self.attestedClass(slot) == .u64) {
+                            self.diags.flag("integer_slots", "\"{s}\" is window-chrome geometry, and embedders report signed content coordinates — the u64 class cannot carry them; keep chrome geometry i64 or f64", .{slot});
+                        }
                     }
                 }
             }
@@ -1592,14 +1601,81 @@ test "u64 attestations on host-supplied signed slots refuse at check time" {
     const signed = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Scroll.offsetY\", \"class\": \"u64\"}", "{\"slot\": \"Scroll.offsetY\", \"class\": \"i64\"}");
     const generated = try emitFromJson(arena, signed);
     try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_scroll_state(1,") != null);
+
+    // Extents stay attestable: the host only ever supplies viewport and
+    // content sizes non-negative, so the unsigned class carries them.
+    var extent_source = try std.mem.replaceOwned(u8, arena, source, "{\"name\": \"offsetY\", \"type\": {\"kind\": \"i64\"}}", "{\"name\": \"offsetY\", \"type\": {\"kind\": \"f64\"}}");
+    extent_source = try std.mem.replaceOwned(u8, arena, extent_source, "{\"name\": \"viewportExtentY\", \"type\": {\"kind\": \"f64\"}}", "{\"name\": \"viewportExtentY\", \"type\": {\"kind\": \"i64\"}}");
+    extent_source = try std.mem.replaceOwned(u8, arena, extent_source, "{\"slot\": \"Scroll.offsetY\", \"class\": \"u64\"}", "{\"slot\": \"Scroll.viewportExtentY\", \"class\": \"u64\"}");
+    const extent_generated = try emitFromJson(arena, extent_source);
+    try testing.expect(std.mem.indexOf(u8, extent_generated, "shim_rt.exactF64Unsigned(payload.viewportExtentY)") != null);
 }
 
-test "a u64 attestation on a selection bound refuses at check time" {
+test "a u64 attestation on chrome geometry refuses at check time" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A wired chrome arm whose buttons record attests x as u64:
+    // embedders report signed content coordinates, which the unsigned
+    // class cannot carry.
+    const source =
+        \\{
+        \\  "format": 1, "wire_version": 3, "abi_version": 1,
+        \\  "compiler_version": "0.0.1", "entry": "src/core.ts",
+        \\  "source_hash": "00000000c0ffee00", "build_id": "00000000b01dface",
+        \\  "types": {
+        \\    "structs": [
+        \\      {"name": "Model", "fields": [{"name": "chromeTop", "type": {"kind": "f64"}}]},
+        \\      {"name": "Insets", "fields": [
+        \\        {"name": "top", "type": {"kind": "f64"}}, {"name": "right", "type": {"kind": "f64"}},
+        \\        {"name": "bottom", "type": {"kind": "f64"}}, {"name": "left", "type": {"kind": "f64"}}
+        \\      ]},
+        \\      {"name": "Buttons", "fields": [
+        \\        {"name": "x", "type": {"kind": "i64"}}, {"name": "y", "type": {"kind": "f64"}},
+        \\        {"name": "width", "type": {"kind": "f64"}}, {"name": "height", "type": {"kind": "f64"}}
+        \\      ]},
+        \\      {"name": "Msg_chrome_changed", "fields": [
+        \\        {"name": "insets", "type": {"kind": "value", "name": "Insets"}},
+        \\        {"name": "buttons", "type": {"kind": "value", "name": "Buttons"}},
+        \\        {"name": "tabsProjected", "type": {"kind": "bool"}}
+        \\      ]}
+        \\    ],
+        \\    "enums": [], "unions": []
+        \\  },
+        \\  "model": "Model", "model_helpers": [], "model_unbound": [],
+        \\  "msg": {"name": "Msg", "arms": [
+        \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
+        \\  ], "unbound": []},
+        \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
+        \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
+        \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
+        \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
+        \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
+        \\    "helper_call"], "snapshot_format": 1},
+        \\  "integer_slots": [{"slot": "Buttons.x", "class": "u64"}],
+        \\  "deterministic": true, "async_free": true
+        \\}
+    ;
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "window-chrome geometry") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "u64 attestations on selection bounds are accepted (the host supplies unsigned offsets)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     // The full text-input vocabulary with a u64-attested selection
-    // anchor: backward selections carry signed bounds.
+    // anchor: the engine's selection bounds are unsigned offsets (a
+    // backward selection is anchor > focus, never a negative index), so
+    // the unsigned class carries every host-supplied value.
     const records =
         \\      {"name": "Move", "fields": [
         \\        {"name": "direction", "type": {"kind": "enum", "name": "Dir"}},
@@ -1644,16 +1720,15 @@ test "a u64 attestation on a selection bound refuses at check time" {
         arena,
         source,
         "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
-        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Sel.anchor\", \"class\": \"u64\"}, {\"slot\": \"Sel.focus\", \"class\": \"i64\"}, {\"slot\": \"Comp.cursor\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Sel.anchor\", \"class\": \"u64\"}, {\"slot\": \"Sel.focus\", \"class\": \"u64\"}, {\"slot\": \"Comp.cursor\", \"class\": \"u64\"}",
     );
-    var diags = sidecar_mod.Diagnostics{ .arena = arena };
-    const parsed = try sidecar_mod.read(arena, source, &diags);
-    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
-    var found = false;
-    for (diags.list.items) |item| {
-        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "text-selection bound") != null) found = true;
-    }
-    try testing.expect(found);
+    const generated = try emitFromJson(arena, source);
+    // The mirror spells the attested classes and the union still routes
+    // through the text-input entry (recognition is spelling-level).
+    try testing.expect(std.mem.indexOf(u8, generated, "anchor: u64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "focus: u64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "cursor: ?u64,") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_text_input(0,") != null);
 }
 
 test "the empty integer_slots list decodes nothing differently" {

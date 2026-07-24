@@ -1634,6 +1634,19 @@ fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diag
             diags.flag("integer_slots", "the i64 slot at \"{s}\" involves a name containing '.', which the slot path grammar cannot address unambiguously — rename it in the core source (V10)", .{path.path});
         }
     }
+    // Two DISTINCT slots spelling one path is the same ambiguity from
+    // another direction (a message union named `helpers` whose
+    // number_bytes field spells a helper's return slot, a table type
+    // sharing the message union's name): the bijection would consume
+    // entries interchangeably and one attestation would silently govern
+    // both slots.
+    for (expected, 0..) |path, index| {
+        for (expected[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.path, path.path)) {
+                diags.flag("integer_slots", "two distinct i64 slots spell the one path \"{s}\" — the slot-path grammar cannot address them separately, so their attestations cannot be told apart; rename one of the colliding surfaces in the core source (V10)", .{path.path});
+            }
+        }
+    }
     if (diags.hasErrors()) return;
 
     // One-to-one both ways: every expected slot consumes exactly one
@@ -2167,6 +2180,36 @@ test "V10: message-side slot paths spell the union's authored name" {
         "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Msg.tick\", \"class\": \"i64\"}",
     );
     try expectRefusal(literal, "integer_slots", "spells \"Event.tick\" i64 but attests no integer_slots entry");
+}
+
+test "V10: two distinct slots spelling one path refuse as unaddressable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A message union named "helpers" whose number_bytes arm "peak"
+    // declares its number field "return", beside an exported helper
+    // "peak" returning i64: both slots spell "helpers.peak.return", so
+    // no attestation can be told apart from the other's.
+    var source = try replaced(arena, minimal_valid_json, "\"name\": \"Msg\"", "\"name\": \"helpers\"");
+    source = try replaced(
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"peak\", \"payload\": {\"kind\": \"number_bytes\", \"number_field\": \"return\", \"number_class\": \"i64\", \"bytes_field\": \"body\"}}",
+    );
+    source = try replaced(
+        arena,
+        source,
+        "\"model_helpers\": []",
+        "\"model_helpers\": [{\"name\": \"peak\", \"params\": [], \"returns\": {\"kind\": \"i64\"}, \"arena\": false}]",
+    );
+    source = try replaced(
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"helpers.peak.return\", \"class\": \"i64\"}, {\"slot\": \"helpers.peak.return\", \"class\": \"u64\"}",
+    );
+    try expectRefusal(source, "integer_slots", "two distinct i64 slots spell the one path \"helpers.peak.return\"");
 }
 
 test "V10: an empty integer_slots list is valid when nothing spells i64" {

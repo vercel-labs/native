@@ -323,7 +323,7 @@ pub fn TsUiApp(comptime core: type) type {
                 @compileError("TsUiApp: frameMsg must take (model: Model, frame: FrameEvent) - regenerate the core");
             }
             const FrameArg = params[1].type.?;
-            comptime validateChannelRecord(FrameArg, &.{ "width", "height", "timestampMs", "intervalMs" }, "frameMsg's FrameEvent");
+            comptime validateChannelRecord(FrameArg, &.{ "width", "height", "timestampMs", "intervalMs" }, "frameMsg's FrameEvent", true);
             var arg: FrameArg = undefined;
             inline for (@typeInfo(FrameArg).@"struct".fields) |field| {
                 const value: f64 = if (comptime std.mem.eql(u8, field.name, "width"))
@@ -481,7 +481,11 @@ pub fn TsUiApp(comptime core: type) type {
             @compileError("TsUiApp: " ++ channel ++ " names '" ++ tag ++ "', which is not an arm of Msg");
         }
 
-        fn validateChannelRecord(comptime T: type, comptime names: []const []const u8, comptime what: []const u8) void {
+        /// `allow_unsigned` says whether u64 fields may appear: the
+        /// frame record's values (sizes, clocks) are non-negative, but
+        /// chrome geometry rides signed content coordinates that the
+        /// unsigned class cannot carry.
+        fn validateChannelRecord(comptime T: type, comptime names: []const []const u8, comptime what: []const u8, comptime allow_unsigned: bool) void {
             const info = @typeInfo(T);
             if (info != .@"struct" or info.@"struct".fields.len != names.len) {
                 @compileError("TsUiApp: " ++ what ++ " record has the wrong field set");
@@ -492,8 +496,10 @@ pub fn TsUiApp(comptime core: type) type {
                 }
             }
             for (info.@"struct".fields) |field| {
-                if (field.type != i64 and field.type != u64 and field.type != f64 and field.type != f32) {
-                    @compileError("TsUiApp: " ++ what ++ " field '" ++ field.name ++ "' must be a number");
+                const unsigned_ok = allow_unsigned and field.type == u64;
+                if (field.type != i64 and field.type != f64 and field.type != f32 and !unsigned_ok) {
+                    @compileError("TsUiApp: " ++ what ++ " field '" ++ field.name ++ "' must be a number" ++
+                        (if (allow_unsigned) "" else " (signed: the host reports signed content coordinates here)"));
                 }
             }
         }
@@ -516,8 +522,8 @@ pub fn TsUiApp(comptime core: type) type {
             if (info != .@"struct" or info.@"struct".fields.len != 3) @compileError(teaching);
             if (!@hasField(T, "insets") or !@hasField(T, "buttons") or !@hasField(T, "tabsProjected")) @compileError(teaching);
             if (@FieldType(T, "tabsProjected") != bool) @compileError(teaching);
-            validateChannelRecord(@FieldType(T, "insets"), &.{ "top", "right", "bottom", "left" }, "chromeMsg's insets");
-            validateChannelRecord(@FieldType(T, "buttons"), &.{ "x", "y", "width", "height" }, "chromeMsg's buttons");
+            validateChannelRecord(@FieldType(T, "insets"), &.{ "top", "right", "bottom", "left" }, "chromeMsg's insets", false);
+            validateChannelRecord(@FieldType(T, "buttons"), &.{ "x", "y", "width", "height" }, "chromeMsg's buttons", false);
         }
 
         /// `Options.update_fx`: one full core dispatch cycle, then the
