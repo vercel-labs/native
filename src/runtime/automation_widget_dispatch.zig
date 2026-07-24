@@ -485,7 +485,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // moves focus with the visible ring. Without this gate, a
             // window-level default focus landing on a button dressed an
             // idle control in the focus ring.
-            const focus_visible_id: canvas.ObjectId = if (canvas_widget_runtime.canvasWidgetEditableTextKind(target.kind)) target.id else 0;
+            const focus_visible_id: canvas.ObjectId = if (canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) target.id else 0;
             if (self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != focus_visible_id) {
                 const previous_state = self.views[view_index].canvasWidgetRenderState();
                 self.views[view_index].canvas_widget_focused_id = target.id;

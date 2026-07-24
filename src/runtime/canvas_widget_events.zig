@@ -364,7 +364,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // caret) however focus arrived — the :focus-visible contract
             // text inputs have on every platform.
             const next_focus_visible_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
-                if (target.id == next_focus_id and canvas_widget_runtime.canvasWidgetEditableTextKind(target.kind)) break :blk next_focus_id;
+                if (target.id == next_focus_id and canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) break :blk next_focus_id;
                 break :blk 0;
             } else 0;
 

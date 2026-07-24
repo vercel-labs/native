@@ -434,6 +434,16 @@ pub fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
     return kind == .input or kind == .text_field or kind == .search_field or kind == .combobox or kind == .textarea;
 }
 
+/// Kinds that show their focus affordance HOWEVER focus arrived (pointer,
+/// autofocus, automation) — the :focus-visible contract of a control the
+/// user operates by typing into it. Editable text kinds plus the
+/// terminal: a click that focuses a terminal must reveal its ring the way
+/// clicking a text field reveals its ring and caret, or the ring the
+/// renderer paints on `state.focused` is unreachable except by Tab.
+pub fn canvasWidgetShowsPointerFocusRing(kind: canvas.WidgetKind) bool {
+    return canvasWidgetEditableTextKind(kind) or kind == .terminal;
+}
+
 /// Clipboard paste text sanitized for the target kind and then clamped
 /// to what the view's shared widget text storage can absorb (the bytes
 /// the edit replaces are freed first). Clamping lands on a UTF-8

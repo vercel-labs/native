@@ -636,6 +636,10 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .switch_control,
         .toggle,
         .slider,
+        // The terminal wears the same ring-offset focus stroke, so a
+        // focus enter/leave must reserve the same outside-the-frame
+        // damage or a retained renderer leaves the ring stale.
+        .terminal,
         => tokens.stroke.focus,
         else => 0,
     };

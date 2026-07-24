@@ -249,14 +249,14 @@ pub fn paint(
                 0x256F => geometry.RectF.init(rect.x, cy - t / 2, cx - r / 2 - rect.x, t),
                 else => geometry.RectF.init(cx + r / 2, cy - t / 2, rect.x + rect.width - (cx + r / 2), t),
             };
-            try builder.fillRect(.{ .id = id_base + 1, .rect = run, .fill = .{ .color = color } });
+            try builder.fillRect(.{ .id = id_base +% 1, .rect = run, .fill = .{ .color = color } });
         },
         // Diagonals.
         0x2571 => try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
         0x2572 => try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } }),
         0x2573 => {
             try builder.drawLine(.{ .id = id_base, .from = .{ .x = rect.x, .y = rect.y + rect.height }, .to = .{ .x = rect.x + rect.width, .y = rect.y }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
-            try builder.drawLine(.{ .id = id_base + 1, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
+            try builder.drawLine(.{ .id = id_base +% 1, .from = .{ .x = rect.x, .y = rect.y }, .to = .{ .x = rect.x + rect.width, .y = rect.y + rect.height }, .stroke = .{ .fill = .{ .color = color }, .width = t } });
         },
         // Block elements: fractional rects, edge-to-edge.
         0x2580 => try fillFraction(builder, id_base, rect, color, 1, .top, 0.5),
@@ -287,15 +287,15 @@ pub fn paint(
             var id = id_base;
             if (quads & 0b0001 != 0) {
                 try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x, rect.y, hw, hh), .fill = .{ .color = color } });
-                id += 1;
+                id +%= 1;
             }
             if (quads & 0b0010 != 0) {
                 try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x + hw, rect.y, hw, hh), .fill = .{ .color = color } });
-                id += 1;
+                id +%= 1;
             }
             if (quads & 0b0100 != 0) {
                 try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x, rect.y + hh, hw, hh), .fill = .{ .color = color } });
-                id += 1;
+                id +%= 1;
             }
             if (quads & 0b1000 != 0) {
                 try builder.fillRect(.{ .id = id, .rect = geometry.RectF.init(rect.x + hw, rect.y + hh, hw, hh), .fill = .{ .color = color } });
@@ -341,7 +341,7 @@ fn paintSegment(builder: *canvas.Builder, id: u64, weight: Weight, t: f32, seg: 
             else
                 geometry.RectF.init(seg.x - w / 2, seg.y, w, seg.len);
             try builder.fillRect(.{ .id = id, .rect = rect, .fill = .{ .color = color } });
-            return id + 1;
+            return id +% 1;
         },
         .double => {
             // Two parallel light bars at center +/- t: pure double runs
@@ -354,7 +354,7 @@ fn paintSegment(builder: *canvas.Builder, id: u64, weight: Weight, t: f32, seg: 
                 else
                     geometry.RectF.init(seg.x + offset - t / 2, seg.y, t, seg.len);
                 try builder.fillRect(.{ .id = next, .rect = rect, .fill = .{ .color = color } });
-                next += 1;
+                next +%= 1;
             }
             return next;
         },

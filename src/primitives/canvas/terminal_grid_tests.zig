@@ -325,6 +325,52 @@ test "the glyph budget stops before the row whose new code points cross it" {
     try testing.expect(!saw_b);
 }
 
+test "the prologue budget check accounts for commands already in the builder" {
+    // A builder already near an absolute command ceiling must degrade to
+    // nothing rather than emit the prologue and overrun. Pre-fill the
+    // builder, then paint with a budget at the current length.
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &.{} }};
+    var commands: [16]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    for (0..10) |i| {
+        try builder.fillRect(.{ .id = 1000 + i, .rect = geometry.RectF.init(0, 0, 1, 1), .fill = .{ .color = white } });
+    }
+    const before = builder.len;
+    try grid_model.paint(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 100, 40),
+        .tokens = .{},
+        // No room for the prologue above the already-consumed commands.
+        .command_budget = before + 2,
+    });
+    // Nothing emitted (and no unbalanced clip): the len is unchanged.
+    try testing.expectEqual(before, builder.len);
+}
+
+test "id_base near the u64 ceiling wraps instead of trapping" {
+    // paintIdBase spans the full u64 space, so every emitted id offset
+    // must wrap. An id_base whose spread lands near maxInt paints a
+    // nonempty row without an overflow trap in safe builds.
+    const cells = [_]grid_model.TerminalCell{
+        cell('x', "x", white),
+        .{ .cp = 0x256C, .fg = white }, // ╬ — the eight-command joint
+        .{ .cp = 0x256D, .fg = white }, // ╭ — a rounded corner (path elements)
+    };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells, .selection = .{ 0, 2 } }};
+    var grid = baseGrid(&rows);
+    grid.cursor = .{ .x = 0, .y = 0 };
+    grid.select_head = .{ .x = 0, .y = 0 };
+
+    var commands: [128]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // Any id_base is legal; the painter must not trap on the wrap.
+    try grid_model.paint(grid, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 120, 40),
+        .tokens = .{},
+        .id_base = 0xffff_ffff_ffff_ffff,
+    });
+    try testing.expect(builder.displayList().commands.len > 0);
+}
+
 test "clampGrid trades rows for columns under the cell ceiling" {
     const clamped = grid_model.clampGrid(400, 100);
     try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);

@@ -369,13 +369,15 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     const id_base = paintIdBase(options.id_base);
 
     // Fixed prologue/epilogue overhead (background fill, clip push,
-    // scrollbar thumb, clip pop): a positive budget below it can seat no
-    // row and cannot even frame the surface within its ceiling, so the
-    // paint degrades to nothing — BEFORE emitting the prologue, so a
-    // sub-overhead budget never leaves an unbalanced clip. 0 stays the
-    // unbounded (test) mode.
+    // scrollbar thumb, clip pop): if the builder — with whatever earlier
+    // widgets already emitted — cannot seat that overhead under the
+    // budget, the paint degrades to nothing BEFORE emitting the prologue,
+    // so a full builder never overruns its ceiling and never leaves an
+    // unbalanced clip. The `builder.len` term is what makes the check an
+    // ABSOLUTE ceiling, not a per-paint one. 0 stays the unbounded
+    // (test) mode.
     const fixed_overhead: usize = 8;
-    if (options.command_budget > 0 and options.command_budget < fixed_overhead) return;
+    if (options.command_budget > 0 and builder.len + fixed_overhead > options.command_budget) return;
 
     // The terminal surface: full-bleed background under the grid.
     try builder.fillRect(.{
@@ -500,7 +502,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 const same = if (bg) |next| colorEql(color, next) else false;
                 if (!same) {
                     try builder.fillRect(.{
-                        .id = row_id + 1 + run_start,
+                        .id = row_id +% 1 +% run_start,
                         .rect = geometry.RectF.init(
                             origin_x + @as(f32, @floatFromInt(run_start)) * cell_w,
                             row_y,
@@ -527,7 +529,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 0.30,
             );
             try builder.fillRect(.{
-                .id = row_id + 0x4000,
+                .id = row_id +% 0x4000,
                 .rect = geometry.RectF.init(
                     origin_x + @as(f32, @floatFromInt(range[0])) * cell_w,
                     row_y,
@@ -595,7 +597,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                     break;
                 };
                 try builder.drawText(.{
-                    .id = row_id + 0x8000 + run_x,
+                    .id = row_id +% 0x8000 +% run_x,
                     .font_id = tokens.typography.mono_font_id,
                     .size = metrics.font_size,
                     // `origin` is the BASELINE, not the glyph top: the
@@ -614,7 +616,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 });
                 if (run_underline) {
                     try builder.fillRect(.{
-                        .id = row_id + 0xc000 + run_x,
+                        .id = row_id +% 0xc000 +% run_x,
                         .rect = geometry.RectF.init(
                             origin_x + @as(f32, @floatFromInt(run_x)) * cell_w,
                             row_y + cell_h - 2,
@@ -631,14 +633,16 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             if (box_cp != 0) {
                 // Merge a run of the same seamless piece (a border's
                 // long `─`) into ONE command: fewer commands and one
-                // unbroken bar instead of per-cell segments. Style
-                // equality is color equality here — the snapshot already
-                // resolved everything else.
+                // unbroken bar instead of per-cell segments. Cells merge
+                // only when they match on EVERY channel the span paints —
+                // code point, foreground, AND underline — so a run where
+                // underline toggles mid-way breaks into separate spans
+                // and each keeps its own decoration.
                 var span: usize = 1;
                 if (box.mergesHorizontally(box_cp)) {
                     while (x + span < row.cells.len) : (span += 1) {
                         const next = row.cells[x + span];
-                        if (next.cp != box_cp or !colorEql(next.fg, fg)) break;
+                        if (next.cp != box_cp or !colorEql(next.fg, fg) or next.underline != underline) break;
                     }
                 }
                 const rect = geometry.RectF.init(
@@ -652,7 +656,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // four-wide stride would collide the ids of adjacent
                 // double cells and fail the retained diff with
                 // DuplicateObjectId.
-                box.paint(builder, row_id + 0x6000 + @as(u64, @intCast(x)) * commands_per_cell, rect, box_cp, fg, box_thickness) catch {
+                box.paint(builder, row_id +% 0x6000 +% @as(u64, @intCast(x)) *% commands_per_cell, rect, box_cp, fg, box_thickness) catch {
                     row_torn = true;
                     break;
                 };
@@ -663,7 +667,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // and text ranges).
                 if (underline) {
                     builder.fillRect(.{
-                        .id = row_id + 0xd000 + @as(u64, @intCast(x)),
+                        .id = row_id +% 0xd000 +% @as(u64, @intCast(x)),
                         .rect = geometry.RectF.init(rect.x, row_y + cell_h - 2, rect.width, 1),
                         .fill = .{ .color = fg },
                     }) catch {

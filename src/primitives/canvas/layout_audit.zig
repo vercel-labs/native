@@ -486,7 +486,7 @@ fn auditNodeContainerEscape(
 /// inline link hotspots follow text metrics by convention; both exempt.
 fn widgetKindIsPointerTarget(kind: WidgetKind) bool {
     return switch (kind) {
-        .button, .toggle_button, .icon_button, .select, .combobox, .input, .text_field, .search_field, .textarea, .checkbox, .radio, .switch_control, .toggle, .slider, .menu_item, .segmented_control, .list_item => true,
+        .button, .toggle_button, .icon_button, .select, .combobox, .input, .text_field, .search_field, .textarea, .checkbox, .radio, .switch_control, .toggle, .slider, .menu_item, .segmented_control, .list_item, .terminal => true,
         else => false,
     };
 }
