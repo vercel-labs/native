@@ -436,8 +436,24 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
                     if (hover_pointer_proven) {
-                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
-                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                        if (geometry.RectF.fromSize(self.views[index].gpu_size).containsPoint(pointer_event.pointer.point)) {
+                            self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                            self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                        } else {
+                            // A captured release OUTSIDE the surface is
+                            // the pointer already gone — the leave the
+                            // press suppressed: hosts hold a grab
+                            // through the drag (no motion-leave fired)
+                            // and send no later cancel, so containment
+                            // must retire here or an overflowing
+                            // listener stays entered at an off-view
+                            // point — and the anchor must not park
+                            // off-view for a later rebuild to re-hit.
+                            // The consumed secondary release has the
+                            // same rule in gpu_surface_events.
+                            self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                            self.views[index].canvas_widget_hover_pointer_live = false;
+                        }
                     }
                 },
                 .cancel => {

@@ -6756,3 +6756,50 @@ test "an unownable leave rebind on a standing element degrades loudly, never tra
     try hoverMove(harness, app, 50, 220);
     try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
 }
+
+test "a primary drag released outside the view retires containment and its proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A primary drag released beyond the surface: hosts held a grab
+    // through it (no motion-leave fired) and send no later cancel, so
+    // the release itself retires containment AND the hover proof — an
+    // overflowing listener can never stay entered off-view, and no
+    // rebuild can re-enter one at a parked off-view anchor.
+    for ([_]struct { kind: zero_platform.GpuSurfaceInputKind, x: f32, y: f32 }{
+        .{ .kind = .pointer_down, .x = 50, .y = 20 },
+        .{ .kind = .pointer_drag, .x = 450, .y = 320 },
+        .{ .kind = .pointer_up, .x = 450, .y = 320 },
+    }) |step| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = step.kind,
+            .button = 0,
+            .x = step.x,
+            .y = step.y,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+    try std.testing.expect(!harness.runtime.views[0].canvas_widget_hover_pointer_live);
+}
