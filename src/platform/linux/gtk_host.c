@@ -1378,10 +1378,11 @@ static void native_sdk_gpu_pointer_leave(GtkEventControllerMotion *controller, g
     /* The pointer left the canvas without a press in flight: the
      * window-leave edge the runtime retires hover state on (washes,
      * hover Msgs, tooltip intent), matching the AppKit host's
-     * mouseExited. A leave DURING a drag is the gesture wandering
-     * outside the widget, not the pointer abandoning it - the drag's
-     * own release (or gesture cancel) settles that, so a mid-drag
-     * leave emits nothing. */
+     * mouseExited. A leave DURING a click-gesture press is the pointer
+     * wandering outside the widget mid-gesture, not abandoning it -
+     * the press's own release, gesture cancel, or the runtime's
+     * outside-release check settles that, so a mid-press leave emits
+     * nothing here. */
     if (view->gpu_pointer_down) return;
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
     native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", modifiers);

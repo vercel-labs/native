@@ -194,10 +194,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // view (the tooltip machine's exact reading below):
                     // the proven pointer's departure retires hover-Msg
                     // containment too, so a window exit mid-secondary
-                    // stream never strands an entered element. The rest
-                    // of the consumed stream deliberately freezes the
-                    // chain the way it freezes the wash — a right-drag
-                    // is a menu gesture, not hovering.
+                    // stream never strands an entered element. Honesty
+                    // about scope: only the secondary DOWN/UP/CANCEL
+                    // stream is consumed here — hosts report drag
+                    // MOTION without a button, so it rides the primary
+                    // path and containment follows the pointer through
+                    // a right-drag (the mouseenter/mouseleave
+                    // convention), exactly as the wash does for the
+                    // same journaled moves.
                     if (input_event.kind == .pointer_cancel and
                         self.views[index].canvas_widget_hover_pointer_live and
                         self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)
@@ -207,13 +211,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     }
                     // A consumed secondary RELEASE outside the view is
                     // the gesture ending with the pointer already gone —
-                    // the leave the frozen stream suppressed (hosts hold
-                    // an implicit grab through a right-drag, so no
-                    // motion-leave fired and none will until re-entry):
-                    // retire containment like the cancel above, matching
-                    // the primary path whose outside release re-hit-tests
-                    // to nothing. The freeze holds through the drag
-                    // itself.
+                    // hosts hold an implicit grab through a right-drag,
+                    // so no motion-leave fired and none will until
+                    // re-entry: retire containment like the cancel
+                    // above, matching the primary path whose outside
+                    // release re-hit-tests to nothing.
                     if (input_event.kind == .pointer_up and
                         self.views[index].canvas_widget_hover_pointer_live and
                         self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id and
