@@ -452,8 +452,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
             // check is unsafe — fall back to the probe's old
             // timed-out-means-started answer rather than risk a wedged
             // reap.
-            const flags = c.fcntl(pair.exec_read, f_getfl, @as(c_int, 0));
-            if (flags < 0 or c.fcntl(pair.exec_read, f_setfl, flags | o_nonblock) < 0) {
+            if (!setNonblock(pair.exec_read)) {
                 _ = c.close(pair.exec_read);
                 return .{ .parent = pair.parent, .pid = pair.pid };
             }
@@ -503,12 +502,9 @@ fn spawnPair(
     // write when the child stops reading its stdin (a full pty input
     // buffer), which would stall stdout draining and deadlock both
     // sides. Reads and writes handle EAGAIN; the poll loop paces both.
-    {
-        const flags = c.fcntl(parent, f_getfl, @as(c_int, 0));
-        if (flags < 0 or c.fcntl(parent, f_setfl, flags | o_nonblock) < 0) {
-            _ = c.close(parent);
-            return error.PtyOpenFailed;
-        }
+    if (!setNonblock(parent)) {
+        _ = c.close(parent);
+        return error.PtyOpenFailed;
     }
     if (c.grantpt(parent) != 0 or c.unlockpt(parent) != 0) {
         _ = c.close(parent);
@@ -856,6 +852,13 @@ const o_cloexec_open: c_int = switch (builtin.os.tag) {
     .macos => 0x1000000,
     else => 0,
 };
+// FIONBIO ("set non-blocking io") per platform, the fcntl fallback in
+// `setNonblock`.
+const fionbio: c_ulong = switch (builtin.os.tag) {
+    .linux => 0x5421,
+    .macos => 0x8004667e,
+    else => 0,
+};
 const sigterm: c_int = 15;
 const sigkill: c_int = 9;
 const sighup: c_int = 1;
@@ -992,6 +995,19 @@ fn makePipe(nonblock: bool) Error![2]c_int {
 pub fn closeFd(fd: c_int) void {
     if (comptime !supported) return;
     if (fd >= 0) _ = c.close(fd);
+}
+
+/// Set O_NONBLOCK on `fd`, preferring `fcntl(F_SETFL)` and falling back
+/// to the `FIONBIO` ioctl: Darwin's pty parent-end driver rejects
+/// F_SETFL with ENOTTY on some macOS releases (observed on 14.x; newer
+/// kernels accept it), while FIONBIO succeeds on every release — the
+/// same fallback the mainstream event loops carry for exactly this fd.
+fn setNonblock(fd: c_int) bool {
+    if (comptime !supported) return false;
+    const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
+    if (flags >= 0 and c.fcntl(fd, f_setfl, flags | o_nonblock) >= 0) return true;
+    var one: c_int = 1;
+    return c.ioctl(fd, fionbio, &one) == 0;
 }
 
 /// Write one byte into the nudge pipe. EINTR retries — losing the only
