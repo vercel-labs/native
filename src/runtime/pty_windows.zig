@@ -88,8 +88,15 @@ const write_buffer_bytes: usize = 4096;
 /// touches only `resize` (pseudoconsole handle, under `hpc_lock`),
 /// `kill` (process handle, immutable), and — strictly after the io
 /// thread has finished — `close`.
+///
+/// Allocated from `state_allocator` (process-lifetime backing), NEVER
+/// the caller's allocator: teardown may ABANDON an io thread past its
+/// join deadline, and everything that thread can still reach must
+/// outlive the caller's allocator — the effects layer's abandoned-
+/// worker invariant, applied to the transport. The block is freed at
+/// `close` (which only runs after the io thread finished); an abandon
+/// leaks it with the thread, deliberately.
 const State = struct {
-    gpa: std.mem.Allocator,
     /// The pseudoconsole. Guarded by `hpc_lock` against the one real
     /// race: a loop-thread `resize` landing while the io thread closes
     /// the console after child exit (`ClosePseudoConsole` frees the
@@ -126,20 +133,36 @@ const State = struct {
     /// EOF instead of re-polling an already-signaled handle.
     child_exited: bool = false,
     /// Monotonic stamp of that observation: the console close waits
-    /// out a short QUIET GRACE past it, because conhost renders the
-    /// dead client's final frame asynchronously — a close racing that
+    /// out a QUIET GRACE past it, because conhost renders the dead
+    /// client's final frame asynchronously — a close racing that
     /// render would cut the session's last output off. Bounded (see
     /// `exit_grace_ns`); 0 means the clock was unavailable and the
     /// grace degrades to the quiet-pipe checks alone.
     child_exited_at_ns: u64 = 0,
+    /// Monotonic stamp of the last completed read that carried bytes:
+    /// the quiet grace measures from the LATER of exit and last
+    /// output, so a conhost still emitting (an attached descendant, a
+    /// slow final render) keeps pushing the close out instead of being
+    /// cut mid-stream at a fixed offset from the exit.
+    last_output_at_ns: u64 = 0,
 };
 
-/// How long after the child's exit the console close waits for the
-/// output pipe to stay quiet. Not a liveness cost in the common case —
-/// the close fires at the first quiet observation past the grace — and
-/// bounded either way; the post-close drain still collects anything
-/// conhost flushes while tearing down.
-const exit_grace_ns: u64 = 50 * std.time.ns_per_ms;
+/// Process-lifetime backing for `State` (see its doc): the page
+/// allocator is thread-safe, never torn down, and each session's block
+/// is a handful of pages.
+const state_allocator = std.heap.page_allocator;
+
+/// How long past the child's exit — and past the LAST OUTPUT, whichever
+/// is later — the console close waits for the output pipe to stay
+/// quiet. Not a liveness cost in the common case (the close fires at
+/// the first quiet observation past the grace), and bounded either way;
+/// the post-close drain still collects anything conhost flushes while
+/// tearing down. The residual is stated plainly: a conhost that stays
+/// SILENT this long while still holding an unrendered final frame
+/// would lose it — the alternative (never closing) strands the session
+/// forever, because the pipe never breaks on its own (measured: it
+/// stays open indefinitely even after every attached client exited).
+const exit_grace_ns: u64 = 100 * std.time.ns_per_ms;
 
 const SpinLock = struct {
     locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -273,9 +296,17 @@ pub const Pty = struct {
     /// zombie to re-poll for).
     pub fn reapEnding(self: Pty) Exit {
         const st = self.state;
+        // Every ending tears the console down HERE — on the kill and
+        // shutdown paths (where the loop broke before any EOF) this is
+        // what fells the descendants still attached to it, at the reap
+        // rather than a later retire the host might never drain to. A
+        // no-op on the normal path, whose EOF only exists because the
+        // console already closed.
+        defer drainAndCloseConsole(st);
         if (self.reap()) |exit| return exit;
-        // Still running: hang it up like a real terminal closing.
-        closeConsole(st);
+        // Still running: hang it up like a real terminal closing (the
+        // drain keeps the close away from a full pipe).
+        drainAndCloseConsole(st);
         const start_ns = clock.monotonicNanoseconds();
         const clock_ok = start_ns != 0;
         var iterations: usize = 0;
@@ -323,7 +354,7 @@ pub const Pty = struct {
         _ = win.CloseHandle(st.read_event);
         _ = win.CloseHandle(st.write_event);
         _ = win.CloseHandle(st.process);
-        st.gpa.destroy(st);
+        state_allocator.destroy(st);
     }
 
     /// Windows has no exec self-pipe: `CreateProcessW`'s verdict is
@@ -346,12 +377,48 @@ pub const Pty = struct {
     }
 };
 
+/// Discard-drain the output pipe (bounded), then close the
+/// pseudoconsole. The pre-close drain is what keeps
+/// `ClosePseudoConsole` away from a FULL pipe — pre-rework conhosts
+/// block the close there — on the paths where the io loop stopped
+/// reading before any EOF (kill, shutdown, spawn-failure wind-down);
+/// the bound keeps a still-writing attached descendant from stranding
+/// the reap forever. Discarding is the shared teardown discipline:
+/// these paths already deliver no further output. io-thread only (it
+/// owns the read machinery).
+fn drainAndCloseConsole(st: *State) void {
+    if (st.console_closed) return;
+    const start_ns = clock.monotonicNanoseconds();
+    const clock_ok = start_ns != 0;
+    var iterations: usize = 0;
+    while (!st.read_eof and !st.read_failed) : (iterations += 1) {
+        const elapsed_ns = if (clock_ok) clock.monotonicNanoseconds() -% start_ns else iterations * 10 * std.time.ns_per_ms;
+        if (elapsed_ns >= 500 * std.time.ns_per_ms) break;
+        // Discard whatever the last completion or a sync arm landed.
+        st.read_off = 0;
+        st.read_len = 0;
+        armRead(st);
+        if (st.read_len > 0) continue; // sync data: keep draining
+        if (!st.read_pending) continue; // spurious: re-arm next round
+        if (win.WaitForSingleObject(st.read_event, 10) == win.WAIT_OBJECT_0) {
+            completeRead(st);
+            continue;
+        }
+        // Quiet behind the armed read: if the pipe shows nothing
+        // buffered either, the close cannot meet a saturated writer.
+        var avail: win.DWORD = 0;
+        if (win.PeekNamedPipe(st.out_read, null, 0, null, &avail, null) == 0 or avail == 0) break;
+    }
+    st.read_off = 0;
+    st.read_len = 0;
+    closeConsole(st);
+}
+
 /// Close the pseudoconsole exactly once (idempotent, lock-guarded
 /// against `resize`). Callers uphold the quiet-pipe discipline
 /// documented on the file: the wait loop closes only after the armed
-/// read shows an empty pipe, and the teardown paths close after the
-/// child was terminated (a dead client cannot keep conhost's writer
-/// saturated for long).
+/// read shows an empty pipe, and the teardown paths drain first
+/// (`drainAndCloseConsole`).
 fn closeConsole(st: *State) void {
     st.hpc_lock.lock();
     defer st.hpc_lock.unlock();
@@ -385,6 +452,7 @@ fn completeRead(st: *State) void {
         st.read_pending = false;
         st.read_off = 0;
         st.read_len = n;
+        if (n > 0) st.last_output_at_ns = clock.monotonicNanoseconds();
         return;
     }
     switch (lastError()) {
@@ -434,10 +502,12 @@ fn armRead(st: *State) void {
 fn maybeCloseConsole(st: *State) void {
     if (st.console_closed or !st.read_pending) return;
     // The quiet grace: give conhost its beat to render the dead
-    // client's final frame before manufacturing EOF.
-    if (st.child_exited_at_ns != 0) {
+    // client's final frame — measured from the LATER of the exit and
+    // the last delivered output — before manufacturing EOF.
+    const quiet_since = @max(st.child_exited_at_ns, st.last_output_at_ns);
+    if (quiet_since != 0) {
         const now = clock.monotonicNanoseconds();
-        if (now != 0 and now -% st.child_exited_at_ns < exit_grace_ns) return;
+        if (now != 0 and now -% quiet_since < exit_grace_ns) return;
     }
     if (win.WaitForSingleObject(st.read_event, 0) == win.WAIT_OBJECT_0) return;
     var avail: win.DWORD = 0;
@@ -672,7 +742,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         failSpawnCleanup(hpc, out_pipe.server, in_pipe.server);
         return error.PtyOpenFailed;
     };
-    const state = gpa.create(State) catch {
+    const state = state_allocator.create(State) catch {
         _ = win.CloseHandle(read_event);
         _ = win.CloseHandle(write_event);
         _ = win.TerminateProcess(pi.hProcess, 1);
@@ -681,7 +751,6 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         return error.PtyEnvironTooLarge;
     };
     state.* = .{
-        .gpa = gpa,
         .hpc = hpc,
         .process = pi.hProcess,
         .out_read = out_pipe.server,
@@ -741,10 +810,12 @@ pub fn closeFd(fd: c_int) void {
 /// PEB block raw would race concurrent SetEnvironmentVariable calls).
 /// WTF-16 entries decode to WTF-8 into `bytes`; `TERM` is skipped (the
 /// transport injects its own, and Windows env names are
-/// case-insensitive, so the skip is too) as are the hidden `=X:=...`
-/// per-drive-directory entries CreateProcess plumbs around. Over-bound
-/// environments return null — the same loud whole-or-nothing refusal
-/// the POSIX flatten teaches.
+/// case-insensitive, so the skip is too). The hidden `=X:=...`
+/// per-drive-directory entries CreateProcess plumbs around ride along
+/// verbatim (name `=X:`, and they sort ahead of every letter, the
+/// block position Windows expects) so a child's drive-relative path
+/// state matches its parent's. Over-bound environments return null —
+/// the same loud whole-or-nothing refusal the POSIX flatten teaches.
 pub fn captureGlobalEnviron(buffer: []EnvVar, bytes: []u8) ?[]const EnvVar {
     if (comptime !is_windows) return null;
     const block = win.GetEnvironmentStringsW() orelse return null;
@@ -765,8 +836,11 @@ pub fn captureGlobalEnviron(buffer: []EnvVar, bytes: []u8) ?[]const EnvVar {
         }
         const len = std.unicode.wtf16LeToWtf8(bytes[used..], entry_w);
         const entry = bytes[used .. used + len];
-        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
-        if (eq == 0) continue; // "=C:=C:\..." drive-cwd plumbing
+        // A leading '=' names the hidden per-drive-directory entries
+        // ("=C:=C:\dir"): their name is everything through the drive
+        // ("=C:"), so the split looks past the first byte for them.
+        const search_from: usize = if (entry.len > 0 and entry[0] == '=') 1 else 0;
+        const eq = search_from + (std.mem.indexOfScalar(u8, entry[search_from..], '=') orelse continue);
         const name = entry[0..eq];
         if (asciiEqlIgnoreCase(name, "TERM")) continue;
         if (count == buffer.len) return null;
@@ -801,7 +875,10 @@ fn resolveExecutable(arena: std.mem.Allocator, arg0: []const u8, env: ?[]const E
     if (has_separator) {
         return probeWithExtensions(arena, "", arg0);
     }
-    const path = lookupEnvIgnoreCase(env, "PATH") orelse "C:\\Windows\\System32;C:\\Windows";
+    // Sized for two Windows-directory roots (MAX_PATH each, 3-byte
+    // WTF-8 worst case) plus the joining literal.
+    var fallback_path_buf: [2 * 260 * 3 + 16]u8 = undefined;
+    const path = lookupEnvIgnoreCase(env, "PATH") orelse systemPathFallback(env, &fallback_path_buf);
     var it = std.mem.splitScalar(u8, path, ';');
     while (it.next()) |raw_component| {
         // Quoted PATH components are a Windows convention; the quotes
@@ -812,6 +889,32 @@ fn resolveExecutable(arena: std.mem.Allocator, arg0: []const u8, env: ?[]const E
         if (probeWithExtensions(arena, component, arg0)) |found| return found;
     }
     return null;
+}
+
+/// The PATH stand-in when the caller's env carries none: the system
+/// directories under the real Windows root — the env's own
+/// `SystemRoot`/`windir` first, then the OS's answer
+/// (`GetWindowsDirectoryW`, so an install under D:\Windows still
+/// resolves bare names), and the conventional literal only when both
+/// fail.
+fn systemPathFallback(env: ?[]const EnvVar, buf: []u8) []const u8 {
+    // The Windows directory is bounded at MAX_PATH (260) UTF-16 units;
+    // WTF-8 needs at most 3 bytes per unit.
+    var os_root_buf: [260 * 3]u8 = undefined;
+    const root = root: {
+        if (lookupEnvIgnoreCase(env, "SystemRoot")) |value| break :root value;
+        if (lookupEnvIgnoreCase(env, "windir")) |value| break :root value;
+        if (comptime is_windows) {
+            var wide: [260]u16 = undefined;
+            const len = win.GetWindowsDirectoryW(&wide, @intCast(wide.len));
+            if (len > 0 and len < wide.len) {
+                const decoded_len = std.unicode.wtf16LeToWtf8(&os_root_buf, wide[0..len]);
+                break :root os_root_buf[0..decoded_len];
+            }
+        }
+        break :root "C:\\Windows";
+    };
+    return std.fmt.bufPrint(buf, "{s}\\System32;{s}", .{ root, root }) catch "C:\\Windows\\System32;C:\\Windows";
 }
 
 /// The executable-extension allowlist candidates share: as spelled,
@@ -837,7 +940,10 @@ fn probeWithExtensions(arena: std.mem.Allocator, dir: []const u8, name: []const 
 /// delivers the final verdict synchronously either way).
 fn executableAt(path: []const u8) bool {
     if (comptime !is_windows) return false;
-    var wide: [std.fs.max_path_bytes]u16 = undefined;
+    // Bounded by the argv byte budget the candidate was built from
+    // (a full max_path_bytes-wide buffer would put ~200 KiB on the
+    // loop thread's stack for no reachable input).
+    var wide: [pty.max_argv_bytes]u16 = undefined;
     const len = std.unicode.wtf8ToWtf16Le(wide[0 .. wide.len - 1], path) catch return false;
     wide[len] = 0;
     const attrs = win.GetFileAttributesW(wide[0..len :0].ptr);
@@ -1230,6 +1336,7 @@ const win = struct {
     extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: COORD) callconv(.winapi) HRESULT;
     extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.winapi) void;
     extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetWindowsDirectoryW(lpBuffer: [*]u16, uSize: u32) callconv(.winapi) u32;
     extern "kernel32" fn GetEnvironmentStringsW() callconv(.winapi) ?[*:0]u16;
     extern "kernel32" fn FreeEnvironmentStringsW(penv: [*:0]u16) callconv(.winapi) BOOL;
     extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;

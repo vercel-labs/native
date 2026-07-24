@@ -178,7 +178,7 @@ Adding the pty record kind moved the journal format's layout fingerprint: record
     </tr>
     <tr>
       <td>Windows</td>
-      <td>Supported — ConPTY (<code>CreatePseudoConsole</code>) over an overlapped pipe pair; UTF-8 with VT sequences in both directions, which is the pseudoconsole's own pipe contract. Behavioral differences below.</td>
+      <td>Supported on Windows 10 1809+ (the first ConPTY release; the backend links <code>CreatePseudoConsole</code> directly, so that is the binary's floor) — ConPTY over an overlapped pipe pair; UTF-8 with VT sequences in both directions, which is the pseudoconsole's own pipe contract. Behavioral differences below.</td>
     </tr>
     <tr>
       <td>Null / headless</td>
@@ -194,6 +194,7 @@ The vocabulary is identical — the terminal example runs unchanged — but ConP
 - **Exit codes only.** Windows has no signals, so `signaled` never occurs there: every ending is `exited` with a process exit code (a crash surfaces the NTSTATUS bit-cast to `i32` — an access violation's `0xC0000005` arrives negative), `cancelled` after `ptyKill`, or the shared refusal classes. Apps that branch on `signal` should treat it as the POSIX-only detail it is.
 - **Rendered stream, not raw bytes.** ConPTY output is conhost's VT rendering of the child's screen, not the child's literal write stream — a terminal emulator consumes it identically, but byte-exact expectations against child output do not transfer.
 - **`ptyKill` reach.** The kill is `TerminateProcess` on the direct child plus the pseudoconsole teardown, which takes down every descendant still attached to the console; a descendant that detached (`FreeConsole`, `DETACHED_PROCESS`) escapes — the same documented limit as a POSIX descendant that left the process group.
-- **`ptyResize`** maps to `ResizePseudoConsole`; conhost delivers the window-size change to the child through the console APIs (the SIGWINCH analog).
+- **`ptyResize`** maps to `ResizePseudoConsole`; conhost delivers the window-size change to the child through the console APIs (the SIGWINCH analog). Console geometry is 16-bit signed there, so dimensions above 32767 clamp to it — the declared mirrors keep the requested value, the child observes the clamp.
+- **Session lifetime follows the direct child.** Conhost never breaks the output pipe on its own — not even after every attached process has exited — so the backend watches the child's process handle and closes the pseudoconsole once the pipe has stayed quiet past a bounded grace after its exit. An attached descendant that outlives the direct child (a launcher's `start /b` grandchild) ends with the console teardown, where a POSIX descendant holding the pty child end would have kept the session open; a detached one escapes, as above.
 - **Environment policy is unchanged** — the child sees the bound host environment plus `TERM` — with one Windows spelling: environment names are case-insensitive there, so a caller-supplied `Term` is still the entry the injected value replaces. `argv[0]` resolves through the caller environment's `PATH` (`;`-separated) against the executable kinds `CreateProcessW` can start (`.exe`, `.cmd`, `.bat`, `.com`); the current directory is deliberately never searched.
 - **The reaping contract reads differently.** Windows process objects self-release when the last handle closes, so the POSIX sole-reaper/SIGCHLD paragraph above has no Windows analog — there is nothing an embedder can reap out from under the toolkit.
