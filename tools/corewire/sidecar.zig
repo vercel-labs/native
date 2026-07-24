@@ -8,9 +8,10 @@
 //! message union with declaration-order wire tags, helper signatures,
 //! channel declarations, and build identity. Its only consumers are the
 //! shim generator (emit.zig turns it into a Zig mirror module) and the
-//! checker; both refuse a malformed or unknown-generation sidecar loudly
-//! at tool time, with a teaching that names the exact field path — never
-//! a silent skew that surfaces as wrong dispatch at runtime.
+//! checker; both refuse a malformed or unknown-generation sidecar
+//! outright at tool time, with a teaching that names the exact field
+//! path — never a silent skew that surfaces as wrong dispatch at
+//! runtime.
 //!
 //! Forward compatibility (reader side, normative):
 //! - Unknown FIELDS anywhere are ignored with a one-line warning naming
@@ -148,9 +149,16 @@ pub const Abi = struct {
     snapshot_format: i64,
 };
 
+/// The resolved integer class an `integer_slots` entry attests. The
+/// type table's one integer spelling is `i64`; the attestation refines
+/// it — `u64` marks the slot's wire bytes as the unsigned twin (8-byte
+/// unsigned LE instead of two's complement). `f64` never appears here:
+/// it is the default class and is never attested.
+pub const IntegerClass = enum { i64, u64 };
+
 pub const IntegerSlot = struct {
     slot: []const u8,
-    class: NumberClass,
+    class: IntegerClass,
 };
 
 pub const Sidecar = struct {
@@ -612,6 +620,20 @@ const Mapper = struct {
         return self.diags.fail(at, "unknown number class \"{s}\" — the v1 classes are \"f64\" and \"i64\"; this reader is too old for anything else", .{text});
     }
 
+    /// The integer_slots class vocabulary is its own closed set:
+    /// payload descriptors spell "f64"/"i64" (V7), attestations spell
+    /// "i64"/"u64" — the unsigned class exists only as a per-slot
+    /// verdict, never as a TypeRef or descriptor spelling.
+    fn mapIntegerClass(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!IntegerClass {
+        const text = try self.string(value, at);
+        if (std.mem.eql(u8, text, "i64")) return .i64;
+        if (std.mem.eql(u8, text, "u64")) return .u64;
+        if (std.mem.eql(u8, text, "f64")) {
+            return self.diags.fail(at, "integer_slots records the compiler's integer-class verdicts; class \"f64\" has no place here (f64 is the default class and is never attested)", .{});
+        }
+        return self.diags.fail(at, "unknown integer class \"{s}\" — the format-1 classes are \"i64\" and \"u64\"; this reader is too old for anything else", .{text});
+    }
+
     fn mapHelpers(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const Helper {
         const items = try self.array(value, "model_helpers");
         const out = try self.arena.alloc(Helper, items.items.len);
@@ -750,13 +772,9 @@ const Mapper = struct {
             const at = self.path("integer_slots[{d}]", .{index});
             const entry = try self.members(item, at, &.{ "slot", "class" });
             entry.warnUnknown();
-            const class = try self.mapNumberClass(try entry.get("class"), self.path("{s}.class", .{at}));
-            if (class != .i64) {
-                return self.diags.fail(self.path("{s}.class", .{at}), "integer_slots records the compiler's i64 verdicts; class \"f64\" has no place here (f64 is the default class and is never attested)", .{});
-            }
             out[index] = .{
                 .slot = try self.nonEmptyString(try entry.get("slot"), self.path("{s}.slot", .{at})),
-                .class = class,
+                .class = try self.mapIntegerClass(try entry.get("class"), self.path("{s}.class", .{at})),
             };
         }
         return out;
@@ -796,7 +814,10 @@ fn jsonKindName(value: std.json.Value) []const u8 {
 //                                          scalar shape).
 //   V8  unbound lists resolve            — validateUnbound.
 //   V9  channel wiring                   — validateChannels.
-//   V10 integer-slot bijection           — validateIntegerSlots.
+//   V10 integer-slot bijection           — validateIntegerSlots: the
+//       one-to-one check both ways, plus structural resolution of every
+//       leftover entry's path (unresolvable, wrong spelling, or the
+//       grammar's slice-element gap each carry their own teaching).
 //   V11 export attestation               — validateAbi checks the list
 //       against the profile's canonical vocabulary and order; the
 //       "exactly what the object exports" half needs the object and is
@@ -1423,16 +1444,19 @@ pub fn collectIntegerSlotPaths(arena: std.mem.Allocator, sidecar: Sidecar) error
             }
         }
     }
+    // The message-side path forms spell the union's AUTHORED name —
+    // an app whose union is named Action spells its slots
+    // `Action.<arm>`, never a literal `Msg` token.
     for (sidecar.msg.arms) |arm| {
         switch (arm.payload) {
             .number => |class| if (class == .i64) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}), .components_dotted = dotted(&.{arm.name}) });
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ sidecar.msg.name, arm.name }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name }) });
             },
             .number_bytes => |desc| if (desc.number_class == .i64) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}.{s}", .{ arm.name, desc.number_field }), .components_dotted = dotted(&.{ arm.name, desc.number_field }) });
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}.{s}", .{ sidecar.msg.name, arm.name, desc.number_field }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name, desc.number_field }) });
             },
             .scalar => |ref| if (spellsInteger(ref)) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "Msg.{s}", .{arm.name}), .components_dotted = dotted(&.{arm.name}) });
+                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ sidecar.msg.name, arm.name }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name }) });
             },
             else => {},
         }
@@ -1460,6 +1484,142 @@ fn spellsInteger(ref: TypeRef) bool {
         .optional => |inner| spellsInteger(inner.*),
         else => false,
     };
+}
+
+/// What an `integer_slots` entry's path names once resolved against the
+/// sidecar's own tables under the format-1 slot-path grammar.
+pub const SlotTarget = union(enum) {
+    /// A slot the sidecar spells i64 — an attestable target.
+    integer,
+    /// A real slot, spelled or classed as described — not attestable.
+    not_integer: []const u8,
+    /// A sequence whose elements spell an integer: the format-1 grammar
+    /// has no slice-element form, so no path can attest it.
+    slice_element,
+    /// No grammar form reaches a slot of this spelling.
+    unresolved,
+};
+
+fn refSpelling(ref: TypeRef) []const u8 {
+    return switch (ref) {
+        .bool => "bool",
+        .f64 => "f64",
+        .i64 => "i64",
+        .bytes => "bytes",
+        .void => "void",
+        .optional => |inner| refSpelling(inner.*),
+        .slice => "a slice",
+        .node, .value => "a record",
+        .enum_ref => "an enum",
+        .union_ref => "a union",
+    };
+}
+
+fn wrapsInteger(ref: TypeRef) bool {
+    return switch (ref) {
+        .i64 => true,
+        .optional => |inner| wrapsInteger(inner.*),
+        .slice => |elem| wrapsInteger(elem.*),
+        else => false,
+    };
+}
+
+/// Classify the TypeRef a resolved path lands on: i64 through optionals
+/// is the attestable shape; an integer buried under a slice is the
+/// grammar's known gap; everything else is a real slot of another
+/// spelling.
+fn classifyRef(ref: TypeRef) SlotTarget {
+    return switch (ref) {
+        .i64 => .integer,
+        .optional => |inner| classifyRef(inner.*),
+        .slice => |elem| if (wrapsInteger(elem.*)) .slice_element else .{ .not_integer = "a slice" },
+        else => .{ .not_integer = refSpelling(ref) },
+    };
+}
+
+fn classifyNumberClass(class: NumberClass) SlotTarget {
+    return switch (class) {
+        .i64 => .integer,
+        .f64 => .{ .not_integer = "f64" },
+    };
+}
+
+/// Resolve one slot path against the sidecar's tables. The grammar's
+/// forms, each segment the author's spelling: `<TypeName>.<field>` (a
+/// struct field, or a non-msg union arm's payload),
+/// `<msgName>.<arm>` (a scalar-number arm), `<msgName>.<arm>.<field>`
+/// (a number_bytes arm's number field), `helpers.<name>.return`, and
+/// `helpers.<name>.params[<index>]`.
+pub fn resolveSlotPath(sidecar: Sidecar, path: []const u8) SlotTarget {
+    var segments: [4][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, path, '.');
+    while (it.next()) |segment| {
+        if (segment.len == 0) return .unresolved;
+        if (count == segments.len) return .unresolved;
+        segments[count] = segment;
+        count += 1;
+    }
+
+    if (count == 3 and std.mem.eql(u8, segments[0], "helpers")) {
+        for (sidecar.model_helpers) |helper| {
+            if (!std.mem.eql(u8, helper.name, segments[1])) continue;
+            if (std.mem.eql(u8, segments[2], "return")) return classifyRef(helper.returns);
+            if (std.mem.startsWith(u8, segments[2], "params[") and std.mem.endsWith(u8, segments[2], "]")) {
+                const digits = segments[2]["params[".len .. segments[2].len - 1];
+                const index = std.fmt.parseInt(usize, digits, 10) catch return .unresolved;
+                if (index >= helper.params.len) return .unresolved;
+                return classifyRef(helper.params[index]);
+            }
+            return .unresolved;
+        }
+        return .unresolved;
+    }
+
+    if (std.mem.eql(u8, segments[0], sidecar.msg.name)) {
+        if (count == 2) {
+            if (findArm(sidecar.msg, segments[1])) |arm| {
+                return switch (arm.payload) {
+                    .number => |class| classifyNumberClass(class),
+                    .scalar => |ref| classifyRef(ref),
+                    .void => .{ .not_integer = "void" },
+                    .bytes => .{ .not_integer = "bytes" },
+                    .number_bytes => .{ .not_integer = "a number_bytes record (its number field is the slot)" },
+                    .record => .{ .not_integer = "a record" },
+                    .union_ref => .{ .not_integer = "a union" },
+                    .enum_ref => .{ .not_integer = "an enum" },
+                };
+            }
+        }
+        if (count == 3) {
+            if (findArm(sidecar.msg, segments[1])) |arm| {
+                switch (arm.payload) {
+                    .number_bytes => |desc| {
+                        if (std.mem.eql(u8, segments[2], desc.number_field)) return classifyNumberClass(desc.number_class);
+                        if (std.mem.eql(u8, segments[2], desc.bytes_field)) return .{ .not_integer = "bytes" };
+                    },
+                    else => {},
+                }
+            }
+            return .unresolved;
+        }
+    }
+
+    if (count == 2) {
+        if (findStruct(sidecar.types, segments[0])) |record| {
+            for (record.fields) |field| {
+                if (std.mem.eql(u8, field.name, segments[1])) return classifyRef(field.type);
+            }
+            return .unresolved;
+        }
+        if (findUnion(sidecar.types, segments[0])) |tagged| {
+            for (tagged.arms) |arm| {
+                if (std.mem.eql(u8, arm.name, segments[1])) return classifyRef(arm.payload);
+            }
+            return .unresolved;
+        }
+    }
+    return .unresolved;
 }
 
 fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
@@ -1495,10 +1655,19 @@ fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diag
         for (sidecar.integer_slots[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.slot, slot.slot)) duplicate = true;
         }
+        const at = pathOfStatic(diags, "integer_slots[{d}].slot", .{index});
         if (duplicate) {
-            diags.flag(pathOfStatic(diags, "integer_slots[{d}].slot", .{index}), "duplicate entry for \"{s}\" — every i64 slot has exactly one entry (V10)", .{slot.slot});
-        } else {
-            diags.flag(pathOfStatic(diags, "integer_slots[{d}].slot", .{index}), "\"{s}\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)", .{slot.slot});
+            diags.flag(at, "duplicate entry for \"{s}\" — every i64 slot has exactly one entry (V10)", .{slot.slot});
+            continue;
+        }
+        // The entry consumed nothing: resolve its path structurally so
+        // the teaching names what actually went wrong instead of one
+        // generic mismatch.
+        switch (resolveSlotPath(sidecar, slot.slot)) {
+            .integer => diags.flag(at, "\"{s}\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)", .{slot.slot}),
+            .not_integer => |spelling| diags.flag(at, "\"{s}\" resolves to a slot the sidecar spells {s}, not i64 — an attested integer class must sit on an i64 spelling (V10)", .{ slot.slot, spelling }),
+            .slice_element => diags.flag(at, "\"{s}\" addresses a sequence — the format-1 slot-path grammar has no slice-element form, so slice elements are never integer-attested; the emitter spells them f64 and readers exempt them from the bijection (V10)", .{slot.slot}),
+            .unresolved => diags.flag(at, "\"{s}\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"{s}.<arm>\" or \"{s}.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)", .{ slot.slot, sidecar.msg.name, sidecar.msg.name }),
         }
     }
 }
@@ -1868,7 +2037,7 @@ test "V10: an i64 spelling without an integer_slots entry refuses" {
     try expectRefusal(source, "integer_slots", "spells \"Model.count\" i64 but attests no integer_slots entry");
 }
 
-test "V10: an integer_slots entry naming no i64 slot refuses" {
+test "V10: an entry on a slot of another spelling refuses with that spelling named" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const source = try replaced(
@@ -1877,7 +2046,139 @@ test "V10: an integer_slots entry naming no i64 slot refuses" {
         "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
         "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Model.label\", \"class\": \"i64\"}",
     );
-    try expectRefusal(source, "integer_slots[1].slot", "resolves to no slot the sidecar spells i64");
+    try expectRefusal(source, "integer_slots[1].slot", "resolves to a slot the sidecar spells bytes, not i64");
+}
+
+test "V10: an unresolvable slot path refuses with the grammar's forms" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ghost = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Ghost.count\", \"class\": \"i64\"}",
+    );
+    try expectRefusal(ghost, "integer_slots[1].slot", "resolves against none of the sidecar's own tables");
+    // An element-indexing spelling has no grammar form either — the
+    // format-1 grammar cannot address inside a sequence.
+    const indexed = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Model.ids[0]\", \"class\": \"i64\"}",
+    );
+    try expectRefusal(indexed, "integer_slots[1].slot", "resolves against none of the sidecar's own tables");
+    // A missing helper signature slot is the same refusal.
+    const helper = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"helpers.rowCount.return\", \"class\": \"i64\"}",
+    );
+    try expectRefusal(helper, "integer_slots[1].slot", "resolves against none of the sidecar's own tables");
+}
+
+test "V10: a slot path landing on a slice refuses as the grammar's element gap" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A slice of i64 is a legal spelling (its elements are exempt from
+    // the bijection), but no entry may claim it: the grammar has no
+    // slice-element form, so the checker refuses rather than
+    // half-supporting element attestation.
+    var source = try replaced(
+        arena,
+        minimal_valid_json,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"ids\", \"type\": {\"kind\": \"slice\", \"elem\": {\"kind\": \"i64\"}}}",
+    );
+    source = try replaced(
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Model.ids\", \"class\": \"i64\"}",
+    );
+    try expectRefusal(source, "integer_slots[1].slot", "no slice-element form");
+}
+
+test "V10: a duplicate entry refuses with the exact index" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const source = try replaced(
+        arena_state.allocator(),
+        minimal_valid_json,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Model.count\", \"class\": \"u64\"}",
+    );
+    try expectRefusal(source, "integer_slots[1].slot", "duplicate entry for \"Model.count\"");
+}
+
+test "V10: the u64 class is accepted and carried" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try replaced(arena, minimal_valid_json, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"u64\"}");
+    const sidecar = try readValid(arena, source);
+    try testing.expectEqual(@as(usize, 1), sidecar.integer_slots.len);
+    try testing.expectEqual(IntegerClass.u64, sidecar.integer_slots[0].class);
+}
+
+test "V10: class f64 in integer_slots refuses (the default class is never attested)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"f64\"}");
+    try expectRefusal(source, "integer_slots[0].class", "never attested");
+}
+
+test "V10: an unknown integer class refuses as reader-too-old" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i128\"}");
+    try expectRefusal(source, "integer_slots[0].class", "unknown integer class \"i128\"");
+}
+
+test "V10: message-side slot paths spell the union's authored name" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try replaced(arena, minimal_valid_json, "\"name\": \"Msg\"", "\"name\": \"Event\"");
+    source = try replaced(
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"tick\", \"payload\": {\"kind\": \"number\", \"class\": \"i64\"}}",
+    );
+    // The authored spelling resolves.
+    const authored = try replaced(
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Event.tick\", \"class\": \"i64\"}",
+    );
+    const sidecar = try readValid(arena, authored);
+    try testing.expectEqual(@as(usize, 2), sidecar.integer_slots.len);
+    // A literal `Msg` token does not: the grammar's message forms use
+    // the designated union's own name.
+    const literal = try replaced(
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Msg.tick\", \"class\": \"i64\"}",
+    );
+    try expectRefusal(literal, "integer_slots", "spells \"Event.tick\" i64 but attests no integer_slots entry");
+}
+
+test "V10: an empty integer_slots list is valid when nothing spells i64" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The f64-only sequencing: an emitter predating integer inference
+    // spells every numeric slot f64 and attests the empty list.
+    var source = try replaced(arena, minimal_valid_json, "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}}", "{\"name\": \"count\", \"type\": {\"kind\": \"f64\"}}");
+    source = try replaced(arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "");
+    const sidecar = try readValid(arena, source);
+    try testing.expectEqual(@as(usize, 0), sidecar.integer_slots.len);
 }
 
 test "V11: an unknown export suffix refuses" {

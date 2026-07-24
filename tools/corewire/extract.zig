@@ -409,7 +409,9 @@ fn payloadDescriptor(comptime T: type, comptime msg_zig: []const u8, comptime ar
     if (isBytes(T)) return "{\"kind\": \"bytes\"}";
     if (T == f64) return "{\"kind\": \"number\", \"class\": \"f64\"}";
     if (T == i64) {
-        appendSlot(slots, slot_count, "Msg." ++ arm_name);
+        // Message-side slot paths spell the union's AUTHORED name, never
+        // a literal `Msg` token.
+        appendSlot(slots, slot_count, msg_zig ++ "." ++ arm_name);
         return "{\"kind\": \"number\", \"class\": \"i64\"}";
     }
     if (T == bool) return "{\"kind\": \"scalar\", \"type\": {\"kind\": \"bool\"}}";
@@ -425,7 +427,7 @@ fn payloadDescriptor(comptime T: type, comptime msg_zig: []const u8, comptime ar
             if (isNumberBytesShape(T, msg_zig)) {
                 const class = if (info.fields[0].type == i64) "i64" else "f64";
                 if (info.fields[0].type == i64) {
-                    appendSlot(slots, slot_count, "Msg." ++ arm_name ++ "." ++ info.fields[0].name);
+                    appendSlot(slots, slot_count, msg_zig ++ "." ++ arm_name ++ "." ++ info.fields[0].name);
                 }
                 return "{\"kind\": \"number_bytes\", \"number_field\": " ++ js(info.fields[0].name) ++
                     ", \"number_class\": \"" ++ class ++ "\", \"bytes_field\": " ++ js(info.fields[1].name) ++ "}";
@@ -551,6 +553,37 @@ test "extraction of a small core produces a valid sidecar" {
 
     // Determinism: a second evaluation is byte-identical.
     try testing.expectEqualStrings(json, comptime sidecarJson(Core, "src/core.ts"));
+}
+
+test "message-side integer slot paths spell the union's authored name" {
+    const Core = struct {
+        pub const Model = struct { count: i64 };
+        pub const Event = union(enum) {
+            tick: i64,
+            fetched: struct { status: i64, body: []const u8 },
+        };
+        pub const Msg = Event;
+        pub fn initialModel() *const Model {
+            unreachable;
+        }
+        pub fn update(model: *const Model, msg: Msg) *const Model {
+            _ = msg;
+            return model;
+        }
+    };
+    const json = comptime sidecarJson(Core, "src/core.ts");
+    try testing.expect(std.mem.indexOf(u8, json, "{\"slot\": \"Event.tick\", \"class\": \"i64\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "{\"slot\": \"Event.fetched.status\", \"class\": \"i64\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"Msg.tick\"") == null);
+
+    // The reader's bijection accepts the authored spelling end to end.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sidecar_mod = @import("sidecar.zig");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const sidecar = try sidecar_mod.read(arena, json, &diags);
+    try testing.expectEqual(@as(usize, 3), sidecar.integer_slots.len);
 }
 
 test "anonymous-name detection keys on the final compiler suffix" {
