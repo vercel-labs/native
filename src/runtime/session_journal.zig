@@ -128,7 +128,13 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// touch-source stamp (`platform.touch_pointer_id_bit`) — same bytes,
 /// and an older recording whose host happened to emit ids with that
 /// bit set would replay with hover-proof semantics it never had.
-pub const format_semantic_epoch: u32 = 4;
+/// Epoch 5: audio positions and durations clamp into the exact-integer
+/// window (below 2^53) at every delivery entry, and replay refuses an
+/// out-of-window audio record as journal damage — an older recording
+/// could journal a wider value the old feed paths accepted, which
+/// would now be misreported as damage instead of refusing as a
+/// different generation.
+pub const format_semantic_epoch: u32 = 5;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record
