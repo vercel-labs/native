@@ -5985,7 +5985,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
     NSPoint point;
     if (legacy) {
+        // Discrete wheels have no phases: each event is its own
+        // gesture, so per-gesture state (wire bindings, carries) must
+        // not leak across them — a binding that never cleared would
+        // demote a region to the wire forever.
         point = [self convertPoint:event.locationInWindow fromView:nil];
+        self.wheelResidualCarryX = 0;
+        self.wheelResidualCarryY = 0;
+        [self.wireBoundDriverIds removeAllObjects];
     } else {
         if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
             self.wheelGesturePoint = [self convertPoint:event.locationInWindow fromView:nil];
