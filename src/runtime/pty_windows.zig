@@ -377,17 +377,18 @@ pub const Pty = struct {
     }
 };
 
-/// Discard-drain the output pipe (bounded), then close the
-/// pseudoconsole. The pre-close drain is what keeps
-/// `ClosePseudoConsole` away from a FULL pipe — pre-rework conhosts
-/// block the close there — on the paths where the io loop stopped
-/// reading before any EOF (kill, shutdown, spawn-failure wind-down);
-/// the bound keeps a still-writing attached descendant from stranding
-/// the reap forever. Discarding is the shared teardown discipline:
-/// these paths already deliver no further output. io-thread only (it
-/// owns the read machinery).
+/// Initiate the console close, then discard-drain the output pipe
+/// (bounded) so a conhost blocked mid-write — its own teardown flush,
+/// or a client's CTRL_CLOSE handler emitting past the pipe capacity —
+/// always finds a reader and finishes closing. Used on the paths where
+/// the io loop stopped reading before any EOF (kill, shutdown,
+/// spawn-failure wind-down); the bound keeps a still-writing attached
+/// descendant from stranding the reap forever (the detached closer
+/// finishes whenever conhost does). Discarding is the shared teardown
+/// discipline: these paths already deliver no further output.
+/// io-thread only (it owns the read machinery).
 fn drainAndCloseConsole(st: *State) void {
-    if (st.console_closed) return;
+    closeConsole(st);
     const start_ns = clock.monotonicNanoseconds();
     const clock_ok = start_ns != 0;
     var iterations: usize = 0;
@@ -402,29 +403,38 @@ fn drainAndCloseConsole(st: *State) void {
         if (!st.read_pending) continue; // spurious: re-arm next round
         if (win.WaitForSingleObject(st.read_event, 10) == win.WAIT_OBJECT_0) {
             completeRead(st);
-            continue;
         }
-        // Quiet behind the armed read: if the pipe shows nothing
-        // buffered either, the close cannot meet a saturated writer.
-        var avail: win.DWORD = 0;
-        if (win.PeekNamedPipe(st.out_read, null, 0, null, &avail, null) == 0 or avail == 0) break;
     }
     st.read_off = 0;
     st.read_len = 0;
-    closeConsole(st);
 }
 
 /// Close the pseudoconsole exactly once (idempotent, lock-guarded
-/// against `resize`). Callers uphold the quiet-pipe discipline
-/// documented on the file: the wait loop closes only after the armed
-/// read shows an empty pipe, and the teardown paths drain first
-/// (`drainAndCloseConsole`).
+/// against `resize`). The blocking call itself runs on a DETACHED
+/// helper thread: `ClosePseudoConsole` waits for conhost, and conhost
+/// may be blocked writing into the output pipe (a client's CTRL_CLOSE
+/// handler can emit more than the pipe holds), so the reader thread
+/// must stay free to keep draining — closing inline on the reader is
+/// the documented ClosePseudoConsole deadlock. The helper captures
+/// only the HPCON VALUE (the object the call consumes; `resize` is
+/// fenced off by `console_closed` under the lock), never the session
+/// state, so it needs no join and cannot dangle. If the thread cannot
+/// spawn, the close falls back inline behind the callers' quiet-pipe
+/// checks — the bounded, OOM-only residual.
 fn closeConsole(st: *State) void {
     st.hpc_lock.lock();
     defer st.hpc_lock.unlock();
     if (st.console_closed) return;
     st.console_closed = true;
-    win.ClosePseudoConsole(st.hpc);
+    const thread = std.Thread.spawn(.{}, closeConsoleThreadMain, .{st.hpc}) catch {
+        win.ClosePseudoConsole(st.hpc);
+        return;
+    };
+    thread.detach();
+}
+
+fn closeConsoleThreadMain(hpc: win.HPCON) void {
+    win.ClosePseudoConsole(hpc);
 }
 
 /// Reap a completed overlapped write (non-blocking). True when the
@@ -484,6 +494,9 @@ fn armRead(st: *State) void {
         if (win.GetOverlappedResult(st.out_read, &st.read_overlapped, &n, 0) != 0) {
             st.read_off = 0;
             st.read_len = n;
+            // Synchronous completions push the exit quiet grace out
+            // exactly like event-delivered ones.
+            if (n > 0) st.last_output_at_ns = clock.monotonicNanoseconds();
         }
         return;
     }
@@ -619,9 +632,34 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
 
     const resolved = resolveExecutable(arena, options.argv[0], options.env) orelse
         return error.PtyCommandNotFound;
+    const is_batch = endsWithIgnoreCase(resolved, ".cmd") or endsWithIgnoreCase(resolved, ".bat");
+    if (is_batch) {
+        // A batch target's command line is REPARSED by cmd.exe with
+        // its own metacharacter grammar, which no CRT quoting can
+        // neutralize — `safe&whoami` as one argument would splice a
+        // second command. Bytes the cmd grammar can reinterpret refuse
+        // the spawn whole (the argv-NUL teaching applied): mutating
+        // them would run a different command line than the caller
+        // declared.
+        for (options.argv[1..]) |arg| {
+            if (std.mem.indexOfAny(u8, arg, "&|<>^%!\"\r\n") != null) return error.PtyArgvInvalid;
+        }
+    }
     const command_line_w = buildCommandLineW(arena, resolved, options.argv) catch |err| switch (err) {
         error.InvalidWtf8 => return error.PtyArgvInvalid,
         error.OutOfMemory => return error.PtyEnvironTooLarge,
+    };
+    // The application name rides its own argument for direct
+    // executables — the command line's module token is MAX_PATH-bound,
+    // lpApplicationName is not, so a long-path .exe still starts. Batch
+    // files keep the null application name deliberately: that is the
+    // CreateProcessW form that reroutes them through cmd.exe (cmd
+    // itself imposes the MAX_PATH bound on scripts).
+    const app_name_w: ?[*:0]const u16 = if (is_batch) null else app: {
+        const len = std.unicode.calcWtf16LeLen(resolved) catch return error.PtyArgvInvalid;
+        const wide = arena.allocSentinel(u16, len, 0) catch return error.PtyEnvironTooLarge;
+        _ = std.unicode.wtf8ToWtf16Le(wide, resolved) catch return error.PtyArgvInvalid;
+        break :app wide.ptr;
     };
     const env_block_w = buildEnvironmentBlockW(arena, options.env, options.term) catch |err| switch (err) {
         error.InvalidWtf8 => return error.PtyEnvironTooLarge,
@@ -703,7 +741,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     // ConPTY shape, and the reason no parent-side descriptor can leak
     // into the child at all.
     if (win.CreateProcessW(
-        null,
+        app_name_w,
         command_line_w.ptr,
         null,
         null,
@@ -925,7 +963,13 @@ fn systemPathFallback(env: ?[]const EnvVar, buf: []u8) []const u8 {
 const executable_extensions = [_][]const u8{ "", ".exe", ".cmd", ".bat", ".com" };
 
 fn probeWithExtensions(arena: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]const u8 {
-    for (executable_extensions) |ext| {
+    // A name that already carries an extension is probed AS SPELLED
+    // only: appending further suffixes would let a co-located
+    // `tool.cmd.exe` answer for a missing `tool.cmd` — the
+    // CreateProcess convention (.exe joins extension-less names only),
+    // kept for the whole allowlist.
+    const extensions: []const []const u8 = if (hasExtension(name)) &.{""} else &executable_extensions;
+    for (extensions) |ext| {
         const candidate = if (dir.len == 0)
             std.fmt.allocPrint(arena, "{s}{s}", .{ name, ext }) catch return null
         else
@@ -949,6 +993,20 @@ fn executableAt(path: []const u8) bool {
     const attrs = win.GetFileAttributesW(wide[0..len :0].ptr);
     if (attrs == win.INVALID_FILE_ATTRIBUTES) return false;
     return attrs & win.FILE_ATTRIBUTE_DIRECTORY == 0;
+}
+
+/// Whether the LAST PATH COMPONENT carries an extension (a leading dot
+/// alone names a hidden-style file, not an extension).
+fn hasExtension(name: []const u8) bool {
+    const base_start = if (std.mem.lastIndexOfAny(u8, name, "/\\:")) |index| index + 1 else 0;
+    const base = name[base_start..];
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return false;
+    return dot != 0;
+}
+
+fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
+    if (text.len < suffix.len) return false;
+    return asciiEqlIgnoreCase(text[text.len - suffix.len ..], suffix);
 }
 
 fn lookupEnvIgnoreCase(env: ?[]const EnvVar, name: []const u8) ?[]const u8 {
@@ -1077,14 +1135,30 @@ fn buildEnvironmentBlockW(
     return wide;
 }
 
+/// The environment-block contract's order: name comparison is
+/// case-insensitive in UNICODE order — so the fold walks code points
+/// through the OS's own BMP uppercase table (`toUpperWtf16`, the same
+/// fold std's Windows env-name hashing uses), never bytes. A name that
+/// is not valid WTF-8 falls back to byte order; the block build
+/// refuses such an environment moments later with the
+/// whole-or-nothing env error, so the fallback never reaches a child.
 fn envNameLessThan(_: void, a: EnvVar, b: EnvVar) bool {
-    const n = @min(a.name.len, b.name.len);
-    for (a.name[0..n], b.name[0..n]) |x, y| {
-        const ux = std.ascii.toUpper(x);
-        const uy = std.ascii.toUpper(y);
-        if (ux != uy) return ux < uy;
+    const view_a = std.unicode.Wtf8View.init(a.name) catch return std.mem.lessThan(u8, a.name, b.name);
+    const view_b = std.unicode.Wtf8View.init(b.name) catch return std.mem.lessThan(u8, a.name, b.name);
+    var it_a = view_a.iterator();
+    var it_b = view_b.iterator();
+    while (true) {
+        const cp_a = it_a.nextCodepoint() orelse return it_b.nextCodepoint() != null;
+        const cp_b = it_b.nextCodepoint() orelse return false;
+        const upper_a = upperCodepoint(cp_a);
+        const upper_b = upperCodepoint(cp_b);
+        if (upper_a != upper_b) return upper_a < upper_b;
     }
-    return a.name.len < b.name.len;
+}
+
+fn upperCodepoint(cp: u21) u21 {
+    if (std.math.cast(u16, cp)) |unit| return std.os.windows.toUpperWtf16(unit);
+    return cp;
 }
 
 /// Monotonic counter distinguishing concurrent spawns' pipe names
@@ -1504,6 +1578,27 @@ test "windows initial grid size reaches the child console" {
     // localized, the numbers are not.
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "97") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "41") != null);
+}
+
+test "windows env-block order folds case beyond ascii" {
+    // é (U+00E9) uppercases to É (U+00C9), which orders BEFORE Ê
+    // (U+00CA); raw WTF-8 bytes would order them the other way.
+    const e_acute: EnvVar = .{ .name = "é", .value = "1" };
+    const e_circ: EnvVar = .{ .name = "Ê", .value = "2" };
+    try std.testing.expect(envNameLessThan({}, e_acute, e_circ));
+    try std.testing.expect(!envNameLessThan({}, e_circ, e_acute));
+    // The ASCII fold still holds, and a name that is a strict prefix
+    // of another orders first.
+    try std.testing.expect(envNameLessThan({}, .{ .name = "path", .value = "" }, .{ .name = "PATHEXT", .value = "" }));
+    try std.testing.expect(!envNameLessThan({}, .{ .name = "TERM", .value = "" }, .{ .name = "term", .value = "" }));
+}
+
+test "windows executable probing appends extensions only to extension-less names" {
+    try std.testing.expect(hasExtension("tool.cmd"));
+    try std.testing.expect(hasExtension("C:\\dir.d\\tool.exe"));
+    try std.testing.expect(!hasExtension("cmd"));
+    try std.testing.expect(!hasExtension("C:\\dir.d\\tool"));
+    try std.testing.expect(!hasExtension(".hidden"));
 }
 
 test "windows command-line quoting round-trips the argv inverse" {
