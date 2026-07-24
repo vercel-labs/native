@@ -130,10 +130,17 @@ pub const TerminalGrid = struct {
     /// rows' `selection` ranges).
     select_head: ?TerminalCellPos = null,
     scrollbar: TerminalScrollbar = .{},
-    /// The viewport as plain text — the grid's accessibility surface (a
-    /// terminal's semantic content IS its text) and, through the widget
-    /// text channel, the session fingerprint's cell-state coverage.
-    /// Empty means "unknown", never "same as before".
+    /// The viewport as PLAIN TEXT — the grid's accessibility surface (a
+    /// terminal's semantic content is its text) and, through the widget
+    /// text channel, the a11y-tree fingerprint's coverage of the
+    /// viewport's CHARACTERS. It is text only: colors, styles, the
+    /// cursor position, the selection, and the running state are NOT
+    /// encoded here, so two viewports with identical characters but
+    /// different colors or cursor cells hash alike. The producer that
+    /// owns replay-grade determinism must fold those channels into its
+    /// own checkpoint; this field is the text-coverage layer, not a
+    /// whole-cell-state hash. Empty means "unknown", never "same as
+    /// before".
     screen_text: []const u8 = "",
 };
 
@@ -304,6 +311,15 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // slots exactly like the widget part-id convention leaves slots.
     const id_base = options.id_base *% 0x9E37_79B9_7F4A_7C15;
 
+    // Fixed prologue/epilogue overhead (background fill, clip push,
+    // scrollbar thumb, clip pop): a positive budget below it can seat no
+    // row and cannot even frame the surface within its ceiling, so the
+    // paint degrades to nothing — BEFORE emitting the prologue, so a
+    // sub-overhead budget never leaves an unbalanced clip. 0 stays the
+    // unbounded (test) mode.
+    const fixed_overhead: usize = 8;
+    if (options.command_budget > 0 and options.command_budget < fixed_overhead) return;
+
     // The terminal surface: full-bleed background under the grid.
     try builder.fillRect(.{
         .id = id_base,
@@ -323,14 +339,20 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     const cell_h = metrics.height;
 
     // Worst case for one row, when no runs merge (every cell a distinct
-    // style): a background run, a text run, AND an underline run per
-    // column, or a box-drawing cell's up-to-four segments — four
-    // commands each — plus one selection wash. Reserved for the ACTUAL
-    // grid width so the LAST painted row can never push the list past
-    // the budget; the cursor, caret, scrollbar, and clip push/pop (+4)
-    // fit under the same reserve.
+    // style): a background run (1) PLUS the densest ink. The densest ink
+    // is a pure-double box joint (╬ ╪ ╫ and the double tees) — two
+    // parallel bars for each of its four sides, EIGHT commands — so nine
+    // per column bounds a double-joint row on its own colored background;
+    // a styled text cell (background + text + underline = three) stays
+    // well under it. Reserve nine per column so the LAST painted row can
+    // never push the list past the budget even when it is all double
+    // joints; a cheap text row simply degrades a few rows earlier, which
+    // is safe. The id STRIDE stays eight (a box cell's own commands); the
+    // background run rides a separate id range. The cursor, caret,
+    // scrollbar, and clip push/pop (+8) fit under the same reserve.
+    const commands_per_cell: usize = 8;
     const cols_actual: usize = if (grid.rows.len > 0) grid.rows[0].cells.len else max_cols;
-    const row_reserve: usize = cols_actual * 4 + 8;
+    const row_reserve: usize = cols_actual * (commands_per_cell + 1) + 8;
     const row_ceiling: usize = if (options.command_budget > row_reserve)
         options.command_budget - row_reserve
     else
@@ -342,11 +364,18 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // row is skipped WHOLE if it would not fit the remaining store — so
     // the grid degrades to fewer complete rows, never a row torn midway
     // by an allocation failure.
-    const text_store: usize = if (canvas.max_display_list_text_bytes > options.text_reserve)
+    // The absolute ceiling on the builder's text store the grid may
+    // reach: the whole store minus the reserve held back for widgets
+    // AFTER the grid. `allocTextBytes` counts cumulatively across every
+    // widget in the builder (`builder.text_byte_len`), so the preflight
+    // compares against that live counter — NOT a grid-local zero — or a
+    // row measured against a fresh store would pass here and then have
+    // its runs silently dropped when the shared store, already partly
+    // spent by an earlier widget, cannot hold them.
+    const text_ceiling: usize = if (canvas.max_display_list_text_bytes > options.text_reserve)
         canvas.max_display_list_text_bytes - options.text_reserve
     else
         0;
-    var text_bytes_emitted: usize = 0;
 
     // The glyph-atlas proxy budget (see `TerminalPaintOptions`): clamped
     // under half the probe table so insertion can never scan a full
@@ -365,14 +394,22 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // whole. The run-break flushes when the buffer nears full, so long
     // runs simply split across draw commands rather than overflow.
     var text_scratch: [text_scratch_bytes]u8 = undefined;
+    // Rows painted so far (the loop paints 0..N contiguously from the
+    // top and stops at the first row a budget rejects): the cursor and
+    // caret below are suppressed on any row this never reached, so a row
+    // dropped for budget never leaves its lone cursor floating over the
+    // blank background.
+    var painted_rows: usize = 0;
     for (grid.rows, 0..) |row, row_index| {
         // Command-count stop: once within one row's worst case of the
         // command ceiling, stop painting further rows.
         if (options.command_budget > 0 and builder.displayList().commands.len >= row_ceiling) break;
         // Text-store stop, ATOMIC per row: measure this row's exact text
-        // bytes and stop BEFORE it if the store cannot hold them — never
+        // bytes against the builder's LIVE cumulative counter (which the
+        // grid's own emitted runs and every earlier widget both advance)
+        // and stop BEFORE the row if the store cannot hold it — never
         // emit a row's first runs and then fail mid-row.
-        if (text_bytes_emitted + rowTextBytes(row) > text_store) break;
+        if (builder.text_byte_len + rowTextBytes(row) > text_ceiling) break;
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on
@@ -442,6 +479,13 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // color or decoration change (bold/italic render with the one
         // mono face — weight axes require registered companion faces,
         // a limitation the docs state outright).
+        // A builder-store exhaustion mid-row (the display list, its text
+        // bytes, or its path elements filling despite the reserves) TEARS
+        // the row: the reserves make it unreachable in the widget path,
+        // but if it ever happens the row is left incomplete, so it must
+        // NOT count as painted and no further row may start — otherwise
+        // the cursor could paint over content the tear dropped.
+        var row_torn = false;
         var run_len: usize = 0;
         var run_x: usize = 0;
         var run_fg: canvas.Color = grid.foreground;
@@ -483,8 +527,10 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // The row-wise text ceiling reserves enough that this
                 // append fits; the catch is a defensive floor that stops
                 // the run cleanly if it ever did not (never a torn cell).
-                const run_text = builder.allocTextBytes(text_scratch[0..text_len]) catch break;
-                text_bytes_emitted += text_len;
+                const run_text = builder.allocTextBytes(text_scratch[0..text_len]) catch {
+                    row_torn = true;
+                    break;
+                };
                 try builder.drawText(.{
                     .id = row_id + 0x8000 + run_x,
                     .font_id = tokens.typography.mono_font_id,
@@ -538,7 +584,15 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                     @as(f32, @floatFromInt(span)) * cell_w,
                     cell_h,
                 );
-                box.paint(builder, row_id + 0x6000 + @as(u64, @intCast(x)) * 4, rect, box_cp, fg, box_thickness) catch break;
+                // Eight-command stride per column: a pure-double joint
+                // emits up to eight commands (two bars per side), so a
+                // four-wide stride would collide the ids of adjacent
+                // double cells and fail the retained diff with
+                // DuplicateObjectId.
+                box.paint(builder, row_id + 0x6000 + @as(u64, @intCast(x)) * commands_per_cell, rect, box_cp, fg, box_thickness) catch {
+                    row_torn = true;
+                    break;
+                };
                 x += span - 1;
                 continue;
             }
@@ -557,10 +611,15 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             text_len += take;
             run_len += if (cell.wide == .wide) 2 else 1;
         }
+        // A torn row is not painted content: stop here so the cursor and
+        // caret never draw over the cells the tear dropped.
+        if (row_torn) break;
+        painted_rows = row_index + 1;
     }
 
     // The cursor, over the ink: filled while live, hollow-dim after exit.
-    if (grid.cursor) |cursor| {
+    // Suppressed if its row was never painted (dropped for budget).
+    if (grid.cursor) |cursor| if (cursor.y < painted_rows) {
         const cursor_x = origin_x + @as(f32, @floatFromInt(cursor.x)) * cell_w;
         const cursor_y = origin_y + @as(f32, @floatFromInt(cursor.y)) * cell_h;
         const cursor_color = canvas.Color.rgba(
@@ -579,10 +638,11 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             .rect = rect,
             .fill = .{ .color = cursor_color },
         });
-    }
+    };
 
     // Selection head outline while selecting (the keyboard caret).
-    if (grid.select_head) |head| {
+    // Suppressed on a row that was never painted, like the cursor.
+    if (grid.select_head) |head| if (head.y < painted_rows) {
         const head_x = origin_x + @as(f32, @floatFromInt(head.x)) * cell_w;
         const head_y = origin_y + @as(f32, @floatFromInt(head.y)) * cell_h;
         try builder.strokeRect(.{
@@ -590,7 +650,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             .rect = geometry.RectF.init(head_x, head_y, cell_w, cell_h),
             .stroke = .{ .fill = .{ .color = tokens.colors.focus_ring }, .width = 1 },
         });
-    }
+    };
 
     // Scrollback indicator: a right-edge thumb while the viewport is in
     // history, sized by the visible fraction.

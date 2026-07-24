@@ -1140,7 +1140,14 @@ pub fn Ui(comptime Msg: type) type {
         pub fn translatedTerminalMsg(comptime tag: std.meta.Tag(Msg), comptime Payload: type) TerminalMsgFn {
             return struct {
                 fn num(comptime N: type, value: anytype) N {
-                    return if (@typeInfo(N) == .float) @floatFromInt(value) else @intCast(value);
+                    // Saturating, never trapping: a transpiled core may
+                    // declare a field narrower than the runtime value
+                    // (`cols: u8` cannot hold the 320-column max, a
+                    // small `history` cannot hold a long scrollback), and
+                    // an `@intCast` would panic the app on the first such
+                    // report. The clamp keeps every representable value
+                    // exact and pins the rest at the field's ceiling.
+                    return if (@typeInfo(N) == .float) @floatFromInt(value) else std.math.lossyCast(N, value);
                 }
 
                 fn make(state: canvas.TerminalState) Msg {
@@ -2987,13 +2994,16 @@ pub fn Ui(comptime Msg: type) type {
                     }
                 }
                 // The live screen text IS the terminal's semantic
-                // content: it rides the semantics label so assistive
-                // tech reads the real screen and the session
-                // fingerprint covers cell state. The author's declared
-                // label remains the accessible NAME floor while the
-                // screen is empty or the session has not spoken.
+                // CONTENT: it rides the widget's text (the value the
+                // textbox exposes and the session fingerprint hashes),
+                // NOT the accessible name. The author's `label` stays
+                // the stable control NAME — clobbering it with the whole
+                // screen would rename the control after its output every
+                // frame and strand keyboard navigation. With no author
+                // label, `semanticLabel` falls back to this text, so an
+                // unnamed terminal still reads its screen.
                 if (widget.terminal.grid) |grid| {
-                    if (grid.screen_text.len > 0) widget.semantics.label = grid.screen_text;
+                    if (grid.screen_text.len > 0) widget.text = grid.screen_text;
                 }
             }
             if (node.context_menu.len > 0) {

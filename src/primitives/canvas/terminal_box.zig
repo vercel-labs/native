@@ -209,7 +209,12 @@ pub fn paint(
         // edges through the center, the shape box-heavy TUIs lean on.
         0x256D, 0x256E, 0x256F, 0x2570 => {
             const r = @min(rect.width, rect.height) / 2;
-            var elements: [3]canvas.PathElement = undefined;
+            // Allocated from the builder's OWN path-element store, never
+            // a stack local: `strokePath` retains the slice by reference
+            // (it never copies), so a stack array would dangle the moment
+            // this frame returns and the retained/diffed renderer read it
+            // back as overwritten memory.
+            const elements = try builder.allocPathElements(3);
             switch (cp) {
                 // ╭ bottom edge to right edge
                 0x256D => {
@@ -236,7 +241,7 @@ pub fn paint(
                     elements[2] = .{ .verb = .quad_to, .points = .{ .{ .x = cx, .y = cy }, .{ .x = cx + r / 2, .y = cy }, geometry.PointF.zero() } };
                 },
             }
-            try builder.strokePath(.{ .id = id_base, .elements = &elements, .stroke = .{ .fill = .{ .color = color }, .width = t }, .cap = .butt });
+            try builder.strokePath(.{ .id = id_base, .elements = elements, .stroke = .{ .fill = .{ .color = color }, .width = t }, .cap = .butt });
             // The straight remainder to the horizontal edge.
             const run: geometry.RectF = switch (cp) {
                 0x256D => geometry.RectF.init(cx + r / 2, cy - t / 2, rect.x + rect.width - (cx + r / 2), t),

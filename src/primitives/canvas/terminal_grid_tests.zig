@@ -345,7 +345,9 @@ test "the terminal widget paints its bound grid and the honest empty surface unb
     const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
     const grid = baseGrid(&rows);
 
-    var commands: [256]canvas.CanvasCommand = undefined;
+    // A realistic per-view builder (the widget path floors a builder at
+    // or under the reserve to a degrade-only budget).
+    var commands: [2048]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&commands);
     const bound = canvas.Widget{
         .id = 7,
@@ -419,6 +421,96 @@ test "the terminal widget's register: focusable, press-claiming, I-beam, editabl
     // Deliberately NOT a text-input kind: the emulator owns the editing
     // model, so the TextBuffer pipeline must never claim it.
     try testing.expect(!canvas.widgetTextInputKind(.terminal));
+}
+
+test "rounded-corner path elements survive the builder's lifetime" {
+    // The stroke_path command's elements must be builder-owned, not a
+    // stack local: after paint returns, reading them back (the retained
+    // renderer's path) must still see the move/line/quad verbs.
+    const cells = [_]grid_model.TerminalCell{.{ .cp = 0x256D, .fg = white }}; // ╭
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 40, 40),
+        .tokens = .{},
+    });
+    var saw_path = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .stroke_path => |path| {
+                saw_path = true;
+                try testing.expectEqual(@as(usize, 3), path.elements.len);
+                try testing.expectEqual(canvas.PathVerb.move_to, path.elements[0].verb);
+                try testing.expectEqual(canvas.PathVerb.quad_to, path.elements[2].verb);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_path);
+}
+
+test "adjacent double-cross cells never collide command ids" {
+    // ╬ emits up to eight commands; the per-column id stride must be at
+    // least eight so neighbors never share an object id.
+    const cells = [_]grid_model.TerminalCell{
+        .{ .cp = 0x256C, .fg = white }, // ╬
+        .{ .cp = 0x256C, .fg = white },
+        .{ .cp = 0x256C, .fg = white },
+    };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [128]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 120, 40),
+        .tokens = .{},
+        .id_base = 1,
+    });
+    var seen: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer seen.deinit(testing.allocator);
+    for (builder.displayList().commands) |command| {
+        const id = switch (command) {
+            .fill_rect => |c| c.id,
+            .stroke_rect => |c| c.id,
+            .draw_text => |c| c.id,
+            .push_clip => |c| c.id,
+            else => continue,
+        };
+        if (id == 0) continue;
+        for (seen.items) |prior| try testing.expect(prior != id);
+        try seen.append(testing.allocator, id);
+    }
+}
+
+test "the text preflight accounts for bytes earlier widgets already consumed" {
+    // A grid sharing the builder with a widget that already spent most
+    // of the text store must degrade against the REMAINING space, never
+    // a fresh store — otherwise its rows pass preflight and then lose
+    // text when allocTextBytes fails on the shared counter.
+    const row = comptime asciiRow("cells", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // Pre-consume all but 2 bytes of the store, as an earlier widget
+    // would.
+    const filler = [_]u8{'x'} ** (canvas.max_display_list_text_bytes - 2);
+    _ = try builder.allocTextBytes(&filler);
+
+    try grid_model.paint(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 100),
+        .tokens = .{},
+    });
+    // The row (5 bytes) could not fit the 2 remaining, so it dropped
+    // whole: no grid text command, and the shared counter never
+    // overflowed.
+    try testing.expect(builder.text_byte_len <= canvas.max_display_list_text_bytes);
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| try testing.expect(!std.mem.eql(u8, text.text, "cells")),
+            else => {},
+        }
+    }
 }
 
 test "box drawing classifies the block and ignores neighbors" {

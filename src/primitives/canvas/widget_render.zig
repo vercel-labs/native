@@ -1265,11 +1265,14 @@ fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             @max(0, frame.width - inset.left - inset.right),
             @max(0, frame.height - inset.top - inset.bottom),
         );
+        // The command budget the grid degrades against: the builder's
+        // capacity minus the reserve held back for the widgets around
+        // it. Never 0 — the painter reads 0 as "unbounded" (its
+        // test-only mode), so a builder at or under the reserve floors
+        // to 1, which paints the background and stops row-atomically
+        // instead of overrunning a tiny buffer.
         const capacity = builder.commands.len;
-        const command_budget = if (capacity > canvas.terminal_grid.widget_command_reserve)
-            capacity - canvas.terminal_grid.widget_command_reserve
-        else
-            0;
+        const command_budget = @max(1, capacity -| canvas.terminal_grid.widget_command_reserve);
         try canvas.terminal_grid.paint(grid.*, builder, .{
             .frame = content,
             .background_frame = frame,
