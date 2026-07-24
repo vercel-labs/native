@@ -763,25 +763,43 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     };
 }
 
-/// Assistive scroll steps page ONE axis — the region's primary:
-/// vertical wherever the vertical axis is granted (every pre-axis
-/// region, and `both` regions, whose exposed scroll semantics are
-/// vertical-primary), the horizontal axis only on horizontal-only
-/// regions (width-derived step). A diagonal step would move the
-/// viewport on an axis the assistive node never exposed. The runtime's
-/// accessibility-action path refines the `both` case further with live
-/// extents (`canvasWidgetStepKey` picks the horizontal keys when only
-/// that axis has range); this widget-level derivation has no extents
-/// and keeps the declared primary.
+/// Assistive scroll steps page ONE axis — the region's primary, by the
+/// same range-aware rule its scroll semantics report through: vertical
+/// wherever the vertical axis is granted and can move, the horizontal
+/// axis on horizontal-only regions and on `both` regions whose content
+/// only overflows sideways. A diagonal step would move the viewport on
+/// an axis the assistive node never exposed. Range for the `both` case
+/// reads the widget's own children (widget-walk trees carry them);
+/// retained layout nodes drop children, and their caller — the
+/// runtime's accessibility-action path — resolves the axis with live
+/// extents instead (`canvasWidgetStepKey`).
 fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirection) geometry.OffsetF {
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
     const sign: f32 = if (direction == .increment) 1 else -1;
-    if (widgetScrollKeymapHorizontalOnly(widget)) {
+    const horizontal_primary = widgetScrollKeymapHorizontalOnly(widget) or
+        (widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both and
+            widgetChildrenScrollHorizontalOnly(widget, viewport));
+    if (horizontal_primary) {
         const page_step_x = @max(@max(24, viewport.width * 0.35), viewport.width * 0.85);
         return geometry.OffsetF.init(sign * page_step_x, 0);
     }
     const page_step_y = @max(@max(24, viewport.height * 0.35), viewport.height * 0.85);
     return geometry.OffsetF.init(0, sign * page_step_y);
+}
+
+/// Whether a `both` region's mounted children overflow ONLY sideways:
+/// no vertical range (nothing reaches past the fold) while something
+/// reaches past the right edge. False on childless nodes — retained
+/// trees drop children, and their callers resolve range elsewhere.
+fn widgetChildrenScrollHorizontalOnly(widget: Widget, viewport: geometry.RectF) bool {
+    if (widget.children.len == 0) return false;
+    var right = viewport.maxX();
+    var bottom = viewport.maxY();
+    for (widget.children) |child| {
+        right = @max(right, child.frame.maxX() + widget.value_x);
+        bottom = @max(bottom, child.frame.maxY() + widget.value);
+    }
+    return bottom <= viewport.maxY() and right > viewport.maxX();
 }
 
 pub fn semanticActions(widget: Widget) WidgetActions {

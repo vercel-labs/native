@@ -73,30 +73,47 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             // Occluders: floating surfaces and modal catchers that
             // hit-block regions beneath them, so the host's geometric
             // wheel routing declines exactly the points the engine's
-            // hit test would give to an overlay's branch.
+            // hit test would give to an overlay's branch. Anchored
+            // TOOLTIPS are excluded (they pass hit-testing through),
+            // as are surfaces hidden by an ancestor or concealed by a
+            // closed disclosure — the same visibility rules the hit
+            // test applies. Frames honor the widget's render transform
+            // (a sliding popover blocks where it is SEEN), and a modal
+            // catcher spans the whole VIEW-LOCAL canvas only when it is
+            // actually modal (`scrim` — the false case is the inline
+            // preview, which floats over nothing). More surfaces than
+            // the budget fails SAFE: one whole-view occluder blocking
+            // every driver, so every wheel rides the wire and the
+            // engine's real hit test decides.
             var occluders: [platform.max_gpu_surface_scroll_occluders]platform.GpuSurfaceScrollOccluder = undefined;
             var occluder_nodes: [platform.max_gpu_surface_scroll_occluders]usize = undefined;
             var occluder_count: usize = 0;
+            var occluder_overflow = false;
+            const layout_tree = view.widgetLayoutTree();
+            const view_local = geometry.RectF.init(0, 0, view.frame.normalized().width, view.frame.normalized().height);
             for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
-                if (occluder_count >= occluders.len) break;
+                const anchored_surface = node.widget.layout.anchor != null and node.widget.kind != .tooltip;
+                const modal_surface = switch (node.widget.kind) {
+                    .dialog, .drawer, .sheet => node.widget.scrim,
+                    else => false,
+                };
+                if (!anchored_surface and !modal_surface) continue;
                 if (node.widget.semantics.hidden) continue;
-                if (node.widget.layout.anchor != null and !node.frame.normalized().isEmpty()) {
-                    // An anchored floating surface blocks at its frame.
-                    occluders[occluder_count] = .{ .frame = node.frame.normalized() };
-                    occluder_nodes[occluder_count] = node_index;
-                    occluder_count += 1;
-                    continue;
+                if (canvas.isWidgetHiddenInAncestors(layout_tree, node_index)) continue;
+                if (canvas.isWidgetConcealedByDisclosure(layout_tree, node_index)) continue;
+                const frame = if (modal_surface) view_local else transformedOccluderFrame(node.*);
+                if (frame.isEmpty()) continue;
+                if (occluder_count >= occluders.len) {
+                    occluder_overflow = true;
+                    break;
                 }
-                switch (node.widget.kind) {
-                    // A modal surface's input catcher spans the whole
-                    // view: nothing beneath it scrolls.
-                    .dialog, .drawer, .sheet => {
-                        occluders[occluder_count] = .{ .frame = view.frame.normalized() };
-                        occluder_nodes[occluder_count] = node_index;
-                        occluder_count += 1;
-                    },
-                    else => {},
-                }
+                occluders[occluder_count] = .{ .frame = frame };
+                occluder_nodes[occluder_count] = node_index;
+                occluder_count += 1;
+            }
+            if (occluder_overflow) {
+                occluders[0] = .{ .frame = view_local };
+                occluder_count = 1;
             }
             for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 if (!canvasWidgetScrollDriverEligible(node.*)) continue;
@@ -135,7 +152,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 drivers[count] = .{
                     .id = node.widget.id,
                     .parent_id = nearestAncestorDriverId(view, node_index),
-                    .occluder_mask = driverOccluderMask(view, node_index, occluder_nodes[0..occluder_count]),
+                    .occluder_mask = if (occluder_overflow) 1 else driverOccluderMask(view, node_index, occluder_nodes[0..occluder_count]),
                     .frame = frame,
                     .content_size = .{ .width = content_width, .height = content_height },
                     .offset_x = offset.dx,
@@ -217,17 +234,49 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
     return true;
 }
 
-/// Which occluders block this driver: every pushed occluder whose node
-/// is NOT an ancestor of the driver — a scroll region inside an open
-/// popover or modal is above its own surface, not beneath it.
+/// Which occluders block this driver. An occluder never blocks:
+///   - ITSELF (a directly anchored scroll region is its own surface);
+///   - its own subtree (a scroll region inside an open popover or
+///     modal is above the surface, not beneath it);
+///   - a driver whose anchored ROOT paints LATER in the floating pass
+///     (anchored surfaces paint in tree order above all in-flow
+///     content, so a scroll region inside the topmost of two
+///     overlapping popovers sits above the lower one).
 fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const usize) u32 {
+    const driver_anchor_root = anchoredRootIndex(view, driver_node);
     var mask: u32 = 0;
     for (occluder_nodes, 0..) |occluder_node, bit| {
-        if (!nodeIsAncestor(view, occluder_node, driver_node)) {
-            mask |= @as(u32, 1) << @intCast(bit);
+        if (occluder_node == driver_node) continue;
+        if (driver_anchor_root) |root| {
+            if (occluder_node == root) continue;
+            if (root > occluder_node) continue;
         }
+        if (nodeIsAncestor(view, occluder_node, driver_node)) continue;
+        mask |= @as(u32, 1) << @intCast(bit);
     }
     return mask;
+}
+
+/// The render transform honored: the occluder blocks where the surface
+/// is SEEN (the transformed frame's axis-aligned bounds), not where it
+/// was laid out.
+fn transformedOccluderFrame(node: canvas.WidgetLayoutNode) geometry.RectF {
+    const frame = node.frame.normalized();
+    if (frame.isEmpty()) return frame;
+    const transform = node.widget.transform;
+    if (std.meta.eql(transform, canvas.Affine.identity())) return frame;
+    return transform.transformRect(frame).normalized();
+}
+
+/// The nearest self-or-ancestor node that is an anchored floating root,
+/// or null for in-flow content.
+fn anchoredRootIndex(view: anytype, node_index: usize) ?usize {
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (view.widget_layout_nodes[index].widget.layout.anchor != null) return index;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return null;
 }
 
 fn nodeIsAncestor(view: anytype, ancestor: usize, node: usize) bool {
