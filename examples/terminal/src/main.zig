@@ -32,9 +32,9 @@ pub const window_min_width: f32 = 640;
 pub const window_min_height: f32 = 420;
 
 /// The band the header row occupies and the grid sits below.
-const header_height: f32 = 44;
-const status_height: f32 = 28;
-const grid_inset: f32 = 12;
+/// The grid's padding inside the window: the terminal is the whole
+/// window under a standard titlebar - no header, no status bar.
+const grid_inset: f32 = 8;
 
 /// The pty and clipboard keys (one keyed-effect space per app).
 const shell_key: u64 = 1;
@@ -118,6 +118,9 @@ pub const Model = struct {
     /// its result lands, or the fixed-key re-request would be rejected
     /// as a duplicate and overwrite the first copy's outcome.
     copy_inflight: bool = false,
+    /// Fractional wheel-scroll remainder in view points: deltas
+    /// accumulate here and convert to whole scrollback rows.
+    wheel_accum: f32 = 0,
     /// Delivered output accounting for the status line (and the
     /// replay fingerprint: byte totals pin the fed stream).
     output_batches: u64 = 0,
@@ -125,7 +128,6 @@ pub const Model = struct {
     /// Writes the pty refused over the session (reported on exit).
     dropped_writes: u32 = 0,
     /// The window's traffic-light inset so the header clears it.
-    chrome_leading: f32 = 0,
 
     /// Pending outbound bytes toward the child's stdin — typed keys,
     /// pastes, AND emulator query replies, in one stream-ordered ring
@@ -161,7 +163,6 @@ pub const Msg = union(enum) {
     text: canvas.WidgetKeyboardEvent,
     viewport: struct { cols: u16, rows: u16 },
     clipboard: native_sdk.EffectClipboardResult,
-    chrome_changed: native_sdk.platform.WindowChrome,
     copy_selection,
     restart,
     /// The frame pump asks the update loop (which holds `fx`) to push
@@ -169,6 +170,9 @@ pub const Msg = union(enum) {
     /// may have read and freed FIFO space without producing output to
     /// trigger a flush.
     flush_outbound,
+    /// A wheel/trackpad scroll over the grid: vertical delta in view
+    /// points, accumulated into whole rows of scrollback.
+    wheel: f32,
 };
 
 const TerminalApp = native_sdk.UiApp(Model, Msg);
@@ -290,6 +294,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             // ring left retained in the emulator's buffer.
             moveResponsesToOutbound(model, fx);
         },
+        .wheel => |delta| {
+            // Natural direction, like every terminal: swiping the
+            // content down (positive delta on hosts with natural
+            // scrolling) reveals history. Inert while a selection is
+            // armed - the caret and the emulator's absolute range must
+            // not desynchronize (the scroll-chord rule).
+            if (model.selecting) return;
+            model.wheel_accum += delta;
+            const cell_h = @max(1, model.session.cell_height);
+            const rows = @trunc(model.wheel_accum / cell_h);
+            if (rows != 0) {
+                model.wheel_accum -= rows * cell_h;
+                model.session.scrollLines(-@as(isize, @intFromFloat(rows)));
+            }
+        },
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
             model.copy_inflight = false;
@@ -307,9 +326,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 model.copied_bytes = 0;
                 model.copy_failed = true;
             }
-        },
-        .chrome_changed => |chrome| {
-            model.chrome_leading = chrome.insets.left;
         },
         .restart => {
             // Restart ONLY a genuinely finished session. During
@@ -489,6 +505,11 @@ fn onKey(event: canvas.WidgetKeyboardEvent) ?Msg {
 
 fn onText(event: canvas.WidgetKeyboardEvent) ?Msg {
     return .{ .text = event };
+}
+
+fn onWheel(wheel: native_sdk.platform.WheelEvent) ?Msg {
+    if (wheel.delta_y == 0) return null;
+    return .{ .wheel = wheel.delta_y };
 }
 
 fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
@@ -787,94 +808,18 @@ fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
 const TerminalUi = TerminalApp.Ui;
 
 pub fn view(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
-    // The grid region's accessibility surface IS the viewport text: a
-    // terminal's semantic content is its cells, so screen readers hear
-    // the real screen — and the session fingerprint (the a11y-tree
-    // hash) covers cell state, not just byte counters: two runs with
-    // identical counters but different screens never verify alike.
+    // The window IS the terminal: a standard titlebar and the grid,
+    // nothing else. The grid region's accessibility surface carries the
+    // viewport text: a terminal's semantic content is its cells, so
+    // screen readers hear the real screen - and the session fingerprint
+    // (the a11y-tree hash) covers cell state, not just byte counters:
+    // two runs with identical counters but different screens never
+    // verify alike. A stack paints nothing; a panel here would draw its
+    // surface chrome OVER the grid.
     const screen = model.session.screenText();
     return ui.column(.{}, .{
-        headerView(ui, model),
-        // The grid region: PURE layout space the chrome-painted
-        // terminal fills beneath the widget tree — a stack, which
-        // paints nothing. A panel here would draw its surface chrome
-        // (fill, border, shadow, rounded corners) OVER the grid,
-        // blanking the terminal and rounding a surface that must sit
-        // square and edge-to-edge like a real terminal.
         ui.el(.stack, .{ .grow = 1, .semantics = .{ .label = if (screen.len > 0) screen else "Terminal grid" } }, .{}),
-        statusView(ui, model),
     });
-}
-
-fn textLeaf(ui: *TerminalUi, kind: canvas.WidgetKind, options: TerminalUi.ElementOptions, content: []const u8) TerminalUi.Node {
-    var node = ui.el(kind, options, .{});
-    node.widget.text = content;
-    return node;
-}
-
-fn mutedText(ui: *TerminalUi, content: []const u8) TerminalUi.Node {
-    return ui.paragraph(.{}, &.{.{ .text = content, .color = .text_muted, .scale = 0.92 }});
-}
-
-fn headerView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
-    const phase_label = switch (model.phase) {
-        .starting => "starting",
-        .live => "live",
-        .ended => "ended",
-        .failed => "failed",
-    };
-    return ui.row(.{ .height = header_height, .padding = 10, .gap = 10, .cross = .center, .window_drag = true }, .{
-        ui.el(.stack, .{ .width = model.chrome_leading }, .{}),
-        ui.text(.{}, "Terminal"),
-        // The session state is a QUIET label, not a control: it informs
-        // and never invites a press, so it renders as muted text rather
-        // than a pill that reads as a toggle.
-        ui.paragraph(.{ .semantics = .{ .label = "Session state" } }, &.{.{ .text = phase_label, .color = .text_muted, .scale = 0.92 }}),
-        ui.spacer(1),
-        mutedText(ui, ui.fmt("{d}x{d}", .{ model.cols, model.rows })),
-    });
-}
-
-fn statusView(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
-    // The right-hand fact is the output tally; if a query reply ever
-    // overflowed the write-back buffer, or a paste overran the pending
-    // ring (both kept at zero in practice by the sub-sliced feed and the
-    // large capacity-paced ring), say so plainly rather than let a byte
-    // vanish silently.
-    const replies_dropped = model.session.responses_dropped;
-    const outbound_dropped = model.outbound_dropped;
-    const writes_dropped = model.dropped_writes;
-    const tally = if (replies_dropped > 0 or outbound_dropped > 0 or writes_dropped > 0)
-        ui.fmt("{d} batches / {d} bytes - {d} replies, {d} outbound, {d} writes dropped", .{ model.output_batches, model.output_bytes, replies_dropped, outbound_dropped, writes_dropped })
-    else
-        ui.fmt("{d} batches / {d} bytes", .{ model.output_batches, model.output_bytes });
-    return ui.row(.{ .height = status_height, .padding = 6, .gap = 12, .cross = .center }, .{
-        mutedText(ui, statusText(ui, model)),
-        ui.spacer(1),
-        mutedText(ui, tally),
-    });
-}
-
-fn statusText(ui: *TerminalUi, model: *const Model) []const u8 {
-    if (model.selecting) {
-        if (model.copy_failed) return "copy failed - selection kept, enter retries";
-        return "selecting - arrows move, shift extends, B block, enter copies, esc cancels";
-    }
-    return switch (model.phase) {
-        .starting => "starting shell",
-        .live => if (model.copy_failed)
-            "copy failed"
-        else if (model.copied_bytes > 0)
-            ui.fmt("copied {d} bytes", .{model.copied_bytes})
-        else
-            "cmd+shift+space selects - cmd+arrows scroll",
-        .ended => switch (model.exit_reason) {
-            .signaled => ui.fmt("ended by signal {d} - cmd+R restarts", .{model.exit_signal}),
-            .cancelled => "cancelled - cmd+R restarts",
-            else => ui.fmt("exited ({d}) - cmd+R restarts", .{model.exit_code}),
-        },
-        .failed => "shell failed to start - cmd+R retries",
-    };
 }
 
 /// The grid, painted as a variable-length chrome prefix beneath the
@@ -896,9 +841,9 @@ fn buildChrome(model: *const Model, builder: *canvas.Builder, size: geometry.Siz
 fn gridFrame(size: geometry.SizeF) geometry.RectF {
     return geometry.RectF.init(
         grid_inset,
-        header_height,
+        grid_inset,
         @max(0, size.width - grid_inset * 2),
-        @max(0, size.height - header_height - status_height),
+        @max(0, size.height - grid_inset * 2),
     );
 }
 
@@ -926,10 +871,6 @@ fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     return .{ .viewport = .{ .cols = proposed.x, .rows = proposed.y } };
 }
 
-fn onChrome(chrome: native_sdk.platform.WindowChrome) ?Msg {
-    return .{ .chrome_changed = chrome };
-}
-
 // ------------------------------------------------------------------ main
 
 pub fn appOptions() TerminalApp.Options {
@@ -945,8 +886,8 @@ pub fn appOptions() TerminalApp.Options {
         // reporting; `handleKey` branches on the phase.
         .key_release_events = true,
         .on_text = onText,
+        .on_wheel = onWheel,
         .on_frame = onFrame,
-        .on_chrome = onChrome,
         .chrome = .{
             .prefix_commands = grid_command_budget,
             .variable_prefix = true,

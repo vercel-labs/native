@@ -10,3 +10,13 @@ A recordable terminal: a real shell on a pty, rendered as real text on the canva
 zig build run             # run the terminal
 zig build test -Dplatform=null
 ```
+
+## Keyboard
+
+- `cmd+shift+space` — toggle keyboard selection mode (arrows move the caret, `shift`+arrows extend, `B` toggles block selection, `enter` copies, `esc` cancels)
+- `cmd+C` — copy the active selection
+- `cmd+arrow-up` / `cmd+arrow-down` — scroll history one line (`shift` for a page)
+- `cmd+home` / `cmd+end` — jump to the top / bottom of history
+- `cmd+R` — restart the shell after it exits
+
+Trackpad and mouse-wheel scrolling over the grid scrolls history directly.

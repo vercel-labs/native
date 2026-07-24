@@ -588,6 +588,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// a pinch source emit these (macOS today); everywhere else
             /// the channel simply never fires.
             on_pinch: ?*const fn (pinch: platform.PinchEvent) ?MsgT = null,
+            /// Optional mapping from wheel/trackpad scrolls over a gpu
+            /// surface into messages — the pinch channel's sibling, for
+            /// apps whose content scrolls without a scroll-region
+            /// widget (a terminal's scrollback). Delivered for every
+            /// raw `.scroll` input on a focused gpu surface; apps that
+            /// also declare canvas scroll regions should leave this
+            /// null (regions consume wheel input themselves).
+            on_wheel: ?*const fn (wheel: platform.WheelEvent) ?MsgT = null,
             /// Optional mapping from runtime timer events (started via
             /// `runtime.startTimer`) into messages. Framework-reserved timer
             /// ids (>= `platform.reserved_timer_id_base`) are handled
@@ -3794,7 +3802,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // Raw gpu-surface input stays runtime-internal EXCEPT the
                 // pinch kinds, which surface through the app-level pinch
                 // channel (widget routing never claims a pinch).
-                .gpu_surface_input => |input_event| try self.handlePinch(runtime, input_event),
+                .gpu_surface_input => |input_event| {
+                    try self.handlePinch(runtime, input_event);
+                    try self.handleWheel(runtime, input_event);
+                },
                 else => {},
             }
         }
@@ -5190,6 +5201,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .scale = input_event.scale,
                 .x = input_event.x,
                 .y = input_event.y,
+            })) |msg| {
+                try self.dispatch(runtime, input_event.window_id, msg);
+            }
+        }
+
+        /// Wheel/trackpad scrolls reach the app as the pinch channel's
+        /// sibling (`Options.on_wheel`): the raw `.scroll` kind of the
+        /// gpu-surface input surface, for apps whose content scrolls
+        /// without a scroll-region widget (a terminal's scrollback).
+        /// The Msg dispatch rides the same journaled input event, so a
+        /// recorded scroll replays to the identical model.
+        fn handleWheel(self: *Self, runtime: *Runtime, input_event: platform.GpuSurfaceInputEvent) anyerror!void {
+            const map = self.options.on_wheel orelse return;
+            if (input_event.kind != .scroll) return;
+            if (map(.{
+                .window_id = input_event.window_id,
+                .label = input_event.label,
+                .delta_x = input_event.delta_x,
+                .delta_y = input_event.delta_y,
+                .x = input_event.x,
+                .y = input_event.y,
+                .modifiers = input_event.modifiers,
             })) |msg| {
                 try self.dispatch(runtime, input_event.window_id, msg);
             }

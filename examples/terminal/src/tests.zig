@@ -1223,6 +1223,89 @@ test "a failed selection serialization is an error, never a silent no-selection"
     try testing.expectError(error.OutOfMemory, session.selectionText(std.testing.failing_allocator));
 }
 
+test "wheel scrolling over the grid scrolls history" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    var line: [16]u8 = undefined;
+    for (0..120) |index| {
+        app_state.model.session.feed(std.fmt.bufPrint(&line, "line {d}\r\n", .{index}) catch unreachable);
+    }
+    const bottom_offset = app_state.model.session.scrollbar().offset;
+    try testing.expect(bottom_offset > 0);
+
+    // A trackpad swipe (several fractional deltas accumulating past one
+    // cell) scrolls into history, like every terminal.
+    const cell_h = app_state.model.session.cell_height;
+    for (0..4) |_| {
+        try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = "terminal-canvas",
+            .kind = .scroll,
+            .delta_y = cell_h,
+        } });
+    }
+    try testing.expect(app_state.model.session.scrollbar().offset < bottom_offset);
+
+    // Typing returns the viewport to the live screen.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "x",
+    } });
+    try testing.expectEqual(bottom_offset, app_state.model.session.scrollbar().offset);
+}
+
+test "box-drawing cells render as edge-to-edge geometry, never glyphs" {
+    const session = try createSession(30, 4);
+    defer session.destroy();
+    // A border fragment: two joined horizontals, a corner, a vertical,
+    // and a shade.
+    session.feed("\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\r\n\xe2\x94\x82 \xe2\x96\x92\r\n"); // ┌── / │ ▒
+
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try grid.paint(session, &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .tokens = .{},
+        .running = true,
+        .selecting = false,
+    });
+    const cell_w = session.cell_width;
+    const cell_h = session.cell_height;
+    var box_texts: usize = 0;
+    var merged_bar = false;
+    var full_height_bar = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                // No box character ever reaches a font glyph.
+                if (std.mem.indexOf(u8, text.text, "\xe2\x94") != null) box_texts += 1;
+                if (std.mem.indexOf(u8, text.text, "\xe2\x96") != null) box_texts += 1;
+            },
+            .fill_rect => |fill| {
+                // The two `─` cells merged into ONE bar spanning both,
+                // continuing seamlessly from the corner's stub.
+                if (fill.rect.width > cell_w * 1.9 and fill.rect.height < cell_h) merged_bar = true;
+                // The `│` runs the FULL cell height - rows abut, so
+                // stacked bars join with no seam.
+                if (fill.rect.height == cell_h and fill.rect.width < cell_w) full_height_bar = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), box_texts);
+    try testing.expect(merged_bar);
+    try testing.expect(full_height_bar);
+}
+
 test "scrollback chords pause while a selection is armed" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
@@ -1478,8 +1561,9 @@ test "painted-output oracle: the prompt and caret reach the surface as pixels" {
     const session = app_state.model.session;
     const cell_w: usize = @intFromFloat(@max(1, session.cell_width));
     const cell_h: usize = @intFromFloat(@max(1, session.cell_height));
-    const grid_x: usize = 12;
-    const grid_y: usize = 48;
+    // The window is titlebar + grid: the grid starts at its inset.
+    const grid_x: usize = 8;
+    const grid_y: usize = 8;
     var band_colors = std.AutoHashMap(u32, void).init(gpa);
     defer band_colors.deinit();
     var y: usize = grid_y;
@@ -1499,11 +1583,11 @@ test "painted-output oracle: the prompt and caret reach the surface as pixels" {
     // (ii) The caret cell paints distinguishably: the cursor sits right
     // after "demo$ " (column 6) and its wash differs from both the
     // background and the row's empty cells.
-    const caret_x: usize = @intFromFloat(12.0 + 6.5 * session.cell_width);
+    const caret_x: usize = @intFromFloat(8.0 + 6.5 * session.cell_width);
     const caret_y = grid_y + cell_h / 2;
     const caret_offset = (caret_y * width + caret_x) * 4;
     const caret_value = std.mem.readInt(u32, pixels[caret_offset..][0..4], .little);
-    const empty_x: usize = @intFromFloat(12.0 + 40.0 * session.cell_width);
+    const empty_x: usize = @intFromFloat(8.0 + 40.0 * session.cell_width);
     const empty_offset = (caret_y * width + empty_x) * 4;
     const empty_value = std.mem.readInt(u32, pixels[empty_offset..][0..4], .little);
     try testing.expect(caret_value != empty_value);

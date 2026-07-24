@@ -9,6 +9,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const vt = @import("ghostty-vt");
+const box = @import("box.zig");
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
@@ -535,6 +536,8 @@ fn rowNewGlyphs(row: anytype, seen: *[glyph_probe_slots]u32) usize {
         };
         if (cp == 0) continue;
         if (cell.raw.style_id != 0 and cell.style.flags.invisible) continue;
+        // Box-drawing cells render as geometry: no atlas glyphs.
+        if (box.isBoxDrawing(cp)) continue;
         if (glyphProbeInsert(seen, cp)) new_count += 1;
         if (cell.raw.content_tag == .codepoint_grapheme) {
             for (cell.grapheme) |extra| {
@@ -597,11 +600,13 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
 
     // Worst case for one row, when no runs merge (every cell a distinct
     // style): a background run, a text run, AND an underline run per
-    // column — three commands each — plus one selection wash. Reserve
-    // that so the LAST painted row can never push the list past the
-    // budget; the cursor, scrollbar, and clip push/pop (+4) fit under
-    // the same reserve.
-    const row_reserve: usize = max_cols * 3 + 6;
+    // column, or a box-drawing cell's up-to-four segments — four
+    // commands each — plus one selection wash. Reserved for the ACTUAL
+    // grid width so the LAST painted row can never push the list past
+    // the budget; the cursor, scrollbar, and clip push/pop (+4) fit
+    // under the same reserve.
+    const cols_actual: usize = if (rs.row_data.len > 0) rs.row_data.get(0).cells.len else max_cols;
+    const row_reserve: usize = cols_actual * 4 + 8;
     const row_ceiling: usize = if (options.command_budget > row_reserve)
         options.command_budget - row_reserve
     else
@@ -626,6 +631,10 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     var glyph_seen: [glyph_probe_slots]u32 = undefined;
     if (glyph_budget > 0) @memset(&glyph_seen, 0);
     var glyphs_counted: usize = 0;
+
+    // Light box-drawing line weight, scaled with the cell (roughly the
+    // stroke a terminal font would carry at this size).
+    const box_thickness: f32 = @max(1, @round(session.font_size / 8));
 
     // A run's staging buffer, sized to the whole text store (see
     // `text_scratch_bytes`): any cluster the store can hold stages
@@ -730,6 +739,7 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
             var fg = palette.foreground;
             var underline = false;
             var skip = false;
+            var box_cp: u21 = 0;
             if (x < row.cells.len) {
                 const cell = row.cells.get(x);
                 if (cell.raw.wide == .spacer_tail or cell.raw.wide == .spacer_head) skip = true;
@@ -742,6 +752,15 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                     fg = palette.resolveFg(style, cellBackground(cell, &palette));
                     underline = style.flags.underline != .none;
                     if (style.flags.invisible) cp = 0;
+                }
+                // Box-drawing, block, and shade cells render as GEOMETRY
+                // at exact cell bounds, never font glyphs: glyphs fill
+                // the em box, not the padded cell, so borders drawn from
+                // them show seams between rows and columns. The cell
+                // still breaks the text run (cp zeroes) and paints below.
+                if (cp != 0 and !skip and box.isBoxDrawing(cp)) {
+                    box_cp = cp;
+                    cp = 0;
                 }
             }
             // The current cell's full byte need (primary code point plus
@@ -792,6 +811,32 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
                 run_len = 0;
             }
             if (x >= row.cells.len or skip) continue;
+            if (box_cp != 0) {
+                // Merge a run of the same seamless piece (a border's
+                // long `─`) into ONE command: fewer commands and one
+                // unbroken bar instead of per-cell segments.
+                var span: usize = 1;
+                if (box.mergesHorizontally(box_cp)) {
+                    const style_id = row.cells.get(x).raw.style_id;
+                    while (x + span < row.cells.len) : (span += 1) {
+                        const next = row.cells.get(x + span);
+                        const next_cp: u21 = switch (next.raw.content_tag) {
+                            .codepoint, .codepoint_grapheme => next.raw.content.codepoint.data,
+                            else => 0,
+                        };
+                        if (next_cp != box_cp or next.raw.style_id != style_id) break;
+                    }
+                }
+                const rect = geometry.RectF.init(
+                    origin_x + @as(f32, @floatFromInt(x)) * cell_w,
+                    row_y,
+                    @as(f32, @floatFromInt(span)) * cell_w,
+                    cell_h,
+                );
+                box.paint(builder, row_id + 0x6000 + @as(u64, @intCast(x)) * 4, rect, box_cp, fg, box_thickness) catch break;
+                x += span - 1;
+                continue;
+            }
             if (cp == 0) continue;
             if (run_len == 0) {
                 run_x = x;
@@ -901,6 +946,8 @@ fn cellTextBytes(cell: anytype) usize {
     };
     if (cp == 0) return 0;
     if (cell.raw.style_id != 0 and cell.style.flags.invisible) return 0;
+    // Box-drawing cells render as geometry, never text bytes.
+    if (box.isBoxDrawing(cp)) return 0;
     var n: usize = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
     if (cell.raw.content_tag == .codepoint_grapheme) {
         for (cell.grapheme) |extra| {
