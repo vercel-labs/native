@@ -64,15 +64,21 @@ pub const PanicSinkFn = *const fn (
     address: u64,
 ) callconv(.c) void;
 
-/// An encoded message a conditional channel entry hands back: the arm's
-/// declaration-order wire tag plus the arm payload in the encoding of
-/// its descriptor class. Payload bytes are valid until the next core
-/// entry call of any kind.
-pub const CoreMsg = extern struct {
-    tag: u8,
-    payload: [*]const u8,
-    payload_len: usize,
-};
+// A conditional channel entry hands its whole result back as ONE bytes
+// buffer on the ordinary out-pointer slot — the channel bytes envelope:
+//
+//   [produced u8][tag u8][payload…]
+//
+// Byte 0 is 0 (nothing produced; the envelope is exactly two bytes) or
+// 1. Byte 1 is the produced arm's declaration-order wire tag in the
+// sidecar's msg section (meaningless when nothing was produced; the
+// producer emits 0). The remainder is the arm's payload in the
+// canonical value encoding of its mirror payload type (shim_rt.zig; an
+// i64 arm rides as 8-byte two's-complement LE) — so the envelope's tail
+// is byte-identical to the canonical union encoding of the produced
+// message. Envelope bytes are valid until the next core entry call of
+// any kind. One bytes return keeps the one-return-slot rule intact: the
+// multi-value result needs no marshalling shape of its own.
 
 /// The full symbol set of ABI version 1, bound under `prefix`. The
 /// conditional channel entries are declared unconditionally here —
@@ -152,9 +158,12 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const collect = Symbol(fn () callconv(.c) void, "collect");
 
         // -------------------------- conditional channel entries
-        pub const command_msg = Symbol(fn (name: [*]const u8, name_len: usize, out: *CoreMsg) callconv(.c) u8, "command_msg");
-        pub const frame_msg = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *CoreMsg) callconv(.c) u8, "frame_msg");
-        pub const key_msg = Symbol(fn (key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *CoreMsg) callconv(.c) u8, "key_msg");
-        pub const pinch_msg = Symbol(fn (window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *CoreMsg) callconv(.c) u8, "pinch_msg");
+        //
+        // Each returns the channel bytes envelope (see the module doc
+        // above) through the ordinary out-pointer pair.
+        pub const command_msg = Symbol(fn (name: [*]const u8, name_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "command_msg");
+        pub const frame_msg = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "frame_msg");
+        pub const key_msg = Symbol(fn (key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *[*]const u8, out_len: *usize) callconv(.c) void, "key_msg");
+        pub const pinch_msg = Symbol(fn (window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "pinch_msg");
     };
 }

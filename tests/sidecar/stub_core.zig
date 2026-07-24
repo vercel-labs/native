@@ -4,11 +4,13 @@
 //! shims (dispatch stubs, snapshot decoder, channel forwarders, helper
 //! methods) and still link.
 //!
-//! No compiled core exists yet — the ABI is a draft pending
-//! ratification — so the runtime dispatch paths are compile- and
-//! link-checked here, never executed: every entry that would need a
-//! real core traps. The identity getters and the empty-buffer entries
-//! behave, so the boot fence and lifecycle ordering stay testable.
+//! No compiled core exists in this repo, so the dispatch paths that
+//! would need one are compile- and link-checked here, never executed:
+//! every such entry traps. The identity getters, the empty-buffer
+//! entries, and the channel entries behave — a channel's whole result
+//! is one bytes envelope, so this stub can hand back real envelopes
+//! (nothing-produced by default, test-settable otherwise) and the
+//! generated shims' unpack paths execute for real.
 
 const std = @import("std");
 
@@ -151,40 +153,50 @@ export fn nsc_core_helper_call(helper: u32, args: [*]const u8, args_len: usize, 
 
 export fn nsc_core_collect() void {}
 
-const CoreMsg = extern struct {
-    tag: u8,
-    payload: [*]const u8,
-    payload_len: usize,
-};
+// Channel entries return the bytes envelope ([produced u8][tag u8]
+// [payload…]) on the ordinary out-pointer pair. Unlike the dispatch
+// entries these are EXECUTABLE without a core: the empty envelope is a
+// complete, honest "nothing produced", so the generated shims' unpack
+// paths run for real against this stub.
 
-export fn nsc_core_command_msg(name: [*]const u8, name_len: usize, out: *CoreMsg) u8 {
-    _ = name;
-    _ = name_len;
-    _ = out;
-    return 0;
+/// The two-byte nothing-produced envelope.
+const no_msg_envelope = [2]u8{ 0, 0 };
+
+/// The envelope every channel entry hands back. A test may point it at
+/// a produced envelope (or a malformed one) to drive the generated
+/// shim's unpack path without a compiled core.
+pub var stub_channel_envelope: []const u8 = &no_msg_envelope;
+
+fn channelEnvelopeOut(out: *[*]const u8, out_len: *usize) void {
+    out.* = stub_channel_envelope.ptr;
+    out_len.* = stub_channel_envelope.len;
 }
 
-export fn nsc_core_frame_msg(width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *CoreMsg) u8 {
+export fn nsc_core_command_msg(name: [*]const u8, name_len: usize, out: *[*]const u8, out_len: *usize) void {
+    _ = name;
+    _ = name_len;
+    channelEnvelopeOut(out, out_len);
+}
+
+export fn nsc_core_frame_msg(width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *[*]const u8, out_len: *usize) void {
     _ = width;
     _ = height;
     _ = timestamp_ms;
     _ = interval_ms;
-    _ = out;
-    return 0;
+    channelEnvelopeOut(out, out_len);
 }
 
-export fn nsc_core_key_msg(key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *CoreMsg) u8 {
+export fn nsc_core_key_msg(key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *[*]const u8, out_len: *usize) void {
     _ = key;
     _ = key_len;
     _ = shift;
     _ = control;
     _ = alt;
     _ = super_mod;
-    _ = out;
-    return 0;
+    channelEnvelopeOut(out, out_len);
 }
 
-export fn nsc_core_pinch_msg(window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *CoreMsg) u8 {
+export fn nsc_core_pinch_msg(window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *[*]const u8, out_len: *usize) void {
     _ = window_id;
     _ = label;
     _ = label_len;
@@ -192,6 +204,5 @@ export fn nsc_core_pinch_msg(window_id: f64, label: [*]const u8, label_len: usiz
     _ = scale;
     _ = x;
     _ = y;
-    _ = out;
-    return 0;
+    channelEnvelopeOut(out, out_len);
 }

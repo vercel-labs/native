@@ -358,6 +358,36 @@ pub fn assertVoidPayload(payload: []const u8) void {
     }
 }
 
+/// A channel entry's split bytes envelope: whether a message was
+/// produced, the produced arm's declaration-order wire tag, and the arm
+/// payload bytes (canonical value encoding of the arm's mirror payload
+/// type).
+pub const ChannelEnvelope = struct {
+    produced: bool,
+    tag: u8,
+    payload: []const u8,
+};
+
+/// Split a channel entry's bytes envelope — [produced u8][tag u8]
+/// [payload…]. A malformed envelope is a contract violation, never a
+/// silent no-message, so every framing fault refuses loudly: fewer than
+/// the two header bytes, a produced byte past 1, or payload bytes
+/// behind a nothing-produced header. (The tag byte is meaningless when
+/// nothing was produced; a tag past the declared arms is the generated
+/// unpacker's refusal — it owns the arm table.)
+pub fn channelEnvelope(bytes: []const u8) ChannelEnvelope {
+    if (bytes.len < 2) {
+        @panic("a channel entry returned fewer than the envelope's two header bytes ([produced u8][tag u8]) — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");
+    }
+    if (bytes[0] > 1) {
+        @panic("a channel envelope's produced byte is past 1 — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");
+    }
+    if (bytes[0] == 0 and bytes.len != 2) {
+        @panic("a channel envelope carries payload bytes behind a nothing-produced header — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");
+    }
+    return .{ .produced = bytes[0] == 1, .tag = bytes[1], .payload = bytes[2..] };
+}
+
 // --------------------------------------------------------------- tests
 
 const testing = std.testing;
@@ -476,4 +506,22 @@ test "void union arms ride as the bare arm index" {
     try testing.expect(decoded == .clear);
     // A bare arm's canonical payload is zero bytes exactly.
     assertVoidPayload(&.{});
+}
+
+test "channel envelopes split into produced flag, tag, and payload" {
+    // Nothing produced: exactly the two header bytes, tag ignored.
+    const none = channelEnvelope(&.{ 0, 0 });
+    try testing.expect(!none.produced);
+    try testing.expectEqual(@as(usize, 0), none.payload.len);
+    // A produced bare arm: header only, empty payload.
+    const bare = channelEnvelope(&.{ 1, 3 });
+    try testing.expect(bare.produced);
+    try testing.expectEqual(@as(u8, 3), bare.tag);
+    try testing.expectEqual(@as(usize, 0), bare.payload.len);
+    // A produced payload arm: the tail is the arm's canonical payload
+    // bytes, untouched.
+    const produced = channelEnvelope(&.{ 1, 1, 2, 0, 0, 0, 0, 0, 0, 0 });
+    try testing.expect(produced.produced);
+    try testing.expectEqual(@as(u8, 1), produced.tag);
+    try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0, 0, 0, 0 }, produced.payload);
 }

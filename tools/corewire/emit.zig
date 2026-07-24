@@ -176,7 +176,7 @@ const Emitter = struct {
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
         if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg) {
-            try reserved.append(self.arena, "msgFromWire");
+            try reserved.appendSlice(self.arena, &.{ "msgFromEnvelope", "envelope", "header" });
         }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
         if (self.sidecar.update_returns_cmd) try reserved.append(self.arena, "UpdateResult");
@@ -986,9 +986,10 @@ const Emitter = struct {
                 \\/// Menus, shortcuts, and chrome tabs dispatch through the core's
                 \\/// exported command mapper.
                 \\pub fn commandMsg(name: []const u8) ?{f} {{
-                \\    var out: core_abi.CoreMsg = undefined;
-                \\    if (abi.command_msg(name.ptr, name.len, &out) == 0) return null;
-                \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
+                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_len: usize = 0;
+                \\    abi.command_msg(name.ptr, name.len, &out_ptr, &out_len);
+                \\    return msgFromEnvelope(out_ptr[0..out_len]);
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1008,9 +1009,10 @@ const Emitter = struct {
                 \\
                 \\pub fn frameMsg(model: *const {f}, frame: FrameEvent) ?{f} {{
                 \\    _ = model;
-                \\    var out: core_abi.CoreMsg = undefined;
-                \\    if (abi.frame_msg(frame.width, frame.height, frame.timestampMs, frame.intervalMs, &out) == 0) return null;
-                \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
+                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_len: usize = 0;
+                \\    abi.frame_msg(frame.width, frame.height, frame.timestampMs, frame.intervalMs, &out_ptr, &out_len);
+                \\    return msgFromEnvelope(out_ptr[0..out_len]);
                 \\}}
                 \\
             , .{ ident(self.sidecar.model), ident(self.sidecar.msg.name) });
@@ -1029,9 +1031,10 @@ const Emitter = struct {
                 \\}};
                 \\
                 \\pub fn keyMsg(key: KeyEvent) ?{f} {{
-                \\    var out: core_abi.CoreMsg = undefined;
-                \\    if (abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out) == 0) return null;
-                \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
+                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_len: usize = 0;
+                \\    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);
+                \\    return msgFromEnvelope(out_ptr[0..out_len]);
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1053,9 +1056,10 @@ const Emitter = struct {
                 \\}};
                 \\
                 \\pub fn pinchMsg(pinch: PinchEvent) ?{f} {{
-                \\    var out: core_abi.CoreMsg = undefined;
-                \\    if (abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out) == 0) return null;
-                \\    return msgFromWire(out.tag, out.payload[0..out.payload_len]);
+                \\    var out_ptr: [*]const u8 = undefined;
+                \\    var out_len: usize = 0;
+                \\    abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out_ptr, &out_len);
+                \\    return msgFromEnvelope(out_ptr[0..out_len]);
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1086,22 +1090,27 @@ const Emitter = struct {
         if (any_fn_channel) {
             try self.print(
                 \\
-                \\/// Decode a channel entry's encoded message: the wire tag picks
-                \\/// the arm, the payload rides the canonical value encoding of
-                \\/// that arm's mirror payload type.
-                \\fn msgFromWire(tag: u8, payload: []const u8) {f} {{
-                \\    switch (tag) {{
+                \\/// Unpack a channel entry's bytes envelope — [produced u8][tag u8]
+                \\/// [payload…]: the header says whether a message was produced, the
+                \\/// wire tag picks the arm, and the payload rides the canonical
+                \\/// value encoding of that arm's mirror payload type. Malformed
+                \\/// framing refuses loudly in shim_rt.channelEnvelope; a tag past
+                \\/// the declared arms refuses here.
+                \\fn msgFromEnvelope(envelope: []const u8) ?{f} {{
+                \\    const header = shim_rt.channelEnvelope(envelope);
+                \\    if (!header.produced) return null;
+                \\    switch (header.tag) {{
                 \\
             , .{ident(self.sidecar.msg.name)});
             for (self.sidecar.msg.arms, 0..) |arm, tag| {
                 if (arm.payload == .void) {
-                    try self.print("        {d} => {{\n            shim_rt.assertVoidPayload(payload);\n            return .{f};\n        }},\n", .{ tag, ident(arm.name) });
+                    try self.print("        {d} => {{\n            shim_rt.assertVoidPayload(header.payload);\n            return .{f};\n        }},\n", .{ tag, ident(arm.name) });
                 } else {
-                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
+                    try self.print("        {d} => return .{{ .{f} = shim_rt.decodeExact(@FieldType({f}, \"{f}\"), header.payload, shim_rt.frameAllocator()) }},\n", .{ tag, ident(arm.name), ident(self.sidecar.msg.name), std.zig.fmtString(arm.name) });
                 }
             }
             try self.raw(
-                \\        else => @panic("the compiled core handed back a message tag past the declared arms — the core and its contract sidecar disagree; rebuild the app so both come from one compile"),
+                \\        else => @panic("the compiled core's channel envelope carries a message tag past the declared arms — the core and its contract sidecar disagree; rebuild the app so both come from one compile"),
                 \\    }
                 \\}
                 \\
@@ -1480,8 +1489,15 @@ test "channel glue speaks the sidecar's message union name" {
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const Event = union(enum) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn keyMsg(key: KeyEvent) ?Event {") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "fn msgFromWire(tag: u8, payload: []const u8) Event {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "fn msgFromEnvelope(envelope: []const u8) ?Event {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "@FieldType(Event, \"label_set\")") != null);
+    // The channel entry returns the bytes envelope on the ordinary
+    // out-pointer pair; the wrapper hands the whole buffer to the
+    // unpacker (no status return, no out-record).
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "return msgFromEnvelope(out_ptr[0..out_len]);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "shim_rt.channelEnvelope(envelope)") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "if (!header.produced) return null;") != null);
     const source_z = try arena.dupeZ(u8, generated);
     const tree = try std.zig.Ast.parse(arena, source_z, .zig);
     try testing.expectEqual(@as(usize, 0), tree.errors.len);
