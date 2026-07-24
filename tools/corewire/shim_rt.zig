@@ -360,11 +360,23 @@ pub fn assertVoidPayload(payload: []const u8) void {
 
 /// The defined pre-call state for a channel entry's out-pointer pair:
 /// the generated wrappers point at this byte with length zero before
-/// calling, so an entry that returns without writing both slots — a
-/// contract violation — yields a zero-length envelope that
-/// channelEnvelope refuses with its short-buffer teaching, never a
-/// slice of an undefined pointer.
+/// calling, so an entry that returns without writing — a contract
+/// violation — can never hand back a slice of undefined memory.
+/// channelEnvelopeBytes reads the pair back.
 pub const channel_out_guard = [1]u8{0};
+
+/// Assemble a channel entry's returned envelope from the out pair,
+/// closing every non-writing shape loudly BEFORE a slice forms: an
+/// entry that wrote neither slot yields the guard at length zero
+/// (refused downstream as a short envelope), and an entry that wrote a
+/// length without a pointer — the guard address with a nonzero length —
+/// refuses here, never an out-of-bounds read of the guard.
+pub fn channelEnvelopeBytes(ptr: [*]const u8, len: usize) []const u8 {
+    if (len != 0 and ptr == @as([*]const u8, @ptrCast(&channel_out_guard))) {
+        @panic("a channel entry wrote an envelope length without an envelope pointer — the compiled core and the generated shim disagree about the channel contract; rebuild the app so both come from one compile");
+    }
+    return ptr[0..len];
+}
 
 /// A channel entry's split bytes envelope: whether a message was
 /// produced, the produced arm's declaration-order wire tag, and the arm
@@ -514,6 +526,17 @@ test "void union arms ride as the bare arm index" {
     try testing.expect(decoded == .clear);
     // A bare arm's canonical payload is zero bytes exactly.
     assertVoidPayload(&.{});
+}
+
+test "channel out pairs assemble through the guard-aware reader" {
+    // A written pair passes through untouched.
+    const written = [_]u8{ 1, 0 };
+    try testing.expectEqualSlices(u8, &written, channelEnvelopeBytes(&written, written.len));
+    // The untouched pre-call state (guard pointer, zero length) reads
+    // as the empty buffer — refused downstream as a short envelope,
+    // never an undefined slice.
+    const untouched = channelEnvelopeBytes(@ptrCast(&channel_out_guard), 0);
+    try testing.expectEqual(@as(usize, 0), untouched.len);
 }
 
 test "channel envelopes split into produced flag, tag, and payload" {

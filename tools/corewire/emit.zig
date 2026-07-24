@@ -989,7 +989,7 @@ const Emitter = struct {
                 \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.command_msg(name.ptr, name.len, &out_ptr, &out_len);
-                \\    return msgFromEnvelope(out_ptr[0..out_len]);
+                \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1012,7 +1012,7 @@ const Emitter = struct {
                 \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.frame_msg(frame.width, frame.height, frame.timestampMs, frame.intervalMs, &out_ptr, &out_len);
-                \\    return msgFromEnvelope(out_ptr[0..out_len]);
+                \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
                 \\}}
                 \\
             , .{ ident(self.sidecar.model), ident(self.sidecar.msg.name) });
@@ -1034,7 +1034,7 @@ const Emitter = struct {
                 \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);
-                \\    return msgFromEnvelope(out_ptr[0..out_len]);
+                \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1059,7 +1059,7 @@ const Emitter = struct {
                 \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out_ptr, &out_len);
-                \\    return msgFromEnvelope(out_ptr[0..out_len]);
+                \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
                 \\}}
                 \\
             , .{ident(self.sidecar.msg.name)});
@@ -1497,7 +1497,7 @@ test "channel glue speaks the sidecar's message union name" {
     // DEFINED before the call: an entry that returns without writing
     // yields the zero-length envelope, refused loudly downstream.
     try testing.expect(std.mem.indexOf(u8, generated, "var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;\n    var out_len: usize = 0;\n    abi.key_msg(key.key.ptr, key.key.len, @intFromBool(key.shift), @intFromBool(key.control), @intFromBool(key.alt), @intFromBool(key.super), &out_ptr, &out_len);") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "return msgFromEnvelope(out_ptr[0..out_len]);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "shim_rt.channelEnvelope(envelope)") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "if (!header.produced) return null;") != null);
     const source_z = try arena.dupeZ(u8, generated);
