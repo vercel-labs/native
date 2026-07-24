@@ -13449,7 +13449,13 @@ test "image cache probe propagates a cancel interruption and reads every other f
             _ = dir;
             _ = sub_path;
             _ = options;
-            return .{ .handle = 0, .flags = .{ .nonblocking = false } };
+            // A fake handle the noop close never dereferences —
+            // pointer-shaped on Windows, an fd elsewhere.
+            const fake_handle: std.Io.File.Handle = if (comptime builtin.os.tag == .windows)
+                @ptrFromInt(0x4)
+            else
+                0;
+            return .{ .handle = fake_handle, .flags = .{ .nonblocking = false } };
         }
         fn readCanceled(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
             _ = userdata;
