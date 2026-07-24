@@ -70,10 +70,12 @@ const tile_text_height: f32 = 36;
 const detail_cover_size: f32 = 184;
 const content_padding: f32 = 24;
 
-/// The detail page's album rail: fixed-width tiles (the grid tile at its
-/// narrowest register) on a horizontal scroll region exactly tall enough
-/// for one tile.
-const shelf_tile_width: f32 = 128;
+/// The detail page's album rail: fixed-width tiles on a horizontal
+/// scroll region exactly tall enough for one tile. 168 keeps seven
+/// sibling covers wider than the desktop shell's content row at every
+/// regular window width up to ~1300 points, so the rail actually
+/// scrolls where it ships (a rail that fits simply rests).
+const shelf_tile_width: f32 = 168;
 const shelf_height: f32 = tile_padding * 2 + (shelf_tile_width - tile_padding * 2) + cover_text_gap + tile_text_height;
 
 // ---------------------------------------------------- compact constants
