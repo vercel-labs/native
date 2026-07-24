@@ -486,6 +486,11 @@ pub const PaintOptions = struct {
     /// always fit. 0 means the grid may use the whole store (tests that
     /// paint no widgets).
     text_reserve: usize = 0,
+    /// The rect the full-bleed theme background fills - the WHOLE
+    /// window under hidden-inset chrome, so the titlebar band reads as
+    /// part of the terminal and the window is one seamless surface.
+    /// Null fills `frame` (tests that paint the grid alone).
+    background_frame: ?geometry.RectF = null,
     /// Ceiling on DISTINCT code points the grid may put on screen in one
     /// paint — a proxy bound for the runtime's per-view glyph-atlas
     /// entries, which an adversarial screen (thousands of distinct
@@ -579,10 +584,12 @@ pub fn paint(session: *Session, builder: *canvas.Builder, options: PaintOptions)
     const rs = &session.render;
     const palette = Palette.init(tokens, &rs.colors, &session.term.colors.palette);
 
-    // The terminal surface: full-bleed theme background under the grid.
+    // The terminal surface: full-bleed theme background under the grid
+    // (and under the titlebar band, when the window chrome is hidden -
+    // one seamless surface with the traffic lights floating over it).
     try builder.fillRect(.{
         .id = grid_id_base,
-        .rect = options.frame,
+        .rect = options.background_frame orelse options.frame,
         .fill = .{ .color = palette.background },
     });
 

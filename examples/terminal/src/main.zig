@@ -121,6 +121,11 @@ pub const Model = struct {
     /// Fractional wheel-scroll remainder in view points: deltas
     /// accumulate here and convert to whole scrollback rows.
     wheel_accum: f32 = 0,
+    /// The OS titlebar band height (hidden-inset chrome): the grid's
+    /// text starts below it while the terminal background runs under
+    /// it, so the window reads as one seamless surface with only the
+    /// traffic lights floating over it.
+    chrome_top: f32 = 0,
     /// Delivered output accounting for the status line (and the
     /// replay fingerprint: byte totals pin the fed stream).
     output_batches: u64 = 0,
@@ -173,6 +178,7 @@ pub const Msg = union(enum) {
     /// A wheel/trackpad scroll over the grid: vertical delta in view
     /// points, accumulated into whole rows of scrollback.
     wheel: f32,
+    chrome_changed: native_sdk.platform.WindowChrome,
 };
 
 const TerminalApp = native_sdk.UiApp(Model, Msg);
@@ -293,6 +299,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             // The drain may have freed room for query replies a full
             // ring left retained in the emulator's buffer.
             moveResponsesToOutbound(model, fx);
+        },
+        .chrome_changed => |chrome| {
+            model.chrome_top = chrome.insets.top;
         },
         .wheel => |delta| {
             // Natural direction, like every terminal: swiping the
@@ -510,6 +519,10 @@ fn onText(event: canvas.WidgetKeyboardEvent) ?Msg {
 fn onWheel(wheel: native_sdk.platform.WheelEvent) ?Msg {
     if (wheel.delta_y == 0) return null;
     return .{ .wheel = wheel.delta_y };
+}
+
+fn onChrome(chrome: native_sdk.platform.WindowChrome) ?Msg {
+    return .{ .chrome_changed = chrome };
 }
 
 fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
@@ -826,9 +839,10 @@ pub fn view(ui: *TerminalUi, model: *const Model) TerminalUi.Node {
 /// widget tree: real text through the canvas primitives, damage kept
 /// row-shaped by stable command ids.
 fn buildChrome(model: *const Model, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void {
-    const frame = gridFrame(size);
+    const frame = gridFrame(model, size);
     try grid.paint(model.session, builder, .{
         .frame = frame,
+        .background_frame = geometry.RectF.init(0, 0, size.width, size.height),
         .tokens = tokens,
         .running = model.phase == .live or model.phase == .starting,
         .selecting = model.selecting,
@@ -838,12 +852,16 @@ fn buildChrome(model: *const Model, builder: *canvas.Builder, size: geometry.Siz
     });
 }
 
-fn gridFrame(size: geometry.SizeF) geometry.RectF {
+fn gridFrame(model: *const Model, size: geometry.SizeF) geometry.RectF {
+    // Text starts below the hidden-inset titlebar band (the traffic
+    // lights float over the terminal background); the background
+    // itself runs edge-to-edge behind them (see `buildChrome`).
+    const top = @max(grid_inset, model.chrome_top + 4);
     return geometry.RectF.init(
         grid_inset,
-        grid_inset,
+        top,
         @max(0, size.width - grid_inset * 2),
-        @max(0, size.height - grid_inset * 2),
+        @max(0, size.height - top - grid_inset),
     );
 }
 
@@ -852,7 +870,7 @@ fn gridFrame(size: geometry.SizeF) geometry.RectF {
 /// identically).
 fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (frame.size.width <= 0 or frame.size.height <= 0) return null;
-    const inner = gridFrame(frame.size);
+    const inner = gridFrame(model, frame.size);
     const session = model.session;
     if (session.cell_width <= 0 or session.cell_height <= 0) return null;
     const proposed = grid.Session.clampGrid(
@@ -887,6 +905,7 @@ pub fn appOptions() TerminalApp.Options {
         .key_release_events = true,
         .on_text = onText,
         .on_wheel = onWheel,
+        .on_chrome = onChrome,
         .on_frame = onFrame,
         .chrome = .{
             .prefix_commands = grid_command_budget,
