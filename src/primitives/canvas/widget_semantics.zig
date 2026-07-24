@@ -150,6 +150,10 @@ pub fn semanticRole(widget: Widget) WidgetRole {
         // The grouped input announces as ONE named group; the entry and
         // the accessory controls inside stay individually reachable.
         .input_group => .group,
+        // The terminal announces as an editable text region whose label
+        // carries the live viewport text (a terminal's semantic content
+        // IS its text) — the same register the platform terminals use.
+        .terminal => .textbox,
     };
 }
 

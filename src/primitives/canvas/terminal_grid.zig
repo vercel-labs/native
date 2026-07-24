@@ -37,6 +37,19 @@ pub const max_cols: usize = 320;
 pub const max_rows: usize = 96;
 pub const max_cells: usize = 7168;
 
+/// Painter budgets when the grid rides the WIDGET tree, where it shares
+/// the per-view stores with every other widget. The command reserve is
+/// the tail held back from the display-list capacity for the widgets
+/// emitted after the grid (a status bar, window chrome); the text
+/// reserve holds back the same store their labels draw from; the glyph
+/// budget mirrors the runtime's per-view glyph-atlas capacity minus a
+/// chrome allowance (a lockstep test on the runtime side keeps the
+/// mirror honest). A grid that would cross any of them degrades to
+/// fewer complete rows instead of failing the frame.
+pub const widget_command_reserve: usize = 256;
+pub const widget_text_reserve: usize = 8192;
+pub const widget_glyph_budget: usize = 8192 - 512;
+
 /// One text run's staging capacity — shared by the paint loop's scratch
 /// and the preflight's per-cell cap so measure and emission agree.
 /// Sized to the WHOLE display-list text store, so the paint tier is

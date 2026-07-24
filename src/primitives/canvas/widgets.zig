@@ -5,6 +5,7 @@ const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
 const token_model = @import("tokens.zig");
 const chart_model = @import("chart.zig");
+const terminal_grid_model = @import("terminal_grid.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -149,6 +150,18 @@ pub const WidgetKind = enum {
     /// `ReferenceImage.presentation_only`), so goldens and session
     /// fingerprints never depend on producer output.
     media_surface,
+    /// The terminal leaf: paints a RESOLVED emulator viewport (a
+    /// `terminal_grid.TerminalGrid` snapshot the widget's `terminal`
+    /// binding references) as real text runs and geometric box drawing,
+    /// clipped to its frame. A stateful focus target like the text
+    /// inputs — focused, it routes keys and committed text to the
+    /// framework-owned session behind its bound pty id and consumes
+    /// wheel scrollback — but never a text-input kind: the emulator,
+    /// not a TextBuffer, owns the editing model. Its semantics label
+    /// carries the viewport's plain text (a terminal's semantic content
+    /// IS its text), so assistive tech reads the real screen and the
+    /// session fingerprint covers cell state.
+    terminal,
 };
 
 /// STABLE code for a widget kind: assigned at birth, never reused or
@@ -227,6 +240,7 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
         .tree => 59,
         .input_group => 60,
         .media_surface => 61,
+        .terminal => 62,
     };
 }
 
@@ -740,6 +754,24 @@ pub const WidgetOverscroll = enum {
     rubber_band,
 };
 
+/// The `.terminal` widget's binding: `pty` is the MODEL-OWNED pty
+/// effect key the element binds (the id `fx.ptySpawn` named — ids are
+/// model data, never markup literals; 0 is the unbound sentinel and the
+/// surface paints its background only). `scrollback` is the declared
+/// scrollback offset in rows, following the scroll `value` source-wins
+/// reconcile rule: echo the `on-terminal` state's `scrollback` back
+/// here and the runtime-owned position survives rebuilds; change it
+/// model-side to scroll programmatically. `grid` is the RESOLVED
+/// viewport snapshot the producer (the app loop's terminal session
+/// store) published for the key — producer-owned, outliving the build
+/// that references it; null until a session exists, which paints the
+/// honest empty surface.
+pub const TerminalBinding = struct {
+    pty: u64 = 0,
+    scrollback: u32 = 0,
+    grid: ?*const terminal_grid_model.TerminalGrid = null,
+};
+
 /// A house video-transport chrome role for a control the RUNTIME
 /// consumes: `Ui.video` stamps it on the chrome it composes (`.toggle`
 /// on the play/pause button, `.scrub` on the seek slider), and the app
@@ -957,6 +989,11 @@ pub const Widget = struct {
     /// bounded by `canvas_limits.max_canvas_widget_chart_*` budgets.
     /// `Ui.chart` downsamples long series before they land here.
     chart: chart_model.ChartData = .{},
+    /// The `.terminal` widget's binding (see `TerminalBinding`): the
+    /// model-owned pty effect key the element binds, the declared
+    /// scrollback echo, and the resolved grid snapshot published for
+    /// that key. Default (unbound) on every other kind.
+    terminal: TerminalBinding = .{},
     /// House video-transport role (see `VideoControlVerb`): `Ui.video`
     /// stamps `.toggle`/`.scrub` on the chrome controls it composes, and
     /// the app loop consumes presses/changes on them by driving the

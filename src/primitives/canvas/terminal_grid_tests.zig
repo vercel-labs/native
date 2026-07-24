@@ -340,6 +340,87 @@ test "cell metrics derive from the mono face and never collapse" {
     try testing.expect(metrics.height >= metrics.font_size);
 }
 
+test "the terminal widget paints its bound grid and the honest empty surface unbound" {
+    const row_cells = comptime asciiRow("bound", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
+    const grid = baseGrid(&rows);
+
+    var commands: [256]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const bound = canvas.Widget{
+        .id = 7,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .terminal = .{ .pty = 1, .grid = &grid },
+    };
+    try canvas.emitWidgetTree(&builder, bound, .{});
+    var saw_text = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (std.mem.eql(u8, text.text, "bound")) saw_text = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_text);
+
+    // Unbound: one background fill, no text, never a hole.
+    var empty_commands: [16]canvas.CanvasCommand = undefined;
+    var empty_builder = canvas.Builder.init(&empty_commands);
+    const unbound = canvas.Widget{
+        .id = 8,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+    };
+    try canvas.emitWidgetTree(&empty_builder, unbound, .{});
+    var fills: usize = 0;
+    var texts: usize = 0;
+    for (empty_builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rect => fills += 1,
+            .draw_text => texts += 1,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), fills);
+    try testing.expectEqual(@as(usize, 0), texts);
+}
+
+test "a focused terminal wears the house focus ring" {
+    var commands: [16]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    const focused = canvas.Widget{
+        .id = 9,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(0, 0, 400, 200),
+        .state = .{ .focused = true },
+    };
+    try canvas.emitWidgetTree(&builder, focused, .{});
+    var rings: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .stroke_rect => rings += 1,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), rings);
+}
+
+test "the terminal widget's register: focusable, press-claiming, I-beam, editable-text role" {
+    const widget_access = @import("widget_access.zig");
+    const widget_semantics = @import("widget_semantics.zig");
+    const widget = canvas.Widget{ .id = 3, .kind = .terminal };
+    try testing.expect(canvas.widgetKindHitTarget(.terminal));
+    try testing.expect(widget_access.isFocusable(widget));
+    try testing.expect(canvas.widgetClaimsPress(widget));
+    try testing.expectEqual(canvas.WidgetCursor.text, canvas.cursorForWidgetTarget(.terminal, .{}));
+    try testing.expectEqual(canvas.WidgetRole.textbox, widget_semantics.semanticRole(widget));
+    // Deliberately NOT a text-input kind: the emulator owns the editing
+    // model, so the TextBuffer pipeline must never claim it.
+    try testing.expect(!canvas.widgetTextInputKind(.terminal));
+}
+
 test "box drawing classifies the block and ignores neighbors" {
     try testing.expect(box.isBoxDrawing(0x2500));
     try testing.expect(box.isBoxDrawing(0x259F));

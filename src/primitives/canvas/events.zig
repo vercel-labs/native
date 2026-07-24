@@ -875,7 +875,7 @@ pub fn defaultFocusable(widget: Widget) bool {
     // part of the tree's roving keyboard focus set.
     if (widget.semantics.role == .treeitem) return !widget.state.disabled;
     return switch (widget.kind) {
-        .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider => !widget.state.disabled,
+        .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider, .terminal => !widget.state.disabled,
         else => false,
     };
 }

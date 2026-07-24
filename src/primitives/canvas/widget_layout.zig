@@ -144,7 +144,7 @@ pub fn layoutWidgetDepth(
         // Span paragraphs and span-carrying table cells share the link
         // hotspot child convention (no spans or no children is a no-op).
         .text, .data_cell => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface => {},
+        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
     }
 
     // Anchored floating children are excluded from every flow above (they
@@ -291,7 +291,9 @@ fn widgetIsWindowControlContent(widget: Widget) bool {
         // A text leaf with no bytes and no spans is a hit/semantics
         // overlay, not readable content.
         .text => widget.text.len > 0 or widget.spans.len > 0,
-        .data_cell, .icon, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .spinner, .chart => true,
+        // The terminal's grid is readable content edge to edge — the
+        // cluster must never cover its rows.
+        .data_cell, .icon, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .spinner, .chart, .terminal => true,
     };
 }
 
@@ -1635,7 +1637,10 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         // Media surfaces measure like images: the texture is external
         // content with no natural layout size — definite width/height
         // (or flex grow) size the surface, exactly like an image leaf.
-        .scroll_view, .image, .split, .media_surface => geometry.SizeF.zero(),
+        // Terminals join them: the grid derives its cols/rows FROM the
+        // space it is given (the runtime resizes the pty to fit), so
+        // reporting an intrinsic size would invert the contract.
+        .scroll_view, .image, .split, .media_surface, .terminal => geometry.SizeF.zero(),
     };
 }
 

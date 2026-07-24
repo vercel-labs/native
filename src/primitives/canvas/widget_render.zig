@@ -235,6 +235,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -577,6 +578,7 @@ fn emitWidgetLayoutNodeContent(
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -1237,6 +1239,66 @@ fn mediaSurfaceQuadRadius(radius: Radius, bar: f32) Radius {
 /// The fitted shape is three commands: a BLACK fill over the whole
 /// frame at the frame's own radius (the letterbox field, so the
 /// surface silhouette is exact by construction — no per-bar corner
+/// The terminal leaf: the widget's RESOLVED grid snapshot painted
+/// through the terminal grid painter — real text runs, geometric box
+/// drawing, selection, cursor, and the scrollback thumb, clipped to the
+/// frame and degrading row-atomically under the shared per-view budgets
+/// (`terminal_grid.widget_command_reserve` and friends hold back room
+/// for the widgets around it). Unbound — no session published a grid
+/// yet — it paints the honest empty surface: the theme background under
+/// the widget's frame, so a terminal awaiting its pty reads as an empty
+/// terminal, never a hole. Focus wears the house ring like every other
+/// focusable control.
+fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const frame = widget.frame.normalized();
+    if (frame.isEmpty()) return;
+    if (widget.terminal.grid) |grid| {
+        // The grid text region sits inside the widget's own padding
+        // (the house inset when none is declared), on a full-bleed
+        // background — one seamless surface edge to edge.
+        const padding = widget.layout.padding;
+        const declared = padding.left + padding.top + padding.right + padding.bottom > 0;
+        const inset: geometry.InsetsF = if (declared) padding else geometry.InsetsF.all(8);
+        const content = geometry.RectF.init(
+            frame.x + inset.left,
+            frame.y + inset.top,
+            @max(0, frame.width - inset.left - inset.right),
+            @max(0, frame.height - inset.top - inset.bottom),
+        );
+        const capacity = builder.commands.len;
+        const command_budget = if (capacity > canvas.terminal_grid.widget_command_reserve)
+            capacity - canvas.terminal_grid.widget_command_reserve
+        else
+            0;
+        try canvas.terminal_grid.paint(grid.*, builder, .{
+            .frame = content,
+            .background_frame = frame,
+            .tokens = tokens,
+            .id_base = widget.id,
+            .command_budget = command_budget,
+            .text_reserve = canvas.terminal_grid.widget_text_reserve,
+            .glyph_budget = canvas.terminal_grid.widget_glyph_budget,
+        });
+    } else {
+        try builder.fillRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .fill = colorFill(widget.style.background orelse tokens.colors.surface),
+        });
+    }
+    if (widget.state.focused) {
+        try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+            .id = widgetPartId(widget.id, 2),
+            .rect = widget_render_style.focusRingRect(frame, tokens),
+            .radius = widget_render_style.focusRingRadius(widgetRadius(widget, 0), tokens),
+            .stroke = .{
+                .fill = widget_render_style.widgetFocusRingFill(widget, tokens),
+                .width = tokens.stroke.focus,
+            },
+        }));
+    }
+}
+
 /// approximation), the deterministic placeholder confined to the quad
 /// (goldens and replay screenshots, which skip the texture by policy,
 /// show the placeholder exactly where the picture goes, in the

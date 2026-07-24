@@ -34,7 +34,10 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
     if (state.disabled) return .arrow;
     return switch (kind) {
-        .input, .text_field, .search_field, .combobox, .textarea => .text,
+        // The terminal joins the editable-text register: a click
+        // focuses the session's input, and the I-beam advertises it —
+        // the platform terminals' own convention.
+        .input, .text_field, .search_field, .combobox, .textarea, .terminal => .text,
         .resizable, .split_divider => .resize_horizontal,
         else => .arrow,
     };
@@ -76,7 +79,7 @@ pub fn isDragSource(widget: Widget) bool {
 pub fn widgetKindHitTarget(kind: WidgetKind) bool {
     return switch (kind) {
         .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group, .media_surface => false,
-        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .split_divider => true,
+        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .split_divider, .terminal => true,
     };
 }
 
@@ -159,6 +162,10 @@ pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
         .popover,
         .menu_surface,
         .dropdown_menu,
+        // A click in the terminal focuses the session's input, exactly
+        // like a click in a text field places the caret — it must never
+        // activate the row or card around it.
+        .terminal,
         => true,
         else => false,
     };

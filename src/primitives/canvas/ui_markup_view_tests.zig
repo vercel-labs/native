@@ -1490,6 +1490,9 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
     .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
+    // terminal: the widget kind lands ahead of its `<terminal>` element
+    // (the element entry removes this exclusion when it arrives).
+    .terminal,
 };
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
