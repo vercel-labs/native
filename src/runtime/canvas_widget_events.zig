@@ -367,6 +367,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const hover_target = layout_tree.hoverTargetForHit(pointer_event.target);
             const hover_target_id: canvas.ObjectId = if (hover_target) |value| value.id else 0;
             const raw_hit = layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens);
+            // Containment resolves through the HOVER policy hit test —
+            // the only consumer that may see hover-only listeners; the
+            // wash/cursor resolution below stays on the interactive
+            // raw hit, so binding hover never moves a wash or a click.
+            const hover_raw_hit = layout_tree.hitTestHoverWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens);
             const hit_target = layout_tree.hoverTargetForHit(raw_hit);
             const hit_target_id: canvas.ObjectId = if (hit_target) |value| value.id else 0;
             const hit_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hit_target));
@@ -409,10 +414,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         self.views[index].canvas_widget_hover_pointer_live = true;
                         self.views[index].canvas_widget_hover_pointer_id = pointer_event.pointer.pointer_id;
                         self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
-                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
                     } else if (hover_pointer_proven) {
                         self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
-                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
                     }
                 },
                 .down => {
@@ -421,7 +426,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
                     if (hover_pointer_proven) {
                         self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
-                        self.views[index].setCanvasWidgetHoverMsgChainForHit(pointer_event.target);
+                        // The down's routed target is interactive-only;
+                        // containment keeps its own resolution.
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
                     }
                 },
                 .up => {
@@ -430,7 +437,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     next_cursor = hit_cursor;
                     if (hover_pointer_proven) {
                         self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
-                        self.views[index].setCanvasWidgetHoverMsgChainForHit(raw_hit);
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
                     }
                 },
                 .cancel => {

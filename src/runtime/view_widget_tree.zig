@@ -453,7 +453,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // agree). Without a proven pointer, entries survive by id
             // until their widgets leave the tree — the wash's rule.
             if (self.canvas_widget_hover_pointer_live) {
-                self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
+                self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestHoverWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
             } else {
                 self.pruneCanvasWidgetHoverMsgChain();
             }

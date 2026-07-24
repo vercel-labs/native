@@ -2951,31 +2951,40 @@ test "hover msg chain collects nested listeners outermost first" {
 
     // Inside the row: both listeners, outermost first.
     const label_frame = layout.findById(6).?.frame.normalized();
-    const in_row = layout.hoverMsgChainForHit(layout.hitTest(label_frame.center()), &chain);
+    const in_row = layout.hoverMsgChainForHit(layout.hitTestHover(label_frame.center()), &chain);
     try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, in_row);
 
     // Over the card's own content outside the row: the card alone.
     const plain_frame = layout.findById(4).?.frame.normalized();
-    const in_card = layout.hoverMsgChainForHit(layout.hitTest(plain_frame.center()), &chain);
+    const in_card = layout.hoverMsgChainForHit(layout.hitTestHover(plain_frame.center()), &chain);
     try std.testing.expectEqualSlices(ObjectId, &.{3}, in_card);
 
     // A disabled listener never joins a chain (the hit test skips it,
     // and the walk predicate refuses it either way).
     const disabled_frame = layout.findById(8).?.frame.normalized();
-    const over_disabled = layout.hoverMsgChainForHit(layout.hitTest(disabled_frame.center()), &chain);
+    const over_disabled = layout.hoverMsgChainForHit(layout.hitTestHover(disabled_frame.center()), &chain);
     try std.testing.expectEqualSlices(ObjectId, &.{}, over_disabled);
 
     // A hit with no listening ancestor — and the null hit — both yield
     // the empty chain.
     const bystander_frame = layout.findById(9).?.frame.normalized();
-    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(layout.hitTest(bystander_frame.center()), &chain));
+    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(layout.hitTestHover(bystander_frame.center()), &chain));
     try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(null, &chain));
 
     // Listening keeps presses falling through: the row claims no press,
     // so a click inside it lands on nothing (dead space) — hover-msgs
     // flips where hover attributes, never where clicks land.
-    const press = layout.hitTest(label_frame.center()).?;
+    const press = layout.hitTestHover(label_frame.center()).?;
     try std.testing.expect(canvas.widgetPressTargetForHit(layout, press) == null);
+
+    // And the INTERACTIVE hit test never sees hover-only listeners at
+    // all: the raw hit over the row's plain area resolves exactly as it
+    // would without the bindings (nothing here — layout containers),
+    // so no wash can ever appear where none appeared before.
+    const row_frame = layout.findById(5).?.frame.normalized();
+    const wash_probe = geometry.PointF.init(row_frame.maxX() - 2, row_frame.center().y);
+    try std.testing.expect(layout.hitTest(wash_probe) == null);
+    try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, layout.hoverMsgChainForHit(layout.hitTestHover(wash_probe), &chain));
 }
 
 test "widget emitter renders list item and segmented control states" {

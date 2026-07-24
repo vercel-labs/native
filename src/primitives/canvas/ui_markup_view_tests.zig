@@ -1078,11 +1078,13 @@ test "markup binds the hover pair and makes listeners hover-hittable, never pres
     const row = panel.children[0];
     try testing.expect(panel.hover_msgs);
     try testing.expect(row.hover_msgs);
-    // Hover listening never implies pressability: no press action, no
-    // press claim — clicks inside keep falling through.
+    // Hover listening never implies pressability OR interactive
+    // hit-testing: no press action, no press claim, invisible to the
+    // wash/press hit test — only the hover-containment policy sees it.
     try testing.expect(!row.semantics.actions.press);
     try testing.expect(!canvas.widgetClaimsPress(row));
-    try testing.expect(canvas.widgetIsHitTarget(row));
+    try testing.expect(!canvas.widgetIsHitTarget(row));
+    try testing.expect(canvas.widgetIsHoverMsgHitTarget(row));
 
     // Both edges resolve through the handler table; an element binding
     // only enter has no leave Msg, and plain children listen for nothing.

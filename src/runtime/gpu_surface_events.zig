@@ -475,7 +475,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
         /// Whether a view-local point sits inside the view's surface
         /// (the consumed-release retirement's outside test).
         fn gpuViewContainsPoint(view: anytype, x: f32, y: f32) bool {
-            return x >= 0 and y >= 0 and x <= view.gpu_size.width and y <= view.gpu_size.height;
+            // The engine's own half-open rectangle containment, so a
+            // release at exactly the right or bottom edge counts as
+            // outside the way every hit test already treats it.
+            return geometry.RectF.fromSize(view.gpu_size).containsPoint(geometry.PointF.init(x, y));
         }
 
         /// Drain the view's pending scroll-event set into

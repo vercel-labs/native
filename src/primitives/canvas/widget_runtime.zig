@@ -91,6 +91,18 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.hitTestWidgetLayout(self, point, tokens);
     }
 
+    /// The hover-Msg CONTAINMENT hit test: the interactive hit test's
+    /// resolution plus hover-Msg listeners (`HitTestPolicy.hover_msgs`).
+    /// Only enter/leave containment resolves through this — washes,
+    /// cursors, and presses never see hover-only listeners.
+    pub fn hitTestHover(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, .{}, .hover_msgs);
+    }
+
+    pub fn hitTestHoverWithTokens(self: WidgetLayoutTree, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, tokens, .hover_msgs);
+    }
+
     pub fn cursorForHit(self: WidgetLayoutTree, hit: ?WidgetHit) WidgetCursor {
         _ = self;
         return widget_access.cursorForWidgetHit(hit);

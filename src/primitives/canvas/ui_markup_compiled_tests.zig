@@ -1594,7 +1594,8 @@ test "compiled hover pair (on-hover-enter, on-hover-leave) matches the interpret
     const row = fixture.findByKind(compiled.root, .row).?;
     try testing.expect(panel.hover_msgs and row.hover_msgs);
     try testing.expect(!row.semantics.actions.press);
-    try testing.expect(canvas.widgetIsHitTarget(row));
+    try testing.expect(!canvas.widgetIsHitTarget(row));
+    try testing.expect(canvas.widgetIsHoverMsgHitTarget(row));
     try testing.expectEqual(fixture.Msg.add, compiled.msgFor(panel.id, .hover_enter).?);
     try testing.expectEqual(@as(u32, 0), compiled.msgFor(panel.id, .hover_leave).?.toggle);
     try testing.expect(compiled.msgFor(row.id, .hover_leave) == null);
