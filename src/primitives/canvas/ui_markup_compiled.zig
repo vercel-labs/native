@@ -423,6 +423,16 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         fail(node, markup.image_children_message);
                     }
                 }
+                // Interpreter parity: the terminal leaf's static shape —
+                // pty required (dead markup without it), no children.
+                if (kind == .terminal) {
+                    if (node.attr("pty") == null) {
+                        fail(node, markup.terminal_missing_pty_message);
+                    }
+                    if (node.children.len > 0) {
+                        fail(node, markup.terminal_children_message);
+                    }
+                }
                 // Interpreter parity: the a11y lint's error half — an
                 // unnamed interactive control or a misused role ships a
                 // view a screen reader user cannot operate, so it is a

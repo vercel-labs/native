@@ -48,6 +48,7 @@ pub const max_cells: usize = 7168;
 /// fewer complete rows instead of failing the frame.
 pub const widget_command_reserve: usize = 256;
 pub const widget_text_reserve: usize = 8192;
+pub const widget_path_reserve: usize = 512;
 pub const widget_glyph_budget: usize = 8192 - 512;
 
 /// One text run's staging capacity — shared by the paint loop's scratch
@@ -228,6 +229,13 @@ pub const TerminalPaintOptions = struct {
     /// runtime limit and failing the whole frame. 0 means the grid may
     /// use the whole store.
     text_reserve: usize = 0,
+    /// Path elements to hold back from the grid for the widgets after
+    /// it (a chart's polylines, the checkbox mark, the spinner arc all
+    /// draw from the same per-view element store): the grid's
+    /// rounded-corner rows degrade instead of starving them into
+    /// ChartPathElementListFull. 0 means the grid may use the whole
+    /// store.
+    path_reserve: usize = 0,
     /// Ceiling on glyph-ATLAS ENTRIES the grid may claim in one paint
     /// (the runtime's per-view atlas capacity minus a reserve): every
     /// new distinct code point is charged at the atlas's subpixel
@@ -241,12 +249,16 @@ pub const TerminalPaintOptions = struct {
 /// The painter's command-id base for a caller's `id_base` (typically a
 /// widget id): the widget part-id convention scaled up. `widgetPartId`
 /// reserves the low 4 bits for a widget's part slots (`id *% 16 + slot`,
-/// slots < 16), making distinct widgets' parts DISJOINT BY CONSTRUCTION;
-/// the grid needs a larger slot space (rows x runs x decorations), so it
-/// reserves the low 24 bits (`id *% 2^24 + offset`, every painter offset
-/// < 2^24) — the same shape, the same disjointness guarantee between two
-/// terminals, and the same accepted residual (ids agreeing modulo the
-/// shifted range, astronomically unlikely for hash-derived widget ids).
+/// slots < 16); the grid needs a larger slot space (rows x runs x
+/// decorations), so it reserves the low 24 bits (`id *% 2^24 + offset`,
+/// every painter offset < 2^24). The guarantee is EXACTLY the part-id
+/// convention's: the wrapping multiply discards the id's top bits, so
+/// two ids agreeing modulo 2^40 share a namespace (as two ids agreeing
+/// modulo 2^60 share a `widgetPartId` namespace) — the framework's
+/// accepted residual, unreachable for the structural-hash ids real
+/// widgets carry and identical in kind to what every other widget's
+/// commands already live with. Within one grid, and between grids whose
+/// ids differ modulo 2^40, commands can never collide.
 /// An id of 0 is the framework's ANONYMOUS convention (`widgetPartId`
 /// returns 0 for it): the painter then emits EVERY command with id 0 —
 /// no retained identity, no cross-widget collisions.
@@ -517,6 +529,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // rounded-corner preflight degrades against the running list total,
     // not the builder-owned counter alone.
     var path_total: usize = displayListPathElements(builder.displayList());
+    const path_ceiling: usize = builder.path_elements.len -| options.path_reserve;
 
     // The glyph-atlas proxy budget (see `TerminalPaintOptions`): clamped
     // under half the probe table so insertion can never scan a full
@@ -563,7 +576,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // corners is skipped BEFORE it would cross the per-view
         // path-element budget; a row adding none paints regardless.
         const row_paths = rowPathElements(row);
-        if (row_paths > 0 and path_total + row_paths > builder.path_elements.len) break;
+        if (row_paths > 0 and path_total + row_paths > path_ceiling) break;
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on

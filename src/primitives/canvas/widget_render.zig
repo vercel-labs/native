@@ -1286,6 +1286,7 @@ fn emitTerminalWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             .id_base = widget.id,
             .command_budget = command_budget,
             .text_reserve = canvas.terminal_grid.widget_text_reserve,
+            .path_reserve = canvas.terminal_grid.widget_path_reserve,
             .glyph_budget = canvas.terminal_grid.widget_glyph_budget,
         });
     } else {

@@ -418,6 +418,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     return self.failNode(node, markup.image_children_message);
                 }
             }
+            // The terminal leaf's static shape, the image policy exactly:
+            // without its pty binding it can never attach a session, and
+            // its widget has no child slots — both refused at build so
+            // markup that skipped validation (hot reload) fails instead
+            // of silently rendering an unbound surface or dropping the
+            // child.
+            if (kind == .terminal) {
+                if (node.attr("pty") == null) {
+                    return self.failNode(node, markup.terminal_missing_pty_message);
+                }
+                if (node.children.len > 0) {
+                    return self.failNode(node, markup.terminal_children_message);
+                }
+            }
             // The a11y lint's error half: an unnamed interactive control
             // or a misused role ships a view a screen reader user cannot
             // operate, so it fails the build like any other markup

@@ -2875,6 +2875,36 @@ test "the terminal element binds its pty key, scrollback echo, and view-state ha
     try testing.expectEqual(@as(u16, 24), msg.term_state.rows);
 }
 
+test "the interpreter enforces the terminal leaf shape without the validator" {
+    // Hot reload builds without a validation pass: the build itself must
+    // refuse a pty-less terminal (dead markup) and terminal children (no
+    // child slots), exactly like the image leaf.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = TerminalElementModel{};
+
+    const missing_pty =
+        \\<column>
+        \\  <terminal label="Shell"/>
+        \\</column>
+    ;
+    var missing_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, missing_pty);
+    var missing_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, missing_view.build(&missing_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.terminal_missing_pty_message, missing_view.diagnostic.message);
+
+    const with_child =
+        \\<column>
+        \\  <terminal pty="{shell}" label="Shell"><button>Run</button></terminal>
+        \\</column>
+    ;
+    var child_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, with_child);
+    var child_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, child_view.build(&child_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.terminal_children_message, child_view.diagnostic.message);
+}
+
 test "on-terminal requires a bare tag: an authored payload is refused" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
