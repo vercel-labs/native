@@ -589,6 +589,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * a whole axis of slow diagonal input). */
 @property(nonatomic, assign) double wheelResidualCarryX;
 @property(nonatomic, assign) double wheelResidualCarryY;
+/* The last phase-less wheel's timestamp: discrete streams have no
+ * gesture phases, so a quiet gap IS the gesture boundary. */
+@property(nonatomic, assign) uint64_t lastLegacyWheelTimestampNs;
 /* Driver ids the WIRE has scrolled during this gesture: once the engine
  * applies relative deltas to a region, later ABSOLUTE native reports
  * from the same region would erase them, so a wire-scrolled region
@@ -5985,14 +5988,26 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const BOOL legacy = event.phase == NSEventPhaseNone && event.momentumPhase == NSEventPhaseNone;
     NSPoint point;
     if (legacy) {
-        // Discrete wheels have no phases: each event is its own
-        // gesture, so per-gesture state (wire bindings, carries) must
-        // not leak across them — a binding that never cleared would
-        // demote a region to the wire forever.
+        // Phase-less wheels have no gesture boundaries, so a QUIET GAP
+        // is the boundary: per-gesture state (wire bindings, residual
+        // carries) persists across a rapid stream — sub-half-point
+        // deltas keep accumulating and a wire-bound region stays
+        // wire-bound while its queued relative motion could still be in
+        // flight — and resets only after a pause well past the input
+        // queue's one-frame coalescing delay. Without the gap rule a
+        // binding would demote a region to the wire forever; with a
+        // per-event reset, fractional carries and in-flight residual
+        // ordering would both break.
         point = [self convertPoint:event.locationInWindow fromView:nil];
-        self.wheelResidualCarryX = 0;
-        self.wheelResidualCarryY = 0;
-        [self.wireBoundDriverIds removeAllObjects];
+        const uint64_t now = NativeSdkTimestampNanoseconds();
+        const BOOL freshBurst = self.lastLegacyWheelTimestampNs == 0 ||
+            now - self.lastLegacyWheelTimestampNs > 250000000ull;
+        self.lastLegacyWheelTimestampNs = now;
+        if (freshBurst) {
+            self.wheelResidualCarryX = 0;
+            self.wheelResidualCarryY = 0;
+            [self.wireBoundDriverIds removeAllObjects];
+        }
     } else {
         if (event.phase == NSEventPhaseBegan || event.phase == NSEventPhaseMayBegin) {
             self.wheelGesturePoint = [self convertPoint:event.locationInWindow fromView:nil];
@@ -6000,6 +6015,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             self.wheelResidualCarryX = 0;
             self.wheelResidualCarryY = 0;
             [self.wireBoundDriverIds removeAllObjects];
+            self.lastLegacyWheelTimestampNs = 0;
         }
         point = self.wheelGestureActive ? self.wheelGesturePoint : [self convertPoint:event.locationInWindow fromView:nil];
         if (event.momentumPhase == NSEventPhaseEnded || event.momentumPhase == NSEventPhaseCancelled) {
