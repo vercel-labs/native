@@ -8,6 +8,60 @@ The headline capability: **record a terminal session and it replays byte-identic
 
 The terminal state itself — cursor, styles, scrollback, wrapping, reflow, selection — is owned by [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's extracted VT core, consumed as the `ghostty-vt` Zig module. The toolkit never parses escape sequences; it owns the transport (the pty) and the pixels (the canvas), and hands the bytes between.
 
+## The `<terminal>` element
+
+The declarative shape is one element. Spawn a pty from your model (`fx.ptySpawn`, an ordinary effect), then bind its key to a `<terminal>`: the toolkit owns the emulator behind that key and the element renders its grid — real text, geometric box drawing, the theme-derived ANSI palette, selection, cursor, and scrollback — and routes keys, IME text, and wheel scrollback to the session when focused. The model carries a pty key and, if it wants, the scrollback position; nothing about the emulator's cells, modes, or selection.
+
+<CodeToggle>
+
+```ts
+import { Cmd } from "@native-sdk/core";
+
+const shellKey = 1;
+
+export function view(model: Model) {
+  return terminal({ pty: shellKey, scrollback: model.scrollback, grow: 1, label: "Shell", onTerminal: "termState" });
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    // The runtime-applied view state (scrollback, history, cols, rows).
+    // Echo scrollback back and user scrollback survives rebuilds.
+    case "termState": return { ...model, scrollback: msg.state.scrollback };
+  }
+}
+```
+
+```zig
+const shell_key: u64 = 1;
+
+pub fn view(ui: *Ui, model: *const Model) Ui.Node {
+    return ui.terminal(.{
+        .pty = shell_key,
+        .scrollback = model.scrollback,
+        .grow = 1,
+        .semantics = .{ .label = "Shell" },
+        .on_terminal = Ui.terminalMsg(.term_state),
+    });
+}
+
+pub fn update(model: *Model, msg: Msg) void {
+    switch (msg) {
+        // canvas.TerminalState: scrollback, history, cols, rows — the
+        // app-visible view state. Echo scrollback back under the same
+        // source-wins rule scroll offsets follow; the emulator's cell
+        // state stays framework-owned.
+        .term_state => |state| model.scrollback = state.scrollback,
+    }
+}
+```
+
+</CodeToggle>
+
+`pty` is the model-owned pty key — one `{binding}`, never a markup literal, exactly like `<media-surface surface>` and `<image image>`. A `<terminal>` without it is refused at validation the way a `<media-surface>` without `surface` is: dead markup can never attach a session. The grid derives its `cols`/`rows` from the frame the layout gives it, so size the element like any leaf (`grow`, or a definite `width`/`height`); the runtime pushes the derived size to the pty with `ptyResize`.
+
+The rest of this page is the effect vocabulary the element sits on — spawn a pty yourself when you want the raw stream, or let the element own the session end to end.
+
 ## Spawn, then stream
 
 The pty key is ordinary model data — pick it like an effect key. Spawn the shell, feed each output batch into the emulator, and write typed input back to the pty. Exactly one exit event ends the session.
