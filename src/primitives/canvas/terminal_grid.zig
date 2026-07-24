@@ -428,7 +428,12 @@ fn rowCommandCost(row: TerminalRow) usize {
                 total += 3;
                 i += span - 1;
             } else {
-                total += 9; // a joint: up to eight geometry commands plus an underline
+                // The glyph's own worst case (kept lockstep with the
+                // paint switch by `box.maxCommands`) plus a possible
+                // underline — a row of one-bar pieces costs what it
+                // paints, never a flat joint-worst-case that starves
+                // wide grids.
+                total += box.maxCommands(cell.cp) + 1;
             }
         } else {
             total += 2; // the text run plus its underline
@@ -547,13 +552,18 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // total (all draw_text already in the list plus this row's
         // bytes) — stop BEFORE a row that would cross the per-view text
         // ceiling, never emit its first runs and then have the frame
-        // rejected at commit.
-        if (text_total + rowTextBytes(row) > text_ceiling) break;
+        // rejected at commit. A row that ADDS no text can never cross
+        // anything, so it paints even when earlier widgets already sit
+        // past the grid's reserved share — the ceiling bounds what the
+        // grid adds, not what its siblings spent.
+        const row_text = rowTextBytes(row);
+        if (row_text > 0 and text_total + row_text > text_ceiling) break;
         // Path-element stop, ATOMIC per row, against the view-global
         // running total (static sibling paths included): a row of rounded
         // corners is skipped BEFORE it would cross the per-view
-        // path-element budget.
-        if (path_total + rowPathElements(row) > builder.path_elements.len) break;
+        // path-element budget; a row adding none paints regardless.
+        const row_paths = rowPathElements(row);
+        if (row_paths > 0 and path_total + row_paths > builder.path_elements.len) break;
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on

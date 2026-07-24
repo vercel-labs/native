@@ -541,6 +541,63 @@ test "pure-double corners draw nested L joins, never through-bars" {
     try testing.expect(min_y > 0);
 }
 
+test "a wide row of one-bar box pieces paints under the widget budget" {
+    // 198 columns of │ emit one bar each; the cost estimate must charge
+    // what they paint, not a flat joint worst case that rejects the row.
+    var cells: [198]grid_model.TerminalCell = undefined;
+    for (&cells) |*c| c.* = .{ .cp = 0x2502, .fg = white };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 1700, 40),
+        .tokens = .{},
+        .command_budget = 1792,
+    });
+    var bars: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rect => |fill| {
+                if (fill.rect.width < 40) bars += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 198), bars);
+}
+
+test "a row adding no text paints even when siblings spent the text share" {
+    // Earlier widgets already sit past the grid's reserved text share;
+    // an all-box row ADDS no text, so it must paint — the ceiling bounds
+    // what the grid adds, never what siblings spent.
+    const filler = "x" ** (canvas.max_display_list_text_bytes - 100);
+    var cells: [8]grid_model.TerminalCell = undefined;
+    for (&cells) |*c| c.* = .{ .cp = 0x2500, .fg = white };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try builder.drawText(.{ .id = 1, .font_id = 2, .size = 12, .origin = geometry.PointF.init(0, 0), .color = white, .text = filler });
+
+    try grid_model.paint(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 100, 40),
+        .tokens = .{},
+        // The default widget reserve leaves less than the filler already
+        // consumed; the box row adds zero text and must still paint.
+        .text_reserve = grid_model.widget_text_reserve,
+    });
+    var box_fills: usize = 0;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rect => |fill| {
+                if (fill.rect.width < 100) box_fills += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(box_fills >= 1);
+}
+
 test "clampGrid trades rows for columns under the cell ceiling" {
     const clamped = grid_model.clampGrid(400, 100);
     try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);

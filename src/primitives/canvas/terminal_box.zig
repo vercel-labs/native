@@ -166,6 +166,41 @@ fn lineSides(cp: u21) ?Sides {
 }
 
 /// Paint one box-drawing cell (or a merged horizontal run of the same
+/// The MOST commands `paint` can emit for one code point — the per-cell
+/// charge the grid painter's row preflight uses, kept adjacent to the
+/// paint switch so the two cannot drift. Pure lines emit one bar (two
+/// for a double), joints emit per side (two per double side), nested
+/// double corners four, rounded corners a path plus its straight run,
+/// the crossing diagonal two, quadrants one rect per lit quarter, and
+/// every block/shade/fraction one.
+pub fn maxCommands(cp: u21) usize {
+    if (doubleCorner(cp) != null) return 4;
+    if (lineSides(cp)) |sides| {
+        // The pure-line shortcuts emit one bar (two for a double).
+        if (sides.up == .none and sides.down == .none and sides.left == sides.right and sides.left != .none) {
+            return if (sides.left == .double) 2 else 1;
+        }
+        if (sides.left == .none and sides.right == .none and sides.up == sides.down and sides.up != .none) {
+            return if (sides.up == .double) 2 else 1;
+        }
+        var total: usize = 0;
+        for ([_]Weight{ sides.up, sides.down, sides.left, sides.right }) |weight| {
+            total += switch (weight) {
+                .none => 0,
+                .light, .heavy => 1,
+                .double => 2,
+            };
+        }
+        return total;
+    }
+    return switch (cp) {
+        0x256D, 0x256E, 0x256F, 0x2570 => 2, // arc + straight run
+        0x2573 => 2, // the crossing diagonal
+        0x2596...0x259F => 3, // at most three lit quarters in the set
+        else => 1, // lines, blocks, shades, fractions
+    };
+}
+
 /// A pure-double corner's turn: which vertical and horizontal side the
 /// two nested L joins open toward.
 const DoubleCorner = struct { down: bool, right: bool };
