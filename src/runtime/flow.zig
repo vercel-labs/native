@@ -1220,9 +1220,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             self.dispatch_error_total +%= 1;
             var record: automation.snapshot.DispatchError = .{
                 .timestamp_ns = runtime_clock.timestampToU64(nowNanoseconds()),
-                .event = event_name,
                 .error_name = @errorName(err),
             };
+            record.setEvent(event_name);
             record.setDetail(detail);
             if (self.dispatch_error_len == self.dispatch_errors.len) {
                 std.mem.copyForwards(automation.snapshot.DispatchError, self.dispatch_errors[0 .. self.dispatch_errors.len - 1], self.dispatch_errors[1..]);

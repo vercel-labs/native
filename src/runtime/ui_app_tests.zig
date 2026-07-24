@@ -2873,7 +2873,7 @@ test "an effects-wake rebuild past the widget budget fails tests loudly and degr
     );
     // Recording still happened before the propagate.
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
-    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event);
+    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event());
     try std.testing.expectEqualStrings("WidgetLayoutListFull", harness.runtime.dispatchErrors()[0].error_name);
 
     // Production policy: the same failure degrades — recorded in the
@@ -2932,7 +2932,7 @@ test "a stale automation widget click degrades instead of killing the frame call
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
     const errors = harness.runtime.dispatchErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event);
+    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event());
     try std.testing.expectEqualStrings("InvalidCommand", errors[0].error_name);
 
     // The app is still alive: a real click keeps dispatching.

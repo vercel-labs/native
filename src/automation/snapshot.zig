@@ -73,10 +73,25 @@ pub const FrameProfile = struct {
 /// verb targeted.
 pub const DispatchError = struct {
     timestamp_ns: u64 = 0,
-    event: []const u8 = "",
+    event_storage: [max_dispatch_error_event_bytes]u8 = undefined,
+    event_len: u8 = 0,
     error_name: []const u8 = "",
     detail_storage: [max_dispatch_error_detail_bytes]u8 = undefined,
     detail_len: u8 = 0,
+
+    /// The event name is INLINE storage like `detail`, never a borrowed
+    /// slice: records are copied by value into a ring that outlives any
+    /// caller's buffer, so a name passed from stack or reusable storage
+    /// must be owned at record time.
+    pub fn event(self: *const DispatchError) []const u8 {
+        return self.event_storage[0..self.event_len];
+    }
+
+    pub fn setEvent(self: *DispatchError, text: []const u8) void {
+        const len = @min(text.len, self.event_storage.len);
+        @memcpy(self.event_storage[0..len], text[0..len]);
+        self.event_len = @intCast(len);
+    }
 
     pub fn detail(self: *const DispatchError) []const u8 {
         return self.detail_storage[0..self.detail_len];
@@ -88,6 +103,10 @@ pub const DispatchError = struct {
         self.detail_len = @intCast(len);
     }
 };
+
+/// Event-name bytes kept per degraded dispatch error (a truncated copy,
+/// owned by the record — the ring outlives every caller's buffer).
+pub const max_dispatch_error_event_bytes: usize = 64;
 
 /// Detail context kept per degraded dispatch error (a truncated copy of
 /// the failing automation command's arguments).
@@ -620,14 +639,14 @@ pub fn writeText(input: Input, writer: anytype) !void {
     for (input.errors) |dispatch_error| {
         if (dispatch_error.detail_len > 0) {
             try writer.print("  error event={s} name={s} detail=\"{s}\" timestamp_ns={d}\n", .{
-                dispatch_error.event,
+                dispatch_error.event(),
                 dispatch_error.error_name,
                 dispatch_error.detail(),
                 dispatch_error.timestamp_ns,
             });
         } else {
             try writer.print("  error event={s} name={s} timestamp_ns={d}\n", .{
-                dispatch_error.event,
+                dispatch_error.event(),
                 dispatch_error.error_name,
                 dispatch_error.timestamp_ns,
             });

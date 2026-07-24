@@ -979,7 +979,7 @@ test "a handler error degrades: dispatch continues, the error ring records it, s
     // The error is recorded and queryable...
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
     try std.testing.expectEqual(@as(u64, 1), harness.runtime.dispatchErrorTotal());
-    try std.testing.expectEqualStrings("command", harness.runtime.dispatchErrors()[0].event);
+    try std.testing.expectEqualStrings("command", harness.runtime.dispatchErrors()[0].event());
     try std.testing.expectEqualStrings("UpdateArmBlewUp", harness.runtime.dispatchErrors()[0].error_name);
 
     // ...traced at error level...
@@ -1076,4 +1076,23 @@ test "a full trace sink never fails dispatch; the loss is counted and published"
     try automation.snapshot.writeText(harness.runtime.automationSnapshot("Chatty"), &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "dropped_trace_records=") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "dropped_trace_records=0") == null);
+}
+
+test "the dispatch-error ring owns its event name" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+
+    // Record through a caller-owned buffer, then clobber it: the ring's
+    // record must have copied the name at record time (the record is
+    // copied by value into a ring that outlives every caller's buffer).
+    var name_buffer: [32]u8 = undefined;
+    const name = "hover_leave_capture";
+    @memcpy(name_buffer[0..name.len], name);
+    harness.runtime.recordDispatchError(name_buffer[0..name.len], error.OutOfMemory);
+    @memset(&name_buffer, 'x');
+
+    const errors = harness.runtime.dispatchErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings(name, errors[errors.len - 1].event());
+    try std.testing.expectEqualStrings("OutOfMemory", errors[errors.len - 1].error_name);
 }
