@@ -1,0 +1,76 @@
+<!-- command-palette: the palette overlay as a reusable template — a
+     scrim catcher, a dialog, the query field, and the command rows.
+     Model contract: paletteOpen, paletteQuery, paletteRows
+     {id, prefix, title, hasPrefix, selected}; Msg arms toggle_palette /
+     close_palette / palette_edit / palette_exec / palette_run:{id} /
+     palette_scrolled. Plain ArrowUp/Down ride the edit-derivation seam
+     (see core.ts's palette_edit arm). -->
+<template name="command-palette">
+  <panel background="scrim" on-press="close_palette" label="Palette backdrop">
+    <column cross="center" padding="60">
+      <dialog width="520" height="340" on-dismiss="close_palette" label="Command palette">
+        <column padding="10" gap="8">
+          <text-field text="{paletteQuery}" placeholder="Type a command…" autofocus="true" on-input="palette_edit" on-submit="palette_exec" label="Command query" />
+          <scroll grow="1" value="{paletteScroll}" on-scroll="palette_scrolled" label="Command results">
+            <column>
+              <for each="paletteRows" key="id" as="c">
+                <list-item on-press="palette_run:{c.id}" selected="{c.selected}" padding="10" gap="8" cross="center" label="{c.title}">
+                  <if test="{c.hasPrefix}">
+                    <text size="sm" foreground="text_muted">{c.prefix}</text>
+                  </if>
+                  <text grow="1" wrap="false">{c.title}</text>
+                </list-item>
+              </for>
+              <else>
+                <column padding="14" cross="center">
+                  <text size="sm" foreground="text_muted">No matching commands</text>
+                </column>
+              </else>
+            </column>
+          </scroll>
+          <row cross="center">
+            <text size="sm" foreground="text_muted" grow="1">Up/Down select · Enter runs · Esc closes</text>
+          </row>
+        </column>
+      </dialog>
+    </column>
+  </panel>
+</template>
+<stack>
+  <column background="background">
+    <row height="46" padding="12" gap="10" cross="center" background="surface" label="Header">
+      <text>Tasks</text>
+      <spacer grow="1" />
+      <button size="sm" variant="outline" on-press="toggle_palette">Cmd+Shift+P Commands</button>
+    </row>
+    <separator />
+    <scroll grow="1" label="Task list">
+      <column padding="16" gap="2">
+        <for each="taskRows" key="id" as="t">
+          <list-item on-press="task_toggle:{t.id}" selected="{t.done}" padding="10" gap="10" cross="center" label="{t.title}">
+            <if test="{t.done}">
+              <icon name="check-circle" foreground="success" />
+            </if>
+            <else>
+              <icon name="circle-dot" foreground="text_muted" />
+            </else>
+            <text grow="1" wrap="false">{t.title}</text>
+            <if test="{t.done}">
+              <badge variant="secondary">done</badge>
+            </if>
+          </list-item>
+        </for>
+        <else>
+          <column padding="24" cross="center" gap="6">
+            <text foreground="text_muted">No tasks</text>
+            <text size="sm" foreground="text_muted">Run "Restore sample tasks" from the palette.</text>
+          </column>
+        </else>
+      </column>
+    </scroll>
+    <status-bar>{statusLine} · {openCount} open · {doneCount} done</status-bar>
+  </column>
+  <if test="{paletteOpen}">
+    <use template="command-palette" />
+  </if>
+</stack>
