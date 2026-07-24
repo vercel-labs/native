@@ -249,30 +249,37 @@ pub fn formatClock(arena: std.mem.Allocator, ms: u64) []const u8 {
 }
 
 pub fn view(ui: *PlayerUi, model: *const Model) PlayerUi.Node {
-    return ui.column(.{ .gap = 12, .padding = 16, .style_tokens = .{ .background = .background } }, .{
-        ui.row(.{ .gap = 8, .cross = .center }, .{
-            ui.text(.{ .size = .lg }, "Video Player"),
-            ui.spacer(1),
-            ui.el(.button_group, .{}, .{
-                ui.el(.toggle_button, .{ .selected = model.screen == .player, .on_toggle = .show_player, .text = "Player" }, .{}),
-                ui.el(.toggle_button, .{ .selected = model.screen == .custom, .on_toggle = .show_custom, .text = "Custom" }, .{}),
+    // Bottom chrome anchors like a real app's: the page padding wraps
+    // only the CONTENT column, and the status bar is the root column's
+    // last child — full-bleed to the window's left/right/bottom edges,
+    // its own horizontal padding, its hairline top separator from the
+    // theme tokens.
+    return ui.column(.{ .gap = 0, .style_tokens = .{ .background = .background } }, .{
+        ui.column(.{ .gap = 12, .padding = 16, .grow = 1 }, .{
+            ui.row(.{ .gap = 8, .cross = .center }, .{
+                ui.text(.{ .size = .lg }, "Video Player"),
+                ui.spacer(1),
+                ui.el(.button_group, .{}, .{
+                    ui.el(.toggle_button, .{ .selected = model.screen == .player, .on_toggle = .show_player, .text = "Player" }, .{}),
+                    ui.el(.toggle_button, .{ .selected = model.screen == .custom, .on_toggle = .show_custom, .text = "Custom" }, .{}),
+                }),
             }),
+            ui.row(.{ .gap = 8, .cross = .center }, .{
+                ui.el(.search_field, .{
+                    .grow = 1,
+                    .text = model.source_field.text(),
+                    .placeholder = "file path or http(s) url",
+                    .on_input = PlayerUi.inputMsg(.source_edit),
+                    .on_submit = .open,
+                    .semantics = .{ .label = "Source" },
+                }, .{}),
+                ui.button(.{ .variant = .primary, .on_press = .open, .disabled = model.source_field.text().len == 0 }, "Open"),
+            }),
+            switch (model.screen) {
+                .player => playerScreen(ui, model),
+                .custom => customScreen(ui, model),
+            },
         }),
-        ui.row(.{ .gap = 8, .cross = .center }, .{
-            ui.el(.search_field, .{
-                .grow = 1,
-                .text = model.source_field.text(),
-                .placeholder = "file path or http(s) url",
-                .on_input = PlayerUi.inputMsg(.source_edit),
-                .on_submit = .open,
-                .semantics = .{ .label = "Source" },
-            }, .{}),
-            ui.button(.{ .variant = .primary, .on_press = .open, .disabled = model.source_field.text().len == 0 }, "Open"),
-        }),
-        switch (model.screen) {
-            .player => playerScreen(ui, model),
-            .custom => customScreen(ui, model),
-        },
         // Each screen's status line matches its ownership model: the
         // declarative screen has no event-fed state to report, the
         // custom screen reports exactly what its events told it.

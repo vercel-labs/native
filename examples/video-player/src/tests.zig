@@ -298,6 +298,33 @@ test "the view lays out through the canvas engine on both screens" {
     try testing.expect(findByKind(player_tree.root, .media_surface) != null);
 }
 
+test "the status bar anchors full-bleed to the window edges on both screens" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    inline for (.{ main.Screen.player, main.Screen.custom }) |screen| {
+        var model = openedModel(clip_path, screen);
+        var ui = main.PlayerUi.init(arena);
+        const tree = try ui.finalize(main.view(&ui, &model));
+        var nodes: [512]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 760, 560), &nodes);
+
+        // Bottom chrome, not an inset card: flush to the window's
+        // left, right, and bottom — the page padding wraps only the
+        // content column above it.
+        var bar_frame: ?geometry.RectF = null;
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .status_bar) bar_frame = node.frame.normalized();
+        }
+        const frame = bar_frame orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(f32, 0), frame.x);
+        try testing.expectEqual(@as(f32, 760), frame.width);
+        try testing.expectEqual(@as(f32, 560), frame.maxY());
+        try testing.expect(frame.height > 0);
+    }
+}
+
 fn expectStatusBar(root: canvas.Widget, expected: []const u8) !void {
     const bar = findByKind(root, .status_bar) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(expected, bar.text);
