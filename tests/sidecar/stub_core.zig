@@ -112,12 +112,16 @@ export fn nsc_core_dispatch_text_input(tag: u8, event: [*]const u8, event_len: u
     noCore();
 }
 
-export fn nsc_core_dispatch_scroll_state(tag: u8, offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64, cmd: *[*]const u8, cmd_len: *usize) void {
+export fn nsc_core_dispatch_scroll_state(tag: u8, offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64, cmd: *[*]const u8, cmd_len: *usize) void {
     _ = tag;
-    _ = offset;
-    _ = velocity;
-    _ = viewport_extent;
-    _ = content_extent;
+    _ = offset_x;
+    _ = offset_y;
+    _ = velocity_x;
+    _ = velocity_y;
+    _ = viewport_extent_x;
+    _ = viewport_extent_y;
+    _ = content_extent_x;
+    _ = content_extent_y;
     _ = cmd;
     _ = cmd_len;
     noCore();
