@@ -234,19 +234,21 @@ test "integer-classed slots cross the compiler-provable extremes exactly" {
     ts_core.rt.frameReset();
     shim_core.rt.frameReset();
 
-    // The extremes follow each slot's ATTESTED class in the supplied
-    // sidecar: an i64-classed arm also crosses the negative extreme, a
-    // u64-classed one stays within its unsigned range.
+    // The extremes follow each slot's class in the supplied sidecar: a
+    // signed slot (i64-attested, or f64 in a sidecar predating integer
+    // attestation) also crosses the negative extreme; a u64-attested
+    // one stays within its unsigned range. Every crossing value sits
+    // within +-(2^53 - 1), so each class carries it exactly.
     const max_exact = 9007199254740991; // 2^53 - 1
     const boundary_script = comptime blk: {
         var msgs: []const shim_core.Msg = &.{
             .{ .canvas_resized = max_exact },
             .{ .toggle = max_exact },
         };
-        if (@typeInfo(@FieldType(shim_core.Msg, "toggle")).int.signedness == .signed) {
+        if (carriesNegatives(@FieldType(shim_core.Msg, "toggle"))) {
             msgs = msgs ++ [_]shim_core.Msg{.{ .toggle = -max_exact }};
         }
-        if (@typeInfo(@FieldType(shim_core.Msg, "canvas_resized")).int.signedness == .signed) {
+        if (carriesNegatives(@FieldType(shim_core.Msg, "canvas_resized"))) {
             msgs = msgs ++ [_]shim_core.Msg{.{ .canvas_resized = -max_exact }};
         }
         msgs = msgs ++ [_]shim_core.Msg{.{ .canvas_resized = 0 }};
@@ -259,14 +261,35 @@ test "integer-classed slots cross the compiler-provable extremes exactly" {
         };
         ts_model = next.ts;
         shim_model = next.shim;
-        // The mirror decoded the committed snapshot: its integer slot
+        // The mirror decoded the committed snapshot: its numeric slot
         // holds the exact crossing value (compared class-agnostically —
-        // the arm and the field each follow their own attestation).
+        // the arm and the field each follow their own class, and every
+        // crossing value is f64-exact).
         switch (msg) {
-            .canvas_resized => |value| try testing.expectEqual(@as(i128, value), @as(i128, shim_model.canvasWidth)),
+            .canvas_resized => |value| try testing.expectEqual(exactValue(value), exactValue(shim_model.canvasWidth)),
             else => {},
         }
     }
+}
+
+/// Whether a mirror slot's class carries negative values: signed
+/// integers and f64 do; the unsigned class does not.
+fn carriesNegatives(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int => |info| info.signedness == .signed,
+        .float => true,
+        else => @compileError("not a numeric mirror slot: " ++ @typeName(T)),
+    };
+}
+
+/// A class-agnostic exact comparison value: every crossing this suite
+/// drives sits within +-(2^53 - 1), where f64 carries integers exactly.
+fn exactValue(value: anytype) f64 {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .int => @floatFromInt(value),
+        .float => value,
+        else => @compileError("not a numeric mirror slot: " ++ @typeName(@TypeOf(value))),
+    };
 }
 
 test "channel entries match the transpiler lane through the bytes envelope" {

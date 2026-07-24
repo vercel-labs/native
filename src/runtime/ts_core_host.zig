@@ -2613,7 +2613,12 @@ pub fn TsCoreHost(comptime core: type) type {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
                 } else if (std.mem.eql(u8, f.name, "bytes") or std.mem.eql(u8, f.name, "key")) {
                     if (f.type != []const u8) ok = false;
-                } else if (std.mem.eql(u8, f.name, "code") or std.mem.eql(u8, f.name, "signal") or std.mem.eql(u8, f.name, "droppedWrites")) {
+                } else if (std.mem.eql(u8, f.name, "code") or std.mem.eql(u8, f.name, "signal")) {
+                    // Non-exited terminals deliver -1 sentinels in both
+                    // slots: signed by contract, so the unsigned class
+                    // cannot carry them.
+                    if (f.type != i64 and f.type != f64) ok = false;
+                } else if (std.mem.eql(u8, f.name, "droppedWrites")) {
                     if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;

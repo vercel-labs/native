@@ -112,6 +112,7 @@ const Emitter = struct {
         try self.validateEmissionNames();
         self.validateChannelShapes();
         try self.validateArmStorage();
+        try self.validateIntegerAttestations();
         if (self.diags.hasErrors()) return;
         self.inlined = try self.inlinedNames();
         try self.header();
@@ -516,6 +517,43 @@ const Emitter = struct {
             .f64 => "f64",
             .i64 => self.integerSpelling(slot),
         };
+    }
+
+    // ------------------------------------ host-supplied signed slots
+    //
+    // Some structural vocabularies are filled by the HOST with values
+    // that go negative: scroll axes during rubber-banding and upward
+    // flicks (offsets, velocities), and selection bounds during
+    // backward selections. A u64 attestation on such a slot could
+    // never carry those values — the generated wiring would trap
+    // converting them — so the checker refuses the attestation at tool
+    // time instead.
+
+    fn validateIntegerAttestations(self: *Emitter) Error!void {
+        for (self.sidecar.types.structs) |entry| {
+            if (self.scrollStateFields(entry.name) == null) continue;
+            for (entry.fields) |field| {
+                if (field.type != .i64) continue;
+                const slot = try self.slotPath(entry.name, field.name);
+                if (self.attestedClass(slot) == .u64) {
+                    self.diags.flag("integer_slots", "\"{s}\" is a scroll-state axis, and scroll translation supplies signed values (offsets and velocities go negative) — the u64 class cannot carry them; keep scroll-state fields i64 or f64", .{slot});
+                }
+            }
+        }
+        for (self.sidecar.types.unions) |entry| {
+            if (!self.isTextInputUnion(entry.name)) continue;
+            for (entry.arms) |arm| {
+                if (!std.mem.eql(u8, arm.name, "set_selection")) continue;
+                const record = self.recordOf(arm.payload) orelse continue;
+                for (record.fields) |field| {
+                    if (field.type != .i64) continue;
+                    const slot = try self.slotPath(record.name, field.name);
+                    if (self.attestedClass(slot) == .u64) {
+                        self.diags.flag("integer_slots", "\"{s}\" is a text-selection bound, and backward selections carry signed values — the u64 class cannot carry them; keep selection fields i64 or f64", .{slot});
+                    }
+                }
+            }
+        }
     }
 
     // --------------------------------------------------- mirror types
@@ -1505,6 +1543,117 @@ test "u64-attested slots generate the unsigned twin; i64 and f64 slots are untou
     const source_z = try arena.dupeZ(u8, generated);
     const tree = try std.zig.Ast.parse(arena, source_z, .zig);
     try testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "u64 attestations on host-supplied signed slots refuse at check time" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A scroll-state record with a u64-attested axis: scroll translation
+    // supplies negative offsets and velocities, which the unsigned class
+    // cannot carry — refused before any wiring generates.
+    const scroll_struct =
+        \\      {"name": "Scroll", "fields": [
+        \\        {"name": "offsetX", "type": {"kind": "f64"}},
+        \\        {"name": "offsetY", "type": {"kind": "i64"}},
+        \\        {"name": "velocityX", "type": {"kind": "f64"}},
+        \\        {"name": "velocityY", "type": {"kind": "f64"}},
+        \\        {"name": "viewportExtentX", "type": {"kind": "f64"}},
+        \\        {"name": "viewportExtentY", "type": {"kind": "f64"}},
+        \\        {"name": "contentExtentX", "type": {"kind": "f64"}},
+        \\        {"name": "contentExtentY", "type": {"kind": "f64"}}
+        \\      ]},
+    ;
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "\"structs\": [\n",
+        try std.fmt.allocPrint(arena, "\"structs\": [\n{s}\n", .{scroll_struct}),
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}},\n      {\"name\": \"scrolled\", \"payload\": {\"kind\": \"record\", \"name\": \"Scroll\"}}",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Scroll.offsetY\", \"class\": \"u64\"}");
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "scroll-state axis") != null) found = true;
+    }
+    try testing.expect(found);
+    // The same record i64-attested generates: only the unsigned class
+    // is incoherent with the host's signed values.
+    const signed = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Scroll.offsetY\", \"class\": \"u64\"}", "{\"slot\": \"Scroll.offsetY\", \"class\": \"i64\"}");
+    const generated = try emitFromJson(arena, signed);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_scroll_state(1,") != null);
+}
+
+test "a u64 attestation on a selection bound refuses at check time" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The full text-input vocabulary with a u64-attested selection
+    // anchor: backward selections carry signed bounds.
+    const records =
+        \\      {"name": "Move", "fields": [
+        \\        {"name": "direction", "type": {"kind": "enum", "name": "Dir"}},
+        \\        {"name": "extend", "type": {"kind": "bool"}}
+        \\      ]},
+        \\      {"name": "Sel", "fields": [
+        \\        {"name": "anchor", "type": {"kind": "i64"}},
+        \\        {"name": "focus", "type": {"kind": "i64"}}
+        \\      ]},
+        \\      {"name": "Comp", "fields": [
+        \\        {"name": "text", "type": {"kind": "bytes"}},
+        \\        {"name": "cursor", "type": {"kind": "optional", "inner": {"kind": "i64"}}}
+        \\      ]},
+    ;
+    const union_entry =
+        \\"unions": [{"name": "Edit", "arms": [
+        \\      {"name": "insert_text", "payload": {"kind": "bytes"}},
+        \\      {"name": "delete_backward", "payload": {"kind": "void"}},
+        \\      {"name": "delete_forward", "payload": {"kind": "void"}},
+        \\      {"name": "delete_word_backward", "payload": {"kind": "void"}},
+        \\      {"name": "delete_word_forward", "payload": {"kind": "void"}},
+        \\      {"name": "clear", "payload": {"kind": "void"}},
+        \\      {"name": "move_caret", "payload": {"kind": "value", "name": "Move"}},
+        \\      {"name": "set_selection", "payload": {"kind": "value", "name": "Sel"}},
+        \\      {"name": "set_composition", "payload": {"kind": "value", "name": "Comp"}},
+        \\      {"name": "commit_composition", "payload": {"kind": "void"}},
+        \\      {"name": "cancel_composition", "payload": {"kind": "void"}}
+        \\    ]}]
+    ;
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [\n", try std.fmt.allocPrint(arena, "\"structs\": [\n{s}\n", .{records}));
+    source = try std.mem.replaceOwned(u8, arena, source, "\"enums\": []", "\"enums\": [{\"name\": \"Dir\", \"members\": [\"previous\", \"next\", \"previous_word\", \"next_word\", \"start\", \"end\"]}]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"unions\": []", union_entry);
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"edited\", \"payload\": {\"kind\": \"union\", \"name\": \"Edit\"}}",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Sel.anchor\", \"class\": \"u64\"}, {\"slot\": \"Sel.focus\", \"class\": \"i64\"}, {\"slot\": \"Comp.cursor\", \"class\": \"i64\"}",
+    );
+    var diags = sidecar_mod.Diagnostics{ .arena = arena };
+    const parsed = try sidecar_mod.read(arena, source, &diags);
+    try testing.expectError(error.Refused, emit(arena, parsed, &diags));
+    var found = false;
+    for (diags.list.items) |item| {
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "text-selection bound") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "the empty integer_slots list decodes nothing differently" {
