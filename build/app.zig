@@ -854,16 +854,6 @@ fn nativeSdkModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.
 
     const native_sdk_mod = externalModule(b, dep, target, optimize, "src/root.zig");
     native_sdk_mod.addImport("geometry", geometry_mod);
-    // libghostty-vt rides the SDK's own dependency table (the terminal
-    // element's emulator); resolved through the SDK dependency's builder
-    // so user apps never declare it themselves.
-    native_sdk_mod.addImport("ghostty-vt", dep.builder.dependency("ghostty", .{
-        .target = target,
-        .optimize = optimize,
-        .simd = false,
-        .@"emit-xcframework" = false,
-        .@"emit-macos-app" = false,
-    }).module("ghostty-vt"));
     native_sdk_mod.addImport("assets", assets_mod);
     native_sdk_mod.addImport("app_dirs", app_dirs_mod);
     native_sdk_mod.addImport("trace", trace_mod);
