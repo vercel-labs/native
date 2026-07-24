@@ -256,6 +256,18 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                // Audio scalars obey the recorder the same way (the
+                // delivery boundary clamps them into the exact-integer
+                // window before anything journals), so an out-of-window
+                // value is journal damage — refuse it rather than
+                // silently reshaping the recorded stream at the feed.
+                if (effect.kind == .audio and audioScalarsDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: audio record for key {d} carries a millisecond value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 // Provenance consistency, gated BEFORE the regeneration
                 // skip below: a `.rejected` stamped onto a delivered
                 // record (nonzero token) would be skipped there and its
@@ -574,6 +586,15 @@ fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
         record.video_height >= max_exact;
 }
 
+/// The audio twin: positions and durations clamp into the exact-integer
+/// window at every delivery entry before they journal, so a recorded
+/// value at or past 2^53 can only be a damaged or hand-edited journal.
+fn audioScalarsDamaged(record: journal.EffectResultRecord) bool {
+    const max_exact: u64 = runtime_effects.max_effect_video_scalar_exclusive;
+    return record.audio_position_ms >= max_exact or
+        record.audio_duration_ms >= max_exact;
+}
+
 /// A `.video_load` record's `video_kind` is the load's OUTCOME, and the
 /// recorder writes exactly two values: `.loaded` on a resolved cascade
 /// and `.failed` on a synchronous refusal. Any other kind steers
@@ -757,6 +778,27 @@ test "exit records outside the transport's producible ranges are damaged" {
     try std.testing.expect(ptyRecordDamaged(record));
     record.pty_signal = -9;
     try std.testing.expect(ptyRecordDamaged(record));
+}
+
+test "audio records outside the exact-integer scalar window are damaged" {
+    // The delivery boundary clamps positions and durations below 2^53
+    // before anything journals, so every in-window value passes and
+    // every out-of-window value can only be journal damage.
+    var record: journal.EffectResultRecord = .{
+        .kind = .audio,
+        .key = 1,
+        .audio_kind = .position,
+        .audio_position_ms = 0,
+        .audio_duration_ms = 183_000,
+    };
+    try std.testing.expect(!audioScalarsDamaged(record));
+    record.audio_position_ms = runtime_effects.max_effect_video_scalar_exclusive - 1;
+    try std.testing.expect(!audioScalarsDamaged(record));
+    record.audio_position_ms = runtime_effects.max_effect_video_scalar_exclusive;
+    try std.testing.expect(audioScalarsDamaged(record));
+    record.audio_position_ms = 0;
+    record.audio_duration_ms = std.math.maxInt(u64);
+    try std.testing.expect(audioScalarsDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each
