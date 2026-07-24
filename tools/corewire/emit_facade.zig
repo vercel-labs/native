@@ -28,6 +28,11 @@
 //!   extractor (exact for every finite double, the infinities, and the
 //!   canonical quiet NaN), exported as `nsc_core_model_snapshot` plus
 //!   the two scalar probes the parity suite drives;
+//! - the channel bytes envelope, one export per wired channel entry
+//!   (`nsc_core_<channel>`): the entry's whole multi-value result rides
+//!   ONE bytes return — [produced u8][tag u8][payload…] — packed here
+//!   from a produced message or null, so the compile mode's channel
+//!   exports run the author's channel function and forward the result;
 //! - the identity constants, the sidecar's unbound-list declarations
 //!   (authors declare nothing; the generator carries them), and
 //!   deterministic zero/sample model builders so a compiled facade can
@@ -126,6 +131,7 @@ const FacadeEmitter = struct {
         try self.msgConstructors();
         try self.sampleBuilders();
         try self.encoders();
+        try self.channelEntries();
     }
 
     // ------------------------------------------------------- fencing
@@ -1021,6 +1027,104 @@ const FacadeEmitter = struct {
         , .{ self.sidecar.abi.snapshot_format, self.sidecar.model });
     }
 
+    // ------------------------------------------------ channel entries
+
+    /// The channel bytes envelope: a channel entry's whole result rides
+    /// one bytes return — [produced u8][tag u8][payload…] — so the
+    /// multi-value result (produced?, which arm, payload bytes) needs no
+    /// marshalling shape of its own. Byte 0 is 0 (nothing produced; the
+    /// envelope is exactly two bytes) or 1; byte 1 is the produced arm's
+    /// declaration-order wire tag (meaningless when nothing was
+    /// produced; this packer emits 0); the payload is the arm's
+    /// canonical value encoding — the envelope's tail is byte-identical
+    /// to the canonical union encoding of the produced message. The
+    /// compile mode's channel exports run the author's channel function
+    /// and hand its `Msg | null` result to the wired entry here.
+    fn channelEntries(self: *FacadeEmitter) Error!void {
+        const chan = self.sidecar.channels;
+        const entries = [_]struct { wired: bool, suffix: []const u8 }{
+            .{ .wired = chan.command_msg, .suffix = "command_msg" },
+            .{ .wired = chan.frame_msg, .suffix = "frame_msg" },
+            .{ .wired = chan.key_msg, .suffix = "key_msg" },
+            .{ .wired = chan.pinch_msg, .suffix = "pinch_msg" },
+        };
+        var any_wired = false;
+        for (entries) |entry| {
+            if (entry.wired) any_wired = true;
+        }
+        if (!any_wired) return;
+
+        try self.raw(
+            \\
+            \\// ----------------------------------------------------------------
+            \\// The channel bytes envelope: a channel entry's whole result rides
+            \\// one bytes return — [produced u8][tag u8][payload...]. Byte 0 is 0
+            \\// (nothing produced; the envelope is exactly two bytes) or 1; byte 1
+            \\// is the produced arm's declaration-order wire tag (0 when nothing
+            \\// was produced); the payload is the arm's canonical value encoding.
+            \\
+            \\function nscfMsgEnvelope(value: Msg): Uint8Array {
+            \\
+        );
+        for (self.sidecar.msg.arms, 0..) |arm, tag| {
+            try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte({d})];\n", .{ try tsString(self.arena, arm.name), tag });
+            try self.msgPayloadEncodeStatements(arm);
+            try self.raw("    return nscfCat(parts);\n  }\n");
+        }
+        try self.raw("  throw { kind: \"nscf_contract\", teaching: asciiBytes(\"a channel produced a message outside the declared union — the value and the contract disagree\") } as NscfContractError;\n}\n");
+
+        for (entries) |entry| {
+            if (!entry.wired) continue;
+            try self.print(
+                \\
+                \\export function nsc_core_{s}(msg: Msg | null): Uint8Array {{
+                \\  const nscfMsg = msg;
+                \\  if (nscfMsg === null) {{
+                \\    const parts: Uint8Array[] = [nscfByte(0), nscfByte(0)];
+                \\    return nscfCat(parts);
+                \\  }} else {{
+                \\    return nscfMsgEnvelope(nscfMsg);
+                \\  }}
+                \\}}
+                \\
+            , .{entry.suffix});
+        }
+    }
+
+    /// Statements appending one message arm's canonical payload bytes to
+    /// `parts`, off the narrowed arm value — the payload-descriptor twin
+    /// of the union encoder's per-arm body. The bytes must decode
+    /// against the arm's MIRROR payload type, so field order and number
+    /// classes follow the sidecar exactly.
+    fn msgPayloadEncodeStatements(self: *FacadeEmitter, arm: sidecar_mod.MsgArm) Error!void {
+        switch (arm.payload) {
+            .void => {},
+            .bytes => try self.fieldEncodeStatements(.bytes, "value.value", 2, 0),
+            .number => |class| try self.fieldEncodeStatements(numberRef(class), "value.value", 2, 0),
+            .number_bytes => |desc| {
+                // The mirror declares the number field first (the
+                // emitted convention of every producer of this shape —
+                // SCHEMA-GAPS.md), so the number's bytes lead.
+                try self.fieldEncodeStatements(numberRef(desc.number_class), try tsAccess(self.arena, "value", desc.number_field), 2, 0);
+                try self.fieldEncodeStatements(.bytes, try tsAccess(self.arena, "value", desc.bytes_field), 2, 8);
+            },
+            .record => |name| {
+                if (self.synthesizedRecordOf(recordPayloadRef(arm.payload), self.sidecar.msg.name, arm.name)) |record| {
+                    // Flattened beside `kind`: encode the record's
+                    // fields off the narrowed arm in declaration order.
+                    for (record.fields, 0..) |field, field_index| {
+                        try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8);
+                    }
+                } else {
+                    try self.fieldEncodeStatements(.{ .value = name }, "value.value", 2, 0);
+                }
+            },
+            .union_ref => |name| try self.fieldEncodeStatements(.{ .union_ref = name }, "value.value", 2, 0),
+            .enum_ref => |name| try self.fieldEncodeStatements(.{ .enum_ref = name }, "value.value", 2, 0),
+            .scalar => |ref| try self.fieldEncodeStatements(ref, "value.value", 2, 0),
+        }
+    }
+
     fn encoderNameFor(self: *FacadeEmitter, name: []const u8) Error![]const u8 {
         return std.fmt.allocPrint(self.arena, "nscfEncode{s}", .{name});
     }
@@ -1087,6 +1191,14 @@ fn recordPayloadRef(payload: sidecar_mod.Payload) TypeRef {
     return switch (payload) {
         .record => |name| .{ .value = name },
         else => unreachable,
+    };
+}
+
+/// A number class as the TypeRef the field-encoder authority takes.
+fn numberRef(class: sidecar_mod.NumberClass) TypeRef {
+    return switch (class) {
+        .f64 => .f64,
+        .i64 => .i64,
     };
 }
 
@@ -1297,6 +1409,62 @@ test "facade emission is deterministic and carries the projection surface" {
     try testing.expect(std.mem.indexOf(u8, first, "function nscfF64(value: number): Uint8Array {") != null);
     // The unbound list rides the facade (the author declares nothing).
     try testing.expect(std.mem.indexOf(u8, first, "export const viewUnbound = [\n  \"label_set\",\n] as const;") != null);
+}
+
+test "wired channels emit envelope-packing exports" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"key_msg\": false", "\"key_msg\": true");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\"]");
+    const generated = try facadeFromJson(arena, source);
+    // One export per wired channel, none for the unwired rest.
+    try testing.expect(std.mem.indexOf(u8, generated, "export function nsc_core_key_msg(msg: Msg | null): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "nsc_core_frame_msg") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "nsc_core_command_msg") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "nsc_core_pinch_msg") == null);
+    // The nothing-produced envelope is exactly [0, 0]; a produced arm
+    // leads with [1, tag] and appends the arm's canonical payload.
+    try testing.expect(std.mem.indexOf(u8, generated, "const parts: Uint8Array[] = [nscfByte(0), nscfByte(0)];") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "function nscfMsgEnvelope(value: Msg): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"bump\") {\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte(0)];\n    return nscfCat(parts);\n  }") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"label_set\") {\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte(1)];\n    parts[parts.length] = nscfBytes(value.value);\n    return nscfCat(parts);\n  }") != null);
+}
+
+test "unwired channels leave the envelope surface out of the facade" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const generated = try facadeFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, generated, "nscfMsgEnvelope") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "nsc_core_key_msg") == null);
+}
+
+test "envelope payloads follow the sidecar's classes and flattened orders" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // An i64-classed number arm and a synthesized flattened record arm,
+    // with the frame channel wired.
+    var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"structs\": [", "\"structs\": [\n      {\"name\": \"Msg_loaded\", \"fields\": [{\"name\": \"status\", \"type\": {\"kind\": \"f64\"}}, {\"name\": \"ok\", \"type\": {\"kind\": \"bool\"}}]},");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"number\", \"class\": \"i64\"}}, {\"name\": \"loaded\", \"payload\": {\"kind\": \"record\", \"name\": \"Msg_loaded\"}}",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "\"frame_msg\": false", "\"frame_msg\": true");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"frame_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Msg.bump\", \"class\": \"i64\"}");
+    const generated = try facadeFromJson(arena, source);
+    // The i64 class picks the two's-complement encoder, never the f64
+    // bit pattern.
+    try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"bump\") {\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte(0)];\n    parts[parts.length] = nscfI64(value.value);\n    return nscfCat(parts);\n  }") != null);
+    // The flattened record encodes its fields off the narrowed arm in
+    // declaration order, exactly as the arm's mirror payload decodes.
+    try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"loaded\") {\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte(1)];\n    parts[parts.length] = nscfF64(value.status);\n    parts[parts.length] = nscfByte(value.ok ? 1 : 0);\n    return nscfCat(parts);\n  }") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "export function nsc_core_frame_msg(msg: Msg | null): Uint8Array {") != null);
 }
 
 test "composite slice elements parenthesize in the projection" {
