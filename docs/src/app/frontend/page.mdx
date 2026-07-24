@@ -6,6 +6,8 @@ The same machinery also carries an entire existing web frontend — a React, Vue
 
 For frontends with a build step, the Native SDK provides helpers to switch between a dev server during development and bundled assets in production.
 
+If that frontend needs to call native Zig code, register an app-defined [Bridge](/bridge) handler in the shell and call it from JavaScript with `window.zero.invoke("command.name", payload)`. The scaffolded frontend files only check whether `window.zero` is present; [`examples/webview`](https://github.com/vercel-labs/native/tree/main/examples/webview) shows the complete custom command flow.
+
 ## Dynamic source function
 
 Use `source_fn` on your `App` so development uses a localhost server and production uses bundled assets:
@@ -106,6 +108,8 @@ The repository includes complete frontend examples:
 - `examples/vue` - Vue app built with Vite.
 
 Each example can be run from its directory with `zig build run`, or with `zig build dev` for the managed frontend dev server flow.
+
+For a custom Zig function exposed to JavaScript, start from `examples/webview`: it registers `native.ping`, returns JSON from Zig, and calls the handler from the WebView. WebView calls only work inside the Native SDK shell; a standalone browser dev server will not have `window.zero`.
 
 ## Production source
 
