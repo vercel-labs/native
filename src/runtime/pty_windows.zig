@@ -698,12 +698,15 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         for (options.argv[1..]) |arg| {
             if (std.mem.indexOfAny(u8, arg, batch_hostile_bytes) != null) return error.PtyArgvInvalid;
         }
-        // The command processor is EXPLICIT — resolved through the same
-        // caller-env PATH policy as any spawn — and invoked with /d, so
-        // a machine's AutoRun registry entries cannot splice commands
+        // The command processor is EXPLICIT and PINNED to the OS's own
+        // System32 — never the caller's PATH (a PATH-planted cmd.exe
+        // must not answer for a trusted script, and a PATH without
+        // System32 must not break batch spawns) and never COMSPEC (the
+        // same caller-owned trust class) — and invoked with /d, so a
+        // machine's AutoRun registry entries cannot splice commands
         // around (or in place of) the requested script the way they
         // would under CreateProcess's implicit batch rewrite.
-        interpreter = resolveExecutable(arena, "cmd.exe", options.env) orelse
+        interpreter = batchInterpreterPath(arena, options.env) orelse
             return error.PtyCommandNotFound;
     }
     const command_line_w = buildCommandLineW(arena, interpreter, resolved, options.argv, is_batch) catch |err| switch (err) {
@@ -1011,23 +1014,44 @@ fn resolveExecutable(arena: std.mem.Allocator, arg0: []const u8, env: ?[]const E
 /// resolves bare names), and the conventional literal only when both
 /// fail.
 fn systemPathFallback(env: ?[]const EnvVar, buf: []u8) []const u8 {
-    // The Windows directory is bounded at MAX_PATH (260) UTF-16 units;
-    // WTF-8 needs at most 3 bytes per unit.
-    var os_root_buf: [260 * 3]u8 = undefined;
-    const root = root: {
-        if (lookupEnvIgnoreCase(env, "SystemRoot")) |value| break :root value;
-        if (lookupEnvIgnoreCase(env, "windir")) |value| break :root value;
-        if (comptime is_windows) {
-            var wide: [260]u16 = undefined;
-            const len = win.GetWindowsDirectoryW(&wide, @intCast(wide.len));
-            if (len > 0 and len < wide.len) {
-                const decoded_len = std.unicode.wtf16LeToWtf8(&os_root_buf, wide[0..len]);
-                break :root os_root_buf[0..decoded_len];
-            }
-        }
-        break :root "C:\\Windows";
-    };
+    var root_buf: [windows_root_bytes]u8 = undefined;
+    const root = windowsRoot(env, &root_buf);
     return std.fmt.bufPrint(buf, "{s}\\System32;{s}", .{ root, root }) catch "C:\\Windows\\System32;C:\\Windows";
+}
+
+/// The Windows directory is bounded at MAX_PATH (260) UTF-16 units;
+/// WTF-8 needs at most 3 bytes per unit.
+const windows_root_bytes = 260 * 3;
+
+/// The real Windows root, OS truth first: `GetWindowsDirectoryW` is
+/// what an install under D:\Windows answers regardless of what the
+/// caller's env claims; the env's `SystemRoot`/`windir` and the
+/// conventional literal are the fallbacks for the corner where the
+/// call itself fails.
+fn windowsRoot(env: ?[]const EnvVar, buf: *[windows_root_bytes]u8) []const u8 {
+    if (comptime is_windows) {
+        var wide: [260]u16 = undefined;
+        const len = win.GetWindowsDirectoryW(&wide, @intCast(wide.len));
+        if (len > 0 and len < wide.len) {
+            const decoded_len = std.unicode.wtf16LeToWtf8(buf, wide[0..len]);
+            return buf[0..decoded_len];
+        }
+    }
+    if (lookupEnvIgnoreCase(env, "SystemRoot")) |value| return value;
+    if (lookupEnvIgnoreCase(env, "windir")) |value| return value;
+    return "C:\\Windows";
+}
+
+/// The pinned batch interpreter: `<windows root>\System32\cmd.exe`,
+/// probed for existence — a missing system cmd.exe reports the spawn
+/// as command-not-found rather than falling back to anything the
+/// caller could plant.
+fn batchInterpreterPath(arena: std.mem.Allocator, env: ?[]const EnvVar) ?[]const u8 {
+    var root_buf: [windows_root_bytes]u8 = undefined;
+    const root = windowsRoot(env, &root_buf);
+    const candidate = std.fmt.allocPrint(arena, "{s}\\System32\\cmd.exe", .{root}) catch return null;
+    if (!executableAt(arena, candidate)) return null;
+    return candidate;
 }
 
 /// The executable-extension allowlist for EXTENSION-LESS names: the
