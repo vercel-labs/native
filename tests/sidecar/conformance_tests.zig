@@ -358,6 +358,126 @@ test "ai-chat: facade snapshots byte-match the canonical encoder" {
     try expectSnapshotParity(facade_ai_chat, shim_ai_chat);
 }
 
+// ------------------------------------------- channel envelope axis
+//
+// The channel bytes envelope ([produced u8][tag u8][payload…]): a
+// channel entry's whole result rides one bytes return, the compiled
+// facade packs it, the generated shim unpacks it. Two executable
+// proofs, one per side:
+//
+//   - the facade's packed envelope is [1] ++ the canonical union
+//     encoding of the produced message (the envelope tail IS that
+//     encoding: tag byte = declaration-order arm index, payload = the
+//     arm's canonical bytes) — compared against the host's canonical
+//     encoder over the shim's mirror union;
+//   - the generated shim's channel entries, driven against the stub
+//     core's test-settable envelope, gate on the produced flag and
+//     decode the payload back into the mirror value.
+
+test "markup fixture: facade channel envelopes carry the canonical message bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    facade_markup.rt.resetAll();
+    defer facade_markup.rt.resetAll();
+
+    // Nothing produced: exactly the two header bytes.
+    try testing.expectEqualSlices(u8, &.{ 0, 0 }, facade_markup.nsc_core_key_msg(null));
+
+    // Produced arms across the payload families the fixture carries: a
+    // bare arm, an integer-classed number, bytes, a flattened record,
+    // and a flattened record with an enum member.
+    {
+        const envelope = facade_markup.nsc_core_key_msg(facade_markup.nsc_core_msg_add());
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_markup.Msg, .add, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_markup.nsc_core_key_msg(facade_markup.nsc_core_msg_toggle(2));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_markup.Msg, .{ .toggle = 2 }, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_markup.nsc_core_key_msg(facade_markup.nsc_core_msg_banner_set("parity"));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_markup.Msg, .{ .banner_set = "parity" }, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_markup.nsc_core_pinch_msg(facade_markup.nsc_core_msg_zoomed(1.25, 7, true));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_markup.Msg, .{ .zoomed = .{ .factor = 1.25, .windowId = 7, .fromBoard = true } }, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_markup.nsc_core_frame_msg(facade_markup.nsc_core_msg_appearance_changed(.dark, false, true));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_markup.Msg, .{ .appearance_changed = .{ .colorScheme = .dark, .reduceMotion = false, .highContrast = true } }, arena), envelope[1..]);
+    }
+
+    // Every wired entry routes through one packer: identical bytes for
+    // one message, and the unwired command channel stays out of the
+    // facade surface entirely.
+    const msg = facade_markup.nsc_core_msg_toggle(2);
+    try testing.expectEqualSlices(u8, facade_markup.nsc_core_key_msg(msg), facade_markup.nsc_core_frame_msg(msg));
+    try testing.expectEqualSlices(u8, facade_markup.nsc_core_frame_msg(msg), facade_markup.nsc_core_pinch_msg(msg));
+    try testing.expect(!@hasDecl(facade_markup, "nsc_core_command_msg"));
+}
+
+test "soundboard: facade channel envelopes carry the canonical message bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    facade_soundboard.rt.resetAll();
+    defer facade_soundboard.rt.resetAll();
+
+    try testing.expectEqualSlices(u8, &.{ 0, 0 }, facade_soundboard.nsc_core_frame_msg(null));
+    {
+        const envelope = facade_soundboard.nsc_core_key_msg(facade_soundboard.nsc_core_msg_toggle_play());
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_soundboard.Msg, .toggle_play, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_soundboard.nsc_core_frame_msg(facade_soundboard.nsc_core_msg_canvas_resized(640));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_soundboard.Msg, .{ .canvas_resized = 640 }, arena), envelope[1..]);
+    }
+}
+
+test "markup fixture: generated channel entries unpack the stub core's envelope" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const saved = stub_core.stub_channel_envelope;
+    defer stub_core.stub_channel_envelope = saved;
+    defer shim_markup.rt.frameReset();
+
+    const key = shim_markup.KeyEvent{ .key = "x", .shift = false, .control = false, .alt = false, .super = false };
+
+    // The stub's default envelope says nothing was produced: the entry
+    // gates to null.
+    try testing.expect(shim_markup.keyMsg(key) == null);
+
+    // A produced bare arm: header only, tag 0 = add.
+    stub_core.stub_channel_envelope = &.{ 1, 0 };
+    try testing.expect(shim_markup.keyMsg(key).? == .add);
+
+    // A produced payload arm: the tail decodes as the arm's canonical
+    // payload (toggle, i64-classed, tag 1).
+    var toggle_envelope: std.ArrayListUnmanaged(u8) = .empty;
+    try toggle_envelope.appendSlice(arena, &.{ 1, 1 });
+    try toggle_envelope.appendSlice(arena, corewire_rt.encodeAlloc(i64, 2, arena));
+    stub_core.stub_channel_envelope = toggle_envelope.items;
+    try testing.expectEqual(@as(i64, 2), shim_markup.keyMsg(key).?.toggle);
+
+    // A flattened record arm through the pinch entry (zoomed, tag 11).
+    var zoom_envelope: std.ArrayListUnmanaged(u8) = .empty;
+    try zoom_envelope.appendSlice(arena, &.{ 1, 11 });
+    try zoom_envelope.appendSlice(arena, corewire_rt.encodeAlloc(@FieldType(shim_markup.Msg, "zoomed"), .{ .factor = 1.25, .windowId = 7, .fromBoard = true }, arena));
+    stub_core.stub_channel_envelope = zoom_envelope.items;
+    const zoomed = shim_markup.pinchMsg(.{ .windowId = 7, .label = "board", .phase = .change, .scale = 0.25, .x = 1, .y = 2 }).?;
+    try testing.expectEqual(@as(f64, 1.25), zoomed.zoomed.factor);
+    try testing.expect(zoomed.zoomed.fromBoard);
+}
+
 /// Reference every public declaration, recursing into declared types
 /// (all of a shim's public type declarations are its own, so the walk
 /// never leaves the generated module).
