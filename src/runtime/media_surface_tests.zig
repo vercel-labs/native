@@ -99,6 +99,67 @@ test "burst pushes stage latest-wins and the frame clock adopts the newest" {
     try std.testing.expectEqualSlices(u8, &blue, resources[0].pixels);
 }
 
+test "a video-channel claim purges the previous playback's retained texture" {
+    // Replacing a playback re-claims its surface through the video
+    // channel's binding. The old playback's retained last frame is a
+    // DIFFERENT stream's pixels: composited under the new stream's
+    // fitted geometry it mis-fits visibly (the stale-landscape-in-a-
+    // portrait-quad bug), so the VIDEO claim starts from the
+    // placeholder — entry emptied, host-side texture removed — until
+    // the new stream's first frame adopts. Generic producer re-claims
+    // (`acquireMediaSurfaceProducer` direct) deliberately keep the
+    // retained texture: the adoption-boundary dedup test below pins
+    // that contract.
+    const harness = try startedGpuHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 140),
+    });
+
+    const producer = try harness.runtime.acquireMediaSurfaceProducer(surface_id);
+    const amber = solidFrame(.{ 200, 160, 40, 255 });
+    try producer.pushFrame(2, 2, &amber);
+    try dispatchFrame(harness, app, 1);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
+
+    // Release retains the last frame (the reclaim-ordering contract) —
+    // it is the next VIDEO claim that must not inherit it.
+    producer.release();
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) != null);
+
+    const binding = harness.runtime.mediaSurfaceBinding();
+    const sink = try binding.acquire_fn(binding.context, surface_id);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImages().len);
+    // The host's copied side-channel texture went with it (the
+    // unregister convention rides the same seam).
+    try std.testing.expectEqual(
+        canvas.mediaSurfaceTextureImageId(surface_id),
+        harness.null_platform.gpu_surface_image_remove_id,
+    );
+
+    // The replacement's first adopted frame repopulates the channel.
+    const teal = solidFrame(.{ 20, 140, 140, 255 });
+    try sink.push(2, 2, &teal);
+    try dispatchFrame(harness, app, 2);
+    const adopted = harness.runtime.adoptedMediaSurfaceTexture(surface_id).?;
+    try std.testing.expect(adopted.fingerprint != 0);
+
+    // The video RELEASE purges too: stop/replace/failure tell the UI
+    // "no playback" and the rebuild drops the surface's contain stamp,
+    // so a retained frame would composite stretched-distorted. The
+    // stopped surface returns to its placeholder.
+    binding.release_fn(binding.context, sink);
+    try std.testing.expect(harness.runtime.adoptedMediaSurfaceTexture(surface_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.registeredCanvasImages().len);
+}
+
 test "unchanged frames short-circuit damage; changed frames invalidate and repaint" {
     const harness = try startedGpuHarness(std.testing.allocator);
     defer harness.destroy(std.testing.allocator);

@@ -473,6 +473,22 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
             return error.MediaSurfaceChannelsExhausted;
         }
 
+        /// Forget the retained (adopted) texture for `surface_id`, if
+        /// any: the runtime entry empties (the placeholder shows until
+        /// the next adoption), the host's copied side-channel texture is
+        /// removed best-effort (the unregister convention: unsupported
+        /// seams and never-uploaded ids are no-ops), and views repaint.
+        /// Loop-thread-only, like the entry table it edits.
+        fn purgeRetainedMediaSurfaceTexture(self: *Runtime, surface_id: u64) void {
+            for (self.media_surface_entries[0..self.media_surface_count]) |*entry| {
+                if (entry.surface_id != surface_id or entry.fingerprint == 0) continue;
+                entry.* = .{ .surface_id = surface_id };
+                self.options.platform.services.removeGpuSurfaceImage(canvas.mediaSurfaceTextureImageId(surface_id)) catch {};
+                runtime_canvas_images.RuntimeCanvasImages(Runtime).noteCanvasImagesChanged(self);
+                return;
+            }
+        }
+
         /// Adopt staged producer frames, paced by the compositor: the
         /// gpu-surface frame dispatch calls this once per frame event,
         /// so a burst of pushes between presents collapses to ONE
@@ -622,14 +638,50 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         fn mediaSurfaceBindingAcquire(context: *anyopaque, surface_id: u64) anyerror!platform.VideoFrameSink {
             const self: *Runtime = @ptrCast(@alignCast(context));
             const producer = try acquireMediaSurfaceProducer(self, surface_id);
+            // A video claim starts from the placeholder: the PREVIOUS
+            // playback's retained last frame is a different stream's
+            // pixels, and compositing it under the new stream's fitted
+            // geometry mis-fits visibly (a portrait replacement's LOADED
+            // report rebuilds the quad while a stale landscape texture
+            // is still on the glass). VIDEO-CHANNEL-ONLY: generic
+            // producers (`acquireMediaSurfaceProducer` direct) keep the
+            // adoption-boundary dedup — a re-claim staging the SAME
+            // bytes stays free of copies and repaints. Presentation
+            // chrome only — display lists, goldens, and session
+            // fingerprints never see textures — so the purge cannot
+            // perturb replay identity.
+            purgeRetainedMediaSurfaceTexture(self, surface_id);
             return producer.frameSink();
         }
 
+        /// LOOP-THREAD-ONLY, like the acquire half (the binding's
+        /// documented contract — `effects_mod.MediaSurfaceBinding`):
+        /// the purge below edits the runtime's adopted-texture table
+        /// and calls the platform's image-removal service, both
+        /// loop-thread state. Every caller is the video channel on an
+        /// `update`-dispatch path (stop/replace/failure/teardown);
+        /// producer threads hold only the sink, never the binding.
         fn mediaSurfaceBindingRelease(context: *anyopaque, sink: platform.VideoFrameSink) void {
-            _ = context;
+            const self: *Runtime = @ptrCast(@alignCast(context));
             const slot: *MediaSurfaceSlot = @ptrCast(@alignCast(sink.context orelse return));
+            // The released claim's surface id, read while the claim is
+            // still ours (generation-checked under the data mutex): the
+            // purge below needs it after `release` clears the slot.
+            slot.mutex.lock();
+            const surface_id = if (slot.active and slot.generation == sink.generation) slot.surface_id else 0;
+            slot.mutex.unlock();
             const producer = MediaSurfaceProducer{ .slot = slot, .generation = sink.generation, .surface_id = 0 };
             producer.release();
+            // A video release ends the picture: the channel releases on
+            // stop, replace, and failure — states whose UI story is "no
+            // playback" — and a rebuild there also drops the surface's
+            // CONTAIN stamp, so a retained last frame would composite
+            // stretched-distorted over the placeholder geometry. Purge
+            // it (video-channel-only, like the acquire-side purge; the
+            // same presentation-only determinism argument applies). A
+            // paused or naturally-completed playback keeps its claim,
+            // so the freeze-frame stays for those.
+            if (surface_id != 0) purgeRetainedMediaSurfaceTexture(self, surface_id);
         }
 
         /// Disarm every wake binding this runtime armed: after this

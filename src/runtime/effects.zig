@@ -233,6 +233,14 @@ pub const RegisteredImage = struct {
 /// Constructed by `Runtime.mediaSurfaceBinding()`. `acquire_fn` is
 /// loop-thread-only (it claims runtime-owned channel state) and answers
 /// the copyable `platform.VideoFrameSink` the decoder pushes through;
+/// LOOP-THREAD-ONLY, both halves: acquire touches the runtime's claim
+/// tables, and release purges the runtime's adopted-texture entry (and
+/// the host's copied side-channel texture) for the ended playback —
+/// loop-thread runtime state throughout. That matches every caller:
+/// the video channel acquires in `loadVideo` and releases in
+/// stop/replace/failure/teardown, all `update`-dispatch paths.
+/// Producer THREADS never touch the binding — they hold the copyable
+/// `VideoFrameSink`, whose `push` is the any-thread half.
 /// `release_fn` ends the claim named by a previously acquired sink
 /// (idempotent — the sink carries its claim generation).
 pub const MediaSurfaceBinding = struct {
@@ -6418,8 +6426,10 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Stop playback, release the player AND the surface claim. No
         /// event echoes; the channel goes idle, later platform
-        /// stragglers are swallowed, and the surface keeps its last
-        /// adopted frame until another producer claims it.
+        /// stragglers are swallowed, and the surface returns to its
+        /// placeholder (the release purges the adopted frame - a
+        /// stopped player must not freeze-frame under "no playback"
+        /// chrome).
         pub fn stopVideo(self: *Self) void {
             if (!self.video.active) return;
             const fake = self.video.fake;
@@ -8941,7 +8951,12 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// Release the channel's media-surface claim, if one is held.
-        /// Idempotent; the runtime keeps the last adopted frame.
+        /// Idempotent. The runtime purges the claim's adopted frame on
+        /// this video-channel release (states that release — stop,
+        /// replace, failure — tell the UI "no playback", and a rebuild
+        /// there drops the surface's contain stamp, so a retained frame
+        /// would composite distorted); paused and naturally-completed
+        /// playbacks keep their claim and their freeze-frame.
         fn releaseVideoSink(self: *Self) void {
             if (self.video.sink.push_fn == null) return;
             const sink = self.video.sink;

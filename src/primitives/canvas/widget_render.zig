@@ -1148,6 +1148,44 @@ pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
     );
 }
 
+/// The video stream's reported dimensions for a contain-fitted media
+/// surface (`Widget.stream_size`, stamped by `Ui.stampVideoSurfaceFit`
+/// from the LOADED event's journaled report). Null until the
+/// dimensions are honestly known, so the fit math never runs on
+/// guessed or zero geometry — and only under `.contain`, the video
+/// surface's mode.
+fn mediaSurfaceStreamSize(widget: Widget) ?geometry.SizeF {
+    if (widget.image_fit != .contain) return null;
+    const size = widget.stream_size orelse return null;
+    if (size.width <= 0 or size.height <= 0) return null;
+    return size;
+}
+
+/// A letterbox bar extent below this is nothing to draw: the quad
+/// covers the frame on that axis (float wobble from centering math
+/// never conjures a phantom bar, and a full-frame quad keeps the
+/// frame's own corner radius).
+const media_surface_bar_epsilon: f32 = 0.001;
+
+/// The tight rounded-rect mask for a fitted quad inset `bar` inside a
+/// frame corner of radius `corner`: `max(0, corner - bar)`. The mask's
+/// corner circle is then INTERNALLY TANGENT to the frame's corner
+/// circle (center distance equals the radius difference exactly), so
+/// the masked quad never paints outside the surface's rounded
+/// silhouette while removing the provable minimum of picture — any
+/// smaller radius leaks square corners past the silhouette, any larger
+/// notches more picture than the silhouette demands. Bars at or past
+/// the corner radius mask nothing (0): the quad's corners sit fully
+/// inside the straight-edged part of the frame.
+fn mediaSurfaceQuadRadius(radius: Radius, bar: f32) Radius {
+    return .{
+        .top_left = @max(0, radius.top_left - bar),
+        .top_right = @max(0, radius.top_right - bar),
+        .bottom_right = @max(0, radius.bottom_right - bar),
+        .bottom_left = @max(0, radius.bottom_left - bar),
+    };
+}
+
 /// The media surface: an id-derived placeholder fill with the surface's
 /// externally produced texture composited over it. ONE display list
 /// serves both renderers — the texture rides a `draw_image` whose
@@ -1157,33 +1195,118 @@ pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
 /// composite the real texture. `image_id` is the SURFACE id (0 = the
 /// unbound sentinel: placeholder only, like an image leaf with id 0
 /// draws nothing).
+///
+/// CONTAIN fit is the video-surface mode (`Ui` stamps it on every
+/// surface the video channel feeds): with the stream's reported
+/// dimensions known (`Widget.stream_size`), THIS emit computes the
+/// aspect-fitted quad — centered, letterboxed/pillarboxed — so every
+/// host composites the identical geometry with no fit math of its own.
+/// The fitted shape is three commands: a BLACK fill over the whole
+/// frame at the frame's own radius (the letterbox field, so the
+/// surface silhouette is exact by construction — no per-bar corner
+/// approximation), the deterministic placeholder confined to the quad
+/// (goldens and replay screenshots, which skip the texture by policy,
+/// show the placeholder exactly where the picture goes, in the
+/// journaled-truth black field), and the picture quad — always the
+/// WHOLE frame at the stream's aspect (`image_src` crops do not apply
+/// here: see the coordinate-space teaching at the quad computation).
+/// Unknown dimensions (pre-LOADED) keep the plain full-frame
+/// placeholder draw: no guessed geometry, no divide-by-zero.
 fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
-    const radius = Radius.all(widget.style.radius orelse 0);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
-    });
+    const frame = widget.frame.normalized();
+    // The frame's EFFECTIVE corner radius: renderers clamp every corner
+    // to half the rect's short side, so the tangent-mask math below must
+    // start from the same value — an unbounded style radius (100 on a
+    // 32x16 surface) otherwise derives an inset-quad mask far past the
+    // real silhouette and renderers clamp THAT into a circular picture.
+    const radius = Radius.all(std.math.clamp(
+        widget.style.radius orelse 0,
+        0,
+        @min(frame.width, frame.height) * 0.5,
+    ));
+    // The fitted quad, computed once here: one authority for the
+    // geometry, always the STREAM's reported aspect. A declared
+    // `image_src` crop does NOT ride the fitted draw: `DrawImage.src`
+    // is adopted-TEXTURE pixel coordinates, and the video texture's
+    // size is unknowable at emit time (macOS budget-fits large decodes
+    // — a 3840x2160 stream lands as a smaller texture — so a
+    // stream-coordinate crop cannot be translated here, and forwarding
+    // it raw would sample the wrong region or nothing). Crops remain a
+    // GENERIC-producer facility in texture coordinates; the video
+    // surface always composites the whole frame.
+    const stream_size = mediaSurfaceStreamSize(widget);
+    const dst = if (stream_size) |size|
+        canvas.containDestinationRect(frame, size.width, size.height)
+    else
+        frame;
+    const draw_src = if (stream_size != null) null else widget.image_src;
+    const letterboxed = frame.height - dst.height > media_surface_bar_epsilon;
+    const pillarboxed = frame.width - dst.width > media_surface_bar_epsilon;
+    const fitted = letterboxed or pillarboxed;
+    const bar_extent = if (letterboxed)
+        (frame.height - dst.height) * 0.5
+    else if (pillarboxed)
+        (frame.width - dst.width) * 0.5
+    else
+        0;
+    const quad_radius = if (fitted) mediaSurfaceQuadRadius(radius, bar_extent) else radius;
+    if (fitted) {
+        // The letterbox field: black across the whole frame at the
+        // frame's radius — the silhouette, exactly.
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .radius = radius,
+            .fill = colorFill(Color.rgba8(0x00, 0x00, 0x00, 0xff)),
+        });
+        // The placeholder, confined to the quad under the picture
+        // (same tight mask, so it tracks the picture's shape).
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 4),
+            .rect = dst,
+            .radius = quad_radius,
+            .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+        });
+    } else {
+        try builder.fillRoundedRect(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = frame,
+            .radius = radius,
+            .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+        });
+    }
     // Cover fit expands the drawn texture past the widget frame on one
     // axis; the rectangular clip is what crops the overflow — exactly
     // emitImageWidget's cover clip. The draw's own radius mask below is
     // NOT a substitute: hosts that only mask radii paint a zero-radius
-    // cover surface outside its bounds, over its siblings.
+    // cover surface outside its bounds, over its siblings. (Cover and
+    // the fitted path are mutually exclusive: stream geometry rides
+    // only `.contain` surfaces.)
     const clips_image = widget.image_fit == .cover;
-    if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = widget.frame });
+    if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = frame });
     try builder.drawImage(.{
         .id = widgetPartId(widget.id, 2),
         .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
-        .src = widget.image_src,
-        .dst = widget.frame,
+        .src = draw_src,
+        .dst = dst,
         .opacity = widget.image_opacity,
-        .fit = widget.image_fit,
+        // Known geometry draws STRETCH: the quad is the fit, computed
+        // once from the reported dimensions. A
+        // second host-side contain against the real texture would open
+        // sub-pixel seams whenever a decoder's true dimensions round
+        // off the report (macOS floors scaled decode sizes); the
+        // sub-percent aspect nudge stretch absorbs is invisible, the
+        // seam is not — and any residue lands on the black field, not
+        // a colored fringe. Without known geometry the widget's own
+        // fit passes through.
+        .fit = if (stream_size != null) .stretch else widget.image_fit,
         .sampling = widget.image_sampling,
         // The render plan flattens clip stacks to rects, so a rounded
-        // surface masks on the draw itself (the avatar convention).
-        .radius = radius,
+        // surface masks on the draw itself (the avatar convention); a
+        // fitted quad carries the TIGHT inset mask
+        // (`mediaSurfaceQuadRadius`), tangent to the silhouette.
+        .radius = quad_radius,
     });
     if (clips_image) try builder.popClip();
 }

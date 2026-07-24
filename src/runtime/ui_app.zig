@@ -3333,6 +3333,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .completed = snap.completed,
                 .position_ms = snap.position_ms,
                 .duration_ms = snap.duration_ms,
+                // The surface + reported stream dimensions drive the
+                // video surface's CONTAIN fit: the builder stamps the
+                // fitted-draw geometry on whichever media surface this
+                // playback feeds (Ui.stampVideoSurfaceFit).
+                .surface = snap.surface,
+                .width = snap.width,
+                .height = snap.height,
             };
         }
 

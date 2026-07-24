@@ -5,7 +5,7 @@ import { AttrTable } from "@/components/attr-table";
 
 `video` plays the app's **single platform-decoded video** through the media-surface texture channel: on macOS, AVFoundation decodes straight into the compositor while your app core sees only commands and journaled events — pixels never cross the model boundary. Hosts without a decoder yet (Windows and Linux today) report the capability honestly and answer a load with one explicit `failed` event, never a silent stub.
 
-`src` declares the source — an app-assets path, or an `http(s)` URL streamed progressively — resolved local-first, exactly like audio. Declaring a `src` loads the player (a changed `src` replaces the playback whole; one player is the whole surface); `autoplay` (the default), `loop`, and `muted` shape the fresh playback.
+`src` declares the source — an app-assets path, or an `http(s)` URL streamed progressively — resolved local-first, exactly like audio. Declaring a `src` loads the player (a changed `src` replaces the playback whole; one player is the whole surface); `autoplay` (the default), `loop`, and `muted` shape the fresh playback. The picture always aspect-fits its box (contain): the decoded frame draws centered at the stream's reported proportions, letterboxed or pillarboxed on black — never stretched, never cropped.
 
 `controls` composes the **house transport chrome** under the picture: a play/pause button, a scrub slider, and elapsed/duration readouts — runtime-driven, so your model carries no transport state at all. Without `controls` the element is the surface alone: compose your own controls from the video command vocabulary (`Cmd.videoLoad`/`videoCtl` in TypeScript, `fx.loadVideo` and the transport verbs in Zig), the audio pattern.
 

@@ -1285,8 +1285,10 @@ pub fn Ui(comptime Msg: type) type {
         pub fn el(self: *Self, kind: WidgetKind, options: ElementOptions, children: anytype) Node {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
+            var widget = widgetFromOptions(kind, options);
+            if (kind == .media_surface) self.stampVideoSurfaceFit(&widget);
             return .{
-                .widget = widgetFromOptions(kind, options),
+                .widget = widget,
                 .key = options.key,
                 .global_key = options.global_key,
                 .wrap = options.wrap,
@@ -1831,6 +1833,36 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.media_surface, options, .{});
         }
 
+        /// CONTAIN is the video surface's one fit mode: every media
+        /// surface the video channel feeds — the framework-owned
+        /// `<video>` surface always, an app-claimed surface while its
+        /// playback is live — letterboxes the decoded frame instead of
+        /// stretching it. Stamped on every construction path (`el` runs
+        /// this for the builder, both markup engines, and the house
+        /// `<video>` chrome), with the stream's reported dimensions
+        /// riding `Widget.stream_size` once the LOADED event has
+        /// spoken, so the emit computes the fitted quad from journaled
+        /// truth. The dimensions land ONLY on the surface the active
+        /// playback actually feeds: a source-less `<video>` shown while
+        /// a manual load targets some other surface keeps its
+        /// full-frame placeholder instead of borrowing that unrelated
+        /// stream's geometry. Camera or app-producer surfaces are
+        /// untouched: their producers own their geometry (and
+        /// `image_src` keeps its ordinary source-crop meaning).
+        fn stampVideoSurfaceFit(self: *const Self, widget: *Widget) void {
+            if (widget.image_id == 0) return;
+            const state = self.video_state;
+            const is_playback_target = state.surface != 0 and widget.image_id == state.surface;
+            if (!is_playback_target and widget.image_id != canvas.video_playback_surface_id) return;
+            widget.image_fit = .contain;
+            if (is_playback_target and state.width > 0 and state.height > 0) {
+                widget.stream_size = .{
+                    .width = @floatFromInt(state.width),
+                    .height = @floatFromInt(state.height),
+                };
+            }
+        }
+
         /// The live playback state the house video chrome renders (see
         /// `Ui.video_state`): what the video channel has honestly
         /// reported, never what the model believes.
@@ -1845,6 +1877,17 @@ pub fn Ui(comptime Msg: type) type {
             completed: bool = false,
             position_ms: u64 = 0,
             duration_ms: u64 = 0,
+            /// The media-surface id the ACTIVE playback feeds (0 while
+            /// none): `canvas.video_playback_surface_id` for a declared
+            /// `<video>`, the app's own id for a `loadVideo` claim. The
+            /// builder stamps CONTAIN fit on the matching surface —
+            /// video frames letterbox, never stretch.
+            surface: u64 = 0,
+            /// The stream's reported dimensions (the LOADED event's
+            /// journaled report; 0 until it lands): the geometry the
+            /// video surface's fitted draw is computed from.
+            width: u64 = 0,
+            height: u64 = 0,
         };
 
         /// One build's recorded `<video src>` declaration (see
