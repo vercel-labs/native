@@ -548,6 +548,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// can never steal typing — a fallback that yields to every
             /// consuming widget can carry them safely.
             on_key: ?*const fn (keyboard: canvas.WidgetKeyboardEvent) ?MsgT = null,
+            /// Deliver `.key_up` phases through `on_key` too. OFF by
+            /// default: most key consumers act on presses alone, and a
+            /// release arriving unexpectedly would double-fire a
+            /// name-gated action. A terminal-class consumer opts in to
+            /// forward key releases to the child (the kitty keyboard
+            /// protocol's event reporting); consumers that opt in MUST
+            /// branch on `keyboard.phase`.
+            key_release_events: bool = false,
             /// Optional mapping from unclaimed COMMITTED TEXT into
             /// messages — `on_key`'s typing sibling for apps that
             /// consume text themselves without a text-entry widget
@@ -5153,7 +5161,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return;
             }
             const map = self.options.on_key orelse return;
-            if (keyboard_event.keyboard.phase != .key_down) return;
+            const release = keyboard_event.keyboard.phase == .key_up and self.options.key_release_events;
+            if (keyboard_event.keyboard.phase != .key_down and !release) return;
             if (map(keyboard_event.keyboard)) |msg| {
                 try self.dispatch(runtime, keyboard_event.window_id, msg);
             }

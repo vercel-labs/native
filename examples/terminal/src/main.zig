@@ -114,6 +114,10 @@ pub const Model = struct {
     /// selection stays live for a retry. Cleared by the next copy
     /// attempt and by a restart.
     copy_failed: bool = false,
+    /// A clipboard write is IN FLIGHT: further copies are no-ops until
+    /// its result lands, or the fixed-key re-request would be rejected
+    /// as a duplicate and overwrite the first copy's outcome.
+    copy_inflight: bool = false,
     /// Delivered output accounting for the status line (and the
     /// replay fingerprint: byte totals pin the fed stream).
     output_batches: u64 = 0,
@@ -184,6 +188,7 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     // shell's status line must not claim its predecessor's clipboard.
     model.copied_bytes = 0;
     model.copy_failed = false;
+    model.copy_inflight = false;
     // Drop any bytes still queued for the session that just ended — a
     // restarted shell must not receive the dead one's unsent keystrokes.
     model.outbound_head = 0;
@@ -265,7 +270,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
             if (model.selecting or !model.acceptsInput()) return;
             if (event.text.len == 0) return;
             model.session.scrollToBottom();
-            enqueueTransient(model, fx, event.text);
+            sendCommittedText(model, fx, event.text);
         },
         .viewport => |size| {
             // Commit the new size only once the emulator actually took
@@ -287,6 +292,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
         },
         .copy_selection => copySelection(model, fx),
         .clipboard => |result| {
+            model.copy_inflight = false;
             if (result.outcome == .ok) {
                 // Confirmed on the clipboard: the selection's job is
                 // done, and only NOW does it clear — a failed write
@@ -435,6 +441,12 @@ pub fn moveResponsesToOutbound(model: *Model, fx: *Fx) void {
 }
 
 fn copySelection(model: *Model, fx: *Fx) void {
+    // ONE copy in flight: the clipboard write reuses a fixed key, so a
+    // second request before the first result drains would be rejected
+    // as a duplicate — and that rejection would overwrite the first
+    // copy's success with `copy_failed`. A repeated Enter while the
+    // write is pending is a no-op, not a second request.
+    if (model.copy_inflight) return;
     model.copy_failed = false;
     const text = (model.session.selectionText(model.session.gpa) catch {
         // Serialization failed with a selection ACTIVE: keep the
@@ -457,6 +469,7 @@ fn copySelection(model: *Model, fx: *Fx) void {
     };
     defer model.session.gpa.free(text);
     model.copied_bytes = text.len;
+    model.copy_inflight = true;
     fx.writeClipboard(.{
         .key = clipboard_key,
         .text = text,
@@ -482,6 +495,15 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     const mods = event.modifiers;
     const primary = mods.hasCommandModifier();
     const session = model.session;
+
+    // Releases are terminal input only — app chords and selection act
+    // on presses. The encoder decides whether the child hears them
+    // (kitty event reporting; silent under legacy modes).
+    if (event.phase == .key_up) {
+        if (model.selecting or !model.acceptsInput()) return;
+        encodeKeyEvent(model, fx, event, .release);
+        return;
+    }
 
     // App chords first: selection mode, copy, scrollback, restart.
     if (primary and mods.shift and keyIs(event.key, "space")) {
@@ -554,8 +576,27 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     // Everything else is terminal input: specials and chords encode
     // through the emulator (application cursor-key mode, kitty
     // protocol, and modifier encodings all honored); plain printable
-    // keys arrive through `.text` instead and are ignored here.
-    const key = mapKey(event) orelse return;
+    // presses arrive through `.text` instead and are ignored here.
+    encodeKeyEvent(model, fx, event, .press);
+}
+
+/// Encode one key transition through the emulator's encoder and push
+/// the bytes toward the child. Releases ride the same path with
+/// `.release`: the encoder emits them only under the kitty protocol's
+/// negotiated event reporting and stays silent in legacy modes, so
+/// feeding every release is always correct. (Key REPEAT is the one
+/// event type the hosts do not distinguish from a fresh press, so a
+/// TUI that enabled event reporting sees repeats as presses.)
+fn encodeKeyEvent(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent, action: vt.input.KeyAction) void {
+    const session = model.session;
+    const mods = event.modifiers;
+    const key = mapKey(event) orelse blk: {
+        // A release of a plain printable never maps (its PRESS came
+        // through the text channel): synthesize the codepoint-keyed
+        // event so kitty event reporting hears the release too.
+        if (action != .release) return;
+        break :blk mapPrintable(event.key) orelse return;
+    };
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const encode_options: vt.input.KeyEncodeOptions = .fromTerminal(&session.term);
@@ -570,7 +611,7 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     const encoder_super = mods.super and !mods.control;
     _ = vt.input.encodeKey(&writer, .{
         .key = key.key,
-        .action = .press,
+        .action = action,
         .mods = .{
             .shift = mods.shift,
             .ctrl = mods.control,
@@ -587,6 +628,33 @@ fn handleKey(model: *Model, fx: *Fx, event: canvas.WidgetKeyboardEvent) void {
     enqueueTransient(model, fx, buffer[0..writer.end]);
 }
 
+/// Committed text reaches the child through the emulator's key encoder
+/// when it is a single scalar: byte-identical to the raw text under
+/// legacy modes (the encoder writes unmodified text through untouched)
+/// and the negotiated CSI-u form when a TUI enabled the kitty
+/// protocol's report-all mode — raw bytes there would desynchronize the
+/// application's key decoding. Multi-scalar commits (IME words, paste)
+/// stay raw text, the protocol's rule for composed input.
+fn sendCommittedText(model: *Model, fx: *Fx, text: []const u8) void {
+    single: {
+        const len = std.unicode.utf8ByteSequenceLength(text[0]) catch break :single;
+        if (text.len != len) break :single;
+        const cp = std.unicode.utf8Decode(text[0..len]) catch break :single;
+        var buffer: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        _ = vt.input.encodeKey(&writer, .{
+            .key = .unidentified,
+            .action = .press,
+            .utf8 = text,
+            .unshifted_codepoint = cp,
+        }, .fromTerminal(&model.session.term)) catch break :single;
+        if (writer.end == 0) break :single;
+        enqueueTransient(model, fx, buffer[0..writer.end]);
+        return;
+    }
+    enqueueTransient(model, fx, text);
+}
+
 fn keyIs(key: []const u8, name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(key, name);
 }
@@ -598,6 +666,18 @@ const MappedKey = struct {
 };
 
 /// Host key names -> emulator key codes, for keys that do not commit
+/// A plain printable's codepoint-keyed event, for RELEASE encoding
+/// only: its press travels the committed-text channel, but kitty event
+/// reporting still owes the child the release of the same key. No text
+/// rides a release.
+fn mapPrintable(key: []const u8) ?MappedKey {
+    if (key.len == 0) return null;
+    const len = std.unicode.utf8ByteSequenceLength(key[0]) catch return null;
+    if (key.len != len) return null;
+    const cp = std.unicode.utf8Decode(key[0..len]) catch return null;
+    return .{ .key = .unidentified, .unshifted = cp };
+}
+
 /// text (specials always; letters/digits only under a chord modifier,
 /// where the text channel stays silent and the encoder must speak).
 fn mapKey(event: canvas.WidgetKeyboardEvent) ?MappedKey {
@@ -861,6 +941,9 @@ pub fn appOptions() TerminalApp.Options {
         .update_fx = update,
         .view = view,
         .on_key = onKey,
+        // Key releases feed the encoder for the kitty protocol's event
+        // reporting; `handleKey` branches on the phase.
+        .key_release_events = true,
         .on_text = onText,
         .on_frame = onFrame,
         .on_chrome = onChrome,

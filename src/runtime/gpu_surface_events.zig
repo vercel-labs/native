@@ -617,8 +617,8 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (widget_keyboard_event) |keyboard_event| {
                 try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromKeyboard(self, app, keyboard_event);
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
-            } else if (input_event.kind == .key_down and !widget_surface_dismissed) {
-                // No focused widget routed this key_down (nothing is
+            } else if ((input_event.kind == .key_down or input_event.kind == .key_up) and !widget_surface_dismissed) {
+                // No focused widget routed this key (nothing is
                 // focused, or the focused id is gone from the tree): the
                 // key still reaches the app, as a TARGET-LESS keyboard
                 // event. This is the app-level key-fallback seam — the
@@ -626,11 +626,13 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // transport toggle), which chrome shortcuts deliberately
                 // refuse (`validateShortcut` demands a modifier so global
                 // registration can never steal typing). The ui-app layer
-                // maps it through `Options.on_key`; with a target present
-                // the routed event above carries the same fallback duty
-                // once widget dispatch declines the key. A key that just
-                // dismissed a surface was consumed by the dismissal and
-                // never falls through.
+                // maps it through `Options.on_key` (releases only for
+                // apps that opt into `key_release_events` — a terminal
+                // forwarding the kitty protocol's event reporting); with
+                // a target present the routed event above carries the
+                // same fallback duty once widget dispatch declines the
+                // key. A key that just dismissed a surface was consumed
+                // by the dismissal and never falls through.
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     // The composition-ownership gate again (see
                     // `targetless_composition_owns_keys` above): while
@@ -650,7 +652,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                             .window_id = input_event.window_id,
                             .view_label = self.views[index].label,
                             .keyboard = .{
-                                .phase = .key_down,
+                                .phase = if (input_event.kind == .key_up) .key_up else .key_down,
                                 .key = input_event.key,
                                 .text = input_event.text,
                                 .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),

@@ -710,6 +710,127 @@ test "typing carried on the key event reaches the pty - the no-separate-text-eve
     try testing.expectEqualStrings("j", app_state.effects.ptyWrittenBytes(1));
 }
 
+test "kitty report-all encodes committed text as CSI-u, and legacy passes it raw" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Legacy mode first: a committed "a" reaches the child as the raw
+    // byte, exactly as before the encoder routing.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "a",
+    } });
+    try testing.expectEqualStrings("a", app_state.effects.ptyWrittenBytes(1));
+
+    // The TUI pushes kitty "report all keys as escape codes": the same
+    // committed "a" must now encode as CSI 97 u — raw bytes would
+    // desynchronize the application's key decoding.
+    app_state.model.session.feed("\x1b[>8u");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .text_input,
+        .text = "a",
+    } });
+    const written = app_state.effects.ptyWrittenBytes(1);
+    try testing.expect(std.mem.endsWith(u8, written, "\x1b[97u"));
+}
+
+test "kitty event reporting hears key releases; legacy modes never do" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    // Legacy: a release encodes nothing.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_up,
+        .key = "enter",
+    } });
+    try testing.expectEqualStrings("", app_state.effects.ptyWrittenBytes(1));
+
+    // The TUI enables kitty event reporting (with report-all): the
+    // release of a printable now reaches the child as a CSI-u release
+    // event (`:3` event type) — without it, key-driven state sticks.
+    app_state.model.session.feed("\x1b[>11u");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "a",
+        .text = "a",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_up,
+        .key = "a",
+    } });
+    const written = app_state.effects.ptyWrittenBytes(1);
+    try testing.expect(std.mem.indexOf(u8, written, ":3u") != null);
+}
+
+test "a second copy while the write is in flight is a no-op, never a false failure" {
+    const gpa = testing.allocator;
+    const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
+    defer harness.destroy(gpa);
+    const app_state = try startFocusedTerminal(gpa, harness);
+    defer gpa.destroy(app_state);
+    defer app_state.model.session.destroy();
+    defer app_state.deinit();
+    const app_iface = app_state.app();
+
+    app_state.model.session.feed("copy me");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "space",
+        .modifiers = .{ .primary = true, .shift = true },
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "arrowleft",
+        .modifiers = .{ .shift = true },
+    } });
+    // Enter twice before the async result drains: the second press must
+    // not issue a duplicate-key request whose rejection would overwrite
+    // the first copy's success.
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try harness.runtime.dispatchPlatformEvent(app_iface, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "terminal-canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    try app_state.effects.feedClipboardResult(2, .ok, "");
+    try harness.runtime.dispatchPlatformEvent(app_iface, .wake);
+    try testing.expect(!app_state.model.copy_failed);
+    try testing.expect(!app_state.model.selecting);
+    try testing.expect(!app_state.model.copy_inflight);
+}
+
 test "chorded punctuation and function keys encode their control sequences" {
     const gpa = testing.allocator;
     const harness = try native_sdk.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(980, 640) });
