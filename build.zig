@@ -2983,6 +2983,10 @@ fn tsCoreE2eArtifact(
     conformance_mod.addImport("ts_markup_core", markup_fixture_mod);
     conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
     conformance_mod.addImport("facade_markup_core", facadeCoreModule(b, target, optimize, node, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    // The integer-class fixture: a hand-written sidecar attesting mixed
+    // i64/u64 slot classes, so the suite drives boundary and full-range
+    // integer values through a generated mirror's decode paths.
+    conformance_mod.addImport("shim_integer_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/integer_fixture.contract.json")));
     const conformance_fixtures = [_]struct {
         ts_import: []const u8,
         shim_import: []const u8,
@@ -3031,7 +3035,17 @@ fn tsCoreE2eArtifact(
         while (inputs.next()) |input| {
             parity_mod.addObjectFile(.{ .cwd_relative = b.dupe(input) });
         }
-        break :blk filteredTestArtifact(b, parity_mod, "external-core-parity-tests", &.{});
+        const parity_tests = filteredTestArtifact(b, parity_mod, "external-core-parity-tests", &.{});
+        // Run the checker over the supplied sidecar explicitly (the
+        // shim generation above validates too, but the checker tier —
+        // both projections, integer_slots structural rules included —
+        // is the surface an external compile is verified against).
+        const check_sidecar = b.addRunArtifact(corewire_exe);
+        check_sidecar.addArg("--sidecar");
+        check_sidecar.addFileArg(parity_sidecar);
+        check_sidecar.addArg("--check");
+        parity_tests.step.dependOn(&check_sidecar.step);
+        break :blk parity_tests;
     } else null;
 
     return .{

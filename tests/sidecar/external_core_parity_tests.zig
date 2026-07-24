@@ -195,6 +195,69 @@ fn channelParityCycle(
     return .{ .ts = next_ts, .shim = next_shim };
 }
 
+/// One dispatch cycle in both lanes over one message, comparing the
+/// command and snapshot byte surfaces.
+fn parityCycle(
+    arena: std.mem.Allocator,
+    ts_model: *const ts_core.Model,
+    shim_model: *const shim_core.Model,
+    msg: shim_core.Msg,
+) !struct { ts: *const ts_core.Model, shim: *const shim_core.Model } {
+    const ts_msg = try convertValue(ts_core.Msg, msg, arena);
+    const ts_out = ts_core.update(ts_model, ts_msg);
+    const next_ts = ts_core.commitModelRoot(ts_out.model);
+    const shim_out = shim_core.update(shim_model, msg);
+    const next_shim = shim_core.commitModelRoot(shim_out.model);
+    try testing.expectEqualSlices(u8, ts_out.cmd, shim_out.cmd);
+    try testing.expectEqualSlices(u8, try referenceSnapshot(next_ts, arena), rawSnapshot());
+    ts_core.rt.frameReset();
+    shim_core.rt.frameReset();
+    return .{ .ts = next_ts, .shim = next_shim };
+}
+
+test "integer-classed slots cross the compiler-provable extremes exactly" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A fresh boot in both lanes. When the archive rides a
+    // compiler-emitted sidecar with a populated integer_slots section,
+    // this test is the executable proof of the attested classes: the
+    // i64-classed arms carry the +-(2^53 - 1) extremes through a real
+    // dispatch, the archive's snapshot bytes must equal the canonical
+    // encoding of the transpiler lane's model, and the generated
+    // mirror's decode of those bytes must hold the exact integers.
+    ts_core.rt.resetAll();
+    shim_core.rt.resetAll();
+    var ts_model = ts_core.commitModelRoot(ts_core.initialModel());
+    var shim_model = shim_core.commitModelRoot(shim_core.initialModel());
+    ts_core.rt.frameReset();
+    shim_core.rt.frameReset();
+
+    const max_exact: i64 = 9007199254740991; // 2^53 - 1
+    const boundary_script = [_]shim_core.Msg{
+        .{ .canvas_resized = max_exact },
+        .{ .toggle = max_exact },
+        .{ .toggle = -max_exact },
+        .{ .canvas_resized = -max_exact },
+        .{ .canvas_resized = 0 },
+    };
+    for (boundary_script, 0..) |msg, step| {
+        const next = parityCycle(arena, ts_model, shim_model, msg) catch |err| {
+            std.debug.print("integer boundary parity diverges at step {d} ({s})\n", .{ step, @tagName(msg) });
+            return err;
+        };
+        ts_model = next.ts;
+        shim_model = next.shim;
+        // The mirror decoded the committed snapshot: its integer slot
+        // holds the exact crossing value.
+        switch (msg) {
+            .canvas_resized => |value| try testing.expectEqual(value, shim_model.canvasWidth),
+            else => {},
+        }
+    }
+}
+
 test "channel entries match the transpiler lane through the bytes envelope" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

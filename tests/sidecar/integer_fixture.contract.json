@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "wire_version": 3,
+  "abi_version": 1,
+  "compiler_version": "0.0.1",
+  "entry": "tests/sidecar/integer_fixture.ts",
+  "source_hash": "5eedc0de00000002",
+  "build_id": "b11d1d0000000002",
+  "types": {
+    "structs": [
+      {"name": "Model", "fields": [
+        {"name": "count", "type": {"kind": "i64"}},
+        {"name": "id", "type": {"kind": "i64"}},
+        {"name": "ratio", "type": {"kind": "f64"}},
+        {"name": "cursor", "type": {"kind": "optional", "inner": {"kind": "i64"}}}
+      ]}
+    ],
+    "enums": [],
+    "unions": []
+  },
+  "model": "Model",
+  "model_helpers": [],
+  "model_unbound": [],
+  "msg": {
+    "name": "Msg",
+    "arms": [
+      {"name": "noop", "payload": {"kind": "void"}},
+      {"name": "count_set", "payload": {"kind": "number", "class": "i64"}},
+      {"name": "id_set", "payload": {"kind": "number", "class": "i64"}},
+      {"name": "ratio_set", "payload": {"kind": "number", "class": "f64"}},
+      {"name": "sized", "payload": {"kind": "number_bytes", "number_field": "size", "number_class": "i64", "bytes_field": "label"}}
+    ],
+    "unbound": []
+  },
+  "init_returns_cmd": false,
+  "update_returns_cmd": true,
+  "has_subscriptions": false,
+  "channels": {
+    "command_msg": false,
+    "frame_msg": false,
+    "key_msg": true,
+    "pinch_msg": false,
+    "appearance_msg": null,
+    "chrome_msg": null,
+    "env_msgs": []
+  },
+  "abi": {
+    "prefix": "nsc_core_",
+    "exports": ["abi_version", "build_id", "set_panic_sink", "init", "collect",
+      "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
+      "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
+      "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
+      "helper_call", "key_msg"],
+    "snapshot_format": 1
+  },
+  "integer_slots": [
+    {"slot": "Model.count", "class": "i64"},
+    {"slot": "Model.id", "class": "u64"},
+    {"slot": "Model.cursor", "class": "u64"},
+    {"slot": "Msg.count_set", "class": "i64"},
+    {"slot": "Msg.id_set", "class": "u64"},
+    {"slot": "Msg.sized.size", "class": "u64"}
+  ],
+  "deterministic": true,
+  "async_free": true
+}

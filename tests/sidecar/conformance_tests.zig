@@ -45,6 +45,7 @@ const corewire_rt = @import("corewire_rt");
 const ts_markup = @import("ts_markup_core");
 const shim_markup = @import("shim_markup_core");
 const facade_markup = @import("facade_markup_core");
+const shim_integer = @import("shim_integer_core");
 const ts_host = @import("ts_host_core");
 const shim_host = @import("shim_host_core");
 const facade_host = @import("facade_host_core");
@@ -478,6 +479,109 @@ test "markup fixture: generated channel entries unpack the stub core's envelope"
     try testing.expect(zoomed.zoomed.fromBoard);
 }
 
+// ---------------------------------------------- integer-class fixture
+//
+// A hand-written sidecar attesting mixed integer classes
+// (tests/sidecar/integer_fixture.contract.json): the generated mirror
+// must decode each slot per its attested class — two's complement for
+// i64, the unsigned twin for u64, f64 for every non-attested slot —
+// over the compiler-provable extremes (+-(2^53 - 1)) and the full
+// 8-byte wire range alike (the wire type is 8 bytes; the decoder is
+// total over it).
+
+test "integer fixture: mirror slots spell their attested classes" {
+    try testing.expectEqual(i64, @FieldType(shim_integer.Model, "count"));
+    try testing.expectEqual(u64, @FieldType(shim_integer.Model, "id"));
+    try testing.expectEqual(f64, @FieldType(shim_integer.Model, "ratio"));
+    try testing.expectEqual(?u64, @FieldType(shim_integer.Model, "cursor"));
+    try testing.expectEqual(i64, @FieldType(shim_integer.Msg, "count_set"));
+    try testing.expectEqual(u64, @FieldType(shim_integer.Msg, "id_set"));
+    try testing.expectEqual(f64, @FieldType(shim_integer.Msg, "ratio_set"));
+    try testing.expectEqual(u64, @FieldType(@FieldType(shim_integer.Msg, "sized"), "size"));
+}
+
+test "integer fixture: envelope payloads decode boundary and full-range integers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const saved = stub_core.stub_channel_envelope;
+    defer stub_core.stub_channel_envelope = saved;
+    defer shim_integer.rt.frameReset();
+
+    const key = shim_integer.KeyEvent{ .key = "x", .shift = false, .control = false, .alt = false, .super = false };
+
+    const Case = struct { envelope: []const u8, expected: shim_integer.Msg };
+    const cases = [_]Case{
+        // The compiler-provable extremes cross the i64-classed arm
+        // (tag 1) exactly, sign included.
+        .{ .envelope = &.{ 1, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00 }, .expected = .{ .count_set = 9007199254740991 } },
+        .{ .envelope = &.{ 1, 1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff }, .expected = .{ .count_set = -9007199254740991 } },
+        // The u64-attested arm (tag 2) reads the same 8 bytes unsigned:
+        // the all-ones pattern is u64 max, never -1.
+        .{ .envelope = &.{ 1, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00 }, .expected = .{ .id_set = 9007199254740991 } },
+        .{ .envelope = &.{ 1, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, .expected = .{ .id_set = 18446744073709551615 } },
+        // The number_bytes number field follows its own attestation.
+        .{ .envelope = &.{ 1, 4, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 3, 0, 0, 0, 'r', 'o', 'w' }, .expected = .{ .sized = .{ .size = 9007199254740991, .label = "row" } } },
+    };
+    for (cases) |case| {
+        stub_core.stub_channel_envelope = case.envelope;
+        const decoded = shim_integer.keyMsg(key) orelse return error.TestUnexpectedResult;
+        // Decoded value and re-encoded bytes both match: the mirror
+        // round-trips the wire exactly.
+        try testing.expectEqualSlices(
+            u8,
+            corewire_rt.encodeAlloc(shim_integer.Msg, case.expected, arena),
+            corewire_rt.encodeAlloc(shim_integer.Msg, decoded, arena),
+        );
+        try testing.expectEqualSlices(u8, case.envelope[1..], corewire_rt.encodeAlloc(shim_integer.Msg, decoded, arena));
+    }
+}
+
+test "integer fixture: dispatch payloads encode byte-exactly against hand-computed vectors" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The canonical union encoding ([arm u8][payload…]) of each
+    // integer-carrying arm, against hand-computed little-endian bytes.
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff },
+        corewire_rt.encodeAlloc(shim_integer.Msg, .{ .count_set = -9007199254740991 }, arena),
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+        corewire_rt.encodeAlloc(shim_integer.Msg, .{ .id_set = 18446744073709551615 }, arena),
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 4, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 2, 0, 0, 0, 'i', 'd' },
+        corewire_rt.encodeAlloc(shim_integer.Msg, .{ .sized = .{ .size = 9007199254740991, .label = "id" } }, arena),
+    );
+}
+
+test "integer fixture: model snapshots decode per-slot classes from raw bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A hand-laid snapshot of the fixture's model (count i64, id u64,
+    // ratio f64, cursor optional u64), decoded through the mirror's own
+    // declared types: each slot reads its 8 bytes per its class.
+    const snapshot = [_]u8{
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, // count = -(2^53 - 1)
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // id = u64 max
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x3f, // ratio = 1.5
+        0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, // cursor = 2^53 - 1
+    };
+    const model = corewire_rt.decodeExact(shim_integer.Model, &snapshot, arena);
+    try testing.expectEqual(@as(i64, -9007199254740991), model.count);
+    try testing.expectEqual(@as(u64, 18446744073709551615), model.id);
+    try testing.expectEqual(@as(f64, 1.5), model.ratio);
+    try testing.expectEqual(@as(?u64, 9007199254740991), model.cursor);
+    // Re-encoding reproduces the wire bytes exactly.
+    try testing.expectEqualSlices(u8, &snapshot, corewire_rt.encodeAlloc(shim_integer.Model, model, arena));
+}
+
 /// Reference every public declaration, recursing into declared types
 /// (all of a shim's public type declarations are its own, so the walk
 /// never leaves the generated module).
@@ -495,6 +599,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 
 test "every generated shim fully analyzes and links against the ABI" {
     refAllDeclsRecursive(shim_markup);
+    refAllDeclsRecursive(shim_integer);
     refAllDeclsRecursive(shim_host);
     refAllDeclsRecursive(shim_soundboard);
     refAllDeclsRecursive(shim_monitor);
