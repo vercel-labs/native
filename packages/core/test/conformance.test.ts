@@ -4278,7 +4278,6 @@ ${imageTail}
 `,
   },
   {
-<<<<<<< HEAD
     name: "the video verbs emit in their documented shapes",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
@@ -4314,7 +4313,11 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "go": return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("clip.mp4") }, { event: "video_evt" as VideoEventKind<Msg> })];
     case "video_evt": return { ...model, pos: msg.positionMs };
     case "failed": return { ...model, errs: model.errs + 1 };
-=======
+  }
+}
+`,
+  },
+  {
     name: "the pty verbs emit in their documented shapes (defaults, explicit grid, model-expression resize)",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
@@ -4349,13 +4352,11 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "shell", event: "pty_evt" as PtyEventKind<Msg> })];
     case "pty_evt": return { ...model, chunks: model.chunks + 1 };
->>>>>>> ec0c47b6 (Wire the pty command family into the TypeScript tier)
   }
 }
 `,
   },
   {
-<<<<<<< HEAD
     name: "a video event arm with a wrong field shape is taught",
     gate: "NS1027",
     src: `
@@ -4437,7 +4438,9 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.videoSeek("clip", -250)];
 ${videoTail}
-=======
+`,
+  },
+  {
     name: "a pty event arm whose reason union misses a member is taught",
     gate: "NS1027",
     src: `
@@ -4531,7 +4534,6 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go": return [model, Cmd.ptyWrite("shell", asciiBytes("${"y".repeat(4097)}"))];
 ${ptyTail}
->>>>>>> ec0c47b6 (Wire the pty command family into the TypeScript tier)
 `,
   },
 ];
