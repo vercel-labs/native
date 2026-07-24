@@ -678,11 +678,24 @@ typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t item_i
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
  * canvas points (top-left origin, y-down); the host flips to AppKit
  * coordinates itself. */
+/* A surface that hit-blocks scroll regions beneath it (view-local
+ * canvas points, top-left origin): wheel routing declines a driver
+ * whose occluder mask includes an occluder containing the point. */
+typedef struct {
+    double x;
+    double y;
+    double width;
+    double height;
+} native_sdk_appkit_scroll_occluder_t;
+
 typedef struct {
     uint64_t driver_id;
     /* The nearest ancestor driver's id (0 = none): wheel-owner
      * resolution is restricted to the hit region and its ancestors. */
     uint64_t parent_driver_id;
+    /* Bit i set = occluder i (of the sync call's occluder array) blocks
+     * this region at points it contains. */
+    uint32_t occluder_mask;
     double x;
     double y;
     double width;
@@ -716,7 +729,7 @@ typedef struct {
  * extents / (when set_offset) offsets, remove drivers absent from the
  * list. Idempotent; called every layout install and every presented
  * frame. Returns 1 on success, 0 when the view does not exist. */
-int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count);
+int native_sdk_appkit_set_gpu_surface_scroll_drivers(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const native_sdk_appkit_scroll_driver_t *drivers, size_t count, const native_sdk_appkit_scroll_occluder_t *occluders, size_t occluder_count);
 
 /* Present a native context menu (NSMenu popUpMenuPositioningItem) at the
  * view-local point on the next main-loop turn. The selection (or

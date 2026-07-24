@@ -1824,6 +1824,22 @@ pub const PinchEvent = struct {
 /// scrollable canvas region).
 pub const max_gpu_surface_scroll_drivers: usize = 16;
 
+/// Upper bound on scroll OCCLUDERS per gpu-surface view (floating
+/// surfaces and modal catchers that hit-block regions beneath them).
+pub const max_gpu_surface_scroll_occluders: usize = 8;
+
+/// A surface that hit-blocks scroll regions beneath it: anchored
+/// floating surfaces (popovers, dropdowns, tooltips) at their frames,
+/// and modal surfaces (dialog/drawer/sheet input catchers) as the whole
+/// view. The host must not route a wheel to a driver whose
+/// `occluder_mask` includes an occluder containing the point — the
+/// engine's hit test would give that point to the overlay's branch, so
+/// the native fast path has to decline it the same way (the wheel then
+/// rides the wire, where real hit-testing decides).
+pub const GpuSurfaceScrollOccluder = struct {
+    frame: geometry.RectF,
+};
+
 /// One native scroll driver's desired state, pushed by the runtime on
 /// every widget-layout install and every presented frame (self-healing
 /// against host-side relayouts). Coordinates are view-local canvas points
@@ -1867,6 +1883,11 @@ pub const GpuSurfaceScrollDriver = struct {
     /// floating surface steal an axis the engine's route would never
     /// give it.
     parent_id: u64 = 0,
+    /// Which occluders (by bit index into the sync call's occluder
+    /// array) hit-block THIS region: every pushed occluder that is not
+    /// an ancestor of the region — a scroll region inside an open
+    /// popover is not blocked by its own surface.
+    occluder_mask: u32 = 0,
     /// Which axes the region GRANTS (`canvas.widgetScrollsAxis`): the
     /// host arms elasticity and scroller chrome only on granted axes.
     /// Distinct from having range right now — a granted axis with short
@@ -2545,7 +2566,7 @@ pub const PlatformServices = struct {
     /// install and every presented frame. Null on platforms without
     /// native scroll drivers (GTK / Win32 / null default), which keeps
     /// scrolling on the engine's wheel physics.
-    set_gpu_surface_scroll_drivers_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void = null,
+    set_gpu_surface_scroll_drivers_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const GpuSurfaceScrollOccluder) anyerror!void = null,
     /// Present a native context menu at the request's pointer location.
     /// Asynchronous: the selection (or dismissal) arrives later as a
     /// `context_menu_action` event echoing `request.token`. Null on
@@ -2777,9 +2798,9 @@ pub const PlatformServices = struct {
         return close_fn(self.context, window_id, label);
     }
 
-    pub fn setGpuSurfaceScrollDrivers(self: PlatformServices, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+    pub fn setGpuSurfaceScrollDrivers(self: PlatformServices, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const GpuSurfaceScrollOccluder) anyerror!void {
         const set_fn = self.set_gpu_surface_scroll_drivers_fn orelse return error.UnsupportedService;
-        return set_fn(self.context, window_id, label, drivers);
+        return set_fn(self.context, window_id, label, drivers, occluders);
     }
 
     pub fn showContextMenu(self: PlatformServices, request: ContextMenuRequest) anyerror!void {

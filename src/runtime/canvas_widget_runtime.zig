@@ -950,11 +950,35 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
         // Runtime-scrolled virtual lists (declared item count) clamp
         // like plain scroll views, against the VIRTUAL content extent.
         if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
-        // Native scroll drivers own clamping: the OS scroller constrains
-        // its own contentOffset (including mid-rubber-band rebuilds, which
-        // an engine clamp here would fight) and reports the settled offset
-        // back through the driver event.
-        if (node.widget.native_scroll) continue;
+        // Native scroll drivers own RANGE clamping: the OS scroller
+        // constrains its own contentOffset (including mid-rubber-band
+        // rebuilds, which an engine clamp here would fight) and reports
+        // the settled offset back through the driver event. A REVOKED
+        // axis is different — it has no scroller range at all (content
+        // pins to the frame), so its stale offset pins home here
+        // exactly like the engine-scrolled path below: an axis flip
+        // must behave the same on every host, or a source still
+        // echoing the old offset would resurrect it on re-grant only
+        // where drivers run.
+        if (node.widget.native_scroll) {
+            const pin_y = !canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value != 0;
+            const pin_x = !canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x != 0;
+            if (pin_y) nodes[index].widget.value = 0;
+            if (pin_x) nodes[index].widget.value_x = 0;
+            if ((pin_y or pin_x) and states != null) {
+                if (index < states.?.len) {
+                    if (pin_y) {
+                        states.?[index].offset_y = 0;
+                        states.?[index].velocity_y = 0;
+                    }
+                    if (pin_x) {
+                        states.?[index].offset_x = 0;
+                        states.?[index].velocity_x = 0;
+                    }
+                }
+            }
+            continue;
+        }
 
         const viewport = node.frame.inset(node.widget.layout.padding).normalized();
         if (viewport.isEmpty()) continue;

@@ -688,6 +688,8 @@ pub const NullPlatform = struct {
     scroll_driver_label_len: usize = 0,
     scroll_drivers: [max_gpu_surface_scroll_drivers]GpuSurfaceScrollDriver = undefined,
     scroll_driver_count: usize = 0,
+    scroll_occluders: [types.max_gpu_surface_scroll_occluders]types.GpuSurfaceScrollOccluder = undefined,
+    scroll_occluder_count: usize = 0,
     scroll_driver_set_count: usize = 0,
     /// Lifetime count of driver entries pushed with a set-offset flag
     /// on EITHER axis (the runtime forcing an offset into the native
@@ -2795,7 +2797,7 @@ pub const NullPlatform = struct {
         return self.menus[0..self.menu_count];
     }
 
-    fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+    fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const types.GpuSurfaceScrollOccluder) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.gpu_surface_scroll_drivers) return error.UnsupportedService;
         self.scroll_driver_set_count += 1;
@@ -2805,6 +2807,9 @@ pub const NullPlatform = struct {
         const count = @min(drivers.len, self.scroll_drivers.len);
         @memcpy(self.scroll_drivers[0..count], drivers[0..count]);
         self.scroll_driver_count = count;
+        const occluder_count = @min(occluders.len, self.scroll_occluders.len);
+        @memcpy(self.scroll_occluders[0..occluder_count], occluders[0..occluder_count]);
+        self.scroll_occluder_count = occluder_count;
         for (drivers) |driver| {
             if (driver.set_offset_x or driver.set_offset_y) self.scroll_driver_set_offset_count += 1;
         }

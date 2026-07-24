@@ -699,3 +699,47 @@ test "a horizontal-only region's driver pins its vertical range" {
     try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
     try std.testing.expectEqualDeep(geometry.RectF.init(-40, 0, 140, 200), retained.findById(2).?.frame);
 }
+
+test "floating surfaces push occluders that block underlying drivers but not their own" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A horizontal shelf (id 1) with an ANCHORED popover above part of
+    // it (id 4); the popover holds its own scroll region (id 5). The
+    // popover occludes the shelf where they overlap, but never its own
+    // scroll region.
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
+        .{ .widget = .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 400, 60) }, .frame = geometry.RectF.init(0, 0, 400, 60), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 4, .kind = .popover, .frame = geometry.RectF.init(40, 10, 100, 50), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(40, 10, 100, 50), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 5, .kind = .scroll_view, .frame = geometry.RectF.init(44, 14, 92, 42) }, .frame = geometry.RectF.init(44, 14, 92, 42), .depth = 2, .parent_index = 2 },
+        .{ .widget = .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(44, 14, 92, 200) }, .frame = geometry.RectF.init(44, 14, 92, 200), .depth = 3, .parent_index = 3 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.scroll_occluder_count);
+    try std.testing.expectEqualDeep(geometry.RectF.init(40, 10, 100, 50), harness.null_platform.scroll_occluders[0].frame);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 2), drivers.len);
+    // The shelf is blocked by the popover (bit 0)...
+    try std.testing.expectEqual(@as(u64, 1), drivers[0].id);
+    try std.testing.expectEqual(@as(u32, 1), drivers[0].occluder_mask);
+    // ...while the popover's own scroll region is exempt.
+    try std.testing.expectEqual(@as(u64, 5), drivers[1].id);
+    try std.testing.expectEqual(@as(u32, 0), drivers[1].occluder_mask);
+    // And the nested chain rides the parent ids.
+    try std.testing.expectEqual(@as(u64, 0), drivers[0].parent_id);
+    try std.testing.expectEqual(@as(u64, 1), drivers[1].parent_id);
+}

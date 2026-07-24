@@ -70,6 +70,34 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             var ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined;
             var offsets: [platform.max_gpu_surface_scroll_drivers]geometry.OffsetF = undefined;
             var count: usize = 0;
+            // Occluders: floating surfaces and modal catchers that
+            // hit-block regions beneath them, so the host's geometric
+            // wheel routing declines exactly the points the engine's
+            // hit test would give to an overlay's branch.
+            var occluders: [platform.max_gpu_surface_scroll_occluders]platform.GpuSurfaceScrollOccluder = undefined;
+            var occluder_nodes: [platform.max_gpu_surface_scroll_occluders]usize = undefined;
+            var occluder_count: usize = 0;
+            for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
+                if (occluder_count >= occluders.len) break;
+                if (node.widget.semantics.hidden) continue;
+                if (node.widget.layout.anchor != null and !node.frame.normalized().isEmpty()) {
+                    // An anchored floating surface blocks at its frame.
+                    occluders[occluder_count] = .{ .frame = node.frame.normalized() };
+                    occluder_nodes[occluder_count] = node_index;
+                    occluder_count += 1;
+                    continue;
+                }
+                switch (node.widget.kind) {
+                    // A modal surface's input catcher spans the whole
+                    // view: nothing beneath it scrolls.
+                    .dialog, .drawer, .sheet => {
+                        occluders[occluder_count] = .{ .frame = view.frame.normalized() };
+                        occluder_nodes[occluder_count] = node_index;
+                        occluder_count += 1;
+                    },
+                    else => {},
+                }
+            }
             for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 if (!canvasWidgetScrollDriverEligible(node.*)) continue;
                 node.widget.native_scroll = true;
@@ -107,6 +135,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 drivers[count] = .{
                     .id = node.widget.id,
                     .parent_id = nearestAncestorDriverId(view, node_index),
+                    .occluder_mask = driverOccluderMask(view, node_index, occluder_nodes[0..occluder_count]),
                     .frame = frame,
                     .content_size = .{ .width = content_width, .height = content_height },
                     .offset_x = offset.dx,
@@ -126,7 +155,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
                 count += 1;
             }
 
-            self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, drivers[0..count]) catch |err| {
+            self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, drivers[0..count], occluders[0..occluder_count]) catch |err| {
                 if (err != error.UnsupportedService) {
                     scroll_driver_log.warn("scroll driver sync failed for view '{s}': {s}", .{ view.label, @errorName(err) });
                 }
@@ -186,6 +215,28 @@ pub fn canvasWidgetScrollDriverEligible(node: canvas.WidgetLayoutNode) bool {
     // window mounts. Legacy virtualized containers stay model-driven.
     if (node.widget.layout.virtualized) return canvas.widgetVirtualRuntimeScrolled(node.widget);
     return true;
+}
+
+/// Which occluders block this driver: every pushed occluder whose node
+/// is NOT an ancestor of the driver — a scroll region inside an open
+/// popover or modal is above its own surface, not beneath it.
+fn driverOccluderMask(view: anytype, driver_node: usize, occluder_nodes: []const usize) u32 {
+    var mask: u32 = 0;
+    for (occluder_nodes, 0..) |occluder_node, bit| {
+        if (!nodeIsAncestor(view, occluder_node, driver_node)) {
+            mask |= @as(u32, 1) << @intCast(bit);
+        }
+    }
+    return mask;
+}
+
+fn nodeIsAncestor(view: anytype, ancestor: usize, node: usize) bool {
+    var current = view.widget_layout_nodes[node].parent_index;
+    while (current) |index| {
+        if (index == ancestor) return true;
+        current = view.widget_layout_nodes[index].parent_index;
+    }
+    return false;
 }
 
 /// The widget id of the nearest ancestor node that is itself
