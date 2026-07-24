@@ -1207,9 +1207,9 @@ fn mediaSurfaceQuadRadius(radius: Radius, bar: f32) Radius {
 /// approximation), the deterministic placeholder confined to the quad
 /// (goldens and replay screenshots, which skip the texture by policy,
 /// show the placeholder exactly where the picture goes, in the
-/// journaled-truth black field), and the picture quad. An explicit
-/// `image_src` crop drives the aspect when present — the crop is what
-/// draws, so it is never distorted into the full stream's proportions.
+/// journaled-truth black field), and the picture quad — always the
+/// WHOLE frame at the stream's aspect (`image_src` crops do not apply
+/// here: see the coordinate-space teaching at the quad computation).
 /// Unknown dimensions (pre-LOADED) keep the plain full-frame
 /// placeholder draw: no guessed geometry, no divide-by-zero.
 fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
@@ -1226,33 +1226,21 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
         @min(frame.width, frame.height) * 0.5,
     ));
     // The fitted quad, computed once here: one authority for the
-    // geometry. The content's aspect is the source CROP's when one is
-    // declared — clipped to the stream bounds first, exactly the clip
-    // every renderer applies to the crop against the texture, so the
-    // quad's aspect always matches what actually draws (an out-of-range
-    // crop must not stretch its clipped remainder) — and the stream's
-    // otherwise.
+    // geometry, always the STREAM's reported aspect. A declared
+    // `image_src` crop does NOT ride the fitted draw: `DrawImage.src`
+    // is adopted-TEXTURE pixel coordinates, and the video texture's
+    // size is unknowable at emit time (macOS budget-fits large decodes
+    // — a 3840x2160 stream lands as a smaller texture — so a
+    // stream-coordinate crop cannot be translated here, and forwarding
+    // it raw would sample the wrong region or nothing). Crops remain a
+    // GENERIC-producer facility in texture coordinates; the video
+    // surface always composites the whole frame.
     const stream_size = mediaSurfaceStreamSize(widget);
-    var draw_src = widget.image_src;
-    const content_size: ?geometry.SizeF = if (stream_size) |stream| blk: {
-        if (widget.image_src) |src| {
-            const clipped = geometry.RectF.intersection(
-                src.normalized(),
-                geometry.RectF.init(0, 0, stream.width, stream.height),
-            );
-            if (!clipped.isEmpty()) {
-                // The clipped crop is also what the draw samples, so
-                // host-side clipping becomes a no-op by construction.
-                draw_src = clipped;
-                break :blk geometry.SizeF.init(clipped.width, clipped.height);
-            }
-        }
-        break :blk stream;
-    } else null;
-    const dst = if (content_size) |size|
+    const dst = if (stream_size) |size|
         canvas.containDestinationRect(frame, size.width, size.height)
     else
         frame;
+    const draw_src = if (stream_size != null) null else widget.image_src;
     const letterboxed = frame.height - dst.height > media_surface_bar_epsilon;
     const pillarboxed = frame.width - dst.width > media_surface_bar_epsilon;
     const fitted = letterboxed or pillarboxed;
@@ -1304,7 +1292,7 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
         .dst = dst,
         .opacity = widget.image_opacity,
         // Known geometry draws STRETCH: the quad is the fit, computed
-        // once from the reported dimensions (or the declared crop). A
+        // once from the reported dimensions. A
         // second host-side contain against the real texture would open
         // sub-pixel seams whenever a decoder's true dimensions round
         // off the report (macOS floors scaled decode sizes); the
@@ -1312,7 +1300,7 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
         // seam is not — and any residue lands on the black field, not
         // a colored fringe. Without known geometry the widget's own
         // fit passes through.
-        .fit = if (content_size != null) .stretch else widget.image_fit,
+        .fit = if (stream_size != null) .stretch else widget.image_fit,
         .sampling = widget.image_sampling,
         // The render plan flattens clip stacks to rects, so a rounded
         // surface masks on the draw itself (the avatar convention); a

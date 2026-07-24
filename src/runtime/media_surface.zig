@@ -654,6 +654,13 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
             return producer.frameSink();
         }
 
+        /// LOOP-THREAD-ONLY, like the acquire half (the binding's
+        /// documented contract — `effects_mod.MediaSurfaceBinding`):
+        /// the purge below edits the runtime's adopted-texture table
+        /// and calls the platform's image-removal service, both
+        /// loop-thread state. Every caller is the video channel on an
+        /// `update`-dispatch path (stop/replace/failure/teardown);
+        /// producer threads hold only the sink, never the binding.
         fn mediaSurfaceBindingRelease(context: *anyopaque, sink: platform.VideoFrameSink) void {
             const self: *Runtime = @ptrCast(@alignCast(context));
             const slot: *MediaSurfaceSlot = @ptrCast(@alignCast(sink.context orelse return));

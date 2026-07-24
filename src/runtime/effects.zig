@@ -233,6 +233,14 @@ pub const RegisteredImage = struct {
 /// Constructed by `Runtime.mediaSurfaceBinding()`. `acquire_fn` is
 /// loop-thread-only (it claims runtime-owned channel state) and answers
 /// the copyable `platform.VideoFrameSink` the decoder pushes through;
+/// LOOP-THREAD-ONLY, both halves: acquire touches the runtime's claim
+/// tables, and release purges the runtime's adopted-texture entry (and
+/// the host's copied side-channel texture) for the ended playback —
+/// loop-thread runtime state throughout. That matches every caller:
+/// the video channel acquires in `loadVideo` and releases in
+/// stop/replace/failure/teardown, all `update`-dispatch paths.
+/// Producer THREADS never touch the binding — they hold the copyable
+/// `VideoFrameSink`, whose `push` is the any-thread half.
 /// `release_fn` ends the claim named by a previously acquired sink
 /// (idempotent — the sink carries its claim generation).
 pub const MediaSurfaceBinding = struct {

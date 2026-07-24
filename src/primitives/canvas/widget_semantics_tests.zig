@@ -1326,21 +1326,26 @@ test "an unbounded style radius clamps to the frame before the tangent mask" {
     }
 }
 
-test "a declared source crop drives the fitted quad's aspect, never the full stream" {
-    // A square crop out of a 16:9 stream into a 2:1 box: the CROP is
-    // what draws, so the quad is square (16x16 centered) and the crop
-    // stretches into it undistorted — fitting to the full stream's
-    // 16:9 and flattening the square crop into it would distort.
+test "the fitted video draw composites the whole frame; image_src crops do not apply" {
+    // `DrawImage.src` is adopted-TEXTURE pixel coordinates, and the
+    // video texture's size is unknowable at emit time (macOS
+    // budget-fits large decodes to a smaller texture), so a crop
+    // declared against the stream cannot be translated — forwarding it
+    // raw would sample the wrong region or nothing, and fitting the
+    // quad to it would stretch whatever the host's clip leaves. The
+    // fitted draw therefore always samples the whole texture at the
+    // stream's aspect; crops remain a generic-producer facility in
+    // texture coordinates (the non-fitted paths pass them through
+    // unchanged, as ever).
     const frame = geometry.RectF.init(0, 0, 32, 16);
-    const crop = geometry.RectF.init(100, 40, 240, 240);
     const widget = Widget{
         .id = 9,
         .kind = .media_surface,
         .frame = frame,
         .image_id = 5,
         .image_fit = .contain,
-        .stream_size = .{ .width = 1600, .height = 900 },
-        .image_src = crop,
+        .stream_size = .{ .width = 240, .height = 240 },
+        .image_src = geometry.RectF.init(100, 40, 240, 240),
     };
     var nodes: [1]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(widget, frame, &nodes);
@@ -1351,37 +1356,11 @@ test "a declared source crop drives the fitted quad's aspect, never the full str
     try std.testing.expectEqual(@as(usize, 3), display_list.commandCount());
     switch (display_list.commands[2]) {
         .draw_image => |draw| {
+            // Square stream into the 2:1 box: the quad is the stream's
+            // 16x16 center, the sample is the whole texture.
             try expectRect(geometry.RectF.init(8, 0, 16, 16), draw.dst);
-            try std.testing.expectEqual(@as(?geometry.RectF, crop), draw.src);
+            try std.testing.expectEqual(@as(?geometry.RectF, null), draw.src);
             try std.testing.expectEqual(ImageFit.stretch, draw.fit);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    // A crop hanging past the stream bounds fits by its CLIPPED extent
-    // — the same clip every renderer applies against the texture — and
-    // the draw samples exactly that clipped region, so the visible
-    // strip is never stretched to the unclipped request's proportions.
-    const hanging = Widget{
-        .id = 9,
-        .kind = .media_surface,
-        .frame = geometry.RectF.init(0, 0, 32, 16),
-        .image_id = 5,
-        .image_fit = .contain,
-        .stream_size = .{ .width = 100, .height = 100 },
-        .image_src = geometry.RectF.init(80, 0, 40, 100),
-    };
-    var hanging_nodes: [1]WidgetLayoutNode = undefined;
-    const hanging_layout = try layoutWidgetTree(hanging, geometry.RectF.init(0, 0, 32, 16), &hanging_nodes);
-    var hanging_commands: [6]CanvasCommand = undefined;
-    var hanging_builder = Builder.init(&hanging_commands);
-    try hanging_layout.emitDisplayList(&hanging_builder, .{});
-    switch (hanging_builder.displayList().commands[2]) {
-        .draw_image => |draw| {
-            // 20x100 clipped content into 32x16: height-bound, width
-            // 16 * 20/100 = 3.2, centered.
-            try expectRectApprox(geometry.RectF.init(14.4, 0, 3.2, 16), draw.dst);
-            try std.testing.expectEqual(@as(?geometry.RectF, geometry.RectF.init(80, 0, 20, 100)), draw.src);
         },
         else => return error.TestUnexpectedResult,
     }
