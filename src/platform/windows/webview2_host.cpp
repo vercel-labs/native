@@ -2801,16 +2801,31 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
              * exception: in-canvas window-drag regions answer
              * WM_NCHITTEST with HTTRANSPARENT (the parent drags), so
              * the OS reports a "leave" the moment the cursor enters
-             * one while it still sits over this canvas - a cursor
-             * still inside the client rect is that case, not a real
-             * departure, and hover state freezes there (the OS owns
-             * the pointer) until moves resume. */
+             * one while it still sits over this canvas. That hand-off
+             * is recognized by BOTH tests below - the cursor is still
+             * geometrically inside our rectangle AND the window now
+             * owning the point is one of our own ancestors (hit-test
+             * transparency forwards to the parent chain). A cursor
+             * inside our rectangle but owned by a SIBLING child (an
+             * overlapping WebView pane) is a genuine departure and
+             * must cancel, or hover strands until a later move. */
             if (!view->gpu_pointer_down) {
-                POINT cursor = {};
-                RECT client = {};
-                const bool placed = GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor) && GetClientRect(hwnd, &client);
-                const bool still_inside = placed && PtInRect(&client, cursor);
-                if (!still_inside) {
+                POINT screen = {};
+                bool suppressed = false;
+                if (GetCursorPos(&screen)) {
+                    POINT client = screen;
+                    RECT rect = {};
+                    if (ScreenToClient(hwnd, &client) && GetClientRect(hwnd, &rect) && PtInRect(&rect, client)) {
+                        const HWND owner = WindowFromPoint(screen);
+                        for (HWND walk = GetParent(hwnd); walk; walk = GetParent(walk)) {
+                            if (walk == owner) {
+                                suppressed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!suppressed) {
                     emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
                 }
             }

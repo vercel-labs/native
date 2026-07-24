@@ -4241,8 +4241,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn refreshHoverLeaveCaptures(self: *Self) ?anyerror {
             if (self.hover_msg_chain_len == 0) return null;
             if (self.hover_msg_captured_generation == self.build_generation) return null;
-            if (!self.hoverTreeCurrentFor(self.hoverMsgViewLabel())) return null;
-            const mirror_tree = self.treeForViewLabel(self.hoverMsgViewLabel()) orelse return null;
+            if (!self.hoverTreeCurrentFor(self.hover_msg_window_id, self.hoverMsgViewLabel())) return null;
+            const mirror_tree = self.hoverTreeFor(self.hover_msg_window_id, self.hoverMsgViewLabel()) orelse return null;
             var first_error: ?anyerror = null;
             var refreshed = true;
             for (0..self.hover_msg_chain_len) |position| {
@@ -4326,15 +4326,38 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             current_flag.* = false;
         }
 
+        /// The handler tree behind a hover mirror's VIEW IDENTITY —
+        /// window id AND canvas label, never label alone: a replacement
+        /// window can reuse a closed window's canvas label (and even
+        /// rebuild the same structural ids), and resolving the old
+        /// window's captures through the new window's tree would
+        /// dispatch the wrong message under the old window id.
+        fn hoverTreeFor(self: *Self, window_id: platform.WindowId, view_label: []const u8) ?*const Ui.Tree {
+            if (std.mem.eql(u8, view_label, self.options.canvas_label)) {
+                if (window_id != self.canvas_window_id) return null;
+                return if (self.tree) |*tree| tree else null;
+            }
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| {
+                if (slot.window_id != window_id) return null;
+                return if (slot.tree) |*tree| tree else null;
+            }
+            return null;
+        }
+
         /// The currency flag governing hover-Msg resolution through the
-        /// handler tree behind `view_label` (see `main_tree_current`):
-        /// the main canvas keys on the main flag, every secondary
-        /// window on ITS OWN slot's — one window's failed publication
-        /// never defers hover into its siblings. An unknown label has
-        /// no tree at all; the null-tree checks own that case.
-        fn hoverTreeCurrentFor(self: *Self, view_label: []const u8) bool {
+        /// handler tree behind the view identity (see
+        /// `main_tree_current`): the main canvas keys on the main flag,
+        /// every secondary window on ITS OWN slot's — one window's
+        /// failed publication never defers hover into its siblings, and
+        /// a same-label replacement window never answers for its
+        /// predecessor. An unknown identity has no tree at all; the
+        /// null-tree checks own that case.
+        fn hoverTreeCurrentFor(self: *Self, window_id: platform.WindowId, view_label: []const u8) bool {
             if (std.mem.eql(u8, view_label, self.options.canvas_label)) return self.main_tree_current;
-            if (self.windowSlotByCanvasLabel(view_label)) |slot| return slot.tree_current;
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| {
+                if (slot.window_id != window_id) return true;
+                return slot.tree_current;
+            }
             return true;
         }
 
@@ -4622,7 +4645,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // below — their Msgs are owned captures, not tree lookups,
             // and a broken destination must never withhold them.
             const destination_ready = !entering_any or
-                (self.hoverTreeCurrentFor(standing_label) and self.treeForViewLabel(standing_label) != null);
+                (self.hoverTreeCurrentFor(standing_window, standing_label) and self.hoverTreeFor(standing_window, standing_label) != null);
             if (!destination_ready) {
                 var any_leaving = false;
                 for (self.hover_msg_chain[0..mirror_len]) |id| {
@@ -4711,8 +4734,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // its element still stands there.
                 const captured: ?MsgT = if (slot >= hover_msg_slot_count) null else self.hover_msg_leave_msgs[slot];
                 const msg = captured orelse blk: {
-                    if (!self.hoverTreeCurrentFor(leave_label_storage[0..leave_label_len])) break :blk null;
-                    const live = self.treeForViewLabel(leave_label_storage[0..leave_label_len]) orelse break :blk null;
+                    if (!self.hoverTreeCurrentFor(leave_window, leave_label_storage[0..leave_label_len])) break :blk null;
+                    const live = self.hoverTreeFor(leave_window, leave_label_storage[0..leave_label_len]) orelse break :blk null;
                     break :blk live.msgFor(id, .hover_leave);
                 } orelse {
                     self.releaseHoverSlot(slot);
@@ -4729,7 +4752,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (standing_chain[0..standing_len], 0..) |id, position| {
                 if (!destination_ready) break;
                 if (!entering_at[position]) continue;
-                if (!self.hoverTreeCurrentFor(standing_label)) {
+                if (!self.hoverTreeCurrentFor(standing_window, standing_label)) {
                     // An earlier edge's failed rebuild left this tree
                     // stale mid-batch: the same deferral as above — drop
                     // the unentered tail from the mirror and retry after
@@ -4746,7 +4769,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // dispatches, from the same tree that resolved it, so
                 // an enter whose own handler unmounts the element still
                 // has its leave to deliver.
-                const live = self.treeForViewLabel(standing_label) orelse {
+                const live = self.hoverTreeFor(standing_window, standing_label) orelse {
                     // A failed rebuild cleared the tree mid-batch: drop
                     // the not-yet-entered ids from the mirror so the
                     // next drain retries them once the tree returns (the

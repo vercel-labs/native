@@ -276,8 +276,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // samples must move at this boundary, not at the
             // function's successful return. Everything above —
             // node/anchored/pool-budget validation — rejects with the
-            // previous tree fully applied and the witness unmoved.
+            // previous tree fully applied and the witness unmoved. A
+            // torn copy also prunes hover containment against whatever
+            // partial tree it retained, so the owed leaves dispatch at
+            // the failure's own drain instead of waiting for the next
+            // pointer move.
             self.canvas_widget_layout_adoptions +%= 1;
+            errdefer self.pruneCanvasWidgetHoverMsgChain();
             self.widget_layout_node_count = 0;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
@@ -408,7 +413,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             const layout = self.widgetLayoutTree();
             var kept: usize = 0;
             for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
-                if (!canvasWidgetInteractionTargetExists(layout, id)) continue;
+                // Survival is the HOVER predicate, not the interactive
+                // one: a hover-only listener must not be evicted (a
+                // false leave), and a widget whose hover bindings this
+                // rebuild removed must stop standing (its leave is
+                // owed) even though it still exists interactively.
+                if (!canvas_widget_runtime.canvasWidgetHoverMsgTargetExists(layout, id)) continue;
                 self.canvas_widget_hover_msg_chain[kept] = id;
                 kept += 1;
             }
