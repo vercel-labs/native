@@ -115,6 +115,7 @@ const Model = struct {
 const specials = contract.Specials{
     .TextInputEvent = canvas.TextInputEvent,
     .ScrollState = canvas.ScrollState,
+    .TerminalState = canvas.TerminalState,
 };
 
 const model_contract = contract.describe(Model, Msg, specials);

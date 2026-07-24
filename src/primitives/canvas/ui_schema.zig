@@ -111,8 +111,8 @@ pub const AttrInfo = struct {
 /// How an event's payload reaches the Msg: `message` events take a tag
 /// with an optional `{binding}` payload; the others require a bare tag
 /// whose payload the RUNTIME supplies (TextInputEvent, ScrollState, the
-/// split fraction).
-pub const EventPayload = enum { message, text_input, scroll_state, fraction };
+/// split fraction, TerminalState).
+pub const EventPayload = enum { message, text_input, scroll_state, fraction, terminal_state };
 
 pub const EventInfo = struct {
     /// Stable code, assigned at birth, never reused. Nonzero.
@@ -341,6 +341,18 @@ pub const elements = [_]ElementInfo{
     // row), so its rule hook owns the closed attribute set. Pictorial
     // for the a11y lint, like media-surface and image.
     .{ .code = 68, .name = "video", .rule_hook = "video", .hit_target = false, .a11y_name = .image },
+    // The terminal leaf: paints the framework-owned emulator session
+    // behind a MODEL-OWNED pty effect key and routes input to it when
+    // focused. Its `pty` attribute is the runtime-id binding shape
+    // (surface/image precedent): one {binding} to the u64 key the app's
+    // ptySpawn named — ids are model data, never markup literals; 0 is
+    // the unbound sentinel (an empty surface). `scrollback` echoes the
+    // app-visible view state back (the scroll `value` source-wins
+    // precedent) and `on-terminal` delivers it (a TerminalState
+    // record). An interactive control for the a11y lint: focused, it
+    // owns the keyboard, so it must carry a name — the runtime then
+    // announces the live screen text as its content.
+    .{ .code = 69, .name = "terminal", .widget_kind = "terminal", .a11y_name = .control },
 };
 
 // ------------------------------------------------------------- attributes
@@ -529,6 +541,18 @@ pub const attrs = [_]AttrInfo{
     // rule — echo `on-scroll`'s offset_x back here and user scrolling
     // survives rebuilds; move it model-side to scroll programmatically.
     .{ .code = 87, .name = "value-x", .class = .number, .group = .option, .field = "value_x" },
+    // The terminal's pty rendezvous (terminal only; the validator
+    // scopes and REQUIRES it): one {binding} to the model-owned u64 pty
+    // effect key `ptySpawn` named — the media-surface `surface` shape
+    // exactly. A terminal without it is dead markup, taught rather than
+    // rendered inert.
+    .{ .code = 88, .name = "pty", .class = .binding_only, .group = .element },
+    // The terminal's scrollback offset in rows above the live screen
+    // (terminal only; the validator scopes it): the scroll `value`
+    // source-wins reconcile rule — echo `on-terminal`'s `scrollback`
+    // back here and user scrollback survives rebuilds; move it
+    // model-side to scroll programmatically. 0 is pinned to the bottom.
+    .{ .code = 89, .name = "scrollback", .class = .whole, .group = .option, .field = "scrollback" },
 };
 
 // ----------------------------------------------------------------- events
@@ -555,6 +579,13 @@ pub const events = [_]EventInfo{
     // only — touch input never synthesizes it.
     .{ .code = 11, .name = "hover-enter" },
     .{ .code = 12, .name = "hover-leave" },
+    // The terminal's view-state echo: dispatched with a TerminalState
+    // record (scrollback, history, cols, rows) after every
+    // runtime-applied view-state change — wheel and keyboard scrollback,
+    // and the layout-derived grid resize — so the model can echo
+    // `scrollback` back (the on-scroll reconcile shape) and render
+    // honest status. Emulator internals never ride it.
+    .{ .code = 13, .name = "terminal", .payload = .terminal_state, .only_on_element = "terminal" },
 };
 
 // ------------------------------------------------------- token vocabulary

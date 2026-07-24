@@ -786,6 +786,41 @@ test "the video element validates as a leaf with its closed attribute set" {
     }
 }
 
+test "the terminal element requires its pty binding and scopes its vocabulary" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const valid = [_][]const u8{
+        "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\" grow=\"1\"/>\n</column>",
+        "<column>\n  <terminal pty=\"{shell}\" scrollback=\"{offset}\" label=\"Shell\" on-terminal=\"term_state\" autofocus/>\n</column>",
+    };
+    for (valid) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        // A terminal without its pty binding can never attach a session:
+        // dead markup, the media-surface-without-surface policy.
+        .{ .source = "<column>\n  <terminal label=\"Shell\"/>\n</column>", .message = markup.terminal_missing_pty_message },
+        // pty keys are model data, never markup literals.
+        .{ .source = "<column>\n  <terminal pty=\"1\" label=\"Shell\"/>\n</column>", .message = markup.terminal_pty_message },
+        // A leaf like icon and image: no child slots.
+        .{ .source = "<column>\n  <terminal pty=\"{shell}\" label=\"Shell\"><text>x</text></terminal>\n</column>", .message = markup.terminal_children_message },
+        // The scoped vocabulary teaches where it lives.
+        .{ .source = "<column>\n  <panel pty=\"{shell}\"/>\n</column>", .message = markup.terminal_pty_element_message },
+        .{ .source = "<column>\n  <panel scrollback=\"3\"/>\n</column>", .message = markup.scrollback_element_message },
+        .{ .source = "<column>\n  <panel on-terminal=\"term_state\"/>\n</column>", .message = markup.on_terminal_element_message },
+    };
+    for (cases) |case| {
+        var case_parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try case_parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+        try testing.expectEqual(@as(usize, 2), info.line);
+    }
+}
+
 test "wrap and issue-link-base validate as vocabulary with teaching errors" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

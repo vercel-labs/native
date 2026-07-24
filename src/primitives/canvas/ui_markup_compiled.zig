@@ -1675,6 +1675,8 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     applyImageAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime std.mem.eql(u8, attribute.name, "surface")) {
                     applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime std.mem.eql(u8, attribute.name, "pty")) {
+                    applyPtyAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime markup.videoFlagAttrName(attribute.name)) {
                     // The video element's flags, video-scoped (its own
                     // build consumed them): anywhere else they would be
@@ -1787,6 +1789,29 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             options.image = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
                 .integer => |int| if (int < 0) runtimeFail(canvas.ImageId, ui) else @intCast(int),
                 else => runtimeFail(canvas.ImageId, ui),
+            };
+        }
+
+        /// `pty="{binding}"` on terminal resolves to the model-owned u64
+        /// pty effect key whose session the terminal renders —
+        /// terminal-only, binding-only, integer-valued, all checked at
+        /// comptime with the interpreter's messages (the media-surface
+        /// `surface` grammar exactly). The key rides `options.pty` into
+        /// `Widget.terminal.pty`.
+        fn applyPtyAttr(comptime node: markup.MarkupNode, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+            comptime {
+                if (!std.mem.eql(u8, node.name, "terminal")) fail(node, markup.terminal_pty_element_message);
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.terminal_pty_message);
+                if (expression != .binding) fail(node, markup.terminal_pty_message);
+            }
+            const path = comptime markup.parseAttrExpression(raw).?.binding;
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.terminal_pty_message);
+            // Range-checked before the u64 cast (the interpreter fails
+            // the same way): a signed model field can deliver a negative
+            // — fail the build, never trap.
+            options.pty = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
+                .integer => |int| if (int < 0) runtimeFail(u64, ui) else @intCast(int),
+                else => runtimeFail(u64, ui),
             };
         }
 
@@ -1941,6 +1966,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     fail(node, if (legacyScrollTag(expression.tag)) markup.on_scroll_legacy_payload_message else markup.on_scroll_payload_message));
                 return;
             }
+            if (comptime std.mem.eql(u8, event, "terminal")) {
+                comptime {
+                    if (!std.mem.eql(u8, node.name, "terminal")) fail(node, markup.on_terminal_element_message);
+                }
+                options.on_terminal = comptime (terminalConstructor(expression.tag) orelse fail(node, markup.on_terminal_payload_message));
+                return;
+            }
             if (comptime std.mem.eql(u8, event, "resize")) {
                 comptime {
                     if (!std.mem.eql(u8, node.name, "split")) fail(node, markup.on_resize_element_message);
@@ -2030,6 +2062,24 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     // handler shape.
                     if (interpreter.declaredScrollStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
                         return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+                return null;
+            }
+        }
+
+        fn terminalConstructor(comptime tag: []const u8) ?Ui.TerminalMsgFn {
+            comptime {
+                @setEvalBranchQuota(10_000);
+                for (@typeInfo(MsgT).@"union".fields) |field| {
+                    if (field.type == canvas.TerminalState and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.terminalMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                    // A declared mirror of the terminal-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (interpreter.declaredTerminalStateRecord(field.type) and std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedTerminalMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
                     }
                 }
                 return null;

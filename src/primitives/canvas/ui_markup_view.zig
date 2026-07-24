@@ -1591,6 +1591,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applySurfaceAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "pty")) {
+                    try self.applyPtyAttr(scope, node, options, attribute);
+                    continue;
+                }
                 if (markup.videoFlagAttrName(attribute.name)) {
                     // The video element's flags, video-scoped (its own
                     // build consumed them): anywhere else they would be
@@ -1709,6 +1713,30 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 else
                     @intCast(int),
                 else => return self.failVoid(node, markup.media_surface_surface_message),
+            };
+        }
+
+        /// `pty="{binding}"` on terminal: the model-owned u64 pty effect
+        /// key whose session the terminal renders — terminal-only,
+        /// binding-only, integer-valued (the media-surface `surface`
+        /// grammar exactly). The key rides `options.pty` into
+        /// `Widget.terminal.pty`.
+        fn applyPtyAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, attribute: markup.MarkupAttr) BuildError!void {
+            if (!std.mem.eql(u8, node.name, "terminal")) {
+                return self.failVoid(node, markup.terminal_pty_element_message);
+            }
+            const typed = markup.attrTyped(attribute);
+            if (typed != .binding) return self.failVoid(node, markup.terminal_pty_message);
+            const value = try self.evalBinding(scope, node, typed.binding, true);
+            // Range-checked before the u64 cast: expression values are
+            // i64, so a signed model field can deliver a negative — the
+            // teaching failure, never a trap.
+            options.pty = switch (value) {
+                .integer => |int| if (int < 0)
+                    return self.failVoid(node, markup.terminal_pty_message)
+                else
+                    @intCast(int),
+                else => return self.failVoid(node, markup.terminal_pty_message),
             };
         }
 
@@ -1872,6 +1900,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 };
                 return;
             }
+            if (std.mem.eql(u8, event, "terminal")) {
+                if (!std.mem.eql(u8, node.name, "terminal")) {
+                    return self.failVoid(node, markup.on_terminal_element_message);
+                }
+                options.on_terminal = terminalConstructor(expression.tag) orelse {
+                    return self.failVoid(node, markup.on_terminal_payload_message);
+                };
+                return;
+            }
             if (std.mem.eql(u8, event, "resize")) {
                 if (!std.mem.eql(u8, node.name, "split")) {
                     return self.failVoid(node, markup.on_resize_element_message);
@@ -2022,6 +2059,25 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     // handler shape.
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Ui.translatedScrollMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
+                    }
+                }
+            }
+            return null;
+        }
+
+        fn terminalConstructor(tag: []const u8) ?Ui.TerminalMsgFn {
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                if (field.type == canvas.TerminalState) {
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.terminalMsg(@field(std.meta.Tag(MsgT), field.name));
+                    }
+                } else if (comptime reflect.declaredTerminalStateRecord(field.type)) {
+                    // A declared mirror of the terminal-state record
+                    // (transpiled cores): translated at dispatch, same
+                    // handler shape.
+                    if (std.mem.eql(u8, field.name, tag)) {
+                        return Ui.translatedTerminalMsg(@field(std.meta.Tag(MsgT), field.name), field.type);
                     }
                 }
             }
@@ -2388,6 +2444,7 @@ pub const typeScanQuota = reflect.typeScanQuota;
 pub const Pointee = reflect.Pointee;
 pub const declaredTextInputUnion = reflect.declaredTextInputUnion;
 pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
+pub const declaredTerminalStateRecord = reflect.declaredTerminalStateRecord;
 pub const declaredLegacyScrollStateRecord = reflect.declaredLegacyScrollStateRecord;
 pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;

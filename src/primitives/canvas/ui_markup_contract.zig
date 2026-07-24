@@ -135,7 +135,7 @@ pub const Iterable = struct {
 /// cannot be built from markup at all. `legacy_scroll_state` is the
 /// RETIRED one-axis scroll record, recognized only so `on-scroll` can
 /// teach the two-axis migration by field name.
-pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, unsupported };
+pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, unsupported };
 
 pub const MsgTag = struct {
     name: []const u8,
@@ -175,6 +175,7 @@ pub const Contract = struct {
 pub const Specials = struct {
     TextInputEvent: type,
     ScrollState: type,
+    TerminalState: type,
 };
 
 /// Reflect a concrete Model/Msg pair into a contract, at comptime. The
@@ -338,6 +339,11 @@ fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     // teach the two-axis migration by field name instead of rejecting
     // the payload generically.
     if (reflect.declaredLegacyScrollStateRecord(T)) return .legacy_scroll_state;
+    if (T == specials.TerminalState) return .terminal_state;
+    // A declared mirror of the terminal-state record (transpiled cores)
+    // binds through on-terminal exactly like the canvas type — same
+    // resolution as both engines' terminalConstructor.
+    if (reflect.declaredTerminalStateRecord(T)) return .terminal_state;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -872,6 +878,11 @@ const Checker = struct {
             if (found.payload != .scroll_state) return self.failAttr(node, attribute, markup.on_scroll_payload_message);
             return;
         }
+        if (std.mem.eql(u8, event, "terminal")) {
+            const found = tag orelse return self.failAttr(node, attribute, markup.on_terminal_payload_message);
+            if (found.payload != .terminal_state) return self.failAttr(node, attribute, markup.on_terminal_payload_message);
+            return;
+        }
         if (std.mem.eql(u8, event, "resize")) {
             // f32 is the canvas-native arm; f64 the transpiled one-number
             // float arm (engine parity — integer arms stay excluded, a
@@ -911,7 +922,7 @@ const Checker = struct {
             .boolean => {},
             // These payloads cannot be constructed from a markup binding
             // (input/scroll payloads bind through their own events).
-            .text_input, .scroll_state, .legacy_scroll_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
+            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
             .none => unreachable,
         }
     }

@@ -21,14 +21,15 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 68), schema.elements.len);
-    try testing.expectEqual(@as(usize, 87), schema.attrs.len);
-    try testing.expectEqual(@as(usize, 12), schema.events.len);
+    try testing.expectEqual(@as(usize, 69), schema.elements.len);
+    try testing.expectEqual(@as(usize, 89), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 13), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
-    // runtime-image leaf (67), and the video playback composite (68).
+    // runtime-image leaf (67), the video playback composite (68), and
+    // the terminal leaf (69).
     try testing.expectEqual(
-        @as(u64, 0x7dc4a24d1221eac5),
+        @as(u64, 0x439b5e520bedc352),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -39,16 +40,18 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // hover knob quiet-hover (79), the anchored-tooltip hover-intent
     // delay tooltip-delay (80), the media-surface producer rendezvous
     // surface (81), the video element attributes controls (82),
-    // autoplay (83), loop (84), and muted (85), and the scroll-axis
-    // attributes axis (86) and value-x (87).
+    // autoplay (83), loop (84), and muted (85), the scroll-axis
+    // attributes axis (86) and value-x (87), and the terminal
+    // attributes pty (88) and scrollback (89).
     try testing.expectEqual(
-        @as(u64, 0xba6077bbdaac1438),
+        @as(u64, 0x60e430e0cf2cc4f9),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     // The event table runs through the pointer-hover containment pair
-    // hover-enter (11) and hover-leave (12).
+    // hover-enter (11) and hover-leave (12) and the terminal view-state
+    // echo terminal (13).
     try testing.expectEqual(
-        @as(u64, 0xd2d83d3570a6c4e8),
+        @as(u64, 0x62d715c2db7951d6),
         tableFingerprint(schema.EventInfo, &schema.events),
     );
 }
@@ -95,7 +98,7 @@ test "registry event scoping names registry elements" {
 test "derived name lists mirror the registry" {
     // The derivations are the vocabulary every consumer reads; hold them
     // to the registry's own predicates.
-    try testing.expectEqual(@as(usize, 55), schema.element_names.len);
+    try testing.expectEqual(@as(usize, 56), schema.element_names.len);
     for (schema.element_names) |name| {
         try testing.expect(schema.elementByName(name).?.rule_hook == null);
     }

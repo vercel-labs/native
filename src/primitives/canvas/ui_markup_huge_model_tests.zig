@@ -498,6 +498,7 @@ test "huge Model reflects into a model contract without raising the eval-branch 
     const huge_contract = comptime canvas.ui_markup.contract.describe(HugeModel, HugeMsg, .{
         .TextInputEvent = canvas.TextInputEvent,
         .ScrollState = canvas.ScrollState,
+        .TerminalState = canvas.TerminalState,
     });
     try std.testing.expect(huge_contract.model.scalars.len > 100);
     try std.testing.expect(huge_contract.iterables.len > 30);

@@ -1272,6 +1272,14 @@ pub const media_surface_surface_message = "surface takes one {binding} to the u6
 pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
 pub const media_surface_missing_surface_message = "media-surface requires surface={binding} naming the u64 surface id its producer targets - without one the surface can never show anything (dead markup, same policy as icon without name)";
 
+pub const terminal_pty_message = "pty on terminal takes the model-owned pty effect key - one {binding} resolving to the u64 key the app's ptySpawn named (pty keys are model data, never markup literals; 0 leaves the terminal unbound and it renders the empty surface)";
+pub const terminal_pty_element_message = "pty is only supported on terminal - it binds the pty effect key whose session the terminal renders; anywhere else it would be silently inert";
+pub const terminal_missing_pty_message = "terminal requires pty={binding} naming the model-owned u64 pty effect key its session rides - without one the terminal can never attach a session (dead markup, same policy as media-surface without surface)";
+pub const terminal_children_message = "terminal is a leaf - it takes no children";
+pub const scrollback_element_message = "scrollback is only supported on terminal - it is the scrollback offset in rows above the live screen (echo on-terminal's scrollback back here, the scroll value reconcile shape); anywhere else it would be silently inert";
+pub const on_terminal_element_message = "on-terminal is only supported on terminal - the runtime emits terminal view state for terminal elements, so the handler belongs on the terminal element itself";
+pub const on_terminal_payload_message = "on-terminal takes a bare Msg tag whose payload is the post-change terminal view state (a canvas.TerminalState variant, like term_state: canvas.TerminalState, or a declared record of its scrollback/history/cols/rows fields for transpiled cores)";
+
 pub const video_children_message = "video is a leaf - it takes no children";
 pub const video_attr_message = "unknown attribute for video - it takes src, controls, autoplay, loop, muted, width, height, grow, label, key, and global-key";
 pub const video_src_message = "src on video takes the playback source string - an app-assets path or an http(s) URL (a literal, or one {binding} resolving to a string)";
@@ -3015,6 +3023,15 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                 // teaching (the icon-without-name policy).
                 if (node.attr("surface") == null) return errorAt(node, media_surface_missing_surface_message);
             }
+            if (std.mem.eql(u8, node.name, "terminal")) {
+                // A terminal without its pty binding can never attach a
+                // session: the same dead-markup policy as media-surface.
+                if (node.attr("pty") == null) return errorAt(node, terminal_missing_pty_message);
+                // A leaf like icon and image: the widget gives a
+                // terminal no child slots, so nested content would
+                // silently vanish - rejected instead.
+                if (node.children.len > 0) return errorAt(node.children[0], terminal_children_message);
+            }
             if (std.mem.eql(u8, node.name, "image")) {
                 // An image leaf without its id binding can never draw:
                 // the same dead-markup policy as media-surface.
@@ -3057,6 +3074,13 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         // never fire.
                         if (!std.mem.eql(u8, node.name, "scroll")) {
                             return attrError(node, attribute, on_scroll_element_message);
+                        }
+                    } else if (std.mem.eql(u8, attribute.name, "on-terminal")) {
+                        // The runtime emits terminal view state for
+                        // terminal elements only; anywhere else the
+                        // handler could never fire.
+                        if (!std.mem.eql(u8, node.name, "terminal")) {
+                            return attrError(node, attribute, on_terminal_element_message);
                         }
                     } else if (std.mem.eql(u8, attribute.name, "on-dismiss")) {
                         // Only dismissible surfaces are ever dismissed by
@@ -3175,6 +3199,19 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     }
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "pty")) {
+                    // The terminal's pty rendezvous, terminal scoped: pty
+                    // keys are model data the app's ptySpawn named, never
+                    // markup literals (the surface grammar exactly).
+                    if (!std.mem.eql(u8, node.name, "terminal")) {
+                        return attrError(node, attribute, terminal_pty_element_message);
+                    }
+                    const expression = parseAttrExpression(attribute.value);
+                    if (expression == null or expression.? != .binding) {
+                        return attrError(node, attribute, terminal_pty_message);
+                    }
+                    continue;
+                }
                 if (videoFlagAttrName(attribute.name)) {
                     // The video element's flags, video-scoped (its rule
                     // hook consumed them before this pass): anywhere
@@ -3248,6 +3285,15 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                         if (expression == .literal and !nameInList(expression.literal, &overflow_value_names)) {
                             return attrError(node, attribute, overflow_value_message);
                         }
+                    }
+                }
+                if (std.mem.eql(u8, attribute.name, "scrollback")) {
+                    // The scrollback offset exists only where an emulator
+                    // scrolls: anywhere but a terminal the option is
+                    // silently inert (same policy as overscroll off
+                    // scroll).
+                    if (!std.mem.eql(u8, node.name, "terminal")) {
+                        return attrError(node, attribute, scrollback_element_message);
                     }
                 }
                 if (std.mem.eql(u8, attribute.name, "overscroll")) {

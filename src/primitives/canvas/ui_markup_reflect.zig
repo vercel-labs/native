@@ -179,6 +179,15 @@ pub const scroll_state_field_names_ts = [_][]const u8{
     "contentExtentX",  "contentExtentY",
 };
 
+/// The terminal-state vocabulary `canvas.TerminalState` carries — pinned
+/// here so the declared-shape predicate below stays std-only. A drift
+/// test in `ui_markup_contract_tests.zig` holds this list equal to the
+/// real struct's fields. One spelling only: every field is a single
+/// word, so the canvas and TS SDK spellings coincide.
+pub const terminal_state_field_names = [_][]const u8{
+    "scrollback", "history", "cols", "rows",
+};
+
 /// The RETIRED one-axis scroll-state vocabulary, kept only to recognize
 /// a pre-two-axis mirror and teach the migration by name (see
 /// `declaredLegacyScrollStateRecord`). Nothing dispatches through these
@@ -231,6 +240,15 @@ fn declaredRecordMatchesVocabulary(comptime T: type, comptime canvas_names: []co
 /// integer-classed fields to the nearest whole number.
 pub fn declaredScrollStateRecord(comptime T: type) bool {
     return declaredRecordMatchesVocabulary(T, &scroll_state_field_names, &scroll_state_field_names_ts);
+}
+
+/// A Msg arm payload record DECLARING the terminal-state shape rather
+/// than being `canvas.TerminalState` by identity — the transpiled-core
+/// case, matched structurally like `declaredScrollStateRecord`: a struct
+/// of exactly the four field names (scrollback/history/cols/rows — one
+/// spelling, the words are single), each numeric.
+pub fn declaredTerminalStateRecord(comptime T: type) bool {
+    return declaredRecordMatchesVocabulary(T, &terminal_state_field_names, &terminal_state_field_names);
 }
 
 /// A mirror of the RETIRED one-axis scroll state — `{offset, velocity,

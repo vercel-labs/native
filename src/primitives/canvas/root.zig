@@ -565,6 +565,7 @@ pub const MarkupFragment = ui_markup.MarkupFragment;
 pub const markup_contract_specials = ui_markup.contract.Specials{
     .TextInputEvent = TextInputEvent,
     .ScrollState = ScrollState,
+    .TerminalState = TerminalState,
 };
 
 /// Reflect an app's Model/Msg into a markup contract (see
@@ -602,6 +603,7 @@ pub const StyleTokenRefs = ui_builder.StyleTokenRefs;
 /// The fragment hot-reload seam between the app loop and compiled
 /// markup fragments (Debug dev runs only; see `ui_builder`).
 pub const MarkupFragmentHost = ui_builder.MarkupFragmentHost;
+pub const TerminalGridLookup = ui_builder.TerminalGridLookup;
 pub const MarkupFragmentDiagnostic = ui_builder.MarkupFragmentDiagnostic;
 
 // Canvas widget event and semantics data lives in `events.zig`; root keeps the public API stable.

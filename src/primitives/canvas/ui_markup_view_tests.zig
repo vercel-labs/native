@@ -1490,9 +1490,6 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
     .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
-    // terminal: the widget kind lands ahead of its `<terminal>` element
-    // (the element entry removes this exclusion when it arrives).
-    .terminal,
 };
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
@@ -2809,6 +2806,73 @@ pub fn findVideoControl(widget: canvas.Widget, verb: canvas.VideoControlVerb) ?c
         if (findVideoControl(child, verb)) |found| return found;
     }
     return null;
+}
+
+// -------------------------------------------------- terminal element
+
+pub const TerminalElementMsg = union(enum) { term_state: canvas.TerminalState };
+
+pub const TerminalElementModel = struct {
+    shell: u64 = 7,
+    offset: u32 = 4,
+};
+
+pub const terminal_markup_source =
+    \\<column>
+    \\  <terminal pty="{shell}" scrollback="{offset}" grow="1" label="Build shell" on-terminal="term_state"/>
+    \\</column>
+;
+
+pub const TerminalElementUi = canvas.Ui(TerminalElementMsg);
+
+/// The hand-written equivalent of the terminal markup: `ui.terminal`
+/// with the same options, the parity baseline the compiled suite shares.
+pub fn handTerminalElementView(ui: *TerminalElementUi, model: *const TerminalElementModel) TerminalElementUi.Node {
+    return ui.column(.{}, .{
+        ui.terminal(.{
+            .pty = model.shell,
+            .scrollback = model.offset,
+            .grow = 1,
+            .semantics = .{ .label = "Build shell" },
+            .on_terminal = TerminalElementUi.terminalMsg(.term_state),
+        }),
+    });
+}
+
+/// The first widget of the given kind in the tree, or null.
+pub fn findWidgetKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
+    if (widget.kind == kind) return widget;
+    for (widget.children) |child| {
+        if (findWidgetKind(child, kind)) |found| return found;
+    }
+    return null;
+}
+
+test "the terminal element binds its pty key, scrollback echo, and view-state handler" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = TerminalElementModel{};
+    var view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, terminal_markup_source);
+    var ui = TerminalElementUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const widget = findWidgetKind(tree.root, .terminal) orelse return error.TestExpectedTerminal;
+    try testing.expectEqual(@as(u64, 7), widget.terminal.pty);
+    try testing.expectEqual(@as(u32, 4), widget.terminal.scrollback);
+    // No lookup installed (a bare builder): the widget renders unbound
+    // and the author's label stays the accessible name.
+    try testing.expect(widget.terminal.grid == null);
+    try testing.expectEqualStrings("Build shell", widget.semantics.label);
+
+    // The view-state handler resolves through the tree and carries the
+    // applied state.
+    const msg = tree.msgForTerminal(widget.id, .{ .scrollback = 12, .history = 40, .cols = 80, .rows = 24 }) orelse return error.TestExpectedHandler;
+    try testing.expectEqual(@as(u32, 12), msg.term_state.scrollback);
+    try testing.expectEqual(@as(u32, 40), msg.term_state.history);
+    try testing.expectEqual(@as(u16, 80), msg.term_state.cols);
+    try testing.expectEqual(@as(u16, 24), msg.term_state.rows);
 }
 
 test "the video element lowers to the playback surface with house chrome and records the declaration" {

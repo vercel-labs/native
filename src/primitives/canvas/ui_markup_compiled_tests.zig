@@ -42,6 +42,7 @@ fn expectSameTree(comptime MsgT: type, expected: canvas.Ui(MsgT).Tree, actual: c
             .input => |make| try testing.expectEqual(make, actual_handler.action.input),
             .value => |make| try testing.expectEqual(make, actual_handler.action.value),
             .scroll => |make| try testing.expectEqual(make, actual_handler.action.scroll),
+            .terminal => |make| try testing.expectEqual(make, actual_handler.action.terminal),
             // Context-menu handler entries carry one ?Msg per declared
             // item (separators are null slots); markup `<context-menu>`
             // and the Zig builder both produce them.
@@ -1304,6 +1305,41 @@ test "compiled image leaf binding refuses negative model values instead of trapp
     const image_node = ImageLeafNegativeCompiled.build(&image_ui, &fixture.ImageLeafModel{});
     try testing.expect(image_ui.failed);
     try testing.expectError(error.OutOfMemory, image_ui.finalize(image_node));
+}
+
+// -------------------------------------------------- terminal element
+
+const TerminalElementUi = fixture.TerminalElementUi;
+const TerminalElementInterpreter = markup_view.MarkupView(fixture.TerminalElementModel, fixture.TerminalElementMsg);
+const TerminalElementCompiled = canvas.CompiledMarkupView(fixture.TerminalElementModel, fixture.TerminalElementMsg, fixture.terminal_markup_source);
+
+test "compiled terminal element matches the interpreter and the hand-written ui.terminal tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = fixture.TerminalElementModel{};
+
+    var view = try TerminalElementInterpreter.init(arena, fixture.terminal_markup_source);
+    var interpreted_ui = TerminalElementUi.init(arena);
+    const interpreted = try interpreted_ui.finalize(try view.build(&interpreted_ui, &model));
+
+    var compiled_ui = TerminalElementUi.init(arena);
+    const compiled = try compiled_ui.finalize(TerminalElementCompiled.build(&compiled_ui, &model));
+
+    var hand_ui = TerminalElementUi.init(arena);
+    const hand = try hand_ui.finalize(fixture.handTerminalElementView(&hand_ui, &model));
+
+    try expectSameTree(fixture.TerminalElementMsg, hand, interpreted);
+    try expectSameTree(fixture.TerminalElementMsg, hand, compiled);
+
+    // All three lowerings bind the model-owned key and the echo.
+    for ([_]TerminalElementUi.Tree{ hand, interpreted, compiled }) |tree| {
+        const widget = fixture.findWidgetKind(tree.root, .terminal) orelse return error.TestExpectedTerminal;
+        try testing.expectEqual(@as(u64, 7), widget.terminal.pty);
+        try testing.expectEqual(@as(u32, 4), widget.terminal.scrollback);
+        try testing.expect(widget.terminal.grid == null);
+    }
 }
 
 // --------------------------------------------- video playback element

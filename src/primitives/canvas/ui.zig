@@ -263,6 +263,16 @@ pub const MarkupFragmentDiagnostic = struct {
 /// markup imports), or null while the fragment matches its compiled
 /// baseline. `report` carries a reloaded-but-unbuildable fragment's
 /// teaching diagnostic back to the app loop's markup diagnostic channel.
+/// The terminal grid lookup the app loop installs on the builder before
+/// each build (`Ui.terminal_lookup`): finalize resolves each `.terminal`
+/// widget's bound pty key through it to the session store's published
+/// `TerminalGrid` snapshot. Untyped context so the builder core never
+/// imports the runtime — the same seam shape as `MarkupFragmentHost`.
+pub const TerminalGridLookup = struct {
+    context: *anyopaque,
+    resolve: *const fn (context: *anyopaque, pty: u64) ?*const canvas.TerminalGrid,
+};
+
 pub const MarkupFragmentHost = struct {
     context: *anyopaque,
     override: *const fn (context: *anyopaque, key: *const anyopaque) ?*const anyopaque,
@@ -328,6 +338,11 @@ pub const UiHandlerEvent = enum {
     /// prepending a batch causes on its own, since the offset grows by
     /// the prepended extent to keep the viewport anchored.
     reach_start,
+    /// Terminal view-state changes (wheel/keyboard scrollback, the
+    /// layout-derived grid resize), dispatched with the TerminalState
+    /// the runtime already applied — echoing its `scrollback` back into
+    /// the attribute never fights the terminal reconcile rule.
+    terminal,
     /// The pointer entered the widget's hit region (the Elm
     /// onMouseEnter convention): a discrete containment edge the
     /// runtime derives from the same resolution the hover wash uses,
@@ -470,6 +485,12 @@ pub fn Ui(comptime Msg: type) type {
         /// (inactive) outside an app loop, where the chrome renders
         /// disabled.
         video_state: VideoPlaybackState = .{},
+        /// Terminal grid lookup for `.terminal` widgets: the app loop
+        /// installs it before each build, and finalize resolves every
+        /// bound pty key to the session store's published snapshot.
+        /// Null outside an app loop (bare builders, tests that stamp
+        /// grids by hand), where terminals render unbound.
+        terminal_lookup: ?TerminalGridLookup = null,
         /// The `<video src>` declaration this build recorded (see
         /// `video`): last-wins, mirroring `loadVideo`'s replace
         /// semantics — one player is the whole playback surface. The
@@ -726,6 +747,21 @@ pub fn Ui(comptime Msg: type) type {
             /// Gap in points between anchor edge and surface (`anchor`
             /// only).
             anchor_offset: f32 = 4,
+            /// The `.terminal` element's pty binding: the MODEL-OWNED
+            /// u64 effect key the app's `ptySpawn` named (markup
+            /// `pty={binding}` — ids are model data, never markup
+            /// literals). 0 is the unbound sentinel: the terminal
+            /// paints the honest empty surface. Meaningless on every
+            /// other element.
+            pty: u64 = 0,
+            /// The `.terminal` element's scrollback offset in rows
+            /// above the live screen (markup `scrollback=`), following
+            /// the scroll `value` source-wins reconcile rule: echo the
+            /// `on_terminal` state's `scrollback` back here and the
+            /// runtime-owned position survives rebuilds; change it
+            /// model-side to scroll programmatically. 0 is pinned to
+            /// the live bottom. Meaningless on every other element.
+            scrollback: u32 = 0,
             on_press: ?Msg = null,
             /// Double-click Msg (builder-only): dispatched on a release
             /// whose click count reached 2, in place of `on_press` for
@@ -837,6 +873,15 @@ pub fn Ui(comptime Msg: type) type {
             /// so echoing it back into `value` on the next rebuild never
             /// fights the scroll reconcile rule.
             on_scroll: ?ScrollMsgFn = null,
+            /// Message constructor for terminal view-state changes on a
+            /// `terminal` element: called with the post-change
+            /// `canvas.TerminalState` (scrollback, history, cols, rows)
+            /// after every runtime-applied change — wheel and keyboard
+            /// scrollback, and the layout-derived grid resize. Pair
+            /// with `terminalMsg`. The delivered state is what the
+            /// runtime already applied, so echoing `scrollback` back
+            /// never fights the terminal reconcile rule.
+            on_terminal: ?TerminalMsgFn = null,
             /// Context menu for this widget: right/ctrl-click (or a touch
             /// long-press) presents these items through the platform's
             /// native menu (macOS `NSMenu`); selecting one dispatches its
@@ -861,6 +906,7 @@ pub fn Ui(comptime Msg: type) type {
         pub const ValueMsgFn = *const fn (value: f32) Msg;
         pub const LinkMsgFn = *const fn (link: []const u8) Msg;
         pub const ScrollMsgFn = *const fn (scroll: canvas.ScrollState) Msg;
+        pub const TerminalMsgFn = *const fn (state: canvas.TerminalState) Msg;
 
         pub const Node = struct {
             widget: Widget = .{ .kind = .stack },
@@ -888,6 +934,7 @@ pub fn Ui(comptime Msg: type) type {
             on_value: ?ValueMsgFn = null,
             on_resize: ?ValueMsgFn = null,
             on_scroll: ?ScrollMsgFn = null,
+            on_terminal: ?TerminalMsgFn = null,
             context_menu: []const ContextMenuItem = &.{},
             nodes: []const Node = &.{},
             /// Markup authoring provenance, stamped by the markup engines
@@ -907,6 +954,7 @@ pub fn Ui(comptime Msg: type) type {
                 input: InputMsgFn,
                 value: ValueMsgFn,
                 scroll: ScrollMsgFn,
+                terminal: TerminalMsgFn,
                 /// Per-item context-menu messages, indexed like the
                 /// widget's `context_menu` items (null = inert entry:
                 /// separator or msg-less item).
@@ -1070,6 +1118,41 @@ pub fn Ui(comptime Msg: type) type {
             }.make;
         }
 
+        /// Comptime message constructor for `on_terminal`:
+        /// `terminalMsg(.term_state)` yields a function building
+        /// `Msg{ .term_state = state }` from the post-change
+        /// `canvas.TerminalState`.
+        pub fn terminalMsg(comptime tag: std.meta.Tag(Msg)) TerminalMsgFn {
+            return struct {
+                fn make(state: canvas.TerminalState) Msg {
+                    return @unionInit(Msg, @tagName(tag), state);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for `on_terminal` over a DECLARED
+        /// terminal-state record (`ui_markup_reflect.declaredTerminalStateRecord`
+        /// — the transpiled-core shape, where the emitted module declares
+        /// its own mirror of `canvas.TerminalState` and type identity
+        /// cannot cross the emission boundary). Fields map by name (the
+        /// TS spellings are identical) and each numeric field widens the
+        /// way the payload declares it.
+        pub fn translatedTerminalMsg(comptime tag: std.meta.Tag(Msg), comptime Payload: type) TerminalMsgFn {
+            return struct {
+                fn num(comptime N: type, value: anytype) N {
+                    return if (@typeInfo(N) == .float) @floatFromInt(value) else @intCast(value);
+                }
+
+                fn make(state: canvas.TerminalState) Msg {
+                    var payload: Payload = undefined;
+                    inline for (@typeInfo(Payload).@"struct".fields) |field| {
+                        @field(payload, field.name) = num(field.type, @field(state, field.name));
+                    }
+                    return @unionInit(Msg, @tagName(tag), payload);
+                }
+            }.make;
+        }
+
         /// Comptime message constructor for `on_link`: `linkMsg(.open_url)`
         /// yields a function building `Msg{ .open_url = link }`. The link
         /// slice lives in the view arena (or the caller's markdown source),
@@ -1169,6 +1252,17 @@ pub fn Ui(comptime Msg: type) type {
 
             /// Typed dispatch for scroll offset changes: builds the message
             /// through the widget's `on_scroll` constructor.
+            /// Terminal view-state changes route the applied state
+            /// through the widget's `on_terminal` constructor.
+            pub fn msgForTerminal(self: Tree, id: ObjectId, state: canvas.TerminalState) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id == id and handler.event == .terminal and handler.action == .terminal) {
+                        return handler.action.terminal(state);
+                    }
+                }
+                return null;
+            }
+
             pub fn msgForScroll(self: Tree, id: ObjectId, scroll_state: canvas.ScrollState) ?Msg {
                 for (self.handlers) |handler| {
                     if (handler.id == id and handler.event == .scroll and handler.action == .scroll) {
@@ -1359,6 +1453,7 @@ pub fn Ui(comptime Msg: type) type {
                 .on_value = options.on_value,
                 .on_resize = options.on_resize,
                 .on_scroll = options.on_scroll,
+                .on_terminal = options.on_terminal,
                 .context_menu = self.dupeContextMenuItems(options.context_menu),
                 .nodes = self.childNodes(children),
             };
@@ -1865,6 +1960,20 @@ pub fn Ui(comptime Msg: type) type {
         /// unregistered).
         pub fn image(self: *Self, options: ElementOptions) Node {
             return self.el(.image, options, .{});
+        }
+
+        /// The terminal leaf (markup `<terminal pty={key}>`): paints the
+        /// framework-owned emulator session behind the MODEL-OWNED pty
+        /// effect key in `options.pty` (the key `fx.ptySpawn` named; 0
+        /// renders the honest empty surface) and routes keys, IME text,
+        /// and wheel scrollback to it when focused. `options.scrollback`
+        /// echoes the app-visible view state back (the scroll `value`
+        /// source-wins rule) and `options.on_terminal` hears it change
+        /// (`canvas.TerminalState`). Size it like a media surface:
+        /// definite width/height or flex grow — the runtime derives the
+        /// pty's cols/rows FROM the frame the layout resolves.
+        pub fn terminal(self: *Self, options: ElementOptions) Node {
+            return self.el(.terminal, options, .{});
         }
 
         /// The media surface leaf (markup `<media-surface surface={id}>`):
@@ -2864,6 +2973,29 @@ pub fn Ui(comptime Msg: type) type {
                 handlers[handler_len.*] = .{ .id = widget.id, .event = .scroll, .action = .{ .scroll = make } };
                 handler_len.* += 1;
             }
+            if (node.on_terminal) |make| {
+                handlers[handler_len.*] = .{ .id = widget.id, .event = .terminal, .action = .{ .terminal = make } };
+                handler_len.* += 1;
+            }
+            if (widget.kind == .terminal) {
+                // Resolve the bound pty's published grid snapshot (the
+                // app loop installs the lookup before each build; a
+                // bare builder has none and the widget stays unbound).
+                if (widget.terminal.pty != 0) {
+                    if (self.terminal_lookup) |lookup| {
+                        widget.terminal.grid = lookup.resolve(lookup.context, widget.terminal.pty);
+                    }
+                }
+                // The live screen text IS the terminal's semantic
+                // content: it rides the semantics label so assistive
+                // tech reads the real screen and the session
+                // fingerprint covers cell state. The author's declared
+                // label remains the accessible NAME floor while the
+                // screen is empty or the session has not spoken.
+                if (widget.terminal.grid) |grid| {
+                    if (grid.screen_text.len > 0) widget.semantics.label = grid.screen_text;
+                }
+            }
             if (node.context_menu.len > 0) {
                 // Split the declared items: labels ride the widget (the
                 // runtime builds the platform request from them), messages
@@ -2977,6 +3109,7 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_value != null) total += 1;
             if (node.on_resize != null) total += 1;
             if (node.on_scroll != null) total += 1;
+            if (node.on_terminal != null) total += 1;
             if (node.context_menu.len > 0) total += 1;
             for (node.nodes) |child| total += countHandlers(child);
             return total;
@@ -3068,6 +3201,7 @@ pub fn Ui(comptime Msg: type) type {
                 .image_id = options.image,
                 .value = options.value,
                 .value_x = options.value_x,
+                .terminal = .{ .pty = options.pty, .scrollback = options.scrollback },
                 .scroll_axes = options.axis,
                 .variant = options.variant,
                 .size = options.size,
