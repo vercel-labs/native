@@ -125,7 +125,21 @@ const State = struct {
     /// wait loop steers toward the console close and the manufactured
     /// EOF instead of re-polling an already-signaled handle.
     child_exited: bool = false,
+    /// Monotonic stamp of that observation: the console close waits
+    /// out a short QUIET GRACE past it, because conhost renders the
+    /// dead client's final frame asynchronously — a close racing that
+    /// render would cut the session's last output off. Bounded (see
+    /// `exit_grace_ns`); 0 means the clock was unavailable and the
+    /// grace degrades to the quiet-pipe checks alone.
+    child_exited_at_ns: u64 = 0,
 };
+
+/// How long after the child's exit the console close waits for the
+/// output pipe to stay quiet. Not a liveness cost in the common case —
+/// the close fires at the first quiet observation past the grace — and
+/// bounded either way; the post-close drain still collects anything
+/// conhost flushes while tearing down.
+const exit_grace_ns: u64 = 50 * std.time.ns_per_ms;
 
 const SpinLock = struct {
     locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -419,6 +433,12 @@ fn armRead(st: *State) void {
 /// conhosts.
 fn maybeCloseConsole(st: *State) void {
     if (st.console_closed or !st.read_pending) return;
+    // The quiet grace: give conhost its beat to render the dead
+    // client's final frame before manufacturing EOF.
+    if (st.child_exited_at_ns != 0) {
+        const now = clock.monotonicNanoseconds();
+        if (now != 0 and now -% st.child_exited_at_ns < exit_grace_ns) return;
+    }
     if (win.WaitForSingleObject(st.read_event, 0) == win.WAIT_OBJECT_0) return;
     var avail: win.DWORD = 0;
     if (win.PeekNamedPipe(st.out_read, null, 0, null, &avail, null) != 0 and avail != 0) return;
@@ -476,7 +496,16 @@ pub fn wait(transport: Pty, nudge_fd: c_int, want_read: bool, want_write: bool) 
             write_index = count;
             count += 1;
         }
-        const r = win.WaitForMultipleObjects(count, &handles, 0, win.INFINITE);
+        // Between the child's exit and the console close the loop polls
+        // on a short beat instead of blocking: the quiet grace has no
+        // waitable handle of its own, and conhost's final render is
+        // what the beat is listening for.
+        const timeout: win.DWORD = if (want_read and st.child_exited and !st.console_closed)
+            10
+        else
+            win.INFINITE;
+        const r = win.WaitForMultipleObjects(count, &handles, 0, timeout);
+        if (r == win.WAIT_TIMEOUT) continue;
         if (r == win.WAIT_FAILED or r >= win.WAIT_OBJECT_0 + count) return .{};
         const index = r - win.WAIT_OBJECT_0;
         if (index == 0) return .{ .nudged = true };
@@ -485,6 +514,7 @@ pub fn wait(transport: Pty, nudge_fd: c_int, want_read: bool, want_write: bool) 
             // flag must stick before the next iteration rebuilds the
             // wait set without it.
             st.child_exited = true;
+            st.child_exited_at_ns = clock.monotonicNanoseconds();
             continue;
         }
         // A read or write completion: fold it in and let the top of
@@ -587,6 +617,16 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     var siex = std.mem.zeroes(win.STARTUPINFOEXW);
     siex.StartupInfo.cb = @sizeOf(win.STARTUPINFOEXW);
     siex.lpAttributeList = attr_buf.ptr;
+    // STARTF_USESTDHANDLES with NULL handles, deliberately: without
+    // it, CreateProcess DUPLICATES the parent's std handles into a
+    // console child whenever they do not reference a console (a parent
+    // under sshd or CI holds pipes there), and the child's stdio then
+    // bypasses the pseudoconsole entirely — output lands on the
+    // parent's pipes, not in this transport. Explicit null std handles
+    // block that duplication, and console initialization in the child
+    // binds the empty slots to its console: the pseudoconsole. (The
+    // same choice every ConPTY-hosting terminal makes.)
+    siex.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES;
     var pi = std.mem.zeroes(win.PROCESS_INFORMATION);
     // bInheritHandles = FALSE: the child's stdio comes from the
     // pseudoconsole, not from inherited handles — the recommended
@@ -1069,6 +1109,7 @@ const win = struct {
     const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x0000_0400;
     const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
     const DUPLICATE_SAME_ACCESS: DWORD = 0x2;
+    const STARTF_USESTDHANDLES: DWORD = 0x100;
     const INFINITE: DWORD = 0xFFFF_FFFF;
     const WAIT_OBJECT_0: DWORD = 0;
     const WAIT_TIMEOUT: DWORD = 0x102;
@@ -1339,7 +1380,8 @@ test "windows utf-8 honesty: non-ascii argv survives the utf-16 boundary and ret
 test "windows initial grid size reaches the child console" {
     if (comptime !is_windows) return;
     const p = try spawn(std.testing.allocator, .{
-        .argv = &.{ "cmd.exe", "/d", "/c", "mode con" },
+        // Full path: the test env carries no PATH for cmd to search.
+        .argv = &.{ "cmd.exe", "/d", "/c", "C:\\Windows\\System32\\mode.com con" },
         .env = &.{system_root_env},
         .cols = 97,
         .rows = 41,
@@ -1370,9 +1412,14 @@ test "windows command-line quoting round-trips the argv inverse" {
     try line.append(arena, ' ');
     try appendQuotedArg(arena, &line, "trail\\");
     try line.append(arena, ' ');
+    try appendQuotedArg(arena, &line, "back\\slash here\\");
+    try line.append(arena, ' ');
     try appendQuotedArg(arena, &line, "");
+    // A lone backslash needs no quoting (CommandLineToArgvW reads
+    // backslashes literally outside a quote context); a quoted
+    // trailing run doubles ahead of the closing quote.
     try std.testing.expectEqualStrings(
-        "plain \"has space\" \"quote\\\"inside\" \"trail\\\\\" \"\"",
+        "plain \"has space\" \"quote\\\"inside\" trail\\ \"back\\slash here\\\\\" \"\"",
         line.items,
     );
 }
