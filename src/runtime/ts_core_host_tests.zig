@@ -142,6 +142,9 @@ const mini_core = struct {
         // Second-arm mirrors (the replaced-load straggler probe).
         video2_state: VideoState,
         video2_events: i64,
+        // Unsigned-class mirrors (u64-classed arm routing).
+        ustamp_ms: u64,
+        ucode: u64,
     };
 
     pub const Msg = union(enum) {
@@ -281,6 +284,11 @@ const mini_core = struct {
             droppedWrites: f64,
         },
         dup_pty, // 78: two pty spawns under one key in one batch
+        ustamp, // 79: Cmd.now -> .ustamped (unsigned integer class)
+        ustamped: u64, // 80: now arm, u64-classed
+        uget, // 81: fetch "uget" -> ufetched/failed
+        ufetched: struct { status: u64, body: []const u8 }, // 82: fetch ok
+        // record with a u64-classed number field
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -343,6 +351,8 @@ const mini_core = struct {
                 .video_events = 0,
                 .video2_state = .rejected,
                 .video2_events = 0,
+                .ustamp_ms = 0,
+                .ucode = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -432,6 +442,19 @@ const mini_core = struct {
             .stamped => |at| {
                 const out = frameCreate(model.*);
                 out.stamp_ms = at;
+                return .{ .model = out, .cmd = "" };
+            },
+            .ustamp => return .{ .model = model, .cmd = cmdNow(80) },
+            .ustamped => |at| {
+                const out = frameCreate(model.*);
+                out.ustamp_ms = at;
+                return .{ .model = out, .cmd = "" };
+            },
+            .uget => return .{ .model = model, .cmd = cmdFetch("uget", 82, 8, 1, 0, "https://status.test/u", &.{}, "") },
+            .ufetched => |response| {
+                const out = frameCreate(model.*);
+                out.ucode = response.status;
+                out.status = response.body;
                 return .{ .model = out, .cmd = "" };
             },
             .run_lines => return .{ .model = model, .cmd = cmdSpawn("job", 25, 26, 8, 0, &.{ "/bin/probe", "--fast" }, "feed me") },
@@ -1150,6 +1173,28 @@ test "Cmd.now dispatches synchronously with the journaled clock" {
     try std.testing.expectEqual(@as(f64, 1_234), Host.model().stamp_ms);
     try std.testing.expectEqual(@as(usize, 1), Capture.count);
     try std.testing.expectEqual(effects_mod.EffectResultKind.clock, Capture.kinds[0]);
+}
+
+test "u64-classed arms route the number and number_bytes dispatch paths" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    var clock = runtime_clock.TestClock{};
+    clock.setWallMs(1_234);
+    fx.clock = clock.clock();
+    Host.init(fx);
+
+    // Cmd.now into a u64-classed arm: the fire time narrows into the
+    // unsigned class the way an i64-classed arm narrows.
+    Host.dispatch(fx, .ustamp);
+    try std.testing.expectEqual(@as(u64, 1_234), Host.model().ustamp_ms);
+
+    // A fetch ok record whose number field is u64-classed still matches
+    // the { number, bytes } shape by type and routes whole.
+    Host.dispatch(fx, .uget);
+    try fx.feedResponse(load_effect_key, 404, "missing");
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(u64, 404), Host.model().ucode);
+    try std.testing.expectEqualStrings("missing", Host.model().status);
 }
 
 test "fire-and-forget records ride the host-call binding in wire order" {

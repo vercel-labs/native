@@ -2273,7 +2273,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// transpiler validates the shape, so field names stay the
         /// app's). The bytes copy into the core's frame arena like
         /// every routed payload; the number widens into its field the
-        /// way the subset's number model classes it (i64 or f64).
+        /// way the subset's number model classes it (i64, u64, or f64).
         fn msgFromTagNumberBytes(comptime what: []const u8, comptime shape: []const u8, tag: u8, number: anytype, bytes: []const u8) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
@@ -2286,7 +2286,7 @@ pub fn TsCoreHost(comptime core: type) type {
                             var number_fields = 0;
                             for (fields) |f| {
                                 if (f.type == []const u8) bytes_fields += 1;
-                                if (f.type == i64 or f.type == f64) number_fields += 1;
+                                if (f.type == i64 or f.type == u64 or f.type == f64) number_fields += 1;
                             }
                             break :blk bytes_fields == 1 and number_fields == 1;
                         };
@@ -2327,7 +2327,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (std.mem.eql(u8, f.name, "state")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
                 } else if (std.mem.eql(u8, f.name, "positionMs") or std.mem.eql(u8, f.name, "durationMs")) {
-                    if (f.type != i64 and f.type != f64) ok = false;
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else if (std.mem.eql(u8, f.name, "playing") or std.mem.eql(u8, f.name, "buffering")) {
                     if (f.type != bool) ok = false;
                 } else if (std.mem.eql(u8, f.name, "bands")) {
@@ -2354,7 +2354,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// engine event, by field name. The band bytes copy into the
         /// core's frame arena like every routed bytes payload; the
         /// millisecond fields widen the way the subset's number model
-        /// classes them (i64 or f64).
+        /// classes them (i64, u64, or f64).
         fn msgFromTagAudio(tag: u8, event: runtime_effects.EffectAudio) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
@@ -2403,7 +2403,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 } else if (std.mem.eql(u8, f.name, "positionMs") or std.mem.eql(u8, f.name, "durationMs") or
                     std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height"))
                 {
-                    if (f.type != i64 and f.type != f64) ok = false;
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else if (std.mem.eql(u8, f.name, "playing") or std.mem.eql(u8, f.name, "buffering")) {
                     if (f.type != bool) ok = false;
                 } else {
@@ -2426,7 +2426,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Build the seven-field video event arm at index `tag` from an
         /// engine event, by field name. The millisecond and dimension
         /// fields widen the way the subset's number model classes them
-        /// (i64 or f64).
+        /// (i64, u64, or f64).
         fn msgFromTagVideo(tag: u8, event: runtime_effects.EffectVideo) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
@@ -2470,7 +2470,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (std.mem.eql(u8, f.name, "state")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
                 } else if (std.mem.eql(u8, f.name, "id") or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
-                    if (f.type != i64 and f.type != f64) ok = false;
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
                 }
@@ -2535,7 +2535,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 } else if (std.mem.eql(u8, f.name, "bytes")) {
                     if (f.type != []const u8) ok = false;
                 } else if (std.mem.eql(u8, f.name, "key") or std.mem.eql(u8, f.name, "droppedPending") or std.mem.eql(u8, f.name, "droppedTotal")) {
-                    if (f.type != i64 and f.type != f64) ok = false;
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
                 }
@@ -2614,7 +2614,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 } else if (std.mem.eql(u8, f.name, "bytes") or std.mem.eql(u8, f.name, "key")) {
                     if (f.type != []const u8) ok = false;
                 } else if (std.mem.eql(u8, f.name, "code") or std.mem.eql(u8, f.name, "signal") or std.mem.eql(u8, f.name, "droppedWrites")) {
-                    if (f.type != i64 and f.type != f64) ok = false;
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
                 }
@@ -2704,14 +2704,15 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         /// Build the Msg arm at index `tag` carrying one number (`now`
-        /// timestamps and timer fires; an i64-classed arm truncates the
-        /// way the subset's number model does at index sites).
+        /// timestamps and timer fires; an integer-classed arm — i64 or
+        /// its unsigned twin — truncates the way the subset's number
+        /// model does at index sites).
         fn msgFromTagNumber(tag: u8, value: f64) Msg {
             inline for (msg_arms, 0..) |arm, index| {
                 if (tag == index) {
                     if (comptime arm.type == f64) {
                         return @unionInit(Msg, arm.name, value);
-                    } else if (comptime arm.type == i64) {
+                    } else if (comptime arm.type == i64 or arm.type == u64) {
                         return @unionInit(Msg, arm.name, @intFromFloat(value));
                     }
                     @panic("ts core host: a timestamp targets Msg arm '" ++ arm.name ++ "', whose payload is not a number");

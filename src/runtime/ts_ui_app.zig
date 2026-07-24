@@ -492,7 +492,7 @@ pub fn TsUiApp(comptime core: type) type {
                 }
             }
             for (info.@"struct".fields) |field| {
-                if (field.type != i64 and field.type != f64 and field.type != f32) {
+                if (field.type != i64 and field.type != u64 and field.type != f64 and field.type != f32) {
                     @compileError("TsUiApp: " ++ what ++ " field '" ++ field.name ++ "' must be a number");
                 }
             }
