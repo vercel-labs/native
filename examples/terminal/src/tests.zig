@@ -1211,6 +1211,36 @@ test "a selection outlives the copy until the clipboard confirms" {
     try testing.expect(!app_state.model.session.selectionActive());
 }
 
+test "an armed selection follows its text when output scrolls the screen" {
+    const session = try createSession(20, 4);
+    defer session.destroy();
+    session.feed("alpha\r\nbeta\r\ngamma\r\n");
+    // Select "beta" (row 1): anchor at the cursor, walk up and extend.
+    session.beginSelection(false);
+    session.moveSelection(0, -2, false);
+    session.moveSelection(3, 0, true);
+    const before = (try session.selectionText(testing.allocator)) orelse return error.TestExpectedSelection;
+    defer testing.allocator.free(before);
+    try testing.expectEqualStrings("beta", before);
+    try testing.expectEqual(@as(u16, 1), session.select_head.y);
+
+    // One more output line scrolls the live screen: the emulator's
+    // absolute pins keep marking "beta", and the rebase moves the
+    // caret with it — a copy still returns the text the caret names.
+    session.feed("one\r\n");
+    try testing.expect(session.rebaseSelection());
+    try testing.expectEqual(@as(u16, 0), session.select_head.y);
+    const after = (try session.selectionText(testing.allocator)) orelse return error.TestExpectedSelection;
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings("beta", after);
+
+    // Enough output pushes the range out of the viewport: the rebase
+    // clears to the honest no-selection instead of desynchronizing.
+    session.feed("two\r\nthree\r\n");
+    try testing.expect(!session.rebaseSelection());
+    try testing.expect(!session.selectionActive());
+}
+
 test "a selection anchors at the live cursor, not the last painted snapshot" {
     const session = try createSession(40, 6);
     defer session.destroy();

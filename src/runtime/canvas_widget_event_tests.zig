@@ -1665,6 +1665,19 @@ test "a target-less composition owns its surface's keys - and its resolution rel
     } });
     try std.testing.expectEqual(@as(u32, 0), app_state.keydown_count);
 
+    // COMMAND CHORDS stay live mid-composition: input methods never
+    // consume them, so Ctrl+Alt+C here is a genuine shortcut the app
+    // must hear (on Windows alone Ctrl+Alt is AltGr and composes text;
+    // this build treats it as the chord it is on this host).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "c",
+        .modifiers = .{ .control = true, .option = true },
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
+
     // The commit delivers the composed text and ENDS the ownership: a
     // key_down arriving after the resolution is a genuine keystroke on
     // every host (hosts whose input method consumes the resolving key
@@ -1684,7 +1697,7 @@ test "a target-less composition owns its surface's keys - and its resolution rel
         .kind = .key_down,
         .key = "enter",
     } });
-    try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
 
     // A cancel releases the keys the same way.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
@@ -1699,7 +1712,7 @@ test "a target-less composition owns its surface's keys - and its resolution rel
         .kind = .key_down,
         .key = "backspace",
     } });
-    try std.testing.expectEqual(@as(u32, 1), app_state.keydown_count);
+    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
         .label = "canvas",
@@ -1711,7 +1724,7 @@ test "a target-less composition owns its surface's keys - and its resolution rel
         .kind = .key_down,
         .key = "escape",
     } });
-    try std.testing.expectEqual(@as(u32, 2), app_state.keydown_count);
+    try std.testing.expectEqual(@as(u32, 3), app_state.keydown_count);
 }
 
 test "an input-method-owned key never activates a freshly focused widget" {

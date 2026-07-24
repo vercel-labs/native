@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
@@ -422,12 +423,16 @@ pub fn canvasWidgetEscapeKey(key: []const u8) bool {
 /// insert it (above), and the target-less `on_text` fallback applies the
 /// same gate so a Ctrl/Cmd-chorded key never delivers both the shortcut
 /// and a literal character. Alt stays out of the set on purpose — Option
-/// composes text on macOS and AltGr produces it elsewhere — and
-/// Ctrl+Alt TOGETHER is exempt too: Windows represents AltGr as
-/// Ctrl+Alt, so a text event carrying both is composed text (AltGr+Q's
-/// `@`), not a chord.
+/// composes text on macOS and AltGr produces it elsewhere — and on
+/// WINDOWS ALONE Ctrl+Alt together is exempt too: that host represents
+/// AltGr as Ctrl+Alt, so a text event carrying both is composed text
+/// (AltGr+Q's `@`), not a chord. Linux reports AltGr as its own
+/// level-3 shift and macOS composes on bare Option, so Ctrl+Alt there
+/// is always a genuine chord and must keep gating.
 pub fn gpuInputHasTextCommandModifier(input_event: GpuSurfaceInputEvent) bool {
-    if (input_event.modifiers.control and input_event.modifiers.option) return false;
+    if (comptime builtin.os.tag == .windows) {
+        if (input_event.modifiers.control and input_event.modifiers.option) return false;
+    }
     return input_event.modifiers.primary or input_event.modifiers.command or input_event.modifiers.control;
 }
 

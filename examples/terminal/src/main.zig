@@ -222,6 +222,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
                 // fingerprint — byte counters alone would verify a
                 // wrong screen).
                 model.session.refreshScreenText();
+                // An armed selection follows the TEXT the emulator's
+                // absolute pins track — output that scrolled the screen
+                // moves the caret with the selected cells, and a range
+                // that left the viewport clears selection mode rather
+                // than desynchronizing the caret from the copyable text.
+                if (model.selecting and !model.session.rebaseSelection()) {
+                    model.selecting = false;
+                }
                 // The child produced output, so it is reading: its stdin
                 // FIFO likely has room now — push any pending outbound,
                 // then let a reply the full ring retained take the room

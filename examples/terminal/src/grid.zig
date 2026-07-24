@@ -356,6 +356,37 @@ pub const Session = struct {
         session.term.screens.active.clearSelection();
     }
 
+    /// Re-derive the viewport-relative selection coordinates from the
+    /// emulator's ABSOLUTE pins after content moved (an output feed
+    /// scrolled the live screen). The pins track the selected TEXT —
+    /// the painted highlight already follows it — so the caret and the
+    /// next Shift+Arrow must follow the same cells, or a copy would
+    /// return text the caret no longer names. Returns whether a
+    /// selection is still armed: a range that scrolled out of the
+    /// viewport (or that the emulator dropped) clears to the honest
+    /// no-selection instead of desynchronizing.
+    pub fn rebaseSelection(session: *Session) bool {
+        if (session.select_anchor == null) return false;
+        const screen = session.term.screens.active;
+        const selection = screen.selection orelse {
+            session.clearSelection();
+            return false;
+        };
+        const anchor_point = screen.pages.pointFromPin(.viewport, selection.start()) orelse {
+            session.clearSelection();
+            return false;
+        };
+        const head_point = screen.pages.pointFromPin(.viewport, selection.end()) orelse {
+            session.clearSelection();
+            return false;
+        };
+        const anchor_coord = anchor_point.coord();
+        const head_coord = head_point.coord();
+        session.select_anchor = .{ .x = @intCast(anchor_coord.x), .y = @intCast(anchor_coord.y) };
+        session.select_head = .{ .x = @intCast(head_coord.x), .y = @intCast(head_coord.y) };
+        return true;
+    }
+
     fn applySelection(session: *Session) void {
         const anchor = session.select_anchor orelse return;
         const screen = session.term.screens.active;
