@@ -22,6 +22,9 @@
 //!                       deterministic across producers.
 //!   i64                 8 bytes, two's complement, LE (never a bit
 //!                       reinterpretation of the f64)
+//!   u64                 8 bytes, unsigned, LE — the unsigned twin, for
+//!                       slots whose integer_slots attestation refines
+//!                       the i64 spelling to the u64 class
 //!   bool                u8, 0 or 1
 //!   bytes               u32 LE length + the bytes
 //!   enum                u32 LE declaration-order member index
@@ -116,7 +119,7 @@ fn encodeInto(comptime T: type, value: T, allocator: std.mem.Allocator, out: *st
     switch (@typeInfo(T)) {
         .bool => try out.append(allocator, @intFromBool(value)),
         .int => {
-            comptime std.debug.assert(T == i64);
+            comptime std.debug.assert(T == i64 or T == u64);
             try appendInt(u64, @bitCast(value), allocator, out);
         },
         .float => {
@@ -226,7 +229,10 @@ pub fn decode(comptime T: type, reader: *Reader, allocator: std.mem.Allocator) T
             return raw == 1;
         },
         .int => {
-            comptime std.debug.assert(T == i64);
+            comptime std.debug.assert(T == i64 or T == u64);
+            // The wire type is 8 bytes: every bit pattern decodes (the
+            // compiler-provable crossing range is narrower, but the
+            // decoder is total over the encoding).
             return @bitCast(reader.int(u64));
         },
         .float => {
@@ -344,6 +350,16 @@ pub fn panicSink(ctx: ?*anyopaque, msg: [*]const u8, msg_len: usize, address: u6
 pub fn exactF64(value: i64) f64 {
     const bound: i64 = 9007199254740992; // 2^53: the first alias point.
     if (value >= bound or value <= -bound) {
+        @panic("an integer message payload is at or past 2^53 — the f64 wire aliases such values, so dispatching one would corrupt it silently; keep integer payloads within +-(2^53 - 1)");
+    }
+    return @floatFromInt(value);
+}
+
+/// The unsigned twin, for u64-attested slots: the same 2^53 exactness
+/// line, one-sided.
+pub fn exactF64Unsigned(value: u64) f64 {
+    const bound: u64 = 9007199254740992; // 2^53: the first alias point.
+    if (value >= bound) {
         @panic("an integer message payload is at or past 2^53 — the f64 wire aliases such values, so dispatching one would corrupt it silently; keep integer payloads within +-(2^53 - 1)");
     }
     return @floatFromInt(value);
@@ -483,6 +499,63 @@ test "exactF64 carries every in-range integer and matches the wire grid" {
     try testing.expectEqual(@as(f64, 9007199254740991.0), exactF64(9007199254740991));
     try testing.expectEqual(@as(f64, -9007199254740991.0), exactF64(-9007199254740991));
     try testing.expectEqual(@as(f64, 0.0), exactF64(0));
+    try testing.expectEqual(@as(f64, 9007199254740991.0), exactF64Unsigned(9007199254740991));
+    try testing.expectEqual(@as(f64, 0.0), exactF64Unsigned(0));
+}
+
+test "integer slots encode as hand-computed 8-byte little-endian vectors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The compiler-provable extremes: +-(2^53 - 1) = 0x1fffffffffffff.
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00 }, encodeAlloc(i64, 9007199254740991, a));
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff }, encodeAlloc(i64, -9007199254740991, a));
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00 }, encodeAlloc(u64, 9007199254740991, a));
+
+    // Sign handling: two's complement for i64, plain magnitude for u64.
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, encodeAlloc(i64, -1, a));
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, encodeAlloc(u64, 1, a));
+
+    // The wire type is 8 bytes: the full i64/u64 range encodes, past
+    // the f64-exact crossing bound.
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80 }, encodeAlloc(i64, std.math.minInt(i64), a));
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f }, encodeAlloc(i64, std.math.maxInt(i64), a));
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, encodeAlloc(u64, std.math.maxInt(u64), a));
+}
+
+test "the full 8-byte wire range decodes and round-trips for both integer classes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Every bit pattern is a value of the wire type: the same bytes
+    // read signed or unsigned per the attested class.
+    const all_ones = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    try testing.expectEqual(@as(i64, -1), decodeExact(i64, &all_ones, a));
+    try testing.expectEqual(@as(u64, 18446744073709551615), decodeExact(u64, &all_ones, a));
+    const high_bit = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80 };
+    try testing.expectEqual(@as(i64, std.math.minInt(i64)), decodeExact(i64, &high_bit, a));
+    try testing.expectEqual(@as(u64, 9223372036854775808), decodeExact(u64, &high_bit, a));
+
+    const i64_values = [_]i64{ 0, 1, -1, 9007199254740991, -9007199254740991, std.math.minInt(i64), std.math.maxInt(i64) };
+    for (i64_values) |value| {
+        try testing.expectEqual(value, decodeExact(i64, encodeAlloc(i64, value, a), a));
+    }
+    const u64_values = [_]u64{ 0, 1, 9007199254740991, 9007199254740992, 9223372036854775808, std.math.maxInt(u64) };
+    for (u64_values) |value| {
+        try testing.expectEqual(value, decodeExact(u64, encodeAlloc(u64, value, a), a));
+    }
+
+    // Wrapped shapes carry the class through: optionals and record
+    // fields decode per the slot's own integer class.
+    try testing.expectEqualSlices(u8, &.{ 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, encodeAlloc(?u64, std.math.maxInt(u64), a));
+    try testing.expectEqual(@as(?u64, std.math.maxInt(u64)), decodeExact(?u64, &.{ 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, a));
+    const Pair = struct { id: u64, delta: i64 };
+    const pair = Pair{ .id = 9007199254740991, .delta = -9007199254740991 };
+    const encoded = encodeAlloc(Pair, pair, a);
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff }, encoded);
+    try testing.expectEqual(pair, decodeExact(Pair, encoded, a));
 }
 
 test "a decoded model root survives exactly one subsequent decode" {
