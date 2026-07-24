@@ -58,6 +58,12 @@ const SessionModel = struct {
     zoom: f32 = 1,
     pinch_begins: u32 = 0,
     pinch_ends: u32 = 0,
+    /// Hover-Msg counters: the reference session moves the pointer onto
+    /// the increment button (a hover listener) and off again, so the
+    /// journal records only the raw pointer moves and replay must
+    /// re-derive the same enter/leave containment edges.
+    hover_enters: u32 = 0,
+    hover_leaves: u32 = 0,
 
     fn bodyText(self: *const SessionModel) []const u8 {
         return self.body[0..self.body_len];
@@ -82,6 +88,8 @@ const SessionMsg = union(enum) {
     query_edit: canvas.TextInputEvent,
     name_edit: canvas.TextInputEvent,
     pinch: platform.PinchEvent,
+    hover_enter,
+    hover_leave,
     fetched: effects_mod.EffectResponse,
     line: effects_mod.EffectLine,
     exited: effects_mod.EffectExit,
@@ -133,6 +141,8 @@ fn sessionUpdate(model: *SessionModel, msg: SessionMsg, fx: *SessionApp.Effects)
         },
         .query_edit => |edit| applyMirrorEdit(&model.query, &model.query_len, &model.query_anchor, &model.query_focus, &model.query_edits, edit),
         .name_edit => |edit| applyMirrorEdit(&model.name, &model.name_len, &model.name_anchor, &model.name_focus, &model.name_edits, edit),
+        .hover_enter => model.hover_enters += 1,
+        .hover_leave => model.hover_leaves += 1,
         .pinch => |pinch| switch (pinch.phase) {
             .begin => model.pinch_begins += 1,
             .change => model.zoom *= (1 + pinch.scale),
@@ -184,7 +194,8 @@ fn sessionView(ui: *SessionApp.Ui, model: *const SessionModel) SessionApp.Ui.Nod
         ui.el(.textarea, .{ .text = "line one\nline two" }, .{}),
         ui.text(.{}, ui.fmt("Query {s} ({d}) Name {s} ({d})", .{ model.queryText(), model.query_edits, model.nameText(), model.name_edits })),
         ui.text(.{}, ui.fmt("Zoom {d:.4} ({d}/{d})", .{ model.zoom, model.pinch_begins, model.pinch_ends })),
-        ui.button(.{ .on_press = .increment }, "Increment"),
+        ui.text(.{}, ui.fmt("Hover {d}/{d}", .{ model.hover_enters, model.hover_leaves })),
+        ui.button(.{ .on_press = .increment, .on_hover_enter = .hover_enter, .on_hover_leave = .hover_leave }, "Increment"),
     });
 }
 
@@ -456,6 +467,30 @@ fn recordReferenceSession(gpa: std.mem.Allocator, buffer: *JournalBuffer, web_la
     try harness.runtime.dispatchAutomationCommand(app, pinch_command);
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
+    // Hover containment edges from raw journaled moves: onto the
+    // increment button (a hover listener), then off — replay re-derives
+    // the same enter/leave Msgs from the pointer events alone.
+    var button_frame: ?geometry.RectF = null;
+    for ((try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| {
+        if (node.widget.kind == .button) button_frame = node.frame;
+    }
+    const hover_frame = button_frame.?;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = hover_frame.x + hover_frame.width * 0.5,
+        .y = hover_frame.y + hover_frame.height * 0.5,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = 2,
+        .y = 2,
+    } });
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+
     recorder.finish();
     try std.testing.expect(!recorder.failed);
 
@@ -518,6 +553,9 @@ test "a recorded session replays to identical model state and fingerprints" {
     try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_begins);
     try std.testing.expectEqual(@as(u32, 2), recorded.model.pinch_ends);
     try std.testing.expectEqual(@as(f32, 1.40625), recorded.model.zoom);
+    // The hover moves dispatched exactly one containment pair.
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.hover_enters);
+    try std.testing.expectEqual(@as(u32, 1), recorded.model.hover_leaves);
 
     const replayed = try replayIntoFreshApp(gpa, buffer.journalBytes(), true);
     try std.testing.expect(replayed.report.ok());

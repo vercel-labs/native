@@ -2873,7 +2873,7 @@ test "an effects-wake rebuild past the widget budget fails tests loudly and degr
     );
     // Recording still happened before the propagate.
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.dispatchErrors().len);
-    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event);
+    try std.testing.expectEqualStrings("effects_wake", harness.runtime.dispatchErrors()[0].event());
     try std.testing.expectEqualStrings("WidgetLayoutListFull", harness.runtime.dispatchErrors()[0].error_name);
 
     // Production policy: the same failure degrades — recorded in the
@@ -2932,7 +2932,7 @@ test "a stale automation widget click degrades instead of killing the frame call
     try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
     const errors = harness.runtime.dispatchErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event);
+    try std.testing.expectEqualStrings("automation.widget_click", errors[0].event());
     try std.testing.expectEqualStrings("InvalidCommand", errors[0].error_name);
 
     // The app is still alive: a real click keeps dispatching.
@@ -5580,4 +5580,1226 @@ test "pinch identity distinguishes windows and views in the Msg" {
     try std.testing.expectEqual(@as(f32, 0.625), app_state.model.scale);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
+}
+
+// ------------------------------------------------------------ hover fixture
+
+const HoverEntry = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+};
+
+const HoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+    show_vanish: bool = true,
+    outer_bound: bool = true,
+
+    fn push(model: *HoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const HoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const HoverMsg = union(enum) {
+    outer_enter,
+    outer_leave,
+    row_enter: u32,
+    row_leave: u32,
+    vanish_enter,
+    vanish_leave,
+    unbind_outer,
+};
+
+const HoverApp = ui_app_model.UiApp(HoverModel, HoverMsg);
+
+fn hoverUpdate(model: *HoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .outer_enter => model.push(.outer_enter),
+        .outer_leave => model.push(.outer_leave),
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        .vanish_enter => {
+            // The enter handler unmounts the hovered element: the very
+            // next drain pass owes (and delivers) the captured leave.
+            model.push(.vanish_enter);
+            model.show_vanish = false;
+        },
+        .vanish_leave => model.push(.vanish_leave),
+        .unbind_outer => model.outer_bound = false,
+    }
+}
+
+/// A listening panel (y 0..120) holding two listening rows (y 0..40 and
+/// 40..80; the band at 80..120 is the panel's own), then a listening row
+/// (y 120..160) whose ENTER unmounts it. Dead space below. Fixed heights
+/// so the tests probe laid-out geometry deterministically.
+fn hoverView(ui: *HoverApp.Ui, model: *const HoverModel) HoverApp.Ui.Node {
+    const rows = ui.column(.{ .gap = 0 }, .{
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 1 }, .on_hover_leave = .{ .row_leave = 1 } }, .{
+            ui.text(.{}, "Row one"),
+        }),
+        ui.row(.{ .height = 40, .on_hover_enter = .{ .row_enter = 2 }, .on_hover_leave = .{ .row_leave = 2 } }, .{
+            ui.text(.{}, "Row two"),
+        }),
+    });
+    const outer = if (model.outer_bound)
+        ui.panel(.{ .height = 120, .on_hover_enter = .outer_enter, .on_hover_leave = .outer_leave }, .{rows})
+    else
+        ui.panel(.{ .height = 120 }, .{rows});
+    if (model.show_vanish) {
+        return ui.column(.{ .gap = 0 }, .{
+            outer,
+            ui.row(.{ .height = 40, .on_hover_enter = .vanish_enter, .on_hover_leave = .vanish_leave }, .{
+                ui.text(.{}, "Vanish"),
+            }),
+        });
+    }
+    return ui.column(.{ .gap = 0 }, .{outer});
+}
+
+const hover_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const hover_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Hover",
+    .width = 400,
+    .height = 300,
+    .views = &hover_views,
+}};
+const hover_scene: app_manifest.ShellConfig = .{ .windows = &hover_windows };
+
+fn hoverOptions() HoverApp.Options {
+    return .{
+        .name = "ui-app-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = hoverUpdate,
+        .view = hoverView,
+    };
+}
+
+fn hoverMove(harness: anytype, app: anytype, x: f32, y: f32) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = x,
+        .y = y,
+    } });
+}
+
+fn expectHoverLog(model: *const HoverModel, expected: []const HoverEntry) !void {
+    try std.testing.expectEqualSlices(HoverEntry, expected, model.entries());
+}
+
+test "hover msgs dispatch containment edges: nested listeners, cancel, and coalesced moves" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Dead space: nothing listens, nothing dispatches, and the runtime
+    // holds no standing chain (unbound surfaces pay nothing).
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // Onto row one (over its plain TEXT child — containment falls
+    // through to the listeners): enters fire outermost first.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // Row one to row two: the shared panel ancestor stays entered — the
+    // pointer never left it, the DOM mouseenter/mouseleave rule.
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 } });
+
+    // Onto the panel's own band below the rows: only the row leaves.
+    try hoverMove(harness, app, 50, 100);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 } });
+
+    // Off the panel entirely.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+
+    // Back inside, then the pointer LEAVES THE VIEW (the pointer-cancel
+    // hosts emit on window exit): leaves fire innermost first.
+    app_state.model = .{};
+    try hoverMove(harness, app, 50, 60);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 2 }, .{ .row_leave = 2 }, .outer_leave });
+}
+
+test "unbinding an outer listener leaves it alone: the standing inner row never flickers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Inside row one: panel and row both stand.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A rebuild removes only the PANEL's hover bindings: the panel's
+    // leave dispatches, and the row — whose containment never changed —
+    // dispatches NOTHING (per-listener containment, not a positional
+    // chain).
+    try app_state.dispatch(&harness.runtime, 1, .unbind_outer);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave });
+
+    // The row's own exit still delivers its captured leave.
+    try hoverMove(harness, app, 50, 220);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .outer_leave, .{ .row_leave = 1 } });
+}
+
+test "hover enter that unmounts its element still delivers the captured leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The enter handler hides the row; the rebuild prunes it from the
+    // standing chain and the SAME event's drain delivers the leave Msg
+    // captured when the enter dispatched — the live tree can no longer
+    // resolve it. No enter without its eventual leave.
+    try hoverMove(harness, app, 50, 140);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // The pointer now stands over dead space (the row is gone); moving
+    // again dispatches nothing further.
+    try hoverMove(harness, app, 50, 141);
+    try expectHoverLog(&app_state.model, &.{ .vanish_enter, .vanish_leave });
+}
+
+// ------------------------------------------------- hover-under-scroll fixture
+
+const ScrollHoverModel = struct {
+    log: [24]HoverEntry = undefined,
+    log_len: usize = 0,
+
+    fn push(model: *ScrollHoverModel, entry: HoverEntry) void {
+        if (model.log_len >= model.log.len) return;
+        model.log[model.log_len] = entry;
+        model.log_len += 1;
+    }
+
+    fn entries(model: *const ScrollHoverModel) []const HoverEntry {
+        return model.log[0..model.log_len];
+    }
+};
+
+const ScrollHoverApp = ui_app_model.UiApp(ScrollHoverModel, HoverMsg);
+
+fn scrollHoverUpdate(model: *ScrollHoverModel, msg: HoverMsg) void {
+    switch (msg) {
+        .row_enter => |id| model.push(.{ .row_enter = id }),
+        .row_leave => |id| model.push(.{ .row_leave = id }),
+        else => {},
+    }
+}
+
+/// Ten listening rows of 40 points inside a 120-point scroll viewport:
+/// scrolling moves rows under a stationary pointer.
+fn scrollHoverView(ui: *ScrollHoverApp.Ui, model: *const ScrollHoverModel) ScrollHoverApp.Ui.Node {
+    _ = model;
+    var rows: [10]ScrollHoverApp.Ui.Node = undefined;
+    for (&rows, 0..) |*node, index| {
+        const id: u32 = @intCast(index + 1);
+        node.* = ui.row(.{
+            .height = 40,
+            .key = canvas.uiKey(@as(u64, id)),
+            .on_hover_enter = .{ .row_enter = id },
+            .on_hover_leave = .{ .row_leave = id },
+        }, .{ui.text(.{}, ui.fmt("Row {d}", .{id}))});
+    }
+    const row_nodes: []const ScrollHoverApp.Ui.Node = rows[0..];
+    return ui.scroll(.{ .height = 120 }, .{ui.column(.{ .gap = 0 }, row_nodes)});
+}
+
+fn scrollHoverOptions() ScrollHoverApp.Options {
+    return .{
+        .name = "ui-app-scroll-hover",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = scrollHoverUpdate,
+        .view = scrollHoverView,
+    };
+}
+
+test "hover msgs re-resolve when content scrolls under a stationary pointer" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(ScrollHoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = ScrollHoverApp.init(std.heap.page_allocator, .{}, scrollHoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Park the pointer on row 1.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .x = 50,
+        .y = 20,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{.{ .row_enter = 1 }}, app_state.model.entries());
+
+    // A wheel scroll of 80 points slides row 3 under the stationary
+    // pointer: the same leave/enter a real move off row 1 onto row 3
+    // would dispatch — content moved, containment followed.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .scroll,
+        .timestamp_ns = 2_000_000,
+        .x = 50,
+        .y = 20,
+        .delta_y = 80,
+    } });
+    try std.testing.expectEqualSlices(HoverEntry, &.{ .{ .row_enter = 1 }, .{ .row_leave = 1 }, .{ .row_enter = 3 } }, app_state.model.entries());
+}
+
+test "touch-shaped input (down/up/drag without hover) never synthesizes hover msgs" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // A tap (down/up) and a scrub (drag) over a listening row — the
+    // touch input shape, which never includes a hover-phase move —
+    // dispatch no hover Msgs and leave no standing containment: touch
+    // cannot hover, mechanically.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_drag, .pointer_up }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .x = 50,
+            .y = 20,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // A TOUCH-STAMPED hover-phase move (the mouse-shaped float Windows
+    // synthesizes for taps, marked by the host with the reserved
+    // pointer-id bit) earns no proof either: the fake float dispatches
+    // nothing and leaves no standing containment.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_move,
+        .pointer_id = zero_platform.touch_pointer_id_bit | 1,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{});
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+
+    // A hover-phase move proves a hover-capable pointer; from then on
+    // clicks and drags keep full mouse fidelity.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_drag,
+        .x = 50,
+        .y = 220,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+// ------------------------------------------------ hover capture fixture
+
+const CaptureModel = struct {
+    churns: u32 = 0,
+    show_row: bool = true,
+    bind_leave: bool = true,
+    exploded: bool = false,
+    two_entered: u32 = 0,
+    two_left: u32 = 0,
+    field: canvas.TextBuffer(16) = .{},
+    left_storage: [32]u8 = [_]u8{0} ** 32,
+    left_len: usize = 0,
+
+    fn leftText(model: *const CaptureModel) []const u8 {
+        return model.left_storage[0..model.left_len];
+    }
+
+    pub fn fieldText(model: *const CaptureModel) []const u8 {
+        return model.field.text();
+    }
+};
+
+const CaptureMsg = union(enum) {
+    churn,
+    hide_row,
+    entered,
+    left: []const u8,
+    entered_two,
+    left_two,
+    bind_leave_now,
+    explode,
+    calm,
+    field_edit: canvas.TextInputEvent,
+};
+
+const CaptureApp = ui_app_model.UiApp(CaptureModel, CaptureMsg);
+
+fn captureUpdate(model: *CaptureModel, msg: CaptureMsg) void {
+    switch (msg) {
+        .churn => model.churns += 1,
+        .hide_row => model.show_row = false,
+        .entered => {},
+        .left => |text| {
+            const len = @min(text.len, model.left_storage.len);
+            @memcpy(model.left_storage[0..len], text[0..len]);
+            model.left_len = len;
+        },
+        .entered_two => model.two_entered += 1,
+        .left_two => model.two_left += 1,
+        .bind_leave_now => model.bind_leave = true,
+        .explode => model.exploded = true,
+        .calm => model.exploded = false,
+        .field_edit => |edit| {
+            // Any edit — the standalone accessibility selection verb
+            // included — unmounts the hovered row, the shape that
+            // strands a leave if the standalone event skips the drain.
+            model.field.apply(edit);
+            model.show_row = false;
+        },
+    }
+}
+
+/// The leave Msg's payload is a `ui.fmt` slice — build-arena bytes that
+/// the arena pair recycles two builds later. The capture must own them.
+/// `exploded` renders a view past the per-view widget-node budget, so
+/// its rebuild FAILS AT PUBLICATION — `self.tree` moved to a build the
+/// runtime never adopted, the exact stale-tree seam the hover drain's
+/// currency invariant covers.
+fn captureView(ui: *CaptureApp.Ui, model: *const CaptureModel) CaptureApp.Ui.Node {
+    if (model.exploded) {
+        var rows: [1100]CaptureApp.Ui.Node = undefined;
+        for (&rows, 0..) |*node, index| {
+            node.* = ui.text(.{ .key = canvas.uiKey(@as(u64, index)) }, "x");
+        }
+        const row_nodes: []const CaptureApp.Ui.Node = rows[0..];
+        return ui.column(.{ .gap = 0 }, row_nodes);
+    }
+    if (!model.show_row) {
+        return ui.column(.{ .gap = 0 }, .{ui.text(.{}, ui.fmt("churn {d}", .{model.churns}))});
+    }
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = if (model.bind_leave) CaptureMsg{ .left = ui.fmt("left-after-{d}-churns", .{model.churns}) } else null,
+        }, .{ui.text(.{}, "Capture row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered_two,
+            .on_hover_leave = .left_two,
+        }, .{ui.text(.{}, "Second row")}),
+        ui.el(.text_field, .{
+            .height = 30,
+            .text = model.fieldText(),
+            .placeholder = "notes",
+            .on_input = CaptureApp.Ui.inputMsg(.field_edit),
+        }, .{}),
+        ui.text(.{}, ui.fmt("churn {d}", .{model.churns})),
+    });
+}
+
+fn captureCommand(name: []const u8) ?CaptureMsg {
+    if (std.mem.eql(u8, name, "capture.churn")) return .churn;
+    if (std.mem.eql(u8, name, "capture.hide")) return .hide_row;
+    return null;
+}
+
+fn captureOptions() CaptureApp.Options {
+    return .{
+        .name = "ui-app-hover-capture",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = captureUpdate,
+        .view = captureView,
+        .on_command = captureCommand,
+    };
+}
+
+test "a captured hover-leave msg owns its arena payload across rebuilds and unmount" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter the row: its leave Msg carries a `ui.fmt` payload built in
+    // THIS build's arena.
+    try hoverMove(harness, app, 50, 20);
+
+    // Churn rebuilds until the arena pair has recycled the bytes the
+    // enter-time payload lived in. The capture deep-copies each build's
+    // LATEST binding (kept fresh as the trees change), so the payload
+    // is always owned bytes, never a pointer into a recycled arena.
+    for (0..3) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.churn", .window_id = 1 } });
+    }
+    try std.testing.expectEqual(@as(u32, 3), app_state.model.churns);
+
+    // Unmount the row under the stationary pointer: the captured leave
+    // dispatches the last build's binding, bytes intact.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
+    try std.testing.expectEqualStrings("left-after-3-churns", app_state.model.leftText());
+}
+
+test "a direct dispatch that unmounts the hovered element delivers its leave immediately" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // A DIRECT dispatch (a command handler, an embedder, a test) that
+    // unmounts the hovered row settles the leave at its own tail — no
+    // later platform event required.
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "another pointer's contact never rides a mouse's hover proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The mouse (pointer 0) proves hover over row one.
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A touch contact (another pointer id) taps row two and lifts with
+    // a cancel: on a host that distinguishes pointers, none of it moves
+    // the mouse's standing containment.
+    for ([_]zero_platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up, .pointer_cancel }) |kind| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 7,
+            .x = 50,
+            .y = 60,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // The mouse's own departure retires it.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 20,
+    } });
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+}
+
+test "a leave handler added while the listener stands is captured before the unmount needs it" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    app_state.model.bind_leave = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave handler bound: nothing to capture yet.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqualStrings("", app_state.model.leftText());
+
+    // A rebuild ADDS the leave binding while the listener stands: the
+    // capture refresh picks it up (id-identical chains included), so
+    // the later unmount can still deliver the pair.
+    try app_state.dispatch(&harness.runtime, 1, .bind_leave_now);
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "hover edges defer while a tree is stale and deliver after recovery" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // White-box: mark the main tree stale, the state a failure INSIDE
+    // the install window leaves behind (publication adopted, handler
+    // tree not yet) — the narrow seam no budget lever reaches
+    // deterministically from outside. An enter-only transition then
+    // has nothing deliverable: the enter DEFERS rather than resolving
+    // through the stale tree (any owed leave would still dispatch and
+    // its rebuild would heal the staleness — the pure-enter case is
+    // the one that must wait).
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 60);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.two_entered);
+
+    // Recovery: the next successful rebuild restores currency at the
+    // install seam, and its own drain delivers the deferred enter.
+    try app_state.dispatch(&harness.runtime, 1, .churn);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // Leaves never wait on currency: stale again, moving off the row
+    // still delivers the captured leave — and that dispatch's own
+    // successful rebuild heals the flag at the install seam.
+    app_state.main_tree_current = false;
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
+    try std.testing.expect(app_state.main_tree_current);
+}
+
+test "a failed build keeps the still-matching pair live: edges flow through it" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // The explode rebuild fails at LAYOUT — before publication, before
+    // `self.tree` moves — so the OLD handler tree still matches the
+    // runtime's retained state and stays CURRENT: a failure outside
+    // the install window must never defer hover edges (an idle app
+    // might perform no further rebuild to lift the deferral).
+    if (app_state.dispatch(&harness.runtime, 1, .explode)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expect(app_state.model.exploded);
+
+    // The pointer moves to the second row (hit-tested against the
+    // retained tree the failed build never replaced): row one's
+    // captured leave AND row two's enter both flow through the
+    // still-matching pair. Each edge's own dispatch rebuild fails (the
+    // model remains exploded), so the event ERRORS after the Msgs
+    // landed — the degradation contract: edges delivered, failures
+    // loud.
+    if (hoverMove(harness, app, 50, 60)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // Recovery is clean: a successful rebuild changes nothing owed.
+    try app_state.dispatch(&harness.runtime, 1, .calm);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_entered);
+
+    // And the pair completes on exit.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .kind = .pointer_cancel,
+        .x = 50,
+        .y = 60,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.two_left);
+}
+
+// -------------------------------------------- over-aligned payload probe
+
+const AlignedModel = struct {
+    bytes: [64]u8 align(64) = [_]u8{'a'} ** 64,
+    show_row: bool = true,
+    left_len: usize = 0,
+    z_payload: [4]u8 = [_]u8{0} ** 4,
+
+    fn payload(model: *const AlignedModel) []align(64) const u8 {
+        return @alignCast(model.bytes[0..8]);
+    }
+};
+
+const AlignedMsg = union(enum) {
+    entered,
+    left: []align(64) const u8,
+    left_z: [3:0]u8,
+    hide,
+};
+
+/// Markup-free on purpose: the runtime markup interpreter's coercion
+/// vocabulary is plain `[]const u8`, so the over-aligned payload rides a
+/// builder-only app — which is exactly where such a payload can exist.
+const AlignedApp = ui_app_model.UiAppWithFeatures(AlignedModel, AlignedMsg, .{ .runtime_markup = false });
+
+fn alignedUpdate(model: *AlignedModel, msg: AlignedMsg) void {
+    switch (msg) {
+        .entered => {},
+        .left => |bytes| model.left_len = bytes.len,
+        .left_z => |arr| {
+            // Record the declared elements AND the sentinel storage the
+            // copy must have stamped.
+            model.z_payload = .{ arr[0], arr[1], arr[2], arr[3] };
+        },
+        .hide => model.show_row = false,
+    }
+}
+
+fn alignedView(ui: *AlignedApp.Ui, model: *const AlignedModel) AlignedApp.Ui.Node {
+    if (!model.show_row) return ui.column(.{}, .{ui.text(.{}, "empty")});
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left = model.payload() },
+        }, .{ui.text(.{}, "Aligned row")}),
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = .{ .left_z = .{ 'x', 'y', 'z' } },
+        }, .{ui.text(.{}, "Sentinel row")}),
+    });
+}
+
+fn alignedOptions() AlignedApp.Options {
+    return .{
+        .name = "ui-app-hover-aligned",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = alignedUpdate,
+        .view = alignedView,
+    };
+}
+
+test "an over-aligned slice leave payload captures, survives unmount, and delivers" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The capture deep-copies a `[]align(64) const u8` payload (the
+    // alignment-preserving allocation path), and the unmount-driven
+    // leave delivers it.
+    try hoverMove(harness, app, 50, 20);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqual(@as(usize, 8), app_state.model.left_len);
+}
+
+test "a standalone accessibility edit that unmounts the hovered listener drains its leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // The accessibility selection edit dispatches a STANDALONE keyboard
+    // event — no gpu-surface input cycle follows it — and its Msg
+    // unmounts the hovered row: the drain must run at the standalone
+    // event's own tail, or the leave strands until an unrelated event.
+    const field_id = findWidgetIdByText(app_state.tree.?, .text_field, "").?;
+    var command_buffer: [96]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} set-selection 0 0", .{ canvas_label, field_id });
+    try harness.runtime.dispatchAutomationCommand(app, command);
+    try std.testing.expect(!app_state.model.show_row);
+    try std.testing.expectEqualStrings("left-after-0-churns", app_state.model.leftText());
+}
+
+test "two dispatches in one cycle deliver the LATEST leave binding on unmount" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(CaptureApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CaptureApp.init(std.heap.page_allocator, .{}, captureOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try hoverMove(harness, app, 50, 20);
+
+    // White-box cycle shape: two dispatches with the drain deferred to
+    // the cycle's end (an event handler dispatching twice). The first
+    // moves the leave payload, the second unmounts — the capture must
+    // refresh at EACH rebuild commit, not just at drain time against
+    // the final (unmounted) tree.
+    app_state.hover_msg_event_depth = 1;
+    try app_state.dispatch(&harness.runtime, 1, .churn);
+    try app_state.dispatch(&harness.runtime, 1, .hide_row);
+    app_state.hover_msg_event_depth = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .wake);
+    try std.testing.expectEqualStrings("left-after-1-churns", app_state.model.leftText());
+}
+
+test "a secondary drag released outside the view retires the entered chain" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A right-drag: the consumed secondary stream freezes containment
+    // through the gesture (a menu gesture is not hovering) — but a
+    // release OUTSIDE the view is the pointer already gone, the leave
+    // the freeze suppressed. No motion-leave will fire (the implicit
+    // grab held it), so the release itself must retire the chain.
+    for ([_]struct { kind: zero_platform.GpuSurfaceInputKind, x: f32, y: f32 }{
+        .{ .kind = .pointer_down, .x = 50, .y = 20 },
+        .{ .kind = .pointer_drag, .x = 450, .y = 320 },
+        .{ .kind = .pointer_up, .x = 450, .y = 320 },
+    }) |step| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = step.kind,
+            .button = 1,
+            .x = step.x,
+            .y = step.y,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+}
+
+test "repeated re-entry with rebuilding edge handlers never exhausts capture slots" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Every edge Msg rebuilds, and each rebuild's capture refresh can
+    // fill a mid-transition slot the enter loop then replaces: cycling
+    // far past the slot budget proves replacement always releases —
+    // a leaked claim per cycle would exhaust the slots and trap.
+    for (0..40) |_| {
+        try hoverMove(harness, app, 50, 60);
+        try hoverMove(harness, app, 50, 220);
+    }
+    var used: usize = 0;
+    for (app_state.hover_msg_slot_used) |slot_used| used += @intFromBool(slot_used);
+    try std.testing.expectEqual(@as(usize, 0), used);
+}
+
+// ---------------------------------------------- unownable payload probe
+
+const PtrModel = struct {
+    entered: u32 = 0,
+    anchor: u32 = 7,
+    bind_ptr: bool = true,
+};
+
+const PtrMsg = union(enum) {
+    entered,
+    left_ptr: *const u32,
+    bind_ptr_now,
+};
+
+/// Markup-free like the aligned probe: a single-item-pointer payload is
+/// builder-only territory.
+const PtrApp = ui_app_model.UiAppWithFeatures(PtrModel, PtrMsg, .{ .runtime_markup = false });
+
+fn ptrUpdate(model: *PtrModel, msg: PtrMsg) void {
+    switch (msg) {
+        .entered => model.entered += 1,
+        .left_ptr => {},
+        .bind_ptr_now => model.bind_ptr = true,
+    }
+}
+
+fn ptrView(ui: *PtrApp.Ui, model: *const PtrModel) PtrApp.Ui.Node {
+    return ui.column(.{ .gap = 0 }, .{
+        ui.row(.{
+            .height = 40,
+            .on_hover_enter = .entered,
+            .on_hover_leave = if (model.bind_ptr) PtrMsg{ .left_ptr = &model.anchor } else null,
+        }, .{ui.text(.{}, "Pointer row")}),
+    });
+}
+
+fn ptrOptions() PtrApp.Options {
+    return .{
+        .name = "ui-app-hover-ptr",
+        .scene = hover_scene,
+        .canvas_label = canvas_label,
+        .update = ptrUpdate,
+        .view = ptrView,
+    };
+}
+
+test "an unownable leave payload disables the pair: no enter, no dangling leave" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // The leave payload is a single-item pointer no copy can own: the
+    // PAIR is refused — the enter never dispatches (no enter without a
+    // deliverable leave), the exit owes nothing, and the refusal
+    // settles instead of retrying every event.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+
+    // Re-entry retries the refusal (a rebind could have made the
+    // payload ownable); with the same binding it refuses identically.
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.entered);
+}
+
+test "a sentinel-terminated array payload captures with its sentinel stamped" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AlignedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AlignedApp.init(std.heap.page_allocator, .{}, alignedOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Hover the sentinel row, unmount, and read the delivered array's
+    // FULL storage: the declared elements and the zero sentinel one
+    // past them — never undefined bytes.
+    try hoverMove(harness, app, 50, 60);
+    try app_state.dispatch(&harness.runtime, 1, .hide);
+    try std.testing.expectEqualSlices(u8, &.{ 'x', 'y', 'z', 0 }, &app_state.model.z_payload);
+}
+
+test "an unownable leave rebind on a standing element degrades loudly, never traps" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(PtrApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = PtrApp.init(std.heap.page_allocator, .{}, ptrOptions());
+    defer app_state.deinit();
+    app_state.model.bind_ptr = false;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // Enter with NO leave bound: the enter dispatches (an ownable-free
+    // pair is fine).
+    try hoverMove(harness, app, 50, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // A rebuild BINDS an unownable leave while the element stands: the
+    // refresh degrades with a warning (once) and the mirror settles —
+    // subsequent rebuilds and moves neither trap nor re-enter.
+    try app_state.dispatch(&harness.runtime, 1, .bind_ptr_now);
+    try hoverMove(harness, app, 55, 20);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+
+    // The exit resolves the leave from the live tree (the element still
+    // stands), so the standing pair still closes — through live
+    // resolution rather than a capture.
+    try hoverMove(harness, app, 50, 220);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.entered);
+}
+
+test "a primary drag released outside the view retires containment and its proof" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(HoverApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = HoverApp.init(std.heap.page_allocator, .{}, hoverOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try hoverMove(harness, app, 50, 20);
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 } });
+
+    // A primary drag released beyond the surface: hosts held a grab
+    // through it (no motion-leave fired) and send no later cancel, so
+    // the release itself retires containment AND the hover proof — an
+    // overflowing listener can never stay entered off-view, and no
+    // rebuild can re-enter one at a parked off-view anchor.
+    for ([_]struct { kind: zero_platform.GpuSurfaceInputKind, x: f32, y: f32 }{
+        .{ .kind = .pointer_down, .x = 50, .y = 20 },
+        .{ .kind = .pointer_drag, .x = 450, .y = 320 },
+        .{ .kind = .pointer_up, .x = 450, .y = 320 },
+    }) |step| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = step.kind,
+            .button = 0,
+            .x = step.x,
+            .y = step.y,
+        } });
+    }
+    try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
+    try std.testing.expect(!harness.runtime.views[0].canvas_widget_hover_pointer_live);
 }

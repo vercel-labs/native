@@ -143,6 +143,13 @@ pub const Msg = union(enum) {
     /// only while deleted notes do).
     select_trash,
     open_note: u32,
+    /// Pointer hover on a note row (the enter/leave containment pair):
+    /// the status bar previews the hovered note's details — the browser
+    /// status-line convention, glanceable with zero layout shift —
+    /// without committing the selection. The leave carries the row's id
+    /// so it only ever retires its own preview.
+    hover_note: u32,
+    unhover_note: u32,
     next_note,
     prev_note,
     new_note,
@@ -257,6 +264,11 @@ pub const Model = struct {
     /// Note-list scroll offset (model-owned; the runtime echoes scrolls
     /// back through `note_list_scrolled`).
     note_list_scroll: f32 = 0,
+    /// The note row under the pointer (0 = none): `hover_note` sets it,
+    /// the paired `unhover_note` clears it — including when the row
+    /// unmounts or scrolls out from under a stationary pointer, so the
+    /// status-bar preview can never outlive the hover.
+    hovered_note: u32 = 0,
     /// Chrome overlay geometry from `on_chrome` (tall hidden-inset
     /// titlebar): the header row leads with a spacer this wide so its
     /// controls clear the traffic lights, and matches its height to the
@@ -279,7 +291,7 @@ pub const Model = struct {
         "store_write_inflight", "save_pending", "system_scheme",
         "clock",          "now_ms",        "status_storage",  "status_len",
         "liveNoteCount",  "deletedNoteCount", "searching",    "status",
-        "storePath",
+        "storePath",      "hovered_note",
     };
 
     /// Keyboard reference rendered in the idle editor pane. Spelled-out
@@ -545,6 +557,21 @@ pub const Model = struct {
     }
 
     pub fn statusLine(model: *const Model, arena: std.mem.Allocator) []const u8 {
+        // A hovered note row previews its details here — the status-line
+        // convention browsers use for link targets: glanceable, zero
+        // layout shift, gone the moment the pointer leaves. Hover never
+        // commits the selection; clicking does.
+        if (model.hovered_note != 0) {
+            if (model.noteById(model.hovered_note)) |note| {
+                const title = displayTitle(arena, note.body.text());
+                const verb: []const u8 = if (note.isDeleted()) "Deleted" else "Edited";
+                const age = relativeTimeLabel(arena, model.now_ms, if (note.isDeleted()) note.deleted_ms else note.updated_ms);
+                if (std.mem.eql(u8, age, "now")) {
+                    return std.fmt.allocPrint(arena, "{s} · {s} just now · {d} words", .{ title, verb, countWords(note.body.text()) }) catch "";
+                }
+                return std.fmt.allocPrint(arena, "{s} · {s} {s} ago · {d} words", .{ title, verb, age, countWords(note.body.text()) }) catch "";
+            }
+        }
         var indexes: [max_notes]usize = undefined;
         const shown = model.visibleNoteIndexes(&indexes);
         const live = model.liveNoteCount();
@@ -930,6 +957,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .open_note => |id| {
             if (model.noteById(id) != null) model.active_note = id;
+        },
+        .hover_note => |id| model.hovered_note = id,
+        // Row-to-row moves dispatch the old row's leave before the new
+        // row's enter, so a plain clear would be enough; matching the id
+        // states the intent — a leave only ever retires ITS OWN preview.
+        .unhover_note => |id| {
+            if (model.hovered_note == id) model.hovered_note = 0;
         },
         .next_note => moveSelection(model, 1),
         .prev_note => moveSelection(model, -1),

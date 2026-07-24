@@ -85,7 +85,11 @@
                  pane width. -->
             <column>
               <for each="noteRows" key="id" as="n">
-                <list-item on-press="open_note:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
+                <!-- Hovering a row previews its details in the status
+                     bar (the browser status-line convention) without
+                     committing the selection; the row's hover WASH is
+                     the list-item's own — binding hover adds no visual. -->
+                <list-item on-press="open_note:{n.id}" on-hover-enter="hover_note:{n.id}" on-hover-leave="unhover_note:{n.id}" selected="{n.active}" padding="10" label="{n.title}">
                   <column gap="4" grow="1">
                     <!-- Title leads, the age trails the same line; the
                          snippet gets the full second line. Titles elide

@@ -296,6 +296,17 @@ pub const UiHandlerEvent = enum {
     /// prepending a batch causes on its own, since the offset grows by
     /// the prepended extent to keep the viewport anchored.
     reach_start,
+    /// The pointer entered the widget's hit region (the Elm
+    /// onMouseEnter convention): a discrete containment edge the
+    /// runtime derives from the same resolution the hover wash uses,
+    /// dispatched once per entry — never per move. Every enter is
+    /// paired with an eventual `.hover_leave` while the app runs.
+    hover_enter,
+    /// The pointer left the widget's hit region — by moving out, by
+    /// the pointer leaving the window, by the widget unmounting or a
+    /// scroll/rebuild moving it out from under a stationary pointer,
+    /// or by a dismissal removing the surface under the pointer.
+    hover_leave,
 };
 
 /// A color design token referenced by name (the fields of
@@ -715,6 +726,36 @@ pub fn Ui(comptime Msg: type) type {
             /// alternative. Like `on_press`, binding it makes the element
             /// a hit target and press claimer.
             on_hold: ?Msg = null,
+            /// Pointer hover-enter Msg (the Elm onMouseEnter
+            /// convention): dispatched once when the pointer enters
+            /// the element's hit region — a discrete containment edge,
+            /// never per move. Binding it (or `on_hover_leave`) makes
+            /// the element hover-hittable the way `on_press` makes it
+            /// pressable, WITHOUT claiming presses or painting any
+            /// hover wash — hover feedback stays with acting controls;
+            /// a quiet content tile that binds hover stays quiet.
+            /// Hover comes from mouse/trackpad pointers only; touch
+            /// input never synthesizes it.
+            on_hover_enter: ?Msg = null,
+            /// Pointer hover-leave Msg, the paired exit edge: fires
+            /// when the pointer leaves the element's hit region — by
+            /// moving out, by leaving the window, by the element
+            /// unmounting, or by a scroll/rebuild moving the element
+            /// out from under a stationary pointer (the same
+            /// resolution the hover wash uses). Every dispatched
+            /// enter is answered by exactly one eventual leave while
+            /// the app runs; the leave Msg is CAPTURED while the
+            /// element stands — payload slices deep-copied into
+            /// app-owned bytes, refreshed as rebuilds change the
+            /// binding, retained from the last build that bound one —
+            /// so an element removed (or unbound) mid-hover still
+            /// delivers its pair. The one uncapturable payload shape is
+            /// a single-item pointer, which no markup can construct — a
+            /// Zig view binding one DISABLES the pair for that element
+            /// with a warning (no enter dispatches, because its paired
+            /// leave could dangle); bind a slice or scalar payload
+            /// instead.
+            on_hover_leave: ?Msg = null,
             /// Message constructor for text edits: called with each
             /// `TextInputEvent` on text-entry widgets. Pair with `inputMsg`.
             on_input: ?InputMsgFn = null,
@@ -788,6 +829,8 @@ pub fn Ui(comptime Msg: type) type {
             on_submit: ?Msg = null,
             on_dismiss: ?Msg = null,
             on_hold: ?Msg = null,
+            on_hover_enter: ?Msg = null,
+            on_hover_leave: ?Msg = null,
             on_reach_end: ?Msg = null,
             on_reach_start: ?Msg = null,
             on_input: ?InputMsgFn = null,
@@ -1255,6 +1298,8 @@ pub fn Ui(comptime Msg: type) type {
                 .on_submit = options.on_submit,
                 .on_dismiss = options.on_dismiss,
                 .on_hold = options.on_hold,
+                .on_hover_enter = options.on_hover_enter,
+                .on_hover_leave = options.on_hover_leave,
                 .on_reach_end = options.on_reach_end,
                 .on_reach_start = options.on_reach_start,
                 .on_input = options.on_input,
@@ -2662,6 +2707,13 @@ pub fn Ui(comptime Msg: type) type {
             // press, and the classic list-row shape (press to open, hold
             // for the menu) pairs the two on one element.
             if (node.on_hold != null) widget.semantics.actions.press = true;
+            // Hover family: binding either edge makes the element
+            // hover-hittable (`Widget.hover_msgs` — the chart
+            // hover-details shape, a hit target that claims no
+            // presses), never pressable: hover is not an action a
+            // screen reader can invoke, so no semantic action is
+            // stamped.
+            if (node.on_hover_enter != null or node.on_hover_leave != null) widget.hover_msgs = true;
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;
@@ -2698,6 +2750,8 @@ pub fn Ui(comptime Msg: type) type {
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
             appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
             appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
+            appendHandler(handlers, handler_len, widget.id, .hover_enter, node.on_hover_enter);
+            appendHandler(handlers, handler_len, widget.id, .hover_leave, node.on_hover_leave);
             appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
             appendHandler(handlers, handler_len, widget.id, .reach_start, node.on_reach_start);
             if (node.on_input) |make| {
@@ -2821,6 +2875,8 @@ pub fn Ui(comptime Msg: type) type {
             if (node.on_submit != null) total += 1;
             if (node.on_dismiss != null) total += 1;
             if (node.on_hold != null) total += 1;
+            if (node.on_hover_enter != null) total += 1;
+            if (node.on_hover_leave != null) total += 1;
             if (node.on_reach_end != null) total += 1;
             if (node.on_reach_start != null) total += 1;
             if (node.on_input != null) total += 1;

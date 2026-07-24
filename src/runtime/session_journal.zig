@@ -123,8 +123,12 @@ pub const format_fingerprint: u64 = layout_fingerprint.hash(formatLayoutDescript
 /// the identical bytes must refuse. Epoch 3: the `video_kind` field on
 /// `.video_load` records became the load's OUTCOME (`.loaded` or
 /// `.failed`, steering the replayed fake's synchronous reset) where it
-/// previously rode its default — same bytes, new meaning.
-pub const format_semantic_epoch: u32 = 3;
+/// previously rode its default — same bytes, new meaning. Epoch 4:
+/// `pointer_id` on gpu-surface input records reserved bit 63 as the
+/// touch-source stamp (`platform.touch_pointer_id_bit`) — same bytes,
+/// and an older recording whose host happened to emit ids with that
+/// bit set would replay with hover-proof semantics it never had.
+pub const format_semantic_epoch: u32 = 4;
 
 /// The canonical description `format_fingerprint` hashes: everything
 /// that defines the on-disk record layout. Reflection covers the record

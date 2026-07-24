@@ -695,6 +695,8 @@ pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget
 /// any widget with a bound press/toggle handler (stamped into
 /// `semantics.actions` by the builder and both markup engines).
 pub const widgetIsHitTarget = @import("widget_access.zig").isHitTarget;
+pub const widgetIsHoverMsgHitTarget = @import("widget_access.zig").isHoverMsgHitTarget;
+pub const widgetListensForHoverMsgs = @import("widget_access.zig").widgetListensForHoverMsgs;
 /// Press-claiming predicates (widget_access.zig): where a press gesture
 /// stops instead of falling through to the nearest pressable ancestor.
 pub const widgetKindClaimsPress = @import("widget_access.zig").widgetKindClaimsPress;

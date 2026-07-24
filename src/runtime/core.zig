@@ -601,6 +601,7 @@ pub const Runtime = struct {
     pub const respondToBridge = FlowMethods.respondToBridge;
     pub const dispatchPlatformEvent = FlowMethods.dispatchPlatformEvent;
     pub const dispatchEvent = FlowMethods.dispatchEvent;
+    pub const recordDispatchError = FlowMethods.recordDispatchError;
     pub const dispatchCommand = FlowMethods.dispatchCommand;
     pub const frame = FlowMethods.frame;
     pub const automationSnapshot = FlowMethods.automationSnapshot;

@@ -41,11 +41,15 @@ const Ui = Md.Ui;
 /// node buffer (64 nodes x a multi-KiB `Ui.Node`), and one table costs a
 /// 64-row buffer (~315 KiB measured), so container-dense documents run
 /// ~180x their source bytes (measured: 100-deep nesting 15 KiB -> 2.7 MiB).
-/// 256x + a one-table floor keeps the assert green for every legitimate
-/// shape while a quadratic join (megabytes-per-source-KiB) still blows
-/// through it by orders of magnitude.
+/// The factor scales with `Ui.Node` itself — every handler field added to
+/// `ElementOptions` (the hover pair moved the densest corpus doc from
+/// ~1.45 MiB to ~1.54 MiB at 3.9 KiB source) grows those eager buffers
+/// linearly, so the factor carries headroom over the measured densest
+/// shape. 320x + a one-table floor keeps the assert green for every
+/// legitimate shape while a quadratic join (megabytes-per-source-KiB)
+/// still blows through it by orders of magnitude.
 fn arenaBound(source_len: usize) usize {
-    return source_len * 256 + 512 * 1024;
+    return source_len * 320 + 512 * 1024;
 }
 
 const BuildResult = struct {

@@ -940,7 +940,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     } });
     try std.testing.expect(runtime.dispatchErrors().len > errors_before_invalid);
     try std.testing.expectEqualStrings("InvalidCommand", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].error_name);
-    try std.testing.expectEqualStrings("widget_accessibility_action", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].event);
+    try std.testing.expectEqualStrings("widget_accessibility_action", runtime.dispatchErrors()[runtime.dispatchErrors().len - 1].event());
     try std.testing.expectEqualStrings("Search", platform_state.nodes[3].text_value);
 
     try runtime.dispatchPlatformEvent(app_state.app(), .{ .widget_accessibility_action = .{

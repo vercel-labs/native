@@ -521,6 +521,14 @@
     {
       "name": "on-reach-end",
       "doc": "scroll element only: Msg (tag or tag:{payload}) dispatched when a user scroll comes within one viewport of the content end - the infinite-scroll fetch signal. Fires once per approach with hysteresis: it re-arms only after the offset retreats past 1.5 viewports, which appending a batch causes on its own by growing the extent."
+    },
+    {
+      "name": "on-hover-enter",
+      "doc": "Dispatch a Msg when the pointer enters the element's hit region: tag or tag:{payload} - a discrete containment edge, never per-move. Legal on any element: binding it makes the element hover-hittable the way a bound press makes it pressable, without claiming presses or painting a hover wash. Mouse/trackpad only; touch never synthesizes hover."
+    },
+    {
+      "name": "on-hover-leave",
+      "doc": "The paired exit edge for on-hover-enter: dispatched when the pointer leaves the element's hit region - by moving off, leaving the window, the element unmounting, or content scrolling/reflowing out from under a stationary pointer (the hover wash's exact resolution). Every enter is answered by exactly one eventual leave; the leave Msg is captured while the element stands (kept fresh across rebuilds), so it survives the element's removal."
     }
   ],
   "scoped": {

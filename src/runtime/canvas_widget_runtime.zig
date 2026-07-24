@@ -278,6 +278,20 @@ pub fn canvasWidgetInteractionTargetExists(layout: canvas.WidgetLayoutTree, id: 
     return canvasWidgetRuntimeHitTarget(layout.nodes[index].widget);
 }
 
+/// The hover-containment survival predicate: the widget still exists,
+/// is still visible, and still LISTENS for hover Msgs. Its own
+/// predicate rather than the interactive one above, because a chain
+/// entry can be a hover-only listener the interactive test would
+/// wrongly evict (a false leave), and an interactive widget whose
+/// hover bindings a rebuild removed must stop standing (its leave is
+/// owed) even though it still exists interactively.
+pub fn canvasWidgetHoverMsgTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
+    const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
+    if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
+    if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
+    return canvas.widgetListensForHoverMsgs(layout.nodes[index].widget);
+}
+
 pub fn canvasWidgetSelectableTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
     if (canvasWidgetLayoutNodeHidden(layout, index)) return false;

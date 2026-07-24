@@ -33,7 +33,28 @@ const isWidgetHiddenInAncestors = widget_tree.isWidgetHiddenInAncestors;
 
 const max_widget_depth: usize = 32;
 
+/// Which widgets a hit test may land on: the interactive policy is the
+/// engine's classic one (presses, washes, cursor, text selection); the
+/// hover policy additionally sees hover-Msg listeners, and ONLY the
+/// hover-containment resolution uses it — so binding hover never moves
+/// a wash or steals a click, even from an overlapping sibling.
+pub const HitTestPolicy = enum {
+    interactive,
+    hover_msgs,
+
+    fn admits(comptime self: HitTestPolicy, widget: Widget) bool {
+        return switch (self) {
+            .interactive => widget_access.isHitTarget(widget),
+            .hover_msgs => widget_access.isHoverMsgHitTarget(widget),
+        };
+    }
+};
+
 pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+    return hitTestWidgetLayoutWithPolicy(layout, point, tokens, .interactive);
+}
+
+pub fn hitTestWidgetLayoutWithPolicy(layout: anytype, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     // Anchored floating surfaces paint in the late z-pass — topmost — so
     // they hit-test FIRST, in reverse tree order (a nested anchored
     // submenu has a higher node index than the surface it hangs from).
@@ -43,12 +64,12 @@ pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: Desi
         if (!widget_tree.widgetIsAnchored(layout.nodes[index].widget)) continue;
         if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
-        if (hitTestWidgetLayoutNode(layout, index, point, tokens)) |hit| return hit;
+        if (hitTestWidgetLayoutNode(layout, index, point, tokens, policy)) |hit| return hit;
     }
-    return hitTestWidgetLayoutChildren(layout, null, point, tokens);
+    return hitTestWidgetLayoutChildren(layout, null, point, tokens, policy);
 }
 
-fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     const child_count = widget_tree.widgetLayoutDirectChildCount(layout, parent_index);
     var tested: usize = 0;
     var previous: ?widget_tree.WidgetPaintOrder = null;
@@ -57,14 +78,14 @@ fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geo
         // Anchored floating children live in the hoisted pre-pass above,
         // never at their tree position.
         if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
-            if (hitTestWidgetLayoutNode(layout, child_index, point, tokens)) |hit| return hit;
+            if (hitTestWidgetLayoutNode(layout, child_index, point, tokens, policy)) |hit| return hit;
         }
         previous = .{ .layer = widget_tree.widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
     }
     return null;
 }
 
-fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     if (node_index >= layout.nodes.len) return null;
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return null;
@@ -79,10 +100,10 @@ fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.P
     // shadows the widgets that actually occupy that space.
     const content_interactive = !widget_tree.widgetKindDisclosureAnimated(node.widget.kind) or widget_tree.disclosureSettledOpen(layout, node_index);
     if (content_interactive) {
-        if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens)) |hit| return hit;
+        if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens, policy)) |hit| return hit;
     }
 
-    if (!widget_access.isHitTarget(node.widget)) return null;
+    if (!policy.admits(node.widget)) return null;
     if (!node.frame.normalized().containsPoint(local_point)) return null;
     return widgetHitFromNode(node, node_index);
 }
@@ -149,6 +170,37 @@ pub fn widgetHoverTargetForHit(layout: anytype, hit: WidgetHit) WidgetHit {
         if (widgetAncestorHitOfKind(layout, target.index, .data_row)) |row_hit| return row_hit;
     }
     return target;
+}
+
+/// The hover-Msg containment chain for a raw hit: every widget on the
+/// hit path (the target itself, then its ancestors) whose bound
+/// hover-enter/hover-leave handlers are live
+/// (`widget_access.widgetListensForHoverMsgs`), written into `output`
+/// OUTERMOST FIRST — the DOM's mouseenter order, so a diff against the
+/// previously delivered chain fires enters outermost-first and leaves
+/// innermost-first by construction. Nested listeners each track their
+/// own containment: moving from a listening card onto a listening row
+/// inside it keeps the card's entry (the pointer never left the card),
+/// exactly like the browser pair this models. The chain is empty for
+/// apps that bind no hover handlers, so unbound trees pay nothing.
+pub fn widgetHoverMsgChainFromNode(layout: anytype, node_index: usize, output: []ObjectId) []const ObjectId {
+    var chain: [max_widget_depth]ObjectId = undefined;
+    var chain_len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) break;
+        if (widget_access.widgetListensForHoverMsgs(layout.nodes[index].widget) and chain_len < chain.len) {
+            chain[chain_len] = layout.nodes[index].widget.id;
+            chain_len += 1;
+        }
+        current = layout.nodes[index].parent_index;
+    }
+    const len = @min(chain_len, output.len);
+    // The walk collected innermost-first; deliver outermost-first.
+    for (0..len) |index| {
+        output[index] = chain[chain_len - 1 - index];
+    }
+    return output[0..len];
 }
 
 /// The nearest ancestor of `node_index` with the given kind, as a hit.

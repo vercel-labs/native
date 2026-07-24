@@ -443,6 +443,10 @@ struct NativeView {
     int gpu_nonblank = 0;
     uint32_t gpu_sample_color = 0;
     int gpu_pointer_down = 0;
+    /* TrackMouseEvent(TME_LEAVE) armed for the current hover session:
+     * set on the first WM_MOUSEMOVE, cleared by the WM_MOUSELEAVE it
+     * buys, re-armed by the next move. */
+    int gpu_mouse_tracking = 0;
     double gpu_pointer_x = 0;
     double gpu_pointer_y = 0;
     WCHAR gpu_pending_high_surrogate = 0;
@@ -2767,12 +2771,64 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             return 0;
         }
         case WM_MOUSEMOVE: {
+            /* Win32 only reports the pointer LEAVING the client area on
+             * request: arm TME_LEAVE once per hover session so the
+             * WM_MOUSELEAVE below can retire hover state (washes, hover
+             * Msgs, tooltip intent) the way the AppKit host's
+             * mouseExited does. */
+            if (!view->gpu_mouse_tracking) {
+                TRACKMOUSEEVENT track = {};
+                track.cbSize = sizeof(track);
+                track.dwFlags = TME_LEAVE;
+                track.hwndTrack = hwnd;
+                if (TrackMouseEvent(&track)) view->gpu_mouse_tracking = 1;
+            }
             const double x = (double)(short)LOWORD(lparam) / scale;
             const double y = (double)(short)HIWORD(lparam) / scale;
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
             const int kind = view->gpu_pointer_down ? kGpuInputPointerDrag : kGpuInputPointerMove;
             emitGpuSurfaceInput(host, *view, kind, x, y, 0, 0, 0, "", "", gpuModifierFlags());
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            view->gpu_mouse_tracking = 0;
+            /* The pointer left the client area without a press in
+             * flight: the window-leave edge, reported as the same
+             * pointer cancel a capture loss emits. A captured drag
+             * keeps receiving moves outside the window and settles
+             * through its own up/capture-change instead. One
+             * exception: in-canvas window-drag regions answer
+             * WM_NCHITTEST with HTTRANSPARENT (the parent drags), so
+             * the OS reports a "leave" the moment the cursor enters
+             * one while it still sits over this canvas. That hand-off
+             * is recognized by BOTH tests below - the cursor is still
+             * geometrically inside our rectangle AND the window now
+             * owning the point is one of our own ancestors (hit-test
+             * transparency forwards to the parent chain). A cursor
+             * inside our rectangle but owned by a SIBLING child (an
+             * overlapping WebView pane) is a genuine departure and
+             * must cancel, or hover strands until a later move. */
+            if (!view->gpu_pointer_down) {
+                POINT screen = {};
+                bool suppressed = false;
+                if (GetCursorPos(&screen)) {
+                    POINT client = screen;
+                    RECT rect = {};
+                    if (ScreenToClient(hwnd, &client) && GetClientRect(hwnd, &rect) && PtInRect(&rect, client)) {
+                        const HWND owner = WindowFromPoint(screen);
+                        for (HWND walk = GetParent(hwnd); walk; walk = GetParent(walk)) {
+                            if (walk == owner) {
+                                suppressed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!suppressed) {
+                    emitGpuSurfaceInput(host, *view, kGpuInputPointerCancel, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, "", "", gpuModifierFlags());
+                }
+            }
             return 0;
         }
         case WM_CAPTURECHANGED:

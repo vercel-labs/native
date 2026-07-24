@@ -366,34 +366,122 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const target_id: canvas.ObjectId = if (pointer_event.target) |target| target.id else 0;
             const hover_target = layout_tree.hoverTargetForHit(pointer_event.target);
             const hover_target_id: canvas.ObjectId = if (hover_target) |value| value.id else 0;
-            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens));
+            const raw_hit = layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens);
+            // Containment resolves through the HOVER policy hit test —
+            // the only consumer that may see hover-only listeners; the
+            // wash/cursor resolution below stays on the interactive
+            // raw hit, so binding hover never moves a wash or a click.
+            const hover_raw_hit = layout_tree.hitTestHoverWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens);
+            const hit_target = layout_tree.hoverTargetForHit(raw_hit);
             const hit_target_id: canvas.ObjectId = if (hit_target) |value| value.id else 0;
             const hit_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hit_target));
             var next_hovered_id = self.views[index].canvas_widget_hovered_id;
             var next_pressed_id = self.views[index].canvas_widget_pressed_id;
             var next_cursor = self.views[index].canvas_widget_cursor;
 
+            // The hover-Msg chain re-resolves from the SAME raw hit the
+            // wash phase-switch consumes below, so containment and the
+            // wash always agree: fresh hit test for hovers/moves/ups
+            // (drags included — the wash follows the actual pointer),
+            // the routed raw target for downs, empty on cancel (the
+            // pointer left the view — the window-leave edge). Wheel
+            // keeps the standing chain; the scroll reconcile re-derives
+            // it from the post-scroll tree. Down/drag/up advance the
+            // chain only while a hover-capable pointer is live (a prior
+            // hover-phase move) — touch input arrives as bare
+            // down/drag/up sequences, so a tap or a scrub can never
+            // synthesize hover, while a mouse (whose presence the
+            // hover phase already proved) keeps full fidelity through
+            // clicks and drags.
+            // The hover-capable proof is per pointer IDENTITY: only the
+            // pointer that earned it (a hover-phase move) advances the
+            // chain through its clicks and drags, so on hosts that
+            // distinguish pointers a touch contact can never ride a
+            // mouse's proof.
+            const hover_pointer_proven = self.views[index].canvas_widget_hover_pointer_live and
+                self.views[index].canvas_widget_hover_pointer_id == pointer_event.pointer.pointer_id;
             switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
+                    // A hover-phase move earns the proof UNLESS the host
+                    // stamped the event touch-sourced
+                    // (`platform.touch_pointer_id_bit`): Windows
+                    // synthesizes a mouse-shaped move for every tap, and
+                    // that fake float must never make touch hoverable.
+                    const touch_sourced = pointer_event.pointer.pointer_id & platform.touch_pointer_id_bit != 0;
+                    if (pointer_event.pointer.phase == .hover and !touch_sourced) {
+                        self.views[index].canvas_widget_hover_pointer_live = true;
+                        self.views[index].canvas_widget_hover_pointer_id = pointer_event.pointer.pointer_id;
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                    } else if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                    }
                 },
                 .down => {
                     next_hovered_id = hover_target_id;
                     next_pressed_id = target_id;
                     next_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hover_target));
+                    if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                        // The down's routed target is interactive-only;
+                        // containment keeps its own resolution.
+                        self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                    }
                 },
                 .up => {
                     next_hovered_id = hit_target_id;
                     next_pressed_id = 0;
                     next_cursor = hit_cursor;
+                    if (hover_pointer_proven) {
+                        if (geometry.RectF.fromSize(self.views[index].gpu_size).containsPoint(pointer_event.pointer.point)) {
+                            self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                            self.views[index].setCanvasWidgetHoverMsgChainForHit(hover_raw_hit);
+                        } else {
+                            // A captured release OUTSIDE the surface is
+                            // the pointer already gone — the leave the
+                            // press suppressed: hosts hold a grab
+                            // through the drag (no motion-leave fired)
+                            // and send no later cancel, so containment
+                            // must retire here or an overflowing
+                            // listener stays entered at an off-view
+                            // point — and the anchor must not park
+                            // off-view for a later rebuild to re-hit.
+                            // The consumed secondary release has the
+                            // same rule in gpu_surface_events.
+                            self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                            self.views[index].canvas_widget_hover_pointer_live = false;
+                        }
+                    }
                 },
                 .cancel => {
                     next_hovered_id = 0;
                     next_pressed_id = 0;
                     next_cursor = .arrow;
+                    // Only the proven pointer's departure retires the
+                    // containment (a lifted touch finger's cancel must
+                    // not clear a mouse's standing hover); a cancel
+                    // before any proof clears nothing because nothing
+                    // stands.
+                    if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
                 },
-                .wheel => {},
+                .wheel => {
+                    // The proven pointer's wheel carries its CURRENT
+                    // position: refresh the chain's re-hit anchor before
+                    // the scroll reconcile resolves against it, so a
+                    // wheel arriving ahead of its coalesced motion event
+                    // still derives containment from where the pointer
+                    // really is (the wash resolves from this same wheel
+                    // point).
+                    if (hover_pointer_proven) {
+                        self.views[index].canvas_widget_hover_pointer_position = pointer_event.pointer.point;
+                    }
+                },
             }
 
             // Hover-detail chrome (chart cursor + floating card) tracks

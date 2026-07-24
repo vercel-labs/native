@@ -190,6 +190,40 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
+                    // A consumed cancel is still the pointer leaving the
+                    // view (the tooltip machine's exact reading below):
+                    // the proven pointer's departure retires hover-Msg
+                    // containment too, so a window exit mid-secondary
+                    // stream never strands an entered element. Honesty
+                    // about scope: only the secondary DOWN/UP/CANCEL
+                    // stream is consumed here — hosts report drag
+                    // MOTION without a button, so it rides the primary
+                    // path and containment follows the pointer through
+                    // a right-drag (the mouseenter/mouseleave
+                    // convention), exactly as the wash does for the
+                    // same journaled moves.
+                    if (input_event.kind == .pointer_cancel and
+                        self.views[index].canvas_widget_hover_pointer_live and
+                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)
+                    {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
+                    // A consumed secondary RELEASE outside the view is
+                    // the gesture ending with the pointer already gone —
+                    // hosts hold an implicit grab through a right-drag,
+                    // so no motion-leave fired and none will until
+                    // re-entry: retire containment like the cancel
+                    // above, matching the primary path whose outside
+                    // release re-hit-tests to nothing.
+                    if (input_event.kind == .pointer_up and
+                        self.views[index].canvas_widget_hover_pointer_live and
+                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id and
+                        !gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y))
+                    {
+                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
+                        self.views[index].canvas_widget_hover_pointer_live = false;
+                    }
                 }
                 // The whole consumed stream still feeds the tooltip
                 // intent choke point: every pointer-carrying event
@@ -438,6 +472,15 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // input changed semantics but no pixels) publish now — there
             // is no present to protect.
             try CanvasWidgetDisplayMethods().settleDeferredCanvasWidgetAccessibility(self);
+        }
+
+        /// Whether a view-local point sits inside the view's surface
+        /// (the consumed-release retirement's outside test).
+        fn gpuViewContainsPoint(view: anytype, x: f32, y: f32) bool {
+            // The engine's own half-open rectangle containment, so a
+            // release at exactly the right or bottom edge counts as
+            // outside the way every hit test already treats it.
+            return geometry.RectF.fromSize(view.gpu_size).containsPoint(geometry.PointF.init(x, y));
         }
 
         /// Drain the view's pending scroll-event set into

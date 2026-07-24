@@ -2012,7 +2012,7 @@ test "a widget text budget overflow on input degrades instead of exiting" {
     try std.testing.expectEqual(filler.len, retained.nodes[1].widget.text.len);
     const errors = harness.runtime.dispatchErrors();
     try std.testing.expect(errors.len >= 1);
-    try std.testing.expectEqualStrings("gpu_surface_input", errors[errors.len - 1].event);
+    try std.testing.expectEqualStrings("gpu_surface_input", errors[errors.len - 1].event());
     try std.testing.expectEqualStrings("WidgetTextTooLarge", errors[errors.len - 1].error_name);
 
     // The next interaction dispatches clean.

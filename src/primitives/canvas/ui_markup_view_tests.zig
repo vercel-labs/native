@@ -1050,6 +1050,51 @@ pub const picker_markup_source =
     \\</column>
 ;
 
+/// Shared source for the hover-pair parity tests (interpreter here,
+/// compiled engine in ui_markup_compiled_tests.zig): nested hover
+/// listeners on LAYOUT containers — legal everywhere like the press
+/// family, and the binding is what makes them hover-hittable.
+pub const hover_markup_source =
+    \\<column gap="8">
+    \\  <panel padding="8" on-hover-enter="add" on-hover-leave="toggle:{open_count}">
+    \\    <row gap="4" on-hover-enter="add">
+    \\      <text>Peek target</text>
+    \\    </row>
+    \\  </panel>
+    \\</column>
+;
+
+test "markup binds the hover pair and makes listeners hover-hittable, never pressable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, hover_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const panel = tree.root.children[0];
+    const row = panel.children[0];
+    try testing.expect(panel.hover_msgs);
+    try testing.expect(row.hover_msgs);
+    // Hover listening never implies pressability OR interactive
+    // hit-testing: no press action, no press claim, invisible to the
+    // wash/press hit test — only the hover-containment policy sees it.
+    try testing.expect(!row.semantics.actions.press);
+    try testing.expect(!canvas.widgetClaimsPress(row));
+    try testing.expect(!canvas.widgetIsHitTarget(row));
+    try testing.expect(canvas.widgetIsHoverMsgHitTarget(row));
+
+    // Both edges resolve through the handler table; an element binding
+    // only enter has no leave Msg, and plain children listen for nothing.
+    try testing.expectEqual(Msg.add, tree.msgFor(panel.id, .hover_enter).?);
+    try testing.expectEqual(@as(u32, 0), tree.msgFor(panel.id, .hover_leave).?.toggle);
+    try testing.expectEqual(Msg.add, tree.msgFor(row.id, .hover_enter).?);
+    try testing.expect(tree.msgFor(row.id, .hover_leave) == null);
+    try testing.expect(!row.children[0].hover_msgs);
+}
+
 test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

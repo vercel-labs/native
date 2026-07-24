@@ -91,6 +91,18 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.hitTestWidgetLayout(self, point, tokens);
     }
 
+    /// The hover-Msg CONTAINMENT hit test: the interactive hit test's
+    /// resolution plus hover-Msg listeners (`HitTestPolicy.hover_msgs`).
+    /// Only enter/leave containment resolves through this — washes,
+    /// cursors, and presses never see hover-only listeners.
+    pub fn hitTestHover(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, .{}, .hover_msgs);
+    }
+
+    pub fn hitTestHoverWithTokens(self: WidgetLayoutTree, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, tokens, .hover_msgs);
+    }
+
     pub fn cursorForHit(self: WidgetLayoutTree, hit: ?WidgetHit) WidgetCursor {
         _ = self;
         return widget_access.cursorForWidgetHit(hit);
@@ -102,6 +114,17 @@ pub const WidgetLayoutTree = struct {
     pub fn hoverTargetForHit(self: WidgetLayoutTree, hit: ?WidgetHit) ?WidgetHit {
         const raw = hit orelse return null;
         return widget_routing.widgetHoverTargetForHit(self, raw);
+    }
+
+    /// The hover-Msg containment chain for a raw hit (see
+    /// `widget_routing.widgetHoverMsgChainFromNode`): every live
+    /// hover-listening widget on the hit path, outermost first. Null
+    /// (or an off-tree) hit yields the empty chain — the pointer
+    /// stands inside no listener.
+    pub fn hoverMsgChainForHit(self: WidgetLayoutTree, hit: ?WidgetHit, output: []ObjectId) []const ObjectId {
+        const raw = hit orelse return output[0..0];
+        if (raw.index >= self.nodes.len) return output[0..0];
+        return widget_routing.widgetHoverMsgChainFromNode(self, raw.index, output);
     }
 
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {

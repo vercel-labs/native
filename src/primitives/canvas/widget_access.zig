@@ -93,6 +93,25 @@ pub fn isHitTarget(widget: Widget) bool {
     return widgetKindHitTarget(widget.kind);
 }
 
+/// The hover-Msg CONTAINMENT predicate: everything the interactive hit
+/// test sees, plus hover-Msg listeners. Deliberately a separate policy
+/// from `isHitTarget` — a hover-only listener must be resolvable for
+/// enter/leave containment while remaining INVISIBLE to the interactive
+/// pipeline (wash, cursor, press routing, text selection), so binding
+/// hover changes nothing about where washes paint or clicks land, even
+/// for overlapping siblings.
+pub fn isHoverMsgHitTarget(widget: Widget) bool {
+    return isHitTarget(widget) or widgetListensForHoverMsgs(widget);
+}
+
+/// Whether this widget's bound hover-enter/hover-leave Msgs are LIVE:
+/// the containment walk (`widgetHoverMsgChainFromNode`) collects only
+/// these. Disabled widgets stand down exactly like they do for presses
+/// (the hit test skips them too).
+pub fn widgetListensForHoverMsgs(widget: Widget) bool {
+    return widget.id != 0 and !widget.state.disabled and widget.hover_msgs;
+}
+
 /// Whether this widget is a live window-drag surface: a press landing
 /// on it (or falling through to it) moves the WINDOW. Disabled widgets
 /// stand down exactly like they do for presses.

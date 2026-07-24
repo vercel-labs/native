@@ -28,7 +28,8 @@
         {"name": "zoomFromBoard", "type": {"kind": "bool"}},
         {"name": "dark", "type": {"kind": "bool"}},
         {"name": "chromeTop", "type": {"kind": "f64"}},
-        {"name": "previewSurface", "type": {"kind": "i64"}}
+        {"name": "previewSurface", "type": {"kind": "i64"}},
+        {"name": "hoveredId", "type": {"kind": "f64"}}
       ]},
       {"name": "TextCaretMove", "fields": [
         {"name": "direction", "type": {"kind": "enum", "name": "TextCaretDirection"}},
@@ -104,6 +105,8 @@
       {"name": "clear", "payload": {"kind": "void"}},
       {"name": "stamp", "payload": {"kind": "void"}},
       {"name": "stamped", "payload": {"kind": "number", "class": "f64"}},
+      {"name": "hover_row", "payload": {"kind": "number", "class": "f64"}},
+      {"name": "hover_off", "payload": {"kind": "number", "class": "f64"}},
       {"name": "draft_edit", "payload": {"kind": "union", "name": "TextInputEvent"}},
       {"name": "canvas_resized", "payload": {"kind": "number", "class": "i64"}},
       {"name": "zoomed", "payload": {"kind": "record", "name": "Msg_zoomed"}},

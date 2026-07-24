@@ -651,6 +651,9 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 .view_label = self.views[view_index].label,
                 .keyboard = .{ .phase = .key_down, .focused_id = id, .edit = edit },
                 .target = target,
+                // No gpu-surface input cycle wraps this selection edit:
+                // the ui-app hover drain runs at its own tail.
+                .standalone = true,
             };
             // Same observability contract as selectAutomationCanvasWidget:
             // the repaint this edit triggers must publish its completing

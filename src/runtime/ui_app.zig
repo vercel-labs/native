@@ -690,6 +690,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             window_id: platform.WindowId = 0,
             on_close: ?MsgT = null,
             installed: bool = false,
+            /// This slot's handler-tree currency (the per-slot half of
+            /// `main_tree_current`): false only between handing the
+            /// runtime this window's new layout and adopting the
+            /// matching tree — so one window's failed publication never
+            /// poisons its siblings, and this window's own next
+            /// successful rebuild (a frame-driven retry included)
+            /// restores it.
+            tree_current: bool = true,
             /// The `<video src>` declaration the in-flight build pass
             /// recorded (arena-borrowed; consumed by
             /// `rebuildWindowSlot` immediately after the pass succeeds
@@ -870,6 +878,75 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         hold_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
         hold_view_label_len: usize = 0,
         hold_window_id: platform.WindowId = 1,
+        /// Hover-Msg delivery mirror: the containment chain — and which
+        /// view it belongs to — as the app last HEARD it. The runtime
+        /// owns the STANDING chain per view (derived from journaled
+        /// input at the same seams the hover wash resolves through);
+        /// this mirror is the dispatch bookkeeping, and the diff
+        /// between the two is exactly the enter/leave Msgs owed. One
+        /// pointer, one standing mirror (the hold-arming shape). Leave
+        /// Msgs are captured when their enter dispatches (the
+        /// context-menu snapshot's capture-at-presentation rule), so a
+        /// widget unmounted mid-hover still delivers the paired leave
+        /// the live tree can no longer resolve — no enter without its
+        /// eventual leave. Captures are DEEP copies: payload slices are
+        /// duplicated into the slot's own bytes below, because a
+        /// standing hover outlives the build-arena pair's two-build
+        /// lifetime and a by-value capture of a `ui.fmt` payload would
+        /// dangle into a reset arena.
+        hover_msg_window_id: platform.WindowId = 1,
+        hover_msg_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+        hover_msg_view_label_len: usize = 0,
+        hover_msg_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined,
+        hover_msg_chain_len: usize = 0,
+        /// Capture SLOT per mirror chain position (`hover_msg_slot_none`
+        /// = no capture): containment is per LISTENER, so when an outer
+        /// listener unbinds while an inner one stands, the retained
+        /// entry keeps its slot — and its captured leave — while only
+        /// the departed id's edges dispatch. Slots decouple capture
+        /// ownership from chain position so retained entries never need
+        /// their captures moved or re-taken.
+        hover_msg_slots: [canvas.max_widget_depth]u8 = undefined,
+        hover_msg_slot_used: [hover_msg_slot_count]bool = [_]bool{false} ** hover_msg_slot_count,
+        /// Captured leave Msgs BY SLOT (see `hover_msg_slots`).
+        hover_msg_leave_msgs: [hover_msg_slot_count]?MsgT = undefined,
+        /// Per-SLOT arenas owning the captured leave Msgs' payload
+        /// bytes (see `captureHoverLeave`): reset when the slot
+        /// releases or re-captures, freed at deinit. Arena-backed so a
+        /// payload of any size can be owned — a fixed budget would turn
+        /// a large `ui.fmt` payload into a silently unpaired leave.
+        hover_msg_leave_arenas: [hover_msg_slot_count]std.heap.ArenaAllocator = undefined,
+        /// Re-entrancy guard for `drainHoverMsgs`: the drain's own
+        /// dispatches must not drain recursively through `dispatch`'s
+        /// tail.
+        hover_msg_draining: bool = false,
+        /// Handler-tree currency for hover-Msg delivery — the shared
+        /// invariant over every rebuild/error seam, PER TREE FAMILY: a
+        /// flag holds while its last rebuild attempt fully succeeded,
+        /// so a failed build — or a failed publication that left a
+        /// tree pointing at a build the runtime never adopted — defers
+        /// entering edges into that tree instead of resolving them
+        /// through a stale handler table or consuming them as absent.
+        /// Two flags because the families recover independently: a
+        /// main-only rebuild (a resize, a frame path) must never
+        /// restore currency for a secondary-window tree whose
+        /// publication failed — only a clean pass over the slots does.
+        /// `build_generation` ticks on every successful rebuild, so
+        /// standing captures refresh exactly when handler bindings can
+        /// have moved and never otherwise. Captured leaves dispatch
+        /// regardless: their Msgs are owned bytes, not tree lookups.
+        main_tree_current: bool = true,
+        build_generation: u64 = 0,
+        /// The `build_generation` the mirror's captures were last
+        /// refreshed against.
+        hover_msg_captured_generation: u64 = 0,
+        /// Nonzero while `eventFn` is on the stack: `dispatch` and
+        /// `drainEffects` tails drain hover edges only for DIRECT
+        /// callers (embedders, command handlers, tests) — inside a
+        /// runtime event, draining belongs to the event's own tail so
+        /// hover dispatches can never rebuild a view out from under the
+        /// input cycle's pending scroll/resize/change observations.
+        hover_msg_event_depth: u32 = 0,
         /// Context-menu presentation fallback state: the widget whose
         /// declared menu is mounted as an anchored canvas surface because
         /// the platform could not present it natively. Set by
@@ -1041,8 +1118,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
+                .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
                 .effects = Effects.init(backing),
             };
+        }
+
+        /// One arena per hover-capture slot, over the backing allocator.
+        fn hoverMsgLeaveArenasInit(backing: std.mem.Allocator) [hover_msg_slot_count]std.heap.ArenaAllocator {
+            var arenas: [hover_msg_slot_count]std.heap.ArenaAllocator = undefined;
+            for (&arenas) |*arena| arena.* = std.heap.ArenaAllocator.init(backing);
+            return arenas;
         }
 
         /// Heap-allocate the app and construct every field — the
@@ -1097,6 +1182,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
+                .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
                 .effects = Effects.init(backing),
             };
         }
@@ -1132,6 +1218,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.arenas[0].deinit();
                 slot.arenas[1].deinit();
             }
+            for (&self.hover_msg_leave_arenas) |*arena| arena.deinit();
             if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
             if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
             self.pixel_buffer = &.{};
@@ -1305,8 +1392,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // events land before the first frame on every launch, so it
             // used to cost a full view build on the launch path.
             if (!self.installed) return;
-            try self.rebuild(runtime, self.canvas_window_id);
-            try self.rebuildWindowSlots(runtime);
+            // Hover edges the rebuilds produce (an unmounted hovered
+            // element's leave, an adoption re-hit-test's handoff)
+            // settle at this tail for DIRECT callers — command
+            // handlers, embedders, tests — without waiting for the
+            // next platform event, and on the REBUILD-ERROR path too:
+            // a failed secondary-window rebuild must not strand the
+            // leave the main rebuild already produced. Inside a runtime
+            // event the event's own tail drains instead, and the
+            // drain's own dispatches re-enter here guarded.
+            var rebuild_error: ?anyerror = null;
+            self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                rebuild_error = err;
+            };
+            if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                rebuild_error = err;
+            };
+            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
+                self.drainHoverMsgs(runtime) catch |err| {
+                    if (rebuild_error == null) rebuild_error = err;
+                };
+            }
+            if (rebuild_error) |err| return err;
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above (one model, every window's view derives
             // from it); `window_id` names the dispatch origin for apps
@@ -1350,9 +1457,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 dispatched = true;
             }
             self.publishAudioState(runtime);
+            var rebuild_error: ?anyerror = null;
             if (dispatched) {
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                    rebuild_error = err;
+                };
+                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                    rebuild_error = err;
+                };
             } else if (self.installed and
                 !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
             {
@@ -1361,9 +1473,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // the mirrors after the last build rendered them:
                 // re-render the chrome so its controls never keep
                 // advertising a playback that is gone.
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                    rebuild_error = err;
+                };
+                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
+                    rebuild_error = err;
+                };
             }
+            // Same tail as `dispatch`, same error-path duty: effect-
+            // driven rebuilds settle the hover edges they produced
+            // (this path is also public — host-pumped embeds call it
+            // directly).
+            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
+                self.drainHoverMsgs(runtime) catch |err| {
+                    if (rebuild_error == null) rebuild_error = err;
+                };
+            }
+            if (rebuild_error) |err| return err;
         }
 
         /// Mirror the effects channel's audio playback state into the
@@ -1582,10 +1708,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const layout = built.layout;
             launch_timing.lapOnce("first_view_built");
 
+            // The INSTALL WINDOW: from the moment the runtime ADOPTS
+            // the new layout until the matching handler tree is adopted
+            // below, the pair disagrees — the one place the main tree
+            // goes stale (see `main_tree_current`; the stamp sits right
+            // AFTER each `setCanvasWidgetLayout`, whose rejection is
+            // validated-then-atomic — `validateWidgetLayoutPoolBudgets`
+            // keeps the previous tree applied — so every failure before
+            // adoption leaves the old, still-matching pair current). A
+            // failure AFTER the window — animation scheduling, web
+            // panes, the status item — leaves a genuinely current pair,
+            // so hover enters keep flowing even when an idle app
+            // performs no further rebuild.
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
-                _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+                try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
                 if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
                     _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, tokens);
                 }
@@ -1594,6 +1732,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.tree = tree;
             self.arena_index = next_index;
             live_tree_reset = false;
+            self.main_tree_current = true;
+            self.build_generation +%= 1;
+            // Captures track EVERY tree transition (see
+            // refreshHoverLeaveCaptures) — a transient failure is
+            // retried at the next commit or drain and lands in the
+            // dispatch-error ring (the rebuild itself already
+            // committed; erroring it here would lie about the tree).
+            if (self.refreshHoverLeaveCaptures()) |refresh_err| {
+                runtime.recordDispatchError("hover_leave_capture", refresh_err);
+            }
             // The build INSTALLED: its video declaration now speaks
             // for what the glass shows.
             self.commitStagedVideoDeclaration();
@@ -2323,13 +2471,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             const tree = built.tree;
             const layout = built.layout;
-            _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
+            // The slot's install window — the per-slot mirror of the
+            // main rebuild's stamp: stale only from the runtime's
+            // ADOPTION of the new layout (whose rejection is atomic, so
+            // earlier failures keep the old pair current) until the
+            // matching handler tree lands below, wherever the rebuild
+            // was driven from (the full pass or a direct resize/install
+            // site).
+            try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
             }
             slot.tree = tree;
             slot.arena_index = next_index;
             live_tree_reset = false;
+            slot.tree_current = true;
+            self.build_generation +%= 1;
+            // Same per-transition capture refresh as the main rebuild,
+            // same dispatch-error-ring surfacing.
+            if (self.refreshHoverLeaveCaptures()) |refresh_err| {
+                runtime.recordDispatchError("hover_leave_capture", refresh_err);
+            }
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -2575,7 +2737,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (chrome_list.commands[chrome.prefix_commands..]) |command| try builder.append(command);
 
             _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
-            _ = try runtime.setCanvasWidgetLayout(window_id, self.options.canvas_label, layout);
+            // The main install window opens at the layout's true
+            // adoption inside the tracked publication (see `rebuild`)
+            // and closes when the caller adopts the matching handler
+            // tree.
+            try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
             _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
                 .prefix_command_count = chrome.prefix_commands,
                 .suffix_command_count = chrome.suffix_commands,
@@ -3372,6 +3538,68 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            self.hover_msg_event_depth += 1;
+            defer self.hover_msg_event_depth -= 1;
+            // Hover enter/leave delivery rides the tail of runtime
+            // events: the standing chain moves during pointer routing,
+            // scroll reconciles (wheel, kinetic, drivers, keyboard),
+            // dismissals, and any rebuild the dispatches above
+            // performed — the drain seam catches them all, and replay
+            // re-runs the same events through the same seam. The drain
+            // runs on the handler's ERROR path too (the degraded-error
+            // doctrine): a failing handler must not strand edges the
+            // event already produced — a closed window's leave, a
+            // failed rebuild's prune — until some later event happens
+            // by. Mid-cycle DERIVED widget events skip the drain (see
+            // `hoverDrainsAfterEvent`): their input cycle's terminal
+            // `gpu_surface_input` dispatch drains after the cycle's
+            // pending scroll/resize/change observations were delivered,
+            // so a hover Msg's rebuild can never unmount a view whose
+            // promised observation is still queued.
+            handleRuntimeEvent(self, runtime, event_value) catch |err| {
+                if (hoverDrainsAfterEvent(event_value)) self.drainHoverMsgs(runtime) catch {};
+                return err;
+            };
+            if (hoverDrainsAfterEvent(event_value)) try self.drainHoverMsgs(runtime);
+        }
+
+        /// Whether the hover drain runs at this event's tail. Derived
+        /// widget events that only occur INSIDE a gpu-surface input
+        /// cycle defer to the cycle's terminal `gpu_surface_input`
+        /// dispatch — which always follows them, after the pending
+        /// scroll/resize/change drains. Scroll/resize/change events also
+        /// arrive standalone from the native-driver and kinetic paths;
+        /// those defer at most one frame (both paths run under an
+        /// actively pumping frame channel), which is the price of never
+        /// rebuilding mid-cycle. Dismiss events DO drain: the
+        /// automation/accessibility dismiss verb dispatches one
+        /// standalone, and a dismissal's own Msg rebuild already runs
+        /// before the cycle's pending drains, so draining here adds no
+        /// new hazard class. Everything else — commands, timers, wakes,
+        /// frames, the terminal input dispatch, native menu selections —
+        /// drains immediately.
+        fn hoverDrainsAfterEvent(event_value: Event) bool {
+            return switch (event_value) {
+                // Keyboard events usually ride an input cycle (their
+                // terminal dispatch drains); the standalone ones —
+                // accessibility selection edits, context-menu
+                // cut/paste/select-all — have no cycle and drain here.
+                .canvas_widget_keyboard => |keyboard_event| keyboard_event.standalone,
+                .canvas_widget_pointer,
+                .canvas_widget_drag,
+                .canvas_widget_file_drop,
+                .canvas_widget_context_press,
+                .canvas_widget_context_menu_request,
+                .canvas_widget_context_menu_shown,
+                .canvas_widget_scroll,
+                .canvas_widget_resize,
+                .canvas_widget_change,
+                => false,
+                else => true,
+            };
+        }
+
+        fn handleRuntimeEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
             switch (event_value) {
                 .command => |command| {
                     const map = self.options.on_command orelse return;
@@ -3986,6 +4214,646 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
+        }
+
+        /// Cap on hover-Msg drain passes per runtime event: each pass
+        /// delivers one coalesced containment transition, and the Msgs
+        /// it dispatches can rebuild the tree and move the standing
+        /// chain again (an enter handler that unmounts the hovered
+        /// element owes an immediate leave — the second pass delivers
+        /// it). The cap exists ONLY as a flap guard (an app whose enter
+        /// mounts and whose leave unmounts, forever), sized far past
+        /// any honest cascade — even one where every enter replaces the
+        /// listener under a stationary pointer — so a finite sequence
+        /// always settles within one drain; residue past the cap
+        /// delivers on the next event's drain.
+        const hover_msg_drain_passes: usize = 64;
+
+        /// Refresh every standing capture from the mirror view's live
+        /// tree when the trees moved underneath: called at EVERY
+        /// rebuild commit — two dispatches in one cycle (payload A to
+        /// B, then unmount) must deliver B, so the refresh cannot wait
+        /// for drain time and see only the final tree — and again
+        /// defensively at drain time. UPSERT only (an unbound leave
+        /// keeps the last capture). Returns the first TRANSIENT failure
+        /// (allocation) after attempting every entry, leaving the
+        /// generation behind so the next commit or drain retries.
+        fn refreshHoverLeaveCaptures(self: *Self) ?anyerror {
+            if (self.hover_msg_chain_len == 0) return null;
+            if (self.hover_msg_captured_generation == self.build_generation) return null;
+            if (!self.hoverTreeCurrentFor(self.hover_msg_window_id, self.hoverMsgViewLabel())) return null;
+            const mirror_tree = self.hoverTreeFor(self.hover_msg_window_id, self.hoverMsgViewLabel()) orelse return null;
+            var first_error: ?anyerror = null;
+            var refreshed = true;
+            for (0..self.hover_msg_chain_len) |position| {
+                // A refused entry's pair is disabled (its enter never
+                // dispatched); a rebind only takes effect on re-entry.
+                if (self.hover_msg_slots[position] == hover_msg_slot_refused) continue;
+                const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
+                // Copy-then-swap: the replacement lands in a FRESH slot
+                // (the pool sizing guarantees one is free) and the old
+                // capture releases only after it succeeded — a failed
+                // allocation must never destroy the still-valid capture
+                // it was refreshing.
+                const fresh = self.claimHoverSlot() orelse {
+                    refreshed = false;
+                    ui_app_log.warn("hover-leave capture refresh failed: no free capture slot - retrying at the next rebuild or drain", .{});
+                    if (first_error == null) first_error = error.OutOfMemory;
+                    continue;
+                };
+                self.captureHoverLeave(fresh, leave_msg) catch |err| {
+                    self.releaseHoverSlot(fresh);
+                    switch (err) {
+                        error.OutOfMemory => {
+                            // Transient: keep the old capture, retry at
+                            // the next commit or drain — the generation
+                            // stays behind — and surface the failure
+                            // LOUD: if the element unmounts before a
+                            // retry lands, its refreshed leave is lost,
+                            // and that must never be silent.
+                            refreshed = false;
+                            ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
+                            if (first_error == null) first_error = err;
+                        },
+                        error.HoverCapturePayloadUnsupported => {
+                            // A rebind to an unownable payload. An
+                            // entry with a standing capture keeps it
+                            // quietly (the promise the enter earned);
+                            // an entry that never had one — entered
+                            // with no leave bound, then given one no
+                            // copy can own — is marked so the
+                            // degradation is WARNED once, not silent,
+                            // and not re-warned every generation.
+                            if (self.hover_msg_slots[position] == hover_msg_slot_none) {
+                                self.hover_msg_slots[position] = hover_msg_slot_unowned;
+                                ui_app_log.warn("on_hover_leave rebind cannot be owned (a single-item pointer): the standing element's leave degrades to live-tree resolution, and an unmount loses it - bind a slice or scalar payload instead", .{});
+                            }
+                        },
+                    }
+                    continue;
+                };
+                self.releaseHoverSlot(self.hover_msg_slots[position]);
+                self.hover_msg_slots[position] = fresh;
+            }
+            if (refreshed) self.hover_msg_captured_generation = self.build_generation;
+            return first_error;
+        }
+
+        /// The mirror-view adoption count for the tracked publication
+        /// below (0 when the view is not found — then no adoption can
+        /// have happened either).
+        fn canvasWidgetLayoutAdoptions(runtime: *Runtime, window_id: platform.WindowId, label: []const u8) u64 {
+            for (runtime.views[0..runtime.view_count]) |*view| {
+                if (view.window_id == window_id and std.mem.eql(u8, view.label, label)) return view.canvas_widget_layout_adoptions;
+            }
+            return 0;
+        }
+
+        /// Publish a widget layout with the hover-currency stamp at the
+        /// TRUE adoption boundary: `setCanvasWidgetLayout` adopts the
+        /// layout partway through its pipeline (validated-then-atomic)
+        /// and runs more fallible work after — source-text copies, host
+        /// scroll/drag syncs, display refresh — so a failure THERE must
+        /// still mark the pair stale, while a pre-adoption rejection
+        /// must not. The view's adoption counter is the witness.
+        fn publishWidgetLayoutTracked(self: *Self, runtime: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree, current_flag: *bool) anyerror!void {
+            _ = self;
+            const adoptions_before = canvasWidgetLayoutAdoptions(runtime, window_id, label);
+            _ = runtime.setCanvasWidgetLayout(window_id, label, layout) catch |err| {
+                if (canvasWidgetLayoutAdoptions(runtime, window_id, label) != adoptions_before) current_flag.* = false;
+                return err;
+            };
+            current_flag.* = false;
+        }
+
+        /// The handler tree behind a hover mirror's VIEW IDENTITY —
+        /// window id AND canvas label, never label alone: a replacement
+        /// window can reuse a closed window's canvas label (and even
+        /// rebuild the same structural ids), and resolving the old
+        /// window's captures through the new window's tree would
+        /// dispatch the wrong message under the old window id.
+        fn hoverTreeFor(self: *Self, window_id: platform.WindowId, view_label: []const u8) ?*const Ui.Tree {
+            if (std.mem.eql(u8, view_label, self.options.canvas_label)) {
+                if (window_id != self.canvas_window_id) return null;
+                return if (self.tree) |*tree| tree else null;
+            }
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| {
+                if (slot.window_id != window_id) return null;
+                return if (slot.tree) |*tree| tree else null;
+            }
+            return null;
+        }
+
+        /// The currency flag governing hover-Msg resolution through the
+        /// handler tree behind the view identity (see
+        /// `main_tree_current`): the main canvas keys on the main flag,
+        /// every secondary window on ITS OWN slot's — one window's
+        /// failed publication never defers hover into its siblings, and
+        /// a same-label replacement window never answers for its
+        /// predecessor. An unknown identity has no tree at all; the
+        /// null-tree checks own that case.
+        fn hoverTreeCurrentFor(self: *Self, window_id: platform.WindowId, view_label: []const u8) bool {
+            if (std.mem.eql(u8, view_label, self.options.canvas_label)) return self.main_tree_current;
+            if (self.windowSlotByCanvasLabel(view_label)) |slot| {
+                if (slot.window_id != window_id) return true;
+                return slot.tree_current;
+            }
+            return true;
+        }
+
+        /// The capture-slot pool covers BOTH populations a transition
+        /// can hold at once — the departing chain's captures (released
+        /// only after each leave Msg is consumed) and the standing
+        /// mirror's (a mid-batch rebuild's refresh can fill every
+        /// entry before the first leave releases) — plus one in-flight
+        /// swap slot, so a legitimate deep handoff between disjoint
+        /// branches can never exhaust it. `claimHoverSlot` still
+        /// degrades like an allocation failure rather than trapping if
+        /// the accounting is ever wrong.
+        const hover_msg_slot_count: usize = canvas.max_widget_depth * 2 + 1;
+
+        /// The "no capture slot" sentinel in `hover_msg_slots` (the slot
+        /// space is `hover_msg_slot_count`, far below it).
+        const hover_msg_slot_none: u8 = 0xFF;
+
+        /// The "pair disabled" marker: this standing entry's leave
+        /// payload cannot be owned (a single-item pointer only a Zig
+        /// view could construct), so its ENTER was refused too — no
+        /// enter without a deliverable leave. Permanent while the entry
+        /// stands (re-hovering after a rebind retries); refused
+        /// entries dispatch nothing on exit and are skipped by the
+        /// capture refresh.
+        const hover_msg_slot_refused: u8 = 0xFE;
+
+        /// The "entered, but the leave rebind is unownable" marker: the
+        /// enter already dispatched (with no leave bound, or an ownable
+        /// one), then a rebuild bound a payload no copy can own. The
+        /// leave degrades to live-tree resolution — silence on unmount
+        /// — warned ONCE at the rebind; the refresh keeps re-attempting
+        /// it, so a later ownable rebind upgrades to a real capture.
+        const hover_msg_slot_unowned: u8 = 0xFD;
+
+        /// Capture a leave Msg for later delivery into `slot`: a DEEP
+        /// copy whose payload slices live in the slot's own arena (any
+        /// size — a budget here would turn a large payload into an
+        /// unpaired leave). Allocation failure PROPAGATES so the caller
+        /// can defer the enter instead of dispatching one whose paired
+        /// leave is already lost; the one non-transient refusal — a
+        /// payload shape that cannot be owned (a single-item pointer
+        /// only a Zig view could construct) — degrades to an empty
+        /// capture with a debug note, and delivery falls back to the
+        /// live tree while the element stands.
+        fn captureHoverLeave(self: *Self, slot: u8, msg: MsgT) error{ OutOfMemory, HoverCapturePayloadUnsupported }!void {
+            _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+            self.hover_msg_leave_msgs[slot] = deepCopyMsgValue(MsgT, msg, self.hover_msg_leave_arenas[slot].allocator(), 0) catch |err| {
+                // A refused capture holds no bytes either: the partial
+                // copy is released with the arena before the verdict.
+                // OutOfMemory is transient (callers defer and retry);
+                // HoverCapturePayloadUnsupported is permanent (callers
+                // disable the pair — no enter without a deliverable
+                // leave).
+                _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+                self.hover_msg_leave_msgs[slot] = null;
+                return err;
+            };
+        }
+
+        /// Claim a free capture slot, or null when none is free — the
+        /// pool is sized so that never happens for legitimate
+        /// transitions (see `hover_msg_slot_count`), and callers treat
+        /// null exactly like a transient allocation failure: defer and
+        /// retry, never trap.
+        fn claimHoverSlot(self: *Self) ?u8 {
+            for (&self.hover_msg_slot_used, 0..) |*used, slot| {
+                if (used.*) continue;
+                used.* = true;
+                return @intCast(slot);
+            }
+            return null;
+        }
+
+        /// Release a slot: reset its arena (the captured Msg was already
+        /// consumed — dispatch is synchronous) and free it, so a retired
+        /// slot never retains a large payload copy until some later
+        /// hover happens to reuse it.
+        fn releaseHoverSlot(self: *Self, slot: u8) void {
+            if (slot >= hover_msg_slot_count) return;
+            self.hover_msg_leave_msgs[slot] = null;
+            _ = self.hover_msg_leave_arenas[slot].reset(.free_all);
+            self.hover_msg_slot_used[slot] = false;
+        }
+
+        /// Recursively copy a Msg value so it owns every byte it
+        /// references: scalars ride through, slices are duplicated into
+        /// `allocator` (element-wise, so nested slices copy too), and
+        /// payload shapes that cannot be owned (single-item pointers,
+        /// untagged unions) refuse rather than alias.
+        /// Pointer-indirection bound for one captured Msg: a run of
+        /// nested slices deeper than this is either a cyclic value
+        /// graph (which no copy terminates) or data no Msg payload has
+        /// business carrying — both refuse as unsupported instead of
+        /// recursing toward exhaustion. Structs and arrays add no
+        /// depth; only slice hops count.
+        const hover_msg_capture_max_indirections: usize = 64;
+
+        fn deepCopyMsgValue(comptime T: type, value: T, allocator: std.mem.Allocator, indirections: usize) error{ OutOfMemory, HoverCapturePayloadUnsupported }!T {
+            return switch (@typeInfo(T)) {
+                .void, .int, .float, .bool, .@"enum", .vector, .error_set => value,
+                .optional => |info| if (value) |inner| try deepCopyMsgValue(info.child, inner, allocator, indirections) else null,
+                .error_union => |info| if (value) |payload| @as(T, try deepCopyMsgValue(info.payload, payload, allocator, indirections)) else |err| @as(T, err),
+                .array => |info| blk: {
+                    var out: T = undefined;
+                    for (0..info.len) |index| out[index] = try deepCopyMsgValue(info.child, value[index], allocator, indirections);
+                    // A sentinel-terminated array carries one element
+                    // past its length: stamp it, never leave it
+                    // undefined.
+                    if (comptime std.meta.sentinel(T)) |sentinel| out[info.len] = sentinel;
+                    break :blk out;
+                },
+                .@"struct" => |info| blk: {
+                    var out = value;
+                    inline for (info.fields) |field| {
+                        @field(out, field.name) = try deepCopyMsgValue(field.type, @field(value, field.name), allocator, indirections);
+                    }
+                    break :blk out;
+                },
+                .@"union" => |info| if (comptime info.tag_type == null) error.HoverCapturePayloadUnsupported else switch (value) {
+                    inline else => |payload, tag| @unionInit(T, @tagName(tag), try deepCopyMsgValue(@TypeOf(payload), payload, allocator, indirections)),
+                },
+                .pointer => |info| blk: {
+                    if (info.size != .slice) return error.HoverCapturePayloadUnsupported;
+                    if (indirections >= hover_msg_capture_max_indirections) return error.HoverCapturePayloadUnsupported;
+                    // The copy preserves the slice type's OWN alignment
+                    // and sentinel, so over-aligned payloads
+                    // (`[]align(64) const u8`) and sentinel slices
+                    // type-check and round-trip.
+                    const alignment: ?std.mem.Alignment = comptime align_blk: {
+                        const declared = info.alignment orelse break :align_blk null;
+                        if (declared == @alignOf(info.child)) break :align_blk null;
+                        break :align_blk std.mem.Alignment.fromByteUnits(declared);
+                    };
+                    const out = try allocator.allocWithOptions(info.child, value.len, alignment, comptime std.meta.sentinel(T));
+                    for (value, 0..) |element, index| out[index] = try deepCopyMsgValue(info.child, element, allocator, indirections + 1);
+                    break :blk out;
+                },
+                else => error.HoverCapturePayloadUnsupported,
+            };
+        }
+
+        fn hoverMsgViewLabel(self: *const Self) []const u8 {
+            return self.hover_msg_view_label_storage[0..self.hover_msg_view_label_len];
+        }
+
+        /// Deliver hover enter/leave Msgs owed since the last drain:
+        /// diff the runtime's standing containment chain against the
+        /// delivered mirror and dispatch the edges — leaves innermost
+        /// first, then enters outermost first (the DOM's
+        /// mouseleave/mouseenter order). Intermediate flickers within
+        /// one event coalesce away: only the settled containment
+        /// dispatches, which is what "discrete edges, never per-move"
+        /// means under a fast pointer.
+        fn drainHoverMsgs(self: *Self, runtime: *Runtime) anyerror!void {
+            if (!self.installed) return;
+            if (self.hover_msg_draining) return;
+            self.hover_msg_draining = true;
+            defer self.hover_msg_draining = false;
+            // A pass's error degrades WITHOUT aborting the drain: its
+            // mirror commit already happened, and the containment its
+            // dispatches moved (an enter handler that unmounted itself)
+            // still owes edges only a further pass can deliver. The
+            // first error propagates after the loop, into the same
+            // degraded handling every event handler gets.
+            var first_error: ?anyerror = null;
+            var passes: usize = 0;
+            while (passes < hover_msg_drain_passes) : (passes += 1) {
+                const progressed = self.stepHoverMsgs(runtime) catch |err| blk: {
+                    if (first_error == null) first_error = err;
+                    break :blk true;
+                };
+                if (!progressed) break;
+            }
+            if (first_error) |err| return err;
+        }
+
+        /// One drain pass: resolve the view whose standing chain is
+        /// live, compare it to the mirror, and — when they differ —
+        /// dispatch the owed edges and commit the mirror. Returns
+        /// whether it dispatched anything (the drain loop re-checks:
+        /// a dispatched Msg's rebuild may have moved the chain again).
+        ///
+        /// One pointer means at most one view should hold a standing
+        /// chain; if a host ever leaves two populated (a missing
+        /// pointer-cancel on window switch), the mirror's own view
+        /// wins while it stands — deterministic, never flapping.
+        fn stepHoverMsgs(self: *Self, runtime: *Runtime) anyerror!bool {
+            var standing_index: ?usize = null;
+            for (runtime.views[0..runtime.view_count], 0..) |*view, index| {
+                if (view.kind != .gpu_surface) continue;
+                if (view.canvas_widget_hover_msg_chain_len == 0) continue;
+                const is_mirror = view.window_id == self.hover_msg_window_id and
+                    std.mem.eql(u8, view.label, self.hoverMsgViewLabel());
+                if (is_mirror) {
+                    standing_index = index;
+                    break;
+                }
+                if (standing_index == null) standing_index = index;
+            }
+
+            // The standing chain and the view identity it belongs to
+            // (the mirror's own view when nothing stands anywhere:
+            // its entries owe leaves against that view's tree). The
+            // label is COPIED out of runtime view storage: the
+            // dispatches below can close windows and compact the view
+            // array, and a lookup through a reused label slice could
+            // resolve another view's tree.
+            var standing_window: platform.WindowId = self.hover_msg_window_id;
+            var standing_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined;
+            var standing_label_len: usize = @min(self.hover_msg_view_label_len, standing_label_storage.len);
+            @memcpy(standing_label_storage[0..standing_label_len], self.hover_msg_view_label_storage[0..standing_label_len]);
+            var standing_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined;
+            var standing_len: usize = 0;
+            if (standing_index) |index| {
+                const view = &runtime.views[index];
+                standing_window = view.window_id;
+                standing_label_len = @min(view.label.len, standing_label_storage.len);
+                @memcpy(standing_label_storage[0..standing_label_len], view.label[0..standing_label_len]);
+                standing_len = view.canvas_widget_hover_msg_chain_len;
+                @memcpy(standing_chain[0..standing_len], view.canvas_widget_hover_msg_chain[0..standing_len]);
+            }
+            const standing_label: []const u8 = standing_label_storage[0..standing_label_len];
+
+            const same_view = standing_window == self.hover_msg_window_id and
+                std.mem.eql(u8, standing_label, self.hoverMsgViewLabel());
+            const mirror_len = self.hover_msg_chain_len;
+
+            // Handler bindings move with rebuilds: when the trees
+            // changed since the standing captures were taken, refresh
+            // every mirror entry's capture from its live tree — a leave
+            // handler ADDED while the listener already stood must be
+            // captured before an unmount needs it, and a changed
+            // payload delivers its latest value. UPSERT only: an
+            // element whose leave binding VANISHED keeps the previously
+            // captured Msg (the standing enter was promised its pair;
+            // unbinding never un-promises it). Runs before the settled
+            // fast path below, which compares ids and would never see a
+            // binding-only change.
+            var first_error: ?anyerror = self.refreshHoverLeaveCaptures();
+
+            // The diff is a SET diff over listener ids, not a positional
+            // one: containment is per listener, so an outer listener
+            // unbinding (or binding) while an inner one stands must
+            // dispatch edges for the changed id ONLY — the retained
+            // entry keeps standing, its capture untouched in its slot.
+            // A view change retains nothing (one pointer, one view).
+            var retained_slots: [canvas.max_widget_depth]u8 = undefined;
+            var entering_at: [canvas.max_widget_depth]bool = undefined;
+            var entering_any = false;
+            var identical = same_view and standing_len == mirror_len;
+            for (standing_chain[0..standing_len], 0..) |id, position| {
+                var slot: u8 = hover_msg_slot_none;
+                var retained = false;
+                if (same_view) {
+                    for (self.hover_msg_chain[0..mirror_len], 0..) |mirror_id, mirror_position| {
+                        if (mirror_id != id) continue;
+                        slot = self.hover_msg_slots[mirror_position];
+                        retained = true;
+                        if (mirror_position != position) identical = false;
+                        break;
+                    }
+                }
+                retained_slots[position] = slot;
+                entering_at[position] = !retained;
+                if (!retained) {
+                    entering_any = true;
+                    identical = false;
+                }
+            }
+            if (identical) {
+                if (first_error) |err| return err;
+                return false;
+            }
+
+            // Entering edges resolve through the DESTINATION view's
+            // handler tree, and only a CURRENT one (`hoverTreeCurrentFor`): a
+            // failed rebuild may have cleared it, or — worse — left a
+            // tree standing whose build the runtime never adopted, and
+            // resolving through that dispatches stale handlers or
+            // consumes enters as absent. When it is not ready, the
+            // enters DEFER (the standing chain keeps carrying them, so
+            // the drain after the next successful rebuild retries)
+            // while the leaves this transition owes still dispatch
+            // below — their Msgs are owned captures, not tree lookups,
+            // and a broken destination must never withhold them.
+            const destination_ready = !entering_any or
+                (self.hoverTreeCurrentFor(standing_window, standing_label) and self.hoverTreeFor(standing_window, standing_label) != null);
+            if (!destination_ready) {
+                var any_leaving = false;
+                for (self.hover_msg_chain[0..mirror_len]) |id| {
+                    const still_standing = same_view and blk: {
+                        for (standing_chain[0..standing_len]) |candidate| {
+                            if (candidate == id) break :blk true;
+                        }
+                        break :blk false;
+                    };
+                    if (!still_standing) {
+                        any_leaving = true;
+                        break;
+                    }
+                }
+                // Nothing deliverable now: enters wait for a current
+                // tree, retained entries stay put.
+                if (!any_leaving) return false;
+            }
+
+            // The leaves this pass owes — mirror ids absent from the
+            // standing chain — innermost-first. Their captured Msgs own
+            // their payload bytes (see `captureHoverLeave`), so the
+            // rebuilds the dispatches below perform cannot invalidate
+            // them. Ids and the OLD view identity ride along so a
+            // capture that could not be owned can still resolve from
+            // the live tree while its element stands.
+            const leave_window = self.hover_msg_window_id;
+            var leave_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined;
+            const leave_label_len = self.hover_msg_view_label_len;
+            @memcpy(leave_label_storage[0..leave_label_len], self.hover_msg_view_label_storage[0..leave_label_len]);
+            var leave_ids: [canvas.max_widget_depth]canvas.ObjectId = undefined;
+            var leave_slots: [canvas.max_widget_depth]u8 = undefined;
+            var leave_count: usize = 0;
+            var index = mirror_len;
+            while (index > 0) {
+                index -= 1;
+                const id = self.hover_msg_chain[index];
+                const still_standing = same_view and blk: {
+                    for (standing_chain[0..standing_len]) |candidate| {
+                        if (candidate == id) break :blk true;
+                    }
+                    break :blk false;
+                };
+                if (still_standing) continue;
+                leave_ids[leave_count] = id;
+                leave_slots[leave_count] = self.hover_msg_slots[index];
+                leave_count += 1;
+            }
+
+            // Commit the mirror before dispatching so a mid-dispatch
+            // error can never re-deliver the same edges: standing ids in
+            // standing order, retained entries keeping their slots,
+            // entering entries slotless until their enter actually
+            // dispatches below. The identity rewrite only runs on a view
+            // CHANGE — when the view stood, `standing_label` was copied
+            // from the mirror's own storage.
+            if (!same_view) {
+                self.hover_msg_window_id = standing_window;
+                const label_len = @min(standing_label.len, self.hover_msg_view_label_storage.len);
+                @memcpy(self.hover_msg_view_label_storage[0..label_len], standing_label[0..label_len]);
+                self.hover_msg_view_label_len = label_len;
+            }
+            @memcpy(self.hover_msg_chain[0..standing_len], standing_chain[0..standing_len]);
+            @memcpy(self.hover_msg_slots[0..standing_len], retained_slots[0..standing_len]);
+            self.hover_msg_chain_len = standing_len;
+            // A deferred entering side stays OUT of the mirror: the
+            // standing chain still carries those ids, so the drain
+            // after the next successful rebuild sees them entering and
+            // delivers then.
+            if (!destination_ready) self.unwindHoverEnters(&entering_at, 0);
+
+            // Deliver: leaves innermost-first, then enters
+            // outermost-first; retained ids dispatch nothing. Each
+            // dispatch degrades PER EDGE — an error is remembered and
+            // the remaining edges still deliver (the mirror is already
+            // committed, so an aborted batch could never be retried;
+            // one failed rebuild must not swallow its siblings' edges)
+            // — and the first error propagates after the batch, into
+            // the same degraded handling every event handler gets.
+            for (leave_ids[0..leave_count], leave_slots[0..leave_count]) |id, slot| {
+                // A refused entry never entered: it owes nothing on
+                // exit.
+                if (slot == hover_msg_slot_refused) continue;
+                // The capture wins (leave answers what enter announced);
+                // an unowned capture falls back to the live tree while
+                // its element still stands there.
+                const captured: ?MsgT = if (slot >= hover_msg_slot_count) null else self.hover_msg_leave_msgs[slot];
+                const msg = captured orelse blk: {
+                    if (!self.hoverTreeCurrentFor(leave_window, leave_label_storage[0..leave_label_len])) break :blk null;
+                    const live = self.hoverTreeFor(leave_window, leave_label_storage[0..leave_label_len]) orelse break :blk null;
+                    break :blk live.msgFor(id, .hover_leave);
+                } orelse {
+                    self.releaseHoverSlot(slot);
+                    continue;
+                };
+                self.dispatch(runtime, leave_window, msg) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+                // The leave Msg was consumed synchronously: its slot
+                // releases now instead of holding a payload copy until
+                // some later hover reuses it.
+                self.releaseHoverSlot(slot);
+            }
+            for (standing_chain[0..standing_len], 0..) |id, position| {
+                if (!destination_ready) break;
+                if (!entering_at[position]) continue;
+                if (!self.hoverTreeCurrentFor(standing_window, standing_label)) {
+                    // An earlier edge's failed rebuild left this tree
+                    // stale mid-batch: the same deferral as above — drop
+                    // the unentered tail from the mirror and retry after
+                    // a rebuild lands.
+                    self.unwindHoverEnters(&entering_at, position);
+                    break;
+                }
+                // Resolve from the LIVE tree per edge: an earlier edge
+                // in this batch may have rebuilt the view (payload
+                // bytes are only promised for their own dispatch), and
+                // its update may even have unmounted this element — a
+                // vanished handler then dispatches no enter and owes no
+                // leave. The paired leave is captured BEFORE the enter
+                // dispatches, from the same tree that resolved it, so
+                // an enter whose own handler unmounts the element still
+                // has its leave to deliver.
+                const live = self.hoverTreeFor(standing_window, standing_label) orelse {
+                    // A failed rebuild cleared the tree mid-batch: drop
+                    // the not-yet-entered ids from the mirror so the
+                    // next drain retries them once the tree returns (the
+                    // entering-with-no-tree deferral above then holds
+                    // the line instead of consuming enters as silence).
+                    self.unwindHoverEnters(&entering_at, position);
+                    break;
+                };
+                const enter_msg = live.msgFor(id, .hover_enter);
+                if (live.msgFor(id, .hover_leave)) |leave_msg| {
+                    const slot = self.claimHoverSlot() orelse {
+                        // Pool pressure degrades like allocation
+                        // pressure: defer this id and the entering tail
+                        // to the next drain.
+                        self.unwindHoverEnters(&entering_at, position);
+                        if (first_error == null) first_error = error.OutOfMemory;
+                        break;
+                    };
+                    self.captureHoverLeave(slot, leave_msg) catch |err| switch (err) {
+                        error.OutOfMemory => {
+                            // Transient: an enter whose paired leave
+                            // cannot be owned must not dispatch — defer
+                            // this id and the rest of the entering tail
+                            // to the next drain instead of breaking the
+                            // pairing guarantee.
+                            self.releaseHoverSlot(slot);
+                            self.unwindHoverEnters(&entering_at, position);
+                            if (first_error == null) first_error = error.OutOfMemory;
+                            break;
+                        },
+                        error.HoverCapturePayloadUnsupported => {
+                            // Permanent: no copy can own this payload
+                            // (a single-item pointer), so the PAIR is
+                            // disabled — the enter is refused too,
+                            // once, loudly, and the entry settles as
+                            // refused instead of retrying every drain.
+                            self.releaseHoverSlot(slot);
+                            self.releaseHoverSlot(self.hover_msg_slots[position]);
+                            self.hover_msg_slots[position] = hover_msg_slot_refused;
+                            ui_app_log.warn("on_hover_leave payload cannot be owned (a single-item pointer): the hover pair is disabled for this element - bind a slice or scalar payload instead", .{});
+                            continue;
+                        },
+                    };
+                    // A mid-batch rebuild's capture refresh can have
+                    // filled this position's slot already (an earlier
+                    // edge's dispatch rebuilt): release it before the
+                    // fresh assignment so no slot ever leaks.
+                    self.releaseHoverSlot(self.hover_msg_slots[position]);
+                    self.hover_msg_slots[position] = slot;
+                } else {
+                    self.releaseHoverSlot(self.hover_msg_slots[position]);
+                    self.hover_msg_slots[position] = hover_msg_slot_none;
+                }
+                if (enter_msg) |msg| {
+                    self.dispatch(runtime, standing_window, msg) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                }
+            }
+            if (first_error) |err| return err;
+            return true;
+        }
+
+        /// Drop the not-yet-entered entering ids (positions >= `from`
+        /// with `entering_at` set) from the committed mirror, compacting
+        /// ids and slots in lockstep: the standing chain still carries
+        /// them, so a later drain — once the tree (or memory) is back —
+        /// sees them as entering again and retries. Their positions hold
+        /// no capture slots yet, so nothing needs releasing.
+        fn unwindHoverEnters(self: *Self, entering_at: *const [canvas.max_widget_depth]bool, from: usize) void {
+            var kept: usize = 0;
+            for (0..self.hover_msg_chain_len) |position| {
+                if (position >= from and entering_at[position]) {
+                    // A mid-batch capture refresh can have filled this
+                    // never-entered position's slot: release it so an
+                    // unwound enter never leaks its claim.
+                    self.releaseHoverSlot(self.hover_msg_slots[position]);
+                    continue;
+                }
+                self.hover_msg_chain[kept] = self.hover_msg_chain[position];
+                self.hover_msg_slots[kept] = self.hover_msg_slots[position];
+                kept += 1;
+            }
+            self.hover_msg_chain_len = kept;
         }
 
         /// Re-render the house video chrome from the moved channel

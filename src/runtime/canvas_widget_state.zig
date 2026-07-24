@@ -147,6 +147,12 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
+            // The adoption witness (`canvas_widget_layout_adoptions`)
+            // moves INSIDE the copy, at its destructive boundary: a
+            // per-node failure mid-copy leaves a torn retained tree
+            // that hover currency must treat as adopted-and-stale,
+            // while the copy's up-front validation rejects with the
+            // witness unmoved.
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
             self.views[index].copyCanvasWidgetSourceScroll(layout);

@@ -439,6 +439,9 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// edits perform, so runtime widget and app model stay in sync.
         fn applyEditKeyboardEvent(self: *Runtime, app: runtime_api.App(Runtime), keyboard_event: runtime_api.CanvasWidgetKeyboardEvent) anyerror!void {
             var event = keyboard_event;
+            // No gpu-surface input cycle wraps a context-menu edit: mark
+            // it standalone so the ui-app hover drain runs at its tail.
+            event.standalone = true;
             try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, &event);
             try self.dispatchEvent(app, .{ .canvas_widget_keyboard = event });
         }

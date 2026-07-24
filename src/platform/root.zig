@@ -145,6 +145,7 @@ pub const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = types.GpuSurfaceResizeEvent;
 pub const GpuSurfaceInputKind = types.GpuSurfaceInputKind;
 pub const GpuSurfaceInputEvent = types.GpuSurfaceInputEvent;
+pub const touch_pointer_id_bit = types.touch_pointer_id_bit;
 pub const PinchPhase = types.PinchPhase;
 pub const PinchEvent = types.PinchEvent;
 pub const max_gpu_surface_scroll_drivers = types.max_gpu_surface_scroll_drivers;

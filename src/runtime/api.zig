@@ -79,6 +79,15 @@ pub const CanvasWidgetKeyboardEvent = struct {
     keyboard: canvas.WidgetKeyboardEvent,
     target: ?canvas.WidgetFocusTarget = null,
     route: []const canvas.WidgetEventRouteEntry = &.{},
+    /// True when this event is dispatched OUTSIDE a gpu-surface input
+    /// cycle — the accessibility selection edits and the default
+    /// context-menu cut/paste/select-all, which have no terminal
+    /// `gpu_surface_input` dispatch following them. The ui-app layer's
+    /// hover drain, which normally defers mid-cycle keyboard events to
+    /// that terminal dispatch, drains standalone ones at their own
+    /// tail so an edit that unmounts the hovered listener never
+    /// strands its leave.
+    standalone: bool = false,
 };
 
 /// A scroll container's offset changed from a user gesture (wheel,

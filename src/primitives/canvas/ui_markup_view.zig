@@ -1908,6 +1908,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 // Press family: like on-press, a bound hold makes any
                 // element pressable.
                 options.on_hold = msg;
+            } else if (std.mem.eql(u8, event, "hover-enter")) {
+                // Hover family: binding either edge makes any element
+                // hover-hittable (never pressable), so both are legal
+                // everywhere like the press family.
+                options.on_hover_enter = msg;
+            } else if (std.mem.eql(u8, event, "hover-leave")) {
+                options.on_hover_leave = msg;
             } else if (std.mem.eql(u8, event, "reach-end")) {
                 // The approach-end signal (infinite-scroll fetch) is
                 // emitted for scroll containers only.

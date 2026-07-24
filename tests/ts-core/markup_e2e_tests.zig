@@ -298,6 +298,37 @@ test "markup binds the transpiled model: lists, optionals, enums, and the TS fie
     try std.testing.expect(!h.hasText("picked"));
 }
 
+test "markup hover bindings drive the transpiled core: enter and leave with row payloads" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // Two rows; nothing hovered at boot.
+    try h.menu("board.add");
+    try h.menu("board.add");
+    try std.testing.expectEqual(@as(f64, 0), Bridge.model().hoveredId);
+    try std.testing.expect(h.hasText("hover 0"));
+
+    // A raw pointer move over the first row's TEXT: containment falls
+    // through the plain child to the listening row, and the enter Msg
+    // carries the row's `for each` payload into the transpiled core.
+    const first_row_text = h.findId(.text, "beta #1").?;
+    try h.pointerMove(try h.aim(first_row_text), 4_000_000);
+    try std.testing.expectEqual(@as(f64, 1), Bridge.model().hoveredId);
+    try std.testing.expect(h.hasText("hover 1"));
+
+    // Row to row: the first row's leave (its own payload) precedes the
+    // second row's enter, so the mirror lands on the new row.
+    const second_row_text = h.findId(.text, "gamma #2").?;
+    try h.pointerMove(try h.aim(second_row_text), 5_000_000);
+    try std.testing.expectEqual(@as(f64, 2), Bridge.model().hoveredId);
+    try std.testing.expect(h.hasText("hover 2"));
+
+    // Off the list entirely: the paired leave clears the mirror.
+    try h.pointerMove(.{ .x = 4, .y = 350 }, 6_000_000);
+    try std.testing.expectEqual(@as(f64, 0), Bridge.model().hoveredId);
+    try std.testing.expect(h.hasText("hover 0"));
+}
+
 test "the runtime markup interpreter builds the emitted model exactly like the compiled engine" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -322,6 +353,7 @@ test "the runtime markup interpreter builds the emitted model exactly like the c
         .dark = false,
         .chromeTop = 0,
         .previewSurface = 5,
+        .hoveredId = 0,
     };
 
     const BoardUi = canvas.Ui(board.Msg);

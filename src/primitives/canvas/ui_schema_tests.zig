@@ -23,7 +23,7 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // schema-version-bump events, not silent edits.
     try testing.expectEqual(@as(usize, 68), schema.elements.len);
     try testing.expectEqual(@as(usize, 85), schema.attrs.len);
-    try testing.expectEqual(@as(usize, 10), schema.events.len);
+    try testing.expectEqual(@as(usize, 12), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
     // runtime-image leaf (67), and the video playback composite (68).
@@ -44,8 +44,10 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
         @as(u64, 0xa9dbe926a4488dc6),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
+    // The event table runs through the pointer-hover containment pair
+    // hover-enter (11) and hover-leave (12).
     try testing.expectEqual(
-        @as(u64, 0x5c2d94636ea4cf1a),
+        @as(u64, 0xd2d83d3570a6c4e8),
         tableFingerprint(schema.EventInfo, &schema.events),
     );
 }
