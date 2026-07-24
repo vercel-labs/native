@@ -674,6 +674,14 @@ test "clampGrid trades rows for columns under the cell ceiling" {
     try testing.expectEqual(@as(u16, 2), tiny.y);
 }
 
+test "the path reserve holds one maximal filled-line chart series" {
+    // A 256-point filled line strokes its polyline and fills its area
+    // (points plus closure vertices): the reserve must cover both, or a
+    // terminal of rounded corners starves the chart into
+    // ChartPathElementListFull.
+    try testing.expect(grid_model.widget_path_reserve >= 2 * canvas.max_chart_points_per_series + 3);
+}
+
 test "cell metrics derive from the mono face and never collapse" {
     const metrics = grid_model.cellMetrics(.{});
     try testing.expect(metrics.width > 0);

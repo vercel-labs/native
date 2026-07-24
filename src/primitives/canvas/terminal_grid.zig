@@ -48,7 +48,14 @@ pub const max_cells: usize = 7168;
 /// fewer complete rows instead of failing the frame.
 pub const widget_command_reserve: usize = 256;
 pub const widget_text_reserve: usize = 8192;
-pub const widget_path_reserve: usize = 512;
+// Sized to hold ONE maximal filled-line chart series after the grid: a
+// 256-point series strokes its polyline (256 elements) AND fills its
+// area (the points plus closure vertices down to the baseline), so the
+// reserve derives from the series ceiling with slack for the closure —
+// a flat 512 fell three elements short of exactly that documented
+// maximum.
+pub const widget_path_reserve: usize = 2 * chart_ceiling + 16;
+const chart_ceiling: usize = canvas.max_chart_points_per_series;
 pub const widget_glyph_budget: usize = 8192 - 512;
 
 /// One text run's staging capacity — shared by the paint loop's scratch
