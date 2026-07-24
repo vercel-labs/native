@@ -308,7 +308,10 @@ test "the glyph budget stops before the row whose new code points cross it" {
     var builder = try paintInto(baseGrid(&rows), &commands, .{
         .frame = geometry.RectF.init(0, 0, 400, 200),
         .tokens = .{},
-        .glyph_budget = 6,
+        // Atlas-entry units: each new code point charges four subpixel
+        // variants, so row a (4 cps = 16 entries) fits a 24-entry budget
+        // and row b (16 more) crosses it.
+        .glyph_budget = 24,
     });
     var saw_a = false;
     var saw_b = false;

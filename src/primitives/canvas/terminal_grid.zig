@@ -228,12 +228,13 @@ pub const TerminalPaintOptions = struct {
     /// runtime limit and failing the whole frame. 0 means the grid may
     /// use the whole store.
     text_reserve: usize = 0,
-    /// Ceiling on DISTINCT code points the grid may put on screen in
-    /// one paint — a proxy bound for the runtime's per-view glyph-atlas
-    /// entries, which an adversarial screen can exhaust long before the
-    /// command or text budgets bind. Painting stops row-atomically
-    /// BEFORE the row whose new code points would cross it. 0 means
-    /// unbounded.
+    /// Ceiling on glyph-ATLAS ENTRIES the grid may claim in one paint
+    /// (the runtime's per-view atlas capacity minus a reserve): every
+    /// new distinct code point is charged at the atlas's subpixel
+    /// variant multiplier (`atlas_variants_per_glyph`), since one
+    /// scalar occupies up to four x-bucket entries across a row's
+    /// columns. Painting stops row-atomically BEFORE the row whose new
+    /// code points would cross it. 0 means unbounded.
     glyph_budget: usize = 0,
 };
 
@@ -274,6 +275,17 @@ const CommandIds = struct {
         return if (self.keyed) self.base +% offset else 0;
     }
 };
+
+/// Atlas entries one DISTINCT code point can occupy: the runtime atlas
+/// keys on (font, glyph, size, subpixel_x, subpixel_y), and the
+/// subpixel quantization has FOUR x buckets — a fractional cell width
+/// walks the same scalar through all of them across a row's columns
+/// (the grid's rows share one y bucket: row advance is the rounded
+/// integral cell height). The glyph preflight charges every new code
+/// point at this multiplier so a grid within its budget can never
+/// undercount its own atlas usage 4x and fail the frame with
+/// GlyphAtlasListFull.
+const atlas_variants_per_glyph: usize = 4;
 
 /// Distinct-code-point probe set backing `glyph_budget`: open-addressed,
 /// power-of-two slots, zero meaning empty (a stored value is `cp + 1` so
@@ -547,7 +559,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // the frame degrades to fewer rows instead of failing whole on
         // `GlyphAtlasListFull`.
         if (glyph_budget > 0) {
-            glyphs_counted += rowNewGlyphs(row, &glyph_seen);
+            glyphs_counted += rowNewGlyphs(row, &glyph_seen) * atlas_variants_per_glyph;
             if (glyphs_counted > glyph_budget) break;
         }
         // Row-atomic rollback snapshot: the preflights above make a tear
