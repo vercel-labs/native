@@ -1148,17 +1148,49 @@ pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
     );
 }
 
-/// The producer frame's reported dimensions for a `contain` media
-/// surface — `Widget.image_src` doubles as the stream-geometry channel
-/// there (the rect IS the source region the fitted draw samples: the
-/// whole `w x h` frame). Null until the dimensions are honestly known
-/// (`<video>` stamps them from the LOADED event's journaled report), so
-/// the fit math never runs on guessed or zero geometry.
+/// The video stream's reported dimensions for a contain-fitted media
+/// surface (`Widget.stream_size`, stamped by `Ui.stampVideoSurfaceFit`
+/// from the LOADED event's journaled report). Null until the
+/// dimensions are honestly known, so the fit math never runs on
+/// guessed or zero geometry — and only under `.contain`, the video
+/// surface's mode.
 fn mediaSurfaceStreamSize(widget: Widget) ?geometry.SizeF {
     if (widget.image_fit != .contain) return null;
-    const src = (widget.image_src orelse return null).normalized();
-    if (src.width <= 0 or src.height <= 0) return null;
-    return .{ .width = src.width, .height = src.height };
+    const size = widget.stream_size orelse return null;
+    if (size.width <= 0 or size.height <= 0) return null;
+    return size;
+}
+
+/// A letterbox bar extent below this is nothing to draw: the quad
+/// covers the frame on that axis (float wobble from centering math
+/// never conjures a phantom bar, and a full-frame quad keeps the
+/// frame's own corner radius).
+const media_surface_bar_epsilon: f32 = 0.001;
+
+/// One letterbox/pillarbox bar: an opaque black fill over the frame
+/// remainder the fitted quad leaves uncovered. The frame's corner
+/// radius applies only to the bar's OUTER corners (the ones that
+/// coincide with the widget frame's), so a rounded surface keeps its
+/// silhouette while the bar's inner edge stays square against the
+/// picture.
+fn emitMediaSurfaceBar(builder: *Builder, id: ObjectId, rect: geometry.RectF, radius: Radius, top_or_left: bool, horizontal: bool) Error!void {
+    const bar_radius = if (horizontal) Radius{
+        .top_left = if (top_or_left) radius.top_left else 0,
+        .top_right = if (top_or_left) radius.top_right else 0,
+        .bottom_left = if (top_or_left) 0 else radius.bottom_left,
+        .bottom_right = if (top_or_left) 0 else radius.bottom_right,
+    } else Radius{
+        .top_left = if (top_or_left) radius.top_left else 0,
+        .bottom_left = if (top_or_left) radius.bottom_left else 0,
+        .top_right = if (top_or_left) 0 else radius.top_right,
+        .bottom_right = if (top_or_left) 0 else radius.bottom_right,
+    };
+    try builder.fillRoundedRect(.{
+        .id = id,
+        .rect = rect,
+        .radius = bar_radius,
+        .fill = colorFill(Color.rgba8(0x00, 0x00, 0x00, 0xff)),
+    });
 }
 
 /// The media surface: an id-derived placeholder fill with the surface's
@@ -1173,57 +1205,67 @@ fn mediaSurfaceStreamSize(widget: Widget) ?geometry.SizeF {
 ///
 /// CONTAIN fit is the video-surface mode (`Ui` stamps it on every
 /// surface the video channel feeds): with the stream's reported
-/// dimensions known, THIS emit computes the aspect-fitted destination
-/// rect — centered, letterboxed/pillarboxed — and fills the whole frame
-/// black behind it, so every host paints the identical geometry whether
-/// or not its compositor implements fit math of its own. Unknown
-/// dimensions (pre-LOADED) keep the full-frame placeholder draw: no
-/// guessed geometry, no divide-by-zero.
+/// dimensions known (`Widget.stream_size`), THIS emit computes the
+/// aspect-fitted destination rect — centered, letterboxed/pillarboxed —
+/// and paints the remainder bars black, so every host composites the
+/// identical geometry whether or not its compositor implements fit
+/// math of its own. The placeholder fill stays underneath the picture
+/// quad: goldens and replay screenshots (which skip the texture by
+/// policy) keep the deterministic id-derived placeholder there, with
+/// the journaled-truth bars around it. Unknown dimensions (pre-LOADED)
+/// keep the plain full-frame placeholder draw: no guessed geometry, no
+/// divide-by-zero.
 fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
+    const frame = widget.frame.normalized();
     const radius = Radius.all(widget.style.radius orelse 0);
-    const stream_size = mediaSurfaceStreamSize(widget);
-    // Known stream geometry means frames are coming (or here): the
-    // backdrop is the letterbox black. Before that, the deterministic
-    // id-derived placeholder stays the whole story.
-    const backdrop = if (stream_size != null)
-        Color.rgba8(0x00, 0x00, 0x00, 0xff)
-    else
-        mediaSurfacePlaceholderColor(widget.image_id);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
+        .rect = frame,
         .radius = radius,
-        .fill = colorFill(backdrop),
+        .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
     });
-    // Cover fit expands the drawn texture past the widget frame on one
-    // axis; the rectangular clip is what crops the overflow — exactly
-    // emitImageWidget's cover clip. The draw's own radius mask below is
-    // NOT a substitute: hosts that only mask radii paint a zero-radius
-    // cover surface outside its bounds, over its siblings.
-    const clips_image = widget.image_fit == .cover;
-    if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = widget.frame });
     // The fitted quad: pre-computed here from the REPORTED dimensions,
     // so hosts draw into an already-aspect-true rect (a host's own
     // contain math against the real texture is then a no-op). The draw
     // keeps `.contain` rather than a stretch into the quad: a texture
     // whose true aspect ever disagrees with the report letterboxes
     // inside the quad instead of distorting.
+    const stream_size = mediaSurfaceStreamSize(widget);
     const dst = if (stream_size) |size|
-        canvas.containDestinationRect(widget.frame, size.width, size.height)
+        canvas.containDestinationRect(frame, size.width, size.height)
     else
-        widget.frame;
+        frame;
+    const letterboxed = frame.height - dst.height > media_surface_bar_epsilon;
+    const pillarboxed = frame.width - dst.width > media_surface_bar_epsilon;
+    if (letterboxed) {
+        try emitMediaSurfaceBar(builder, widgetPartId(widget.id, 4), geometry.RectF.init(frame.x, frame.y, frame.width, dst.y - frame.y), radius, true, true);
+        try emitMediaSurfaceBar(builder, widgetPartId(widget.id, 5), geometry.RectF.init(frame.x, dst.maxY(), frame.width, frame.maxY() - dst.maxY()), radius, false, true);
+    } else if (pillarboxed) {
+        try emitMediaSurfaceBar(builder, widgetPartId(widget.id, 4), geometry.RectF.init(frame.x, frame.y, dst.x - frame.x, frame.height), radius, true, false);
+        try emitMediaSurfaceBar(builder, widgetPartId(widget.id, 5), geometry.RectF.init(dst.maxX(), frame.y, frame.maxX() - dst.maxX(), frame.height), radius, false, false);
+    }
+    // Cover fit expands the drawn texture past the widget frame on one
+    // axis; the rectangular clip is what crops the overflow — exactly
+    // emitImageWidget's cover clip. The draw's own radius mask below is
+    // NOT a substitute: hosts that only mask radii paint a zero-radius
+    // cover surface outside its bounds, over its siblings.
+    const clips_image = widget.image_fit == .cover;
+    if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = frame });
     try builder.drawImage(.{
         .id = widgetPartId(widget.id, 2),
         .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
-        .src = if (stream_size != null) null else widget.image_src,
+        .src = widget.image_src,
         .dst = dst,
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
         .sampling = widget.image_sampling,
         // The render plan flattens clip stacks to rects, so a rounded
-        // surface masks on the draw itself (the avatar convention).
-        .radius = radius,
+        // surface masks on the draw itself (the avatar convention). A
+        // bar-inset quad drops the mask: its corners sit inside the
+        // frame (in the bars' black), and the frame's radius there
+        // would notch the PICTURE's corners instead of the surface's.
+        .radius = if (letterboxed or pillarboxed) Radius{} else radius,
     });
     if (clips_image) try builder.popClip();
 }

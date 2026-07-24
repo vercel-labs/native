@@ -1093,19 +1093,28 @@ fn playbackSurfaceNode(harness: *core.TestHarness()) !canvas.WidgetLayoutNode {
 }
 
 /// Assert the retained display list draws the playback surface as a
-/// contain fit: a BLACK backdrop over the whole widget frame and the
-/// texture quad at exactly the engine's fitted rect for the reported
-/// stream dimensions.
+/// contain fit: the deterministic placeholder over the whole widget
+/// frame, BLACK bar fills over exactly the frame remainder, and the
+/// texture quad at the engine's fitted rect for the reported stream
+/// dimensions.
 fn expectPlaybackSurfaceFit(harness: *core.TestHarness(), frame: geometry.RectF, stream_width: f32, stream_height: f32) !void {
     const expected = canvas.containDestinationRect(frame, stream_width, stream_height);
+    const black = canvas.Fill{ .color = canvas.Color.rgba8(0, 0, 0, 255) };
     const display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
-    var saw_backdrop = false;
+    var saw_placeholder = false;
+    var bar_area: f32 = 0;
     var saw_quad = false;
     for (display_list.commands) |command| switch (command) {
         .fill_rounded_rect => |fill| {
-            if (!std.meta.eql(fill.rect, frame)) continue;
-            try std.testing.expectEqual(canvas.Fill{ .color = canvas.Color.rgba8(0, 0, 0, 255) }, fill.fill);
-            saw_backdrop = true;
+            if (std.meta.eql(fill.rect, frame)) {
+                try std.testing.expectEqual(
+                    canvas.Fill{ .color = canvas.mediaSurfacePlaceholderColor(canvas.video_playback_surface_id) },
+                    fill.fill,
+                );
+                saw_placeholder = true;
+            } else if (std.meta.eql(fill.fill, black) and frame.containsPoint(fill.rect.center())) {
+                bar_area += fill.rect.width * fill.rect.height;
+            }
         },
         .draw_image => |draw| {
             if (draw.image_id != canvas.mediaSurfaceTextureImageId(canvas.video_playback_surface_id)) continue;
@@ -1115,8 +1124,11 @@ fn expectPlaybackSurfaceFit(harness: *core.TestHarness(), frame: geometry.RectF,
         },
         else => {},
     };
-    try std.testing.expect(saw_backdrop);
+    try std.testing.expect(saw_placeholder);
     try std.testing.expect(saw_quad);
+    // The black bars tile exactly the frame minus the fitted quad.
+    const remainder = frame.width * frame.height - expected.width * expected.height;
+    try std.testing.expectApproxEqAbs(remainder, bar_area, 0.5);
 }
 
 test "the video surface letterboxes from the LOADED report and re-fits on source replacement" {

@@ -1795,24 +1795,26 @@ pub fn Ui(comptime Msg: type) type {
         /// stretching it. Stamped on every construction path (`el` runs
         /// this for the builder, both markup engines, and the house
         /// `<video>` chrome), with the stream's reported dimensions
-        /// riding `image_src` once the LOADED event has spoken, so the
-        /// emit computes the fitted quad from journaled truth. Camera
-        /// or app-producer surfaces are untouched: their producers own
-        /// their geometry.
+        /// riding `Widget.stream_size` once the LOADED event has
+        /// spoken, so the emit computes the fitted quad from journaled
+        /// truth. The dimensions land ONLY on the surface the active
+        /// playback actually feeds: a source-less `<video>` shown while
+        /// a manual load targets some other surface keeps its
+        /// full-frame placeholder instead of borrowing that unrelated
+        /// stream's geometry. Camera or app-producer surfaces are
+        /// untouched: their producers own their geometry (and
+        /// `image_src` keeps its ordinary source-crop meaning).
         fn stampVideoSurfaceFit(self: *const Self, widget: *Widget) void {
             if (widget.image_id == 0) return;
             const state = self.video_state;
-            const is_video_surface = widget.image_id == canvas.video_playback_surface_id or
-                (state.surface != 0 and widget.image_id == state.surface);
-            if (!is_video_surface) return;
+            const is_playback_target = state.surface != 0 and widget.image_id == state.surface;
+            if (!is_playback_target and widget.image_id != canvas.video_playback_surface_id) return;
             widget.image_fit = .contain;
-            if (state.width > 0 and state.height > 0) {
-                widget.image_src = geometry.RectF.init(
-                    0,
-                    0,
-                    @floatFromInt(state.width),
-                    @floatFromInt(state.height),
-                );
+            if (is_playback_target and state.width > 0 and state.height > 0) {
+                widget.stream_size = .{
+                    .width = @floatFromInt(state.width),
+                    .height = @floatFromInt(state.height),
+                };
             }
         }
 

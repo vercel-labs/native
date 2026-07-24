@@ -836,6 +836,14 @@ pub const Widget = struct {
     image_fit: ImageFit = .stretch,
     image_sampling: ImageSampling = .linear,
     image_opacity: f32 = 1,
+    /// The video stream's REPORTED dimensions for a contain-fitted
+    /// media surface (`Ui.stampVideoSurfaceFit` writes it from the
+    /// LOADED event's journaled report; null until then): the emit
+    /// computes the letterboxed frame quad from this, never from
+    /// `image_src` — which keeps its ordinary source-crop meaning on
+    /// every widget. Engine-internal: no builder option, no markup
+    /// attribute.
+    stream_size: ?geometry.SizeF = null,
     text_selection: ?TextSelection = null,
     text_composition: ?TextRange = null,
     value: f32 = 0,
