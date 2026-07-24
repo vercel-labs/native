@@ -329,11 +329,13 @@ test "markup fixture: facade wire constructors carry declaration-order tags" {
     const add = facade_markup.nsc_core_msg_add();
     try testing.expectEqual(@as(usize, 0), @intFromEnum(std.meta.activeTag(add)));
     const zoomed = facade_markup.nsc_core_msg_zoomed(1.5, 7, true);
-    try testing.expectEqual(@as(usize, 9), @intFromEnum(std.meta.activeTag(zoomed)));
+    // zoomed sits at tag 11: the hover containment pair (hover_row,
+    // hover_off) declares ahead of it in the fixture's Msg union.
+    try testing.expectEqual(@as(usize, 11), @intFromEnum(std.meta.activeTag(zoomed)));
     try testing.expectEqual(@as(f64, 1.5), zoomed.zoomed.factor);
     try testing.expect(zoomed.zoomed.fromBoard);
     try testing.expectEqual(@as(usize, 0), facade_markup.nsc_core_tag_add);
-    try testing.expectEqual(@as(usize, 9), facade_markup.nsc_core_tag_zoomed);
+    try testing.expectEqual(@as(usize, 11), facade_markup.nsc_core_tag_zoomed);
 }
 
 test "host fixture: facade scalar encodings match native bit patterns" {
