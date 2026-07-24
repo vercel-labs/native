@@ -471,6 +471,31 @@ const FacadeEmitter = struct {
         }
     }
 
+    /// Whether the slot at `slot` carries a u64 attestation: the
+    /// unsigned class picks the unsigned encoder, so a negative value
+    /// refuses instead of silently encoding bytes the mirror would read
+    /// as a huge unsigned value. Slice elements pass null — the
+    /// format-1 grammar cannot attest them.
+    fn attestedU64(self: *FacadeEmitter, slot: ?[]const u8) bool {
+        const path = slot orelse return false;
+        for (self.sidecar.integer_slots) |entry| {
+            if (entry.class == .u64 and std.mem.eql(u8, entry.slot, path)) return true;
+        }
+        return false;
+    }
+
+    fn anyU64(self: *FacadeEmitter) bool {
+        for (self.sidecar.integer_slots) |entry| {
+            if (entry.class == .u64) return true;
+        }
+        return false;
+    }
+
+    /// A slot path in the sidecar's grammar: `<Container>.<member>`.
+    fn slotOf(self: *FacadeEmitter, container: []const u8, member: []const u8) Error![]const u8 {
+        return std.fmt.allocPrint(self.arena, "{s}.{s}", .{ container, member });
+    }
+
     /// The one TypeRef-to-TypeScript-spelling authority (the facade twin
     /// of the Zig mirror's spellRef).
     fn spellRef(self: *FacadeEmitter, ref: TypeRef, container: []const u8, member: []const u8) Error![]const u8 {
@@ -561,7 +586,7 @@ const FacadeEmitter = struct {
         // them in (FACADE-GAPS records the subset rules that keep the
         // forwarders out of this module today).
         var zero = std.ArrayListUnmanaged(u8).empty;
-        try self.zeroValue(&zero, .{ .value = self.sidecar.model }, 1);
+        try self.zeroValue(&zero, .{ .value = self.sidecar.model }, 1, null);
         try self.print(
             \\
             \\export function initialModel(): Model {{
@@ -637,7 +662,7 @@ const FacadeEmitter = struct {
     fn sampleBuilders(self: *FacadeEmitter) Error!void {
         var sample = std.ArrayListUnmanaged(u8).empty;
         self.sample_ordinal = 0;
-        try self.sampleValue(&sample, .{ .value = self.sidecar.model }, 1);
+        try self.sampleValue(&sample, .{ .value = self.sidecar.model }, 1, null);
         try self.print(
             \\
             \\/// A deterministic, non-trivial model value (every field populated,
@@ -657,7 +682,8 @@ const FacadeEmitter = struct {
         return text;
     }
 
-    fn zeroValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize) Error!void {
+    fn zeroValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize, slot: ?[]const u8) Error!void {
+        _ = slot;
         switch (ref) {
             .bool => try out.appendSlice(self.arena, "false"),
             .f64, .i64 => try out.appendSlice(self.arena, "0"),
@@ -680,14 +706,14 @@ const FacadeEmitter = struct {
         }
     }
 
-    const FieldValueFn = *const fn (self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize) Error!void;
+    const FieldValueFn = *const fn (self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize, slot: ?[]const u8) Error!void;
 
-    fn zeroField(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize) Error!void {
-        try self.zeroValue(out, ref, depth);
+    fn zeroField(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize, slot: ?[]const u8) Error!void {
+        try self.zeroValue(out, ref, depth, slot);
     }
 
-    fn sampleField(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize) Error!void {
-        try self.sampleValue(out, ref, depth);
+    fn sampleField(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize, slot: ?[]const u8) Error!void {
+        try self.sampleValue(out, ref, depth, slot);
     }
 
     fn recordValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), entry: *const sidecar_mod.Struct, depth: usize, field_value: FieldValueFn) Error!void {
@@ -695,7 +721,7 @@ const FacadeEmitter = struct {
         for (entry.fields) |field| {
             try out.appendSlice(self.arena, try self.indentText(depth + 1));
             try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s}: ", .{try tsProp(self.arena, field.name)}));
-            try field_value(self, out, field.type, depth + 1);
+            try field_value(self, out, field.type, depth + 1, try self.slotOf(entry.name, field.name));
             try out.appendSlice(self.arena, ",\n");
         }
         try out.appendSlice(self.arena, try self.indentText(depth));
@@ -712,22 +738,29 @@ const FacadeEmitter = struct {
             try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\"", .{try tsString(self.arena, arm.name)}));
             for (record.fields) |field| {
                 try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, ", {s}: ", .{try tsProp(self.arena, field.name)}));
-                try field_value(self, out, field.type, depth);
+                try field_value(self, out, field.type, depth, try self.slotOf(record.name, field.name));
             }
             try out.appendSlice(self.arena, " }");
             return;
         }
         try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\", value: ", .{try tsString(self.arena, arm.name)}));
-        try field_value(self, out, arm.payload, depth);
+        try field_value(self, out, arm.payload, depth, try self.slotOf(entry.name, arm.name));
         try out.appendSlice(self.arena, " }");
     }
 
-    fn sampleValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize) Error!void {
+    fn sampleValue(self: *FacadeEmitter, out: *std.ArrayListUnmanaged(u8), ref: TypeRef, depth: usize, slot: ?[]const u8) Error!void {
         self.sample_ordinal += 1;
         const n: i64 = @intCast(self.sample_ordinal);
         switch (ref) {
             .bool => try out.appendSlice(self.arena, if (@rem(n, 2) == 0) "true" else "false"),
-            .i64 => try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{n * 7 - 12})),
+            .i64 => {
+                // A u64-attested slot's sample stays non-negative (the
+                // unsigned encoder refuses negatives); the magnitude
+                // keeps the per-ordinal variety.
+                const varied = n * 7 - 12;
+                const value = if (self.attestedU64(slot) and varied < 0) -varied else varied;
+                try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{value}));
+            },
             .f64 => {
                 // Varied signs and fractions (quarters stay exact in
                 // binary, so both encoders see identical values).
@@ -736,7 +769,7 @@ const FacadeEmitter = struct {
             },
             .bytes => try out.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "asciiBytes(\"sample-{d}\")", .{n})),
             .void => try out.appendSlice(self.arena, "undefined"),
-            .optional => |inner| try self.sampleValue(out, inner.*, depth),
+            .optional => |inner| try self.sampleValue(out, inner.*, depth, slot),
             .slice => |elem| {
                 // Two elements at the outermost level exercise ordering;
                 // nested levels take one so deeply nested sequence types
@@ -747,7 +780,7 @@ const FacadeEmitter = struct {
                 try out.appendSlice(self.arena, "[\n");
                 for (0..element_count) |_| {
                     try out.appendSlice(self.arena, try self.indentText(depth + 1));
-                    try self.sampleValue(out, elem.*, depth + 1);
+                    try self.sampleValue(out, elem.*, depth + 1, null);
                     try out.appendSlice(self.arena, ",\n");
                 }
                 try out.appendSlice(self.arena, try self.indentText(depth));
@@ -990,6 +1023,39 @@ const FacadeEmitter = struct {
             \\
         );
 
+        // The unsigned twin, emitted only when a slot attests the u64
+        // class: 8-byte unsigned LE, refusing negatives — a negative
+        // value has no honest unsigned bytes, and encoding one anyway
+        // would decode host-side as a huge unsigned value.
+        if (self.anyU64()) {
+            try self.raw(
+                \\
+                \\// u64, unsigned LE — the unsigned twin for u64-attested integer
+                \\// slots. Values are whole and within [0, 2^53 - 1] by the number
+                \\// model; the same 53-bit scan as nscfI64's non-negative path.
+                \\function nscfU64(value: number): Uint8Array {
+                \\  if (value !== Math.floor(value) || value > 9007199254740991 || value < 0) {
+                \\    throw { kind: "nscf_contract", teaching: asciiBytes("an unsigned integer slot carries a non-integer, negative, or out-of-range value — the u64 encoding has no honest bytes for it; keep unsigned integer slots whole and within 0..(2^53 - 1)") } as NscfContractError;
+                \\  }
+                \\  const bits = new Uint8Array(64);
+                \\  for (let i = 0; i < 64; i++) {
+                \\    bits[i] = 0;
+                \\  }
+                \\  let rest = value;
+                \\  let p = 4503599627370496;
+                \\  for (let i = 0; i < 53; i++) {
+                \\    if (rest >= p) {
+                \\      bits[11 + i] = 1;
+                \\      rest = rest - p;
+                \\    }
+                \\    p = p / 2;
+                \\  }
+                \\  return nscfBitsToBytes(bits, 8);
+                \\}
+                \\
+            );
+        }
+
         for (self.sidecar.types.enums) |entry| {
             try self.print("\nfunction nscfIndex{s}(value: {s}): number {{\n", .{ entry.name, entry.name });
             for (entry.members, 0..) |member, index| {
@@ -1099,29 +1165,29 @@ const FacadeEmitter = struct {
     fn msgPayloadEncodeStatements(self: *FacadeEmitter, arm: sidecar_mod.MsgArm) Error!void {
         switch (arm.payload) {
             .void => {},
-            .bytes => try self.fieldEncodeStatements(.bytes, "value.value", 2, 0),
-            .number => |class| try self.fieldEncodeStatements(numberRef(class), "value.value", 2, 0),
+            .bytes => try self.fieldEncodeStatements(.bytes, "value.value", 2, 0, null),
+            .number => |class| try self.fieldEncodeStatements(numberRef(class), "value.value", 2, 0, try self.slotOf(self.sidecar.msg.name, arm.name)),
             .number_bytes => |desc| {
                 // The mirror declares the number field first (the
                 // emitted convention of every producer of this shape —
                 // SCHEMA-GAPS.md), so the number's bytes lead.
-                try self.fieldEncodeStatements(numberRef(desc.number_class), try tsAccess(self.arena, "value", desc.number_field), 2, 0);
-                try self.fieldEncodeStatements(.bytes, try tsAccess(self.arena, "value", desc.bytes_field), 2, 8);
+                try self.fieldEncodeStatements(numberRef(desc.number_class), try tsAccess(self.arena, "value", desc.number_field), 2, 0, try std.fmt.allocPrint(self.arena, "{s}.{s}.{s}", .{ self.sidecar.msg.name, arm.name, desc.number_field }));
+                try self.fieldEncodeStatements(.bytes, try tsAccess(self.arena, "value", desc.bytes_field), 2, 8, null);
             },
             .record => |name| {
                 if (self.synthesizedRecordOf(recordPayloadRef(arm.payload), self.sidecar.msg.name, arm.name)) |record| {
                     // Flattened beside `kind`: encode the record's
                     // fields off the narrowed arm in declaration order.
                     for (record.fields, 0..) |field, field_index| {
-                        try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8);
+                        try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8, try self.slotOf(record.name, field.name));
                     }
                 } else {
-                    try self.fieldEncodeStatements(.{ .value = name }, "value.value", 2, 0);
+                    try self.fieldEncodeStatements(.{ .value = name }, "value.value", 2, 0, null);
                 }
             },
-            .union_ref => |name| try self.fieldEncodeStatements(.{ .union_ref = name }, "value.value", 2, 0),
-            .enum_ref => |name| try self.fieldEncodeStatements(.{ .enum_ref = name }, "value.value", 2, 0),
-            .scalar => |ref| try self.fieldEncodeStatements(ref, "value.value", 2, 0),
+            .union_ref => |name| try self.fieldEncodeStatements(.{ .union_ref = name }, "value.value", 2, 0, null),
+            .enum_ref => |name| try self.fieldEncodeStatements(.{ .enum_ref = name }, "value.value", 2, 0, null),
+            .scalar => |ref| try self.fieldEncodeStatements(ref, "value.value", 2, 0, try self.slotOf(self.sidecar.msg.name, arm.name)),
         }
     }
 
@@ -1135,7 +1201,7 @@ const FacadeEmitter = struct {
             // Temp names seed per field: every statement shares one
             // function scope, and optional/slice nesting takes the +1
             // steps within the field's own range.
-            try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 1, index * 8);
+            try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 1, index * 8, try self.slotOf(entry.name, field.name));
         }
         try self.raw("  return nscfCat(parts);\n}\n");
     }
@@ -1146,12 +1212,13 @@ const FacadeEmitter = struct {
             try self.print("  if (value.kind === \"{s}\") {{\n    const parts: Uint8Array[] = [nscfByte({d})];\n", .{ try tsString(self.arena, arm.name), index });
             if (self.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| {
                 // Flattened beside `kind`: encode the record's fields
-                // off the narrowed arm in declaration order.
+                // off the narrowed arm in declaration order (the record
+                // is tabled, so its fields carry its own slot paths).
                 for (record.fields, 0..) |field, field_index| {
-                    try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8);
+                    try self.fieldEncodeStatements(field.type, try tsAccess(self.arena, "value", field.name), 2, field_index * 8, try self.slotOf(record.name, field.name));
                 }
             } else if (arm.payload != .void) {
-                try self.fieldEncodeStatements(arm.payload, "value.value", 2, 0);
+                try self.fieldEncodeStatements(arm.payload, "value.value", 2, 0, try self.slotOf(entry.name, arm.name));
             }
             try self.raw("    return nscfCat(parts);\n  }\n");
         }
@@ -1159,24 +1226,26 @@ const FacadeEmitter = struct {
     }
 
     /// Statements appending `expr`'s canonical encoding to `parts`.
-    fn fieldEncodeStatements(self: *FacadeEmitter, ref: TypeRef, expr: []const u8, depth: usize, temp_seed: usize) Error!void {
+    /// `slot` is the site's slot path (null where no path form exists),
+    /// consulted for the attested integer class.
+    fn fieldEncodeStatements(self: *FacadeEmitter, ref: TypeRef, expr: []const u8, depth: usize, temp_seed: usize, slot: ?[]const u8) Error!void {
         const pad = try self.indentText(depth);
         switch (ref) {
             .bool => try self.print("{s}parts[parts.length] = nscfByte({s} ? 1 : 0);\n", .{ pad, expr }),
-            .i64 => try self.print("{s}parts[parts.length] = nscfI64({s});\n", .{ pad, expr }),
+            .i64 => try self.print("{s}parts[parts.length] = {s}({s});\n", .{ pad, if (self.attestedU64(slot)) "nscfU64" else "nscfI64", expr }),
             .f64 => try self.print("{s}parts[parts.length] = nscfF64({s});\n", .{ pad, expr }),
             .bytes => try self.print("{s}parts[parts.length] = nscfBytes({s});\n", .{ pad, expr }),
             .void => {},
             .optional => |inner| {
                 const temp = try std.fmt.allocPrint(self.arena, "nscfOpt{d}", .{temp_seed});
                 try self.print("{s}const {s} = {s};\n{s}if ({s} === null) {{\n{s}  parts[parts.length] = nscfByte(0);\n{s}}} else {{\n{s}  parts[parts.length] = nscfByte(1);\n", .{ pad, temp, expr, pad, temp, pad, pad, pad });
-                try self.fieldEncodeStatements(inner.*, temp, depth + 1, temp_seed + 1);
+                try self.fieldEncodeStatements(inner.*, temp, depth + 1, temp_seed + 1, slot);
                 try self.print("{s}}}\n", .{pad});
             },
             .slice => |elem| {
                 const index = try std.fmt.allocPrint(self.arena, "nscfIdx{d}", .{temp_seed});
                 try self.print("{s}parts[parts.length] = nscfU32({s}.length);\n{s}for (let {s} = 0; {s} < {s}.length; {s}++) {{\n", .{ pad, expr, pad, index, index, expr, index });
-                try self.fieldEncodeStatements(elem.*, try std.fmt.allocPrint(self.arena, "{s}[{s}]", .{ expr, index }), depth + 1, temp_seed + 1);
+                try self.fieldEncodeStatements(elem.*, try std.fmt.allocPrint(self.arena, "{s}[{s}]", .{ expr, index }), depth + 1, temp_seed + 1, null);
                 try self.print("{s}}}\n", .{pad});
             },
             .node, .value => |name| try self.print("{s}parts[parts.length] = {s}({s});\n", .{ pad, try self.encoderNameFor(name), expr }),
@@ -1465,6 +1534,49 @@ test "envelope payloads follow the sidecar's classes and flattened orders" {
     // declaration order, exactly as the arm's mirror payload decodes.
     try testing.expect(std.mem.indexOf(u8, generated, "if (value.kind === \"loaded\") {\n    const parts: Uint8Array[] = [nscfByte(1), nscfByte(1)];\n    parts[parts.length] = nscfF64(value.status);\n    parts[parts.length] = nscfByte(value.ok ? 1 : 0);\n    return nscfCat(parts);\n  }") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "export function nsc_core_frame_msg(msg: Msg | null): Uint8Array {") != null);
+}
+
+test "u64-attested slots pick the unsigned encoder; the twin emits only when attested" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A u64-attested model field and message arm beside an i64-attested
+    // one, with the key channel wired so the envelope path emits too.
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}}",
+        "{\"name\": \"count\", \"type\": {\"kind\": \"i64\"}},\n        {\"name\": \"id\", \"type\": {\"kind\": \"i64\"}}",
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+        "{\"name\": \"tick\", \"payload\": {\"kind\": \"number\", \"class\": \"i64\"}}",
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "\"key_msg\": false", "\"key_msg\": true");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\"]");
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Model.id\", \"class\": \"u64\"}, {\"slot\": \"Msg.tick\", \"class\": \"u64\"}",
+    );
+    const generated = try facadeFromJson(arena, source);
+    // Slot by slot: the attestation picks the encoder.
+    try testing.expect(std.mem.indexOf(u8, generated, "function nscfU64(value: number): Uint8Array {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "parts[parts.length] = nscfI64(value.count);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "parts[parts.length] = nscfU64(value.id);") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "parts[parts.length] = nscfU64(value.value);") != null);
+    // The unsigned encoder refuses negatives, and its sample stays
+    // non-negative so the deterministic sample model encodes.
+    try testing.expect(std.mem.indexOf(u8, generated, "value < 0") != null);
+    // Without a u64 attestation, the twin never emits.
+    const signed_only = try facadeFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, signed_only, "nscfU64") == null);
 }
 
 test "composite slice elements parenthesize in the projection" {

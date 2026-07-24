@@ -2985,8 +2985,10 @@ fn tsCoreE2eArtifact(
     conformance_mod.addImport("facade_markup_core", facadeCoreModule(b, target, optimize, node, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
     // The integer-class fixture: a hand-written sidecar attesting mixed
     // i64/u64 slot classes, so the suite drives boundary and full-range
-    // integer values through a generated mirror's decode paths.
+    // integer values through a generated mirror's decode paths and
+    // holds the compiled facade's integer encoders to the same bytes.
     conformance_mod.addImport("shim_integer_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/integer_fixture.contract.json")));
+    conformance_mod.addImport("facade_integer_core", facadeCoreModule(b, target, optimize, node, corewire_exe, b.path("tests/sidecar/integer_fixture.contract.json")));
     const conformance_fixtures = [_]struct {
         ts_import: []const u8,
         shim_import: []const u8,

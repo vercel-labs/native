@@ -46,6 +46,7 @@ const ts_markup = @import("ts_markup_core");
 const shim_markup = @import("shim_markup_core");
 const facade_markup = @import("facade_markup_core");
 const shim_integer = @import("shim_integer_core");
+const facade_integer = @import("facade_integer_core");
 const ts_host = @import("ts_host_core");
 const shim_host = @import("shim_host_core");
 const facade_host = @import("facade_host_core");
@@ -558,6 +559,34 @@ test "integer fixture: dispatch payloads encode byte-exactly against hand-comput
         &.{ 4, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00, 2, 0, 0, 0, 'i', 'd' },
         corewire_rt.encodeAlloc(shim_integer.Msg, .{ .sized = .{ .size = 9007199254740991, .label = "id" } }, arena),
     );
+}
+
+test "integer fixture: facade snapshots byte-match the canonical encoder" {
+    // The compiled facade routes u64-attested slots through its
+    // unsigned encoder; both the zero and sample models must land on
+    // the exact bytes the mirror's decoder expects.
+    try expectSnapshotParity(facade_integer, shim_integer);
+}
+
+test "integer fixture: facade channel envelopes carry mixed-class message bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    facade_integer.rt.resetAll();
+    defer facade_integer.rt.resetAll();
+
+    // The signed and unsigned arms encode per their own attestations,
+    // byte-identical to the canonical encoding of the mirror value.
+    {
+        const envelope = facade_integer.nsc_core_key_msg(facade_integer.nsc_core_msg_count_set(-42));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_integer.Msg, .{ .count_set = -42 }, arena), envelope[1..]);
+    }
+    {
+        const envelope = facade_integer.nsc_core_key_msg(facade_integer.nsc_core_msg_id_set(9007199254740991));
+        try testing.expectEqual(@as(u8, 1), envelope[0]);
+        try testing.expectEqualSlices(u8, corewire_rt.encodeAlloc(shim_integer.Msg, .{ .id_set = 9007199254740991 }, arena), envelope[1..]);
+    }
 }
 
 test "integer fixture: model snapshots decode per-slot classes from raw bytes" {
