@@ -521,14 +521,17 @@ const Emitter = struct {
 
     // ------------------------------------ host-supplied signed slots
     //
-    // Some structural vocabularies are filled by the HOST with values
-    // that go negative: scroll offsets and velocities during
-    // rubber-banding and upward flicks, and window-chrome geometry in
-    // signed content coordinates. A u64 attestation on such a slot
-    // could never carry those values — the generated wiring would trap
-    // converting them — so the checker refuses the attestation at tool
-    // time instead. Extents (viewport, content) and selection bounds
-    // stay attestable: the host only ever supplies them non-negative.
+    // Two structural vocabularies carry slots the HOST fills with
+    // values that go negative: a scroll arm's offsets and velocities
+    // (rubber-banding, upward flicks) and the window-control cluster's
+    // position (signed content coordinates). A u64 attestation on such
+    // a slot could never carry those values — the generated wiring
+    // would trap converting them — so the checker refuses the
+    // attestation at tool time instead. Everything the host supplies
+    // non-negative stays attestable: scroll extents, selection bounds,
+    // chrome insets and cluster sizes — and a scroll-shaped record the
+    // host never dispatches into (a model-only metrics record) is not
+    // this rule's business at all.
 
     /// The scroll-state axes the host supplies signed, in both
     /// spellings (the TS mirror's and the canvas core's).
@@ -538,8 +541,15 @@ const Emitter = struct {
     };
 
     fn validateIntegerAttestations(self: *Emitter) Error!void {
-        for (self.sidecar.types.structs) |entry| {
-            if (self.scrollStateFields(entry.name) == null) continue;
+        // Only records a message arm routes through the scroll entry
+        // receive host scroll values.
+        for (self.sidecar.msg.arms) |arm| {
+            const record_name = switch (arm.payload) {
+                .record => |name| name,
+                else => continue,
+            };
+            if (self.scrollStateFields(record_name) == null) continue;
+            const entry = sidecar_mod.findStruct(self.sidecar.types, record_name) orelse continue;
             for (entry.fields) |field| {
                 if (field.type != .i64) continue;
                 if (!nameListed(&signed_scroll_axes, field.name)) continue;
@@ -552,12 +562,16 @@ const Emitter = struct {
         if (self.sidecar.channels.chrome_msg) |arm_name| {
             if (self.channelArmRecord(arm_name)) |record| {
                 for (record.fields) |field| {
+                    // Insets and cluster sizes are non-negative overlay
+                    // extents; only the cluster's position is signed.
+                    if (!std.mem.eql(u8, field.name, "buttons")) continue;
                     const nested = self.recordOf(field.type) orelse continue;
                     for (nested.fields) |geometry| {
                         if (geometry.type != .i64) continue;
+                        if (!std.mem.eql(u8, geometry.name, "x") and !std.mem.eql(u8, geometry.name, "y")) continue;
                         const slot = try self.slotPath(nested.name, geometry.name);
                         if (self.attestedClass(slot) == .u64) {
-                            self.diags.flag("integer_slots", "\"{s}\" is window-chrome geometry, and embedders report signed content coordinates — the u64 class cannot carry them; keep chrome geometry i64 or f64", .{slot});
+                            self.diags.flag("integer_slots", "\"{s}\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64", .{slot});
                         }
                     }
                 }
@@ -1609,6 +1623,26 @@ test "u64 attestations on host-supplied signed slots refuse at check time" {
     extent_source = try std.mem.replaceOwned(u8, arena, extent_source, "{\"slot\": \"Scroll.offsetY\", \"class\": \"u64\"}", "{\"slot\": \"Scroll.viewportExtentY\", \"class\": \"u64\"}");
     const extent_generated = try emitFromJson(arena, extent_source);
     try testing.expect(std.mem.indexOf(u8, extent_generated, "shim_rt.exactF64Unsigned(payload.viewportExtentY)") != null);
+
+    // A scroll-shaped record no message arm routes is not scroll state
+    // to the host: a model-only metrics record keeps its unsigned
+    // attestation even on an axis-named field.
+    var model_only = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}},\n      {\"name\": \"scrolled\", \"payload\": {\"kind\": \"record\", \"name\": \"Scroll\"}}",
+        "{\"name\": \"bump\", \"payload\": {\"kind\": \"void\"}}",
+    );
+    model_only = try std.mem.replaceOwned(
+        u8,
+        arena,
+        model_only,
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}",
+        "{\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}, {\"name\": \"metrics\", \"type\": {\"kind\": \"value\", \"name\": \"Scroll\"}}",
+    );
+    const model_only_generated = try emitFromJson(arena, model_only);
+    try testing.expect(std.mem.indexOf(u8, model_only_generated, "offsetY: u64,") != null);
 }
 
 test "a u64 attestation on chrome geometry refuses at check time" {
@@ -1663,9 +1697,20 @@ test "a u64 attestation on chrome geometry refuses at check time" {
     try testing.expectError(error.Refused, emit(arena, parsed, &diags));
     var found = false;
     for (diags.list.items) |item| {
-        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "window-chrome geometry") != null) found = true;
+        if (item.severity == .@"error" and std.mem.indexOf(u8, item.message, "window-control cluster's position") != null) found = true;
     }
     try testing.expect(found);
+
+    // Insets and cluster sizes are non-negative overlay extents: the
+    // unsigned class carries them.
+    var arena_state2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state2.deinit();
+    const arena2 = arena_state2.allocator();
+    var extents = try std.mem.replaceOwned(u8, arena2, source, "{\"name\": \"x\", \"type\": {\"kind\": \"i64\"}}", "{\"name\": \"x\", \"type\": {\"kind\": \"f64\"}}");
+    extents = try std.mem.replaceOwned(u8, arena2, extents, "{\"name\": \"top\", \"type\": {\"kind\": \"f64\"}}", "{\"name\": \"top\", \"type\": {\"kind\": \"i64\"}}");
+    extents = try std.mem.replaceOwned(u8, arena2, extents, "{\"slot\": \"Buttons.x\", \"class\": \"u64\"}", "{\"slot\": \"Insets.top\", \"class\": \"u64\"}");
+    const generated = try emitFromJson(arena2, extents);
+    try testing.expect(std.mem.indexOf(u8, generated, "top: u64,") != null);
 }
 
 test "u64 attestations on selection bounds are accepted (the host supplies unsigned offsets)" {

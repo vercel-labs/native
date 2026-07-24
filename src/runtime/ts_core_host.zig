@@ -2300,6 +2300,17 @@ pub fn TsCoreHost(comptime core: type) type {
                                 } else if (comptime f.type == f64) {
                                     @field(payload, f.name) = @floatFromInt(number);
                                 } else {
+                                    // Exit codes carry -1 sentinels by
+                                    // contract: a negative host number
+                                    // into an unsigned field has no
+                                    // honest value, so the crossing
+                                    // teaches instead of faulting in
+                                    // the cast.
+                                    if (comptime f.type == u64) {
+                                        if (number < 0) {
+                                            @panic("ts core host: a negative number reached the u64-classed field '" ++ f.name ++ "' of Msg arm '" ++ arm.name ++ "' — the unsigned class cannot carry it; declare the field i64 or f64");
+                                        }
+                                    }
                                     @field(payload, f.name) = @intCast(number);
                                 }
                             }
@@ -2718,7 +2729,17 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (tag == index) {
                     if (comptime arm.type == f64) {
                         return @unionInit(Msg, arm.name, value);
-                    } else if (comptime arm.type == i64 or arm.type == u64) {
+                    } else if (comptime arm.type == i64) {
+                        return @unionInit(Msg, arm.name, @intFromFloat(value));
+                    } else if (comptime arm.type == u64) {
+                        // Clocks are signed by contract (a pre-epoch or
+                        // skewed wall clock is a legal reading): when
+                        // one reaches an unsigned arm there is no
+                        // honest value, so the crossing teaches instead
+                        // of faulting in the cast.
+                        if (value < 0) {
+                            @panic("ts core host: a negative number reached the u64-classed Msg arm '" ++ arm.name ++ "' — the unsigned class cannot carry it; declare the arm i64 or f64");
+                        }
                         return @unionInit(Msg, arm.name, @intFromFloat(value));
                     }
                     @panic("ts core host: a timestamp targets Msg arm '" ++ arm.name ++ "', whose payload is not a number");
