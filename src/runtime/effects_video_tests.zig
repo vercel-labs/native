@@ -1082,6 +1082,113 @@ test "a declared <video src> loads on first rebuild, reloads on src change, and 
     try std.testing.expect(np.video.loaded);
 }
 
+/// The retained media-surface widget node for the framework playback
+/// surface, from the runtime's laid-out tree.
+fn playbackSurfaceNode(harness: *core.TestHarness()) !canvas.WidgetLayoutNode {
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    for (layout.nodes) |node| {
+        if (node.widget.kind == .media_surface and node.widget.image_id == canvas.video_playback_surface_id) return node;
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Assert the retained display list draws the playback surface as a
+/// contain fit: a BLACK backdrop over the whole widget frame and the
+/// texture quad at exactly the engine's fitted rect for the reported
+/// stream dimensions.
+fn expectPlaybackSurfaceFit(harness: *core.TestHarness(), frame: geometry.RectF, stream_width: f32, stream_height: f32) !void {
+    const expected = canvas.containDestinationRect(frame, stream_width, stream_height);
+    const display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+    var saw_backdrop = false;
+    var saw_quad = false;
+    for (display_list.commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| {
+            if (!std.meta.eql(fill.rect, frame)) continue;
+            try std.testing.expectEqual(canvas.Fill{ .color = canvas.Color.rgba8(0, 0, 0, 255) }, fill.fill);
+            saw_backdrop = true;
+        },
+        .draw_image => |draw| {
+            if (draw.image_id != canvas.mediaSurfaceTextureImageId(canvas.video_playback_surface_id)) continue;
+            try std.testing.expectEqual(canvas.ImageFit.contain, draw.fit);
+            try std.testing.expectEqual(expected, draw.dst);
+            saw_quad = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_backdrop);
+    try std.testing.expect(saw_quad);
+}
+
+test "the video surface letterboxes from the LOADED report and re-fits on source replacement" {
+    // The paint-level pin of the contain-fit pipeline end to end: the
+    // null platform's fake decoder reports stream dimensions at LOADED
+    // (setVideoMeta), the snapshot feeds the rebuild, and the emitted
+    // canvas frame carries the black backdrop plus the fitted quad —
+    // the exact geometry every host composites.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    // one.mp4 is WIDE (2:1) — into the squarer surface box it must
+    // letterbox (bars top/bottom); two.mp4 is TALL (1:2) — the same box
+    // pillarboxes it (bars left/right).
+    try harness.null_platform.setVideoMeta("one.mp4", 90_000, 480, 240);
+    try harness.null_platform.setVideoMeta("two.mp4", 60_000, 240, 480);
+    const app_state = try std.testing.allocator.create(DeclApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = DeclApp.init(std.heap.page_allocator, .{}, .{
+        .name = "effects-video-fit",
+        .scene = video_scene,
+        .canvas_label = canvas_label,
+        .update_fx = declUpdate,
+        .view = declView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try dispatchFrame(harness, app, 1);
+    const np = &harness.null_platform;
+
+    // Pre-LOADED: no reported dimensions — the surface draw must stay
+    // the full-frame placeholder (no guessed fit, no divide-by-zero).
+    const surface_frame = (try playbackSurfaceNode(harness)).frame.normalized();
+    try std.testing.expect(surface_frame.width > 0 and surface_frame.height > 0);
+    {
+        const display_list = try harness.runtime.canvasDisplayList(1, canvas_label);
+        var saw_quad = false;
+        for (display_list.commands) |command| switch (command) {
+            .draw_image => |draw| {
+                if (draw.image_id != canvas.mediaSurfaceTextureImageId(canvas.video_playback_surface_id)) continue;
+                try std.testing.expectEqual(surface_frame, draw.dst.normalized());
+                saw_quad = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(saw_quad);
+    }
+
+    // LOADED lands the 480x240 report: the rebuilt frame letterboxes —
+    // full width, fitted height, black bars above and below.
+    try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+    try app_state.dispatch(&harness.runtime, 1, .noop);
+    const wide_frame = (try playbackSurfaceNode(harness)).frame.normalized();
+    try expectPlaybackSurfaceFit(harness, wide_frame, 480, 240);
+    const wide_quad = canvas.containDestinationRect(wide_frame, 480, 240);
+    try std.testing.expectEqual(wide_frame.width, wide_quad.width);
+    try std.testing.expect(wide_quad.height < wide_frame.height - 1);
+
+    // Replacing the source re-fits from the NEW report: the tall clip
+    // pillarboxes the same box — full height, fitted width, bars left
+    // and right.
+    try app_state.dispatch(&harness.runtime, 1, .use_second);
+    try harness.runtime.dispatchPlatformEvent(app, np.takeVideoLoaded().?);
+    try app_state.dispatch(&harness.runtime, 1, .noop);
+    const tall_frame = (try playbackSurfaceNode(harness)).frame.normalized();
+    try expectPlaybackSurfaceFit(harness, tall_frame, 240, 480);
+    const tall_quad = canvas.containDestinationRect(tall_frame, 240, 480);
+    try std.testing.expectEqual(tall_frame.height, tall_quad.height);
+    try std.testing.expect(tall_quad.width < tall_frame.width - 1);
+}
+
 test "the reconciler never stops a manual playback sharing its derived key" {
     var h = try DeclHarness.create();
     defer h.destroy();

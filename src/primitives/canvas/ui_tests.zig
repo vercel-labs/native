@@ -1233,6 +1233,34 @@ test "Ui.video records the declaration last-wins, formats times, and disables ch
     try testing.expect(chrome_ui.video_declaration == null);
 }
 
+test "Ui stamps contain fit and stream geometry on video-fed media surfaces" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    // The framework `<video>` surface is ALWAYS contain — pre-LOADED it
+    // simply carries no stream geometry yet (no fit math to run).
+    const idle = ui.video(.{ .src = "assets/clips/one.mp4", .controls = true });
+    try testing.expectEqual(canvas.ImageFit.contain, idle.nodes[0].widget.image_fit);
+    try testing.expectEqual(@as(?geometry.RectF, null), idle.nodes[0].widget.image_src);
+
+    // The LOADED report stamps the fitted-draw geometry, on the house
+    // element and on an app-claimed custom surface alike.
+    ui.video_state = .{ .active = true, .playing = true, .surface = 0x7601, .width = 427, .height = 240 };
+    const custom = ui.mediaSurface(.{ .image = 0x7601, .grow = 1 });
+    try testing.expectEqual(canvas.ImageFit.contain, custom.widget.image_fit);
+    try testing.expectEqual(
+        @as(?geometry.RectF, geometry.RectF.init(0, 0, 427, 240)),
+        custom.widget.image_src,
+    );
+
+    // A producer surface the video channel does NOT feed keeps its own
+    // geometry: no stamp, the default stretch.
+    const camera = ui.mediaSurface(.{ .image = 0x9902, .grow = 1 });
+    try testing.expectEqual(canvas.ImageFit.stretch, camera.widget.image_fit);
+    try testing.expectEqual(@as(?geometry.RectF, null), camera.widget.image_src);
+}
+
 test "Ui.video with controls keeps the media surface's zero-intrinsic contract" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

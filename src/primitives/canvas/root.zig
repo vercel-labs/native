@@ -139,6 +139,7 @@ pub const PathElement = drawing_model.PathElement;
 pub const FillPath = drawing_model.FillPath;
 pub const StrokePath = drawing_model.StrokePath;
 pub const ImageFit = drawing_model.ImageFit;
+pub const containDestinationRect = drawing_model.containDestinationRect;
 pub const ImageSampling = drawing_model.ImageSampling;
 pub const DrawImage = drawing_model.DrawImage;
 pub const Shadow = drawing_model.Shadow;

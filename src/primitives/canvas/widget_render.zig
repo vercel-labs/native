@@ -1148,6 +1148,19 @@ pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
     );
 }
 
+/// The producer frame's reported dimensions for a `contain` media
+/// surface — `Widget.image_src` doubles as the stream-geometry channel
+/// there (the rect IS the source region the fitted draw samples: the
+/// whole `w x h` frame). Null until the dimensions are honestly known
+/// (`<video>` stamps them from the LOADED event's journaled report), so
+/// the fit math never runs on guessed or zero geometry.
+fn mediaSurfaceStreamSize(widget: Widget) ?geometry.SizeF {
+    if (widget.image_fit != .contain) return null;
+    const src = (widget.image_src orelse return null).normalized();
+    if (src.width <= 0 or src.height <= 0) return null;
+    return .{ .width = src.width, .height = src.height };
+}
+
 /// The media surface: an id-derived placeholder fill with the surface's
 /// externally produced texture composited over it. ONE display list
 /// serves both renderers — the texture rides a `draw_image` whose
@@ -1157,14 +1170,31 @@ pub fn mediaSurfacePlaceholderColor(surface_id: u64) Color {
 /// composite the real texture. `image_id` is the SURFACE id (0 = the
 /// unbound sentinel: placeholder only, like an image leaf with id 0
 /// draws nothing).
+///
+/// CONTAIN fit is the video-surface mode (`Ui` stamps it on every
+/// surface the video channel feeds): with the stream's reported
+/// dimensions known, THIS emit computes the aspect-fitted destination
+/// rect — centered, letterboxed/pillarboxed — and fills the whole frame
+/// black behind it, so every host paints the identical geometry whether
+/// or not its compositor implements fit math of its own. Unknown
+/// dimensions (pre-LOADED) keep the full-frame placeholder draw: no
+/// guessed geometry, no divide-by-zero.
 fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
     const radius = Radius.all(widget.style.radius orelse 0);
+    const stream_size = mediaSurfaceStreamSize(widget);
+    // Known stream geometry means frames are coming (or here): the
+    // backdrop is the letterbox black. Before that, the deterministic
+    // id-derived placeholder stays the whole story.
+    const backdrop = if (stream_size != null)
+        Color.rgba8(0x00, 0x00, 0x00, 0xff)
+    else
+        mediaSurfacePlaceholderColor(widget.image_id);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = colorFill(mediaSurfacePlaceholderColor(widget.image_id)),
+        .fill = colorFill(backdrop),
     });
     // Cover fit expands the drawn texture past the widget frame on one
     // axis; the rectangular clip is what crops the overflow — exactly
@@ -1173,11 +1203,21 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
     // cover surface outside its bounds, over its siblings.
     const clips_image = widget.image_fit == .cover;
     if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 3), .rect = widget.frame });
+    // The fitted quad: pre-computed here from the REPORTED dimensions,
+    // so hosts draw into an already-aspect-true rect (a host's own
+    // contain math against the real texture is then a no-op). The draw
+    // keeps `.contain` rather than a stretch into the quad: a texture
+    // whose true aspect ever disagrees with the report letterboxes
+    // inside the quad instead of distorting.
+    const dst = if (stream_size) |size|
+        canvas.containDestinationRect(widget.frame, size.width, size.height)
+    else
+        widget.frame;
     try builder.drawImage(.{
         .id = widgetPartId(widget.id, 2),
         .image_id = canvas.mediaSurfaceTextureImageId(widget.image_id),
-        .src = widget.image_src,
-        .dst = widget.frame,
+        .src = if (stream_size != null) null else widget.image_src,
+        .dst = dst,
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
         .sampling = widget.image_sampling,

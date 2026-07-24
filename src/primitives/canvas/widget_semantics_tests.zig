@@ -1040,6 +1040,204 @@ test "a composited cover media texture is byte-contained in the reference render
     try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 18, 12);
 }
 
+/// Render one contain-fit media surface headlessly and hand back the
+/// composited pixels: the widget's emitted display list (black backdrop
+/// + fitted quad) reference-rendered with the texture fed in as an
+/// ORDINARY resource under the media-derived id, defeating the
+/// presentation-only skip so the letterbox geometry itself is
+/// pixel-assertable. The texture is solid white at the STREAM's own
+/// aspect (a decoder pushes frames at stream geometry, so the draw's
+/// contain re-fit against the real texture is a no-op — exactly
+/// production); the pass clears to opaque blue so bars (black), picture
+/// (white), and page (blue) are three unmistakable bands.
+fn renderContainVideoSurface(
+    frame: geometry.RectF,
+    stream: ?geometry.RectF,
+    texture_width: usize,
+    texture_height: usize,
+    pixels: *[32 * 24 * 4]u8,
+) !ReferenceRenderSurface {
+    const surface_id: u64 = 5;
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = surface_id,
+        .image_fit = .contain,
+        .image_src = stream,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+
+    var texture_pixels: [4 * 2 * 4]u8 = undefined;
+    @memset(&texture_pixels, 255);
+    const images = [_]ReferenceImage{.{
+        .id = canvas.mediaSurfaceTextureImageId(surface_id),
+        .width = texture_width,
+        .height = texture_height,
+        .pixels = texture_pixels[0 .. texture_width * texture_height * 4],
+    }};
+    var render_commands: [8]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    @memset(pixels, 0);
+    const surface = (try ReferenceRenderSurface.init(32, 24, pixels)).withImages(&images);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(32, 24),
+        .full_repaint = true,
+    }, Color.rgb8(0, 0, 255));
+    return surface;
+}
+
+test "a contain video surface pillarboxes a narrow stream on black" {
+    // A square (1:1) stream into a 2:1 box: the fitted quad is the
+    // 16x16 center, with 8px black bars left and right.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .image_src = geometry.RectF.init(0, 0, 240, 240),
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 2), display_list.commandCount());
+
+    // The backdrop: letterbox black over the WHOLE frame, not the
+    // id-derived placeholder — the stream's geometry is known.
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try expectRect(frame, fill.rect);
+            try std.testing.expectEqual(Fill{ .color = Color.rgba8(0, 0, 0, 255) }, fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The frame quad: aspect-fitted from the REPORTED dimensions and
+    // centered — the engine computed it, no host fit math required.
+    switch (display_list.commands[1]) {
+        .draw_image => |draw| {
+            try std.testing.expectEqual(canvas.mediaSurfaceTextureImageId(5), draw.image_id);
+            try expectRect(geometry.RectF.init(8, 4, 16, 16), draw.dst);
+            try std.testing.expectEqual(ImageFit.contain, draw.fit);
+            try std.testing.expectEqual(@as(?geometry.RectF, null), draw.src);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Pixel truth: black side regions, picture centered, page untouched.
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, geometry.RectF.init(0, 0, 240, 240), 2, 2, &pixels);
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 12); // left bar
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 28, 12); // right bar
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12); // picture
+    try support.expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 16, 1); // page above the frame
+}
+
+test "a contain video surface letterboxes a wide stream on black" {
+    // A 2:1 stream into a 2:3 box: the fitted quad is the 16x8 center
+    // band, with 8px black bars above and below.
+    const frame = geometry.RectF.init(8, 0, 16, 24);
+    const stream = geometry.RectF.init(0, 0, 480, 240);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .image_src = stream,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    switch (builder.displayList().commands[1]) {
+        .draw_image => |draw| try expectRect(geometry.RectF.init(8, 8, 16, 8), draw.dst),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, stream, 4, 2, &pixels);
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 16, 4); // top bar
+    try support.expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 16, 20); // bottom bar
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12); // picture
+    try support.expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 4, 12); // page beside the frame
+}
+
+test "a contain video surface with matching aspect fills the frame barless" {
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const stream = geometry.RectF.init(0, 0, 640, 320);
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const surface = try renderContainVideoSurface(frame, stream, 4, 2, &pixels);
+    // Every frame corner is picture — no bars on either axis.
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 1, 5);
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 30, 18);
+    try support.expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 16, 12);
+
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+        .image_src = stream,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    switch (builder.displayList().commands[1]) {
+        .draw_image => |draw| try expectRect(frame, draw.dst),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a contain video surface with unknown stream geometry keeps the placeholder draw" {
+    // Pre-LOADED: no reported dimensions, so no fit math runs (nothing
+    // to divide by) — the id-derived placeholder fills the frame and
+    // the texture draw keeps the full frame as its dst.
+    const frame = geometry.RectF.init(0, 4, 32, 16);
+    const widget = Widget{
+        .id = 9,
+        .kind = .media_surface,
+        .frame = frame,
+        .image_id = 5,
+        .image_fit = .contain,
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(widget, frame, &nodes);
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const display_list = builder.displayList();
+    switch (display_list.commands[0]) {
+        .fill_rounded_rect => |fill| {
+            try std.testing.expectEqual(
+                Fill{ .color = canvas.mediaSurfacePlaceholderColor(5) },
+                fill.fill,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.commands[1]) {
+        .draw_image => |draw| {
+            try expectRect(frame, draw.dst);
+            try std.testing.expectEqual(ImageFit.contain, draw.fit);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "widget text fields expose textbox semantics and render focused chrome" {
     const text_field = Widget{
         .id = 8,
