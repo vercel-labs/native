@@ -5998,6 +5998,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const BOOL dominantVertical = fabs(canvasDy) >= fabs(canvasDx);
     NativeSdkScrollDriverView *native = dominantVertical ? (ownerY ?: ownerX) : (ownerX ?: ownerY);
     if (!native) {
+        // Offsets first (one clock), like every wire hand-off below.
+        [self emitQueuedScrollDriverEvent];
         [self queueScrollInputEvent:event deltaX:canvasDx deltaY:canvasDy];
         return;
     }
