@@ -234,15 +234,25 @@ test "integer-classed slots cross the compiler-provable extremes exactly" {
     ts_core.rt.frameReset();
     shim_core.rt.frameReset();
 
-    const max_exact: i64 = 9007199254740991; // 2^53 - 1
-    const boundary_script = [_]shim_core.Msg{
-        .{ .canvas_resized = max_exact },
-        .{ .toggle = max_exact },
-        .{ .toggle = -max_exact },
-        .{ .canvas_resized = -max_exact },
-        .{ .canvas_resized = 0 },
+    // The extremes follow each slot's ATTESTED class in the supplied
+    // sidecar: an i64-classed arm also crosses the negative extreme, a
+    // u64-classed one stays within its unsigned range.
+    const max_exact = 9007199254740991; // 2^53 - 1
+    const boundary_script = comptime blk: {
+        var msgs: []const shim_core.Msg = &.{
+            .{ .canvas_resized = max_exact },
+            .{ .toggle = max_exact },
+        };
+        if (@typeInfo(@FieldType(shim_core.Msg, "toggle")).int.signedness == .signed) {
+            msgs = msgs ++ [_]shim_core.Msg{.{ .toggle = -max_exact }};
+        }
+        if (@typeInfo(@FieldType(shim_core.Msg, "canvas_resized")).int.signedness == .signed) {
+            msgs = msgs ++ [_]shim_core.Msg{.{ .canvas_resized = -max_exact }};
+        }
+        msgs = msgs ++ [_]shim_core.Msg{.{ .canvas_resized = 0 }};
+        break :blk msgs;
     };
-    for (boundary_script, 0..) |msg, step| {
+    inline for (boundary_script, 0..) |msg, step| {
         const next = parityCycle(arena, ts_model, shim_model, msg) catch |err| {
             std.debug.print("integer boundary parity diverges at step {d} ({s})\n", .{ step, @tagName(msg) });
             return err;
@@ -250,9 +260,10 @@ test "integer-classed slots cross the compiler-provable extremes exactly" {
         ts_model = next.ts;
         shim_model = next.shim;
         // The mirror decoded the committed snapshot: its integer slot
-        // holds the exact crossing value.
+        // holds the exact crossing value (compared class-agnostically —
+        // the arm and the field each follow their own attestation).
         switch (msg) {
-            .canvas_resized => |value| try testing.expectEqual(value, shim_model.canvasWidth),
+            .canvas_resized => |value| try testing.expectEqual(@as(i128, value), @as(i128, shim_model.canvasWidth)),
             else => {},
         }
     }
