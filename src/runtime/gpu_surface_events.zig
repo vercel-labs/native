@@ -529,7 +529,17 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     switch (input_event.kind) {
                         .ime_set_composition => self.views[index].canvas_widget_ime_owner_id =
                             text_input_event.keyboard.focused_id orelse 0,
-                        .ime_cancel_composition => self.views[index].canvas_widget_ime_commit_grace = .route_to_owner,
+                        // Arm ONLY while an owner is pinned: a cancel of
+                        // a live composition holds it. A DUPLICATE
+                        // cancel — hosts emit a synthetic one to disarm
+                        // the grace when the resolving key's own
+                        // key_down was consumed — arrives after the
+                        // probe above already released the owner, and
+                        // re-arming ownerless would convert the next
+                        // ordinary character into a dead-owner swallow.
+                        .ime_cancel_composition => if (self.views[index].canvas_widget_ime_owner_id != 0) {
+                            self.views[index].canvas_widget_ime_commit_grace = .route_to_owner;
+                        },
                         .ime_commit_composition, .text_input => self.views[index].canvas_widget_ime_owner_id = 0,
                         else => {},
                     }
