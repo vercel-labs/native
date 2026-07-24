@@ -498,14 +498,6 @@ fn spawnPair(
         _ = c.close(parent);
         return error.PtyOpenFailed;
     }
-    // Non-blocking parent end: the sole io thread must never block inside a
-    // write when the child stops reading its stdin (a full pty input
-    // buffer), which would stall stdout draining and deadlock both
-    // sides. Reads and writes handle EAGAIN; the poll loop paces both.
-    if (!setNonblock(parent)) {
-        _ = c.close(parent);
-        return error.PtyOpenFailed;
-    }
     if (c.grantpt(parent) != 0 or c.unlockpt(parent) != 0) {
         _ = c.close(parent);
         return error.PtyOpenFailed;
@@ -548,6 +540,19 @@ fn spawnPair(
         _ = c.close(parent);
         return error.PtyOpenFailed;
     };
+    // Non-blocking parent end: the sole io thread must never block inside a
+    // write when the child stops reading its stdin (a full pty input
+    // buffer), which would stall stdout draining and deadlock both
+    // sides. Reads and writes handle EAGAIN; the poll loop paces both.
+    // Set AFTER the child end opened, deliberately: some Darwin kernels
+    // answer ENOTTY to any nonblocking request (fcntl F_SETFL and the
+    // FIONBIO ioctl alike) on a pty parent whose replica has never been
+    // opened, and accept the same call once it has.
+    if (!setNonblock(parent)) {
+        _ = c.close(parent);
+        _ = c.close(child_fd);
+        return error.PtyOpenFailed;
+    }
     // Push the initial window size onto the child end (the child's
     // terminal) before the fork so the child's very first TIOCGWINSZ sees
     // the requested grid. `openpty` applied its `winp` to the child end;
