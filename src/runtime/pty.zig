@@ -1,9 +1,13 @@
-//! POSIX pseudo-terminal primitive: open a pty pair, fork a child with the
-//! child end as its controlling terminal, and hand the caller the parent fd
-//! to read output from and write input to. macOS and Linux only — every
-//! other target compiles to the `error.PtyUnsupported` stubs so the effects
-//! layer reports the same loud rejection the null platform's fake pty stands
-//! in for under test.
+//! Pseudo-terminal transport seam. The POSIX half lives in this file:
+//! open a pty pair, fork a child with the child end as its controlling
+//! terminal, and hand the caller the parent fd to read output from and
+//! write input to (macOS, and Linux with libc). Windows dispatches to
+//! the ConPTY backend in `pty_windows.zig` through the same public
+//! surface — one `Pty` shape, one `wait`/nudge vocabulary, one spawn
+//! policy — so the effects io loop never branches per platform. Every
+//! remaining target compiles to the `error.PtyUnsupported` stubs so the
+//! effects layer reports the same loud rejection the null platform's
+//! fake pty stands in for under test.
 //!
 //! (The two ends of a pty pair: the PARENT end is the controlling side the
 //! toolkit keeps, and the CHILD end is the process side that becomes the
@@ -23,6 +27,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const clock = @import("clock.zig");
+const windows_impl = @import("pty_windows.zig");
+
+const is_windows = builtin.os.tag == .windows;
 
 /// Serializes the descriptor-opening half of every pty spawn in the
 /// process (spawns can originate from independent runtime instances on
@@ -87,8 +94,11 @@ fn recordSurrenderedPid(pid: c_int) void {
 
 /// Opportunistically reap previously surrendered children (WNOHANG,
 /// bounded). Called at spawn entry and teardown; safe from any thread.
+/// A no-op on Windows: process objects self-release when their last
+/// handle closes, so there is no zombie to re-poll for.
 pub fn reapSurrendered() void {
-    if (comptime !supported) return;
+    if (comptime is_windows) return windows_impl.reapSurrendered();
+    if (comptime !posix_supported) return;
     surrendered_lock.lock();
     defer surrendered_lock.unlock();
     for (&surrendered_pids) |*slot| {
@@ -106,16 +116,28 @@ pub fn reapSurrendered() void {
     }
 }
 
-/// pty support is a POSIX story: openpty + a controlling terminal.
-/// Windows (ConPTY) is staged separately; every non-posix target reports
-/// the effect as unsupported rather than pretending. macOS always links
-/// libSystem, so the libc externs below always resolve there; Linux
-/// builds get the real transport exactly when they link libc (every
-/// platform app build does — the GTK host is C — while a libc-free
-/// headless build reports unsupported and tests through the fake pty).
-/// `openpty`/`login_tty` live in libc proper on the supported Linux
-/// floor (glibc 2.34+ merged libutil; musl always shipped them).
+/// Where a real pty transport exists: openpty + a controlling terminal
+/// on the POSIX targets, ConPTY (`pty_windows.zig`) on Windows; every
+/// other target reports the effect as unsupported rather than
+/// pretending. macOS always links libSystem, so the libc externs below
+/// always resolve there; Linux builds get the real transport exactly
+/// when they link libc (every platform app build does — the GTK host is
+/// C — while a libc-free headless build reports unsupported and tests
+/// through the fake pty). `openpty`/`login_tty` live in libc proper on
+/// the supported Linux floor (glibc 2.34+ merged libutil; musl always
+/// shipped them). ConPTY needs no libc at all — the backend speaks
+/// kernel32 directly.
 pub const supported = switch (builtin.os.tag) {
+    .macos => true,
+    .linux => builtin.link_libc,
+    .windows => true,
+    else => false,
+};
+
+/// The POSIX half really compiled into this build — the gate the libc
+/// externs and the in-file POSIX tests sit behind (`supported` also
+/// covers Windows, whose code lives in `pty_windows.zig`).
+const posix_supported = switch (builtin.os.tag) {
     .macos => true,
     .linux => builtin.link_libc,
     else => false,
@@ -143,9 +165,11 @@ pub const Error = error{
     PtyCommandNotFound,
 };
 
-/// A live pty: the parent-end fd plus the child pid. Reads and writes go
-/// to `parent`; `pid` is signalled for kill and reaped on exit.
-pub const Pty = struct {
+/// A live pty. On Windows this is the ConPTY transport
+/// (`pty_windows.zig`), same method surface; on POSIX it is the
+/// parent-end fd plus the child pid — reads and writes go to `parent`,
+/// `pid` is signalled for kill and reaped on exit.
+pub const Pty = if (is_windows) windows_impl.Pty else struct {
     parent: c_int,
     pid: c_int,
     /// The exec self-pipe's read end, kept ONLY when the spawn-time
@@ -196,7 +220,7 @@ pub const Pty = struct {
     /// Push a new window size to the kernel line discipline so the child
     /// receives SIGWINCH and re-queries via TIOCGWINSZ.
     pub fn resize(self: Pty, cols: u16, rows: u16) void {
-        if (!supported) return;
+        if (!posix_supported) return;
         var ws: Winsize = .{
             .row = if (rows == 0) 1 else rows,
             .col = if (cols == 0) 1 else cols,
@@ -219,7 +243,7 @@ pub const Pty = struct {
     /// to reach EOF: an escapee holding the child end open would strand
     /// it forever).
     pub fn kill(self: Pty, graceful: bool) void {
-        if (!supported) return;
+        if (!posix_supported) return;
         const sig: c_int = if (graceful) sigterm else sigkill;
         _ = c.kill(-self.pid, sig);
         _ = c.kill(self.pid, sig);
@@ -233,7 +257,7 @@ pub const Pty = struct {
     /// running": a reaped pid may be reused, so treating it as alive
     /// would let `reapEnding` signal an unrelated process.
     pub fn reap(self: Pty) ?Exit {
-        if (!supported) return null;
+        if (!posix_supported) return null;
         var status: c_int = 0;
         const r = c.waitpid(self.pid, &status, wnohang);
         if (r == self.pid) return decodeStatus(status);
@@ -245,7 +269,7 @@ pub const Pty = struct {
     /// kill so no zombie is left behind. EINTR retries — a signal must
     /// not fabricate an exit and leave the real child a zombie.
     pub fn reapBlocking(self: Pty) Exit {
-        if (!supported) return .{ .code = -1, .signal = 0 };
+        if (!posix_supported) return .{ .code = -1, .signal = 0 };
         var status: c_int = 0;
         while (true) {
             const r = c.waitpid(self.pid, &status, 0);
@@ -266,7 +290,7 @@ pub const Pty = struct {
     /// publishes `reaping` before this so no concurrent kill signals the
     /// (soon-freed) pid.
     pub fn reapEnding(self: Pty) Exit {
-        if (!supported) return .{ .code = -1, .signal = 0 };
+        if (!posix_supported) return .{ .code = -1, .signal = 0 };
         if (self.reap()) |exit| return exit;
         // Still running: hang it up, then escalate. The grace windows
         // are MONOTONIC DEADLINES, not sleep counts: `usleep` returns
@@ -327,7 +351,7 @@ pub const Pty = struct {
     /// Close the parent-end fd (and a still-held exec-status pipe). The
     /// child is expected to be reaped separately.
     pub fn close(self: Pty) void {
-        if (!supported) return;
+        if (!posix_supported) return;
         _ = c.close(self.parent);
         if (self.exec_status >= 0) _ = c.close(self.exec_status);
     }
@@ -339,7 +363,7 @@ pub const Pty = struct {
     /// leaked writer in an embedder-forked child can therefore never
     /// wedge the reap), and an empty pipe reads as success.
     pub fn lateExecFailure(self: Pty) bool {
-        if (!supported) return false;
+        if (!posix_supported) return false;
         if (self.exec_status < 0) return false;
         var probe: [1]u8 = undefined;
         while (true) {
@@ -381,13 +405,26 @@ pub const EnvVar = struct {
     value: []const u8,
 };
 
+/// Windows only: snapshot the LIVE process environment into `buffer`
+/// (names/values decoded into `bytes`) — the effects layer's
+/// inherit-the-host env policy where the OS hands out a WTF-16 block
+/// instead of a posix envp. Returns null on an over-bound environment,
+/// the flatten seam's loud whole-or-nothing refusal. On every other
+/// target the live environ flattens straight from the posix block and
+/// this reports empty.
+pub fn captureGlobalEnviron(buffer: []EnvVar, bytes: []u8) ?[]const EnvVar {
+    if (comptime !is_windows) return buffer[0..0];
+    return windows_impl.captureGlobalEnviron(buffer, bytes);
+}
+
 /// Open a pty and fork `argv` onto it. On success the returned `Pty` owns
 /// the parent-end fd and the child pid. The child's environment is exactly
 /// the caller's `env` (or empty) plus a `TERM` entry — no host variables leak
 /// in unless the caller put them in `env`, the same explicit-policy shape
 /// the spawn effect's `bindEnviron` draws.
 pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
-    if (!supported) return error.PtyUnsupported;
+    if (comptime is_windows) return windows_impl.spawn(gpa, options);
+    if (!posix_supported) return error.PtyUnsupported;
     // A cheap moment to settle any surrendered reap whose child has
     // since died (its stalled device recovered).
     reapSurrendered();
@@ -937,7 +974,8 @@ const c = struct {
 /// would keep these descriptors — and the pipe itself — alive past the
 /// runtime closing its copies. The child needs neither end.
 pub fn pipePair() Error![2]c_int {
-    if (comptime !supported) return error.PtyUnsupported;
+    if (comptime is_windows) return windows_impl.pipePair();
+    if (comptime !posix_supported) return error.PtyUnsupported;
     // Under the spawn lock: Darwin's pipe-then-fcntl flag gap is a
     // descriptor-inheritance window exactly like the spawn's own, so no
     // PTY fork can inherit a not-yet-CLOEXEC wake pipe across its exec.
@@ -998,7 +1036,8 @@ fn makePipe(nonblock: bool) Error![2]c_int {
 }
 
 pub fn closeFd(fd: c_int) void {
-    if (comptime !supported) return;
+    if (comptime is_windows) return windows_impl.closeFd(fd);
+    if (comptime !posix_supported) return;
     if (fd >= 0) _ = c.close(fd);
 }
 
@@ -1008,7 +1047,7 @@ pub fn closeFd(fd: c_int) void {
 /// kernels accept it), while FIONBIO succeeds on every release — the
 /// same fallback the mainstream event loops carry for exactly this fd.
 fn setNonblock(fd: c_int) bool {
-    if (comptime !supported) return false;
+    if (comptime !posix_supported) return false;
     const flags = c.fcntl(fd, f_getfl, @as(c_int, 0));
     if (flags >= 0 and c.fcntl(fd, f_setfl, flags | o_nonblock) >= 0) return true;
     var one: c_int = 1;
@@ -1019,7 +1058,8 @@ fn setNonblock(fd: c_int) bool {
 /// wake would strand staged outbound bytes; a full pipe (EAGAIN) is a
 /// nudge already coalesced and returns.
 pub fn nudge(fd: c_int) void {
-    if (comptime !supported) return;
+    if (comptime is_windows) return windows_impl.nudge(fd);
+    if (comptime !posix_supported) return;
     const byte = [_]u8{1};
     while (true) {
         if (c.write(fd, &byte, 1) >= 0) return;
@@ -1030,7 +1070,8 @@ pub fn nudge(fd: c_int) void {
 
 /// Drain whatever accumulated in the nudge pipe.
 pub fn drainNudges(fd: c_int) void {
-    if (comptime !supported) return;
+    if (comptime is_windows) return windows_impl.drainNudges(fd);
+    if (comptime !posix_supported) return;
     var buf: [64]u8 = undefined;
     _ = c.read(fd, &buf, buf.len);
 }
@@ -1043,14 +1084,18 @@ pub const Ready = struct {
     nudged: bool = false,
 };
 
-/// Block until the parent end is readable (`want_read`), writable
+/// Block until the transport is readable (`want_read`), writable
 /// (`want_write`), hung up, or the nudge pipe fires. A caller wanting
-/// NEITHER parent-end direction (a parked reader with nothing to write)
-/// waits on the nudge pipe alone — POLLHUP is unmaskable, so keeping
-/// the parent end in the set would turn a hangup racing a full staging
-/// ring into a busy loop.
-pub fn wait(parent: c_int, nudge_fd: c_int, want_read: bool, want_write: bool) Ready {
-    if (comptime !supported) return .{};
+/// NEITHER direction (a parked reader with nothing to write) waits on
+/// the nudge pipe alone — POLLHUP is unmaskable, so keeping the parent
+/// end in the set would turn a hangup racing a full staging ring into
+/// a busy loop. (Takes the whole transport, not a bare fd: the Windows
+/// backend waits on events and the process handle, not one
+/// descriptor.)
+pub fn wait(transport: Pty, nudge_fd: c_int, want_read: bool, want_write: bool) Ready {
+    if (comptime is_windows) return windows_impl.wait(transport, nudge_fd, want_read, want_write);
+    if (comptime !posix_supported) return .{};
+    const parent = transport.parent;
     const parent_events: c_short = (if (want_read) pollin else 0) | (if (want_write) pollout else 0);
     var fds = [2]Pollfd{
         .{ .fd = nudge_fd, .events = pollin, .revents = 0 },
@@ -1087,7 +1132,7 @@ const pollhup: c_short = 0x10;
 fn testReadAll(p: Pty, buf: []u8) usize {
     var total: usize = 0;
     while (total < buf.len) {
-        const ready = wait(p.parent, p.parent, true, false);
+        const ready = wait(p, p.parent, true, false);
         if (p.read(buf[total..])) |n| {
             if (n == 0) return total; // EOF
             total += n;
@@ -1102,7 +1147,7 @@ fn testReadAll(p: Pty, buf: []u8) usize {
 }
 
 test "spawn rejects an empty argv and a missing command" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     try std.testing.expectError(error.PtyArgvInvalid, spawn(std.testing.allocator, .{ .argv = &.{} }));
     try std.testing.expectError(error.PtyCommandNotFound, spawn(std.testing.allocator, .{
         .argv = &.{"/nonexistent/never-a-command"},
@@ -1110,7 +1155,7 @@ test "spawn rejects an empty argv and a missing command" {
 }
 
 test "live pty round trip: output, exit code, controlling terminal" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     const p = try spawn(std.testing.allocator, .{
         // `test -t 0` proves fd 0 is a real terminal — the controlling-tty
         // wiring, not just a pipe with a fancy name.
@@ -1128,7 +1173,7 @@ test "live pty round trip: output, exit code, controlling terminal" {
 }
 
 test "kill reports the terminating signal" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     const p = try spawn(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 30" } });
     defer p.close();
     p.resize(100, 30);
@@ -1139,7 +1184,7 @@ test "kill reports the terminating signal" {
 }
 
 test "the child environment is exactly env plus TERM" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     const p = try spawn(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "printf '%s|%s|%s' \"$TERM\" \"$MARKER\" \"$HOME\"" },
         .env = &.{.{ .name = "MARKER", .value = "pty-proof" }},
@@ -1169,7 +1214,7 @@ test "the child environment is exactly env plus TERM" {
 }
 
 test "a late exec-failure byte on the carried status pipe converts at reap time" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     // The unresolved-probe carry: a failure byte written after the
     // probe's deadline is read — non-blocking — at reap time.
     const with_byte = try makePipe(true);
@@ -1194,7 +1239,7 @@ test "a late exec-failure byte on the carried status pipe converts at reap time"
 }
 
 test "an exec failure is reported, not masqueraded as a normal exit" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     // A directory passes the X_OK (searchable) check but execve refuses
     // it — the exec self-pipe turns that into PtyCommandNotFound rather
     // than a forked child that exits 127 on its own.
@@ -1202,6 +1247,6 @@ test "an exec failure is reported, not masqueraded as a normal exit" {
 }
 
 test "embedded NUL in argv is rejected, never truncated" {
-    if (comptime !supported) return;
+    if (comptime !posix_supported) return;
     try std.testing.expectError(error.PtyArgvInvalid, spawn(std.testing.allocator, .{ .argv = &.{ "/bin/echo", "abc\x00def" } }));
 }

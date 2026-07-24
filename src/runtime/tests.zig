@@ -27,6 +27,7 @@ test {
     _ = @import("effects_host_tests.zig");
     _ = @import("effects_pty_tests.zig");
     _ = @import("pty.zig");
+    _ = @import("pty_windows.zig");
     _ = @import("ts_core_host_tests.zig");
     _ = @import("clock.zig");
     _ = @import("frame_profile.zig");

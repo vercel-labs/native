@@ -1,11 +1,12 @@
 //! Pty effect coverage: the `fx.ptySpawn` family — lifecycle (spawn,
 //! coalesced output, resize, kill, the exactly-one exit), the shared
 //! key space with the other keyed families, the scriptable fake pty
-//! (the null platform's whole terminal story), the live POSIX
-//! transport's coalescing and lossless back-pressure, and the
-//! record/replay acceptance story: replay NEVER spawns a process — the
-//! journaled output batches (bytes in the session blob store) and the
-//! exit record ARE the session, fed byte-identical with no shell
+//! (the null platform's whole terminal story), the live transports
+//! (the POSIX backend's coalescing and lossless back-pressure; the
+//! Windows ConPTY backend's rendered-stream/exit-code semantics), and
+//! the record/replay acceptance story: replay NEVER spawns a process —
+//! the journaled output batches (bytes in the session blob store) and
+//! the exit record ARE the session, fed byte-identical with no shell
 //! present.
 
 const std = @import("std");
@@ -22,6 +23,14 @@ const session_record = @import("session_record.zig");
 const session_replay = @import("session_replay.zig");
 
 const testing = std.testing;
+
+/// The POSIX live-transport tests spawn /bin/sh shapes and assert
+/// byte-exact child output; ConPTY output is conhost's VT RENDERING of
+/// the child's screen, not the raw byte stream, so Windows gets its
+/// own live suite below (containment assertions, exit-code-only
+/// endings) and these gate posix-tight.
+const live_posix = pty_transport.supported and builtin.os.tag != .windows;
+const live_windows = builtin.os.tag == .windows;
 
 // ---------------------------------------------------- direct-fx tests
 //
@@ -611,8 +620,10 @@ test "replay never spawns: an armed channel parks the spawn and feeds deliver th
 // ---------------------------------------------------- live posix tests
 //
 // The real transport, driven end to end through the effects channel.
-// Skipped where the toolkit has no pty (Windows, libc-free builds) —
-// the fake pty above is that platform's whole story.
+// Skipped where the toolkit has no POSIX pty — libc-free builds test
+// through the fake pty above, and Windows drives its ConPTY backend
+// through its own live suite further down (the assertions differ where
+// the platform semantics do).
 
 fn drainUntilExit(fx: *DirectFx, budget_ms: u64) !struct {
     output: std.ArrayList(u8),
@@ -642,7 +653,7 @@ fn drainUntilExit(fx: *DirectFx, budget_ms: u64) !struct {
 }
 
 test "live pty end to end: output, coalescing, and the exit code" {
-    if (comptime !pty_transport.supported) return;
+    if (comptime !live_posix) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
@@ -666,7 +677,7 @@ test "live pty end to end: output, coalescing, and the exit code" {
 }
 
 test "live pty back-pressure is lossless past the staging ring" {
-    if (comptime !pty_transport.supported) return;
+    if (comptime !live_posix) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
@@ -687,7 +698,7 @@ test "live pty back-pressure is lossless past the staging ring" {
 }
 
 test "live pty write and kill: input reaches the child, the exit reports cancelled" {
-    if (comptime !pty_transport.supported) return;
+    if (comptime !live_posix) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
@@ -724,7 +735,7 @@ test "live pty write and kill: input reaches the child, the exit reports cancell
 }
 
 test "a write refused after the exit is staged still counts into dropped_writes" {
-    if (comptime !pty_transport.supported) return;
+    if (comptime !live_posix) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
@@ -766,7 +777,7 @@ test "a fed output batch over the chunk bound and NUL-bearing term/argv are refu
 }
 
 test "live pty resize lands as the child's window size" {
-    if (comptime !pty_transport.supported) return;
+    if (comptime !live_posix) return;
     var fx = DirectFx.init(testing.allocator);
     defer fx.deinit();
 
@@ -784,12 +795,138 @@ test "live pty resize lands as the child's window size" {
     try testing.expect(std.mem.indexOf(u8, result.output.items, "33 91") != null);
 }
 
+// ---------------------------------------------- live ConPTY (Windows)
+//
+// The Windows twins of the live tests above, with the two documented
+// semantic differences baked into the assertions: ConPTY output is
+// conhost's VT RENDERING of the child's screen (containment checks,
+// never byte-exact counts), and endings carry exit codes only
+// (`signal` is always 0; `.signaled` never occurs).
+
+test "live conpty end to end: rendered output carries the child's text, the exit code is exact" {
+    if (comptime !live_windows) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.ptySpawn(.{
+        .key = 51,
+        .argv = &.{ "cmd.exe", "/d", "/c", "echo pty-effects-live-marker& exit 4" },
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var result = try drainUntilExit(&fx, 15_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.output.items, "pty-effects-live-marker") != null);
+    try testing.expectEqual(@as(i32, 4), result.exit.code);
+    try testing.expectEqual(effects_mod.EffectExitReason.exited, result.exit.reason);
+    try testing.expectEqual(@as(i32, 0), result.exit.signal);
+}
+
+test "live conpty back-pressure survives output past the staging ring" {
+    if (comptime !live_windows) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    // ~512 KiB of raw child output — twice the staging ring — so the
+    // reader parks and resumes across the run. Rendering makes the
+    // exact byte total non-deterministic; the property under test is
+    // that the session stays live through the parking (arrives, keeps
+    // flowing, exits cleanly) and every record obeys the chunk bound.
+    fx.ptySpawn(.{
+        .key = 52,
+        .argv = &.{
+            "cmd.exe",
+            "/d",
+            "/c",
+            "for /L %i in (1,1,8000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        },
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var result = try drainUntilExit(&fx, 60_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expect(result.output.items.len > effects_mod.max_effect_pty_staging_bytes);
+    try testing.expectEqual(effects_mod.EffectExitReason.exited, result.exit.reason);
+}
+
+test "live conpty write and kill: input reaches the child, the exit reports cancelled" {
+    if (comptime !live_windows) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.ptySpawn(.{
+        .key = 53,
+        .argv = &.{"cmd.exe"},
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    try testing.expect(fx.ptyWrite(53, "echo pty-echo-marker\r"));
+    // The typed command echoes into the rendered stream, and cmd's
+    // execution of it prints the marker again — either sighting proves
+    // input crossed the input pipe into the child's console.
+    var seen = false;
+    var waited: u64 = 0;
+    var collected: std.ArrayList(u8) = .empty;
+    defer collected.deinit(testing.allocator);
+    while (!seen and waited < 15_000) {
+        while (fx.takeMsg()) |msg| {
+            if (msg.pty.kind == .output) try collected.appendSlice(testing.allocator, msg.pty.bytes);
+        }
+        seen = std.mem.indexOf(u8, collected.items, "pty-echo-marker") != null;
+        if (!seen) {
+            try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(2), .awake);
+            waited += 2;
+        }
+    }
+    try testing.expect(seen);
+
+    fx.ptyKill(53);
+    var result = try drainUntilExit(&fx, 15_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expectEqual(effects_mod.EffectExitReason.cancelled, result.exit.reason);
+    // A cancelled end carries the -1 sentinel and no signal (Windows
+    // never reports one).
+    try testing.expectEqual(effects_mod.effect_error_exit_code, result.exit.code);
+    try testing.expectEqual(@as(i32, 0), result.exit.signal);
+}
+
+test "live conpty initial grid size reaches the child console" {
+    if (comptime !live_windows) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.ptySpawn(.{
+        .key = 54,
+        // `mode con` reports the console geometry the pseudoconsole
+        // was created with; labels are localized, digits are not.
+        .argv = &.{ "cmd.exe", "/d", "/c", "mode con" },
+        .cols = 91,
+        .rows = 33,
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var result = try drainUntilExit(&fx, 15_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.output.items, "91") != null);
+    try testing.expect(std.mem.indexOf(u8, result.output.items, "33") != null);
+}
+
+// ------------------------------------------ live tests, both backends
+
+/// A long-lived child per platform for the kill/teardown shapes: the
+/// assertions there are about the toolkit's wind-down, not the child's
+/// output, so one test serves both live transports. (An interactive
+/// cmd prompt waits on stdin the way `sleep 30` waits on the clock.)
+const live_long_lived_argv: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{"cmd.exe"}
+else
+    &.{ "/bin/sh", "-c", "sleep 30" };
+const live_exec_long_lived_argv: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{"cmd.exe"}
+else
+    &.{ "/bin/sh", "-c", "exec sleep 30" };
+
 test "teardown with a live pty returns promptly and reaps the child" {
     if (comptime !pty_transport.supported) return;
     var fx = DirectFx.init(testing.allocator);
     fx.ptySpawn(.{
         .key = 55,
-        .argv = &.{ "/bin/sh", "-c", "sleep 30" },
+        .argv = live_long_lived_argv,
         .on_event = DirectFx.ptyMsg(.pty),
     });
     // Give the transport a moment to start, then tear the channel down
@@ -873,7 +1010,7 @@ test "a failed bind-site snapshot publication never strands a live pty's exit" {
     // across the abandon.
     fx.ptySpawn(.{
         .key = 56,
-        .argv = &.{ "/bin/sh", "-c", "exec sleep 30" },
+        .argv = live_exec_long_lived_argv,
         .on_event = DirectFx.ptyMsg(.pty),
     });
     try testing.expect(fx.ptyWrite(56, "in-flight bytes\r"));

@@ -995,7 +995,12 @@ pub const EffectPtyEvent = struct {
     code: i32 = effect_error_exit_code,
     /// `.exit`: how the pty ended.
     reason: EffectExitReason = .exited,
-    /// `.exit` after a fatal signal: the signal number, else 0.
+    /// `.exit` after a fatal signal: the signal number, else 0. POSIX
+    /// only by nature — Windows has no signal channel, so `.signaled`
+    /// never occurs there and every ending carries an exit code
+    /// instead (a crash surfaces as `.exited` with the NTSTATUS value
+    /// bit-cast to i32, e.g. an access violation's 0xC0000005 arrives
+    /// negative).
     signal: i32 = 0,
     /// `.exit`: `ptyWrite` payloads refused over the pty's lifetime
     /// (outbound staging full, or a single write over
@@ -1922,8 +1927,20 @@ fn fallbackEnviron() std.process.Environ {
 /// transport's bounds: the child MUST see the whole environment the API
 /// promised, so an over-bound environ fails the spawn loudly rather
 /// than handing the child a silently truncated one (a required variable
-/// past the cutoff would otherwise vanish).
-fn flattenPtyEnviron(environ: std.process.Environ, buffer: []pty_transport.EnvVar) ?[]const pty_transport.EnvVar {
+/// past the cutoff would otherwise vanish). On Windows the bound
+/// environ is the live-process sentinel (`GlobalBlock`), so the
+/// transport snapshots the actual environment into `bytes` — same
+/// policy, same loud over-bound refusal, one extra storage hop because
+/// the OS block is WTF-16.
+fn flattenPtyEnviron(
+    environ: std.process.Environ,
+    buffer: []pty_transport.EnvVar,
+    bytes: []u8,
+) ?[]const pty_transport.EnvVar {
+    if (comptime builtin.os.tag == .windows) {
+        if (!environ.block.use_global) return buffer[0..0];
+        return pty_transport.captureGlobalEnviron(buffer, bytes);
+    }
     if (comptime std.process.Environ.Block != std.process.Environ.PosixBlock) return buffer[0..0];
     var count: usize = 0;
     var total_bytes: usize = 0;
@@ -1984,7 +2001,7 @@ fn ptyIoLoop(shared: *PtyShared, transport: pty_transport.Pty, nudge_fd: c_int, 
         // family's documented limit.
         if (shutdown or killed or superseded) break :read_loop;
 
-        const ready = pty_transport.wait(transport.parent, nudge_fd, want_read, want_write);
+        const ready = pty_transport.wait(transport, nudge_fd, want_read, want_write);
         if (ready.nudged) pty_transport.drainNudges(nudge_fd);
         if (ready.writable) ptyFlushOutbound(shared, transport, generation);
         if (ready.readable and want_read) {
@@ -6839,8 +6856,9 @@ pub fn Effects(comptime Msg: type) type {
             if (self.idlePtySlotCount() <= self.stagedPtyReservationCount()) {
                 return self.rejectPty(options.key, options.on_event, true);
             }
-            // A build without a pty transport (Windows until ConPTY
-            // lands; a libc-free Linux build) refuses up front. Unlike
+            // A build without a pty transport (a libc-free Linux
+            // build; a target outside the support matrix) refuses up
+            // front. Unlike
             // the argv/dims/key bounds above, this is EXECUTOR TRUTH,
             // not regenerating validation: whether a spawn can start is
             // a property of the recording host, so the rejection is
@@ -7057,9 +7075,13 @@ pub fn Effects(comptime Msg: type) type {
         /// kill-whole-session primitive), after which the io thread
         /// reaps and the exit delivers with reason `.cancelled` — after
         /// this verb the exit always reports `.cancelled`, the spawn
-        /// cancel convention. Unknown keys are a no-op; on a fake pty
-        /// the kill is recorded (`ptyKillRequested`) and the test feeds
-        /// the exit.
+        /// cancel convention. On Windows the same verb is
+        /// `TerminateProcess` on the direct child plus the io thread's
+        /// pseudoconsole close, which tears down every descendant still
+        /// attached to the console (a FreeConsole/DETACHED_PROCESS
+        /// descendant escapes — the setsid escape's twin). Unknown keys
+        /// are a no-op; on a fake pty the kill is recorded
+        /// (`ptyKillRequested`) and the test feeds the exit.
         pub fn ptyKill(self: *Self, key: u64) void {
             const slot = self.findPtySlot(key) orelse return;
             slot.kill_requested = true;
@@ -11002,7 +11024,11 @@ pub fn Effects(comptime Msg: type) type {
                 return self.failPtyStart(slot, options);
             };
             var env_buffer: [pty_transport.max_env_entries]pty_transport.EnvVar = undefined;
-            const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer) orelse {
+            // The decoded-name/value byte pool behind the Windows
+            // environment snapshot; zero-length (and untouched) where
+            // the posix block's own bytes back the entries.
+            var env_bytes: [if (builtin.os.tag == .windows) pty_transport.max_env_bytes else 0]u8 = undefined;
+            const env = flattenPtyEnviron(self.environ orelse fallbackEnviron(), &env_buffer, &env_bytes) orelse {
                 self.channel_storage_allocator.destroy(outbound);
                 self.channel_storage_allocator.destroy(staging);
                 pty_transport.closeFd(pipe[0]);
