@@ -666,6 +666,16 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         var run_fg: canvas.Color = grid.foreground;
         var run_underline = false;
         var text_len: usize = 0;
+        // Multi-codepoint clusters (combining marks) paint as their OWN
+        // single-cell run at their exact cell origin: inside a merged
+        // run their advance would come from the text layout, and a
+        // layout that advances a combining mark by a full glyph would
+        // shift every later cell in the run off the grid — while the
+        // backgrounds, cursor, and selection stayed cell-aligned.
+        // Isolating the cluster pins its neighbors to their own cell
+        // origins whatever the mark advances to; plain single-scalar
+        // runs keep the merged fast path.
+        var break_after_cluster = false;
         x = 0;
         while (x <= row.cells.len) : (x += 1) {
             var cp: u21 = 0;
@@ -674,6 +684,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             var skip = false;
             var box_cp: u21 = 0;
             var cell_bytes: usize = 0;
+            var multi_cluster = false;
             if (x < row.cells.len) {
                 const cell = row.cells[x];
                 if (cell.wide == .spacer) skip = true;
@@ -694,10 +705,16 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
                 // scratch, so the cell restarts in a fresh buffer and a
                 // large grapheme landing near the buffer's end keeps
                 // all its marks instead of being cut.
-                if (cp != 0 and !skip) cell_bytes = cell.cluster.len;
+                if (cp != 0 and !skip) {
+                    cell_bytes = cell.cluster.len;
+                    const primary_len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+                    multi_cluster = cell.cluster.len > primary_len;
+                }
             }
             const breaks = x == row.cells.len or skip or cp == 0 or
-                !colorEql(fg, run_fg) or underline != run_underline or text_len + cell_bytes > text_scratch.len;
+                !colorEql(fg, run_fg) or underline != run_underline or
+                multi_cluster or break_after_cluster or
+                text_len + cell_bytes > text_scratch.len;
             if (breaks and run_len > 0 and text_len > 0) {
                 // The row-wise text ceiling reserves enough that this
                 // append fits; the catch is a defensive floor that stops
@@ -802,6 +819,7 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             @memcpy(text_scratch[text_len..][0..take], cell.cluster[0..take]);
             text_len += take;
             run_len += if (cell.wide == .wide) 2 else 1;
+            break_after_cluster = multi_cluster;
         }
         // A torn row is not painted content: roll the builder back to the
         // row's start so no partial row reaches the glass, then stop (the

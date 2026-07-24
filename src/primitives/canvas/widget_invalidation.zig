@@ -247,6 +247,18 @@ fn validateUniqueWidgetIds(layout: anytype) Error!void {
     }
 }
 
+/// Terminal bindings compare clean only while UNBOUND (matching pty and
+/// scrollback, no grid on either side): a bound grid is live emulator
+/// content whose snapshot may be republished at a new address or
+/// refreshed in place between diffs, so it always reports paint damage —
+/// conservative, never stale terminal pixels for partial-invalidation
+/// consumers; the command-level retained diff downstream still keeps the
+/// actual repaint row-shaped.
+fn terminalBindingClean(previous: widget_model.TerminalBinding, next: widget_model.TerminalBinding) bool {
+    if (previous.pty != next.pty or previous.scrollback != next.scrollback) return false;
+    return previous.grid == null and next.grid == null;
+}
+
 fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_index: usize, next_index: usize, tokens: DesignTokens) WidgetInvalidation {
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
@@ -269,7 +281,8 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.image_opacity != next.widget.image_opacity or
         !optionalSizesEqual(previous.widget.stream_size, next.widget.stream_size) or
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
-        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
+        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition) or
+        !terminalBindingClean(previous.widget.terminal, next.widget.terminal);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
     const visual_dirty = previous.widget.opacity != next.widget.opacity or
         !affinesEqual(previous.widget.transform, next.widget.transform) or

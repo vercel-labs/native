@@ -1687,6 +1687,10 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     applySurfaceAttr(node, attribute.value, entries, ui, model, scope, options);
                 } else if (comptime std.mem.eql(u8, attribute.name, "pty")) {
                     applyPtyAttr(node, attribute.value, entries, ui, model, scope, options);
+                } else if (comptime (std.mem.eql(u8, attribute.name, "scrollback") and !std.mem.eql(u8, node.name, "terminal"))) {
+                    // Terminal-scoped (validator parity for unvalidated
+                    // paths): anywhere else the option is inert data.
+                    comptime fail(node, markup.scrollback_element_message);
                 } else if (comptime (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal"))) {
                     // Runtime-owned text channel (interpreter and
                     // validator parity).

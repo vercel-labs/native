@@ -598,6 +598,73 @@ test "a row adding no text paints even when siblings spent the text share" {
     try testing.expect(box_fills >= 1);
 }
 
+test "a combining-mark cluster paints alone; its neighbor keeps its cell origin" {
+    // "e" + combining acute in cell 0, "!" in cell 1: the cluster must
+    // paint as its own run and "!" must start at exactly one cell width
+    // — a layout that advanced the mark by a full glyph inside a merged
+    // run would have shifted "!" off the grid.
+    const cells = [_]grid_model.TerminalCell{
+        .{ .cp = 'e', .cluster = "e\u{0301}", .fg = white },
+        cell('!', "!", white),
+    };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [32]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 100, 40),
+        .tokens = .{},
+    });
+    const tokens: canvas.DesignTokens = .{};
+    const metrics = grid_model.cellMetrics(tokens);
+    var saw_cluster = false;
+    var saw_bang = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                if (std.mem.eql(u8, text.text, "e\u{0301}")) {
+                    saw_cluster = true;
+                    try testing.expectApproxEqAbs(@as(f32, 0), text.origin.x, 0.01);
+                }
+                if (std.mem.eql(u8, text.text, "!")) {
+                    saw_bang = true;
+                    try testing.expectApproxEqAbs(metrics.width, text.origin.x, 0.01);
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_cluster);
+    try testing.expect(saw_bang);
+}
+
+test "the widget diff reports paint damage for a changed bound grid" {
+    const row_cells = comptime asciiRow("a", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row_cells }};
+    const grid_a = baseGrid(&rows);
+    var grid_b = baseGrid(&rows);
+    grid_b.cursor = .{ .x = 0, .y = 0 };
+
+    var widget = canvas.Widget{
+        .id = 11,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .terminal = .{ .pty = 1, .grid = &grid_a },
+    };
+    var nodes_a: [4]canvas.WidgetLayoutNode = undefined;
+    const layout_a = try canvas.layoutWidgetTree(widget, geometry.RectF.init(0, 0, 200, 100), &nodes_a);
+    widget.terminal.grid = &grid_b;
+    var nodes_b: [4]canvas.WidgetLayoutNode = undefined;
+    const layout_b = try canvas.layoutWidgetTree(widget, geometry.RectF.init(0, 0, 200, 100), &nodes_b);
+
+    var output: [8]canvas.WidgetInvalidation = undefined;
+    const changes = try layout_a.diff(layout_b, &output);
+    var saw_paint_dirty = false;
+    for (changes) |change| {
+        if (change.id == 11 and change.paint_dirty) saw_paint_dirty = true;
+    }
+    try testing.expect(saw_paint_dirty);
+}
+
 test "clampGrid trades rows for columns under the cell ceiling" {
     const clamped = grid_model.clampGrid(400, 100);
     try testing.expectEqual(@as(u16, grid_model.max_cols), clamped.x);

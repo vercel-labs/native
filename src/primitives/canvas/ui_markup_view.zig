@@ -1609,6 +1609,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     try self.applyPtyAttr(scope, node, options, attribute);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "scrollback") and !std.mem.eql(u8, node.name, "terminal")) {
+                    // Terminal-scoped (the validator's rule, enforced
+                    // here too for unvalidated paths): anywhere else the
+                    // option would be silently inert data.
+                    return self.failVoid(node, markup.scrollback_element_message);
+                }
                 if (std.mem.eql(u8, attribute.name, "text") and std.mem.eql(u8, node.name, "terminal")) {
                     // The terminal's text channel is runtime-owned (the
                     // live screen); an authored value would clobber it

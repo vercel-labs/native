@@ -2903,6 +2903,16 @@ test "the interpreter enforces the terminal leaf shape without the validator" {
     var child_ui = TerminalElementUi.init(arena);
     try testing.expectError(error.MarkupBuild, child_view.build(&child_ui, &model));
     try testing.expectEqualStrings(canvas.ui_markup.terminal_children_message, child_view.diagnostic.message);
+
+    const misplaced_scrollback =
+        \\<column>
+        \\  <panel scrollback="3"/>
+        \\</column>
+    ;
+    var scoped_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, misplaced_scrollback);
+    var scoped_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, scoped_view.build(&scoped_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.scrollback_element_message, scoped_view.diagnostic.message);
 }
 
 test "on-terminal requires a bare tag: an authored payload is refused" {
