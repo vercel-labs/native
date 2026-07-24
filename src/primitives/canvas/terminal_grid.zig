@@ -327,6 +327,36 @@ fn rowPathElements(row: TerminalRow) usize {
     return total;
 }
 
+/// Text bytes ALREADY in the display list — every `draw_text`, whether
+/// its bytes are builder-owned (a chart's labels, this grid's own runs)
+/// or referenced from view-owned memory (an earlier text widget). The
+/// runtime's per-view text budget (`CanvasResourceCounts`, 32 KiB)
+/// counts them all, so the grid must degrade against this total, not
+/// against its builder-owned counter alone.
+fn displayListTextBytes(list: canvas.DisplayList) usize {
+    var total: usize = 0;
+    for (list.commands) |command| {
+        if (command == .draw_text) total += command.draw_text.text.len;
+    }
+    return total;
+}
+
+/// Path elements already in the display list — every `fill_path`/
+/// `stroke_path`, including static (comptime) paths that bypass the
+/// builder's element store (an icon's geometry). The runtime's per-view
+/// path-element budget (2048) counts them all.
+fn displayListPathElements(list: canvas.DisplayList) usize {
+    var total: usize = 0;
+    for (list.commands) |command| {
+        total += switch (command) {
+            .fill_path => |c| c.elements.len,
+            .stroke_path => |c| c.elements.len,
+            else => 0,
+        };
+    }
+    return total;
+}
+
 /// An UPPER BOUND on the display-list commands one row emits, assuming
 /// no runs merge (the pathological worst case): a background run per
 /// cell that carries one, plus the cell's ink — eight commands for a
@@ -338,12 +368,32 @@ fn rowPathElements(row: TerminalRow) usize {
 /// flat worst-case-per-column reserve that would starve wide grids).
 fn rowCommandCost(row: TerminalRow) usize {
     var total: usize = 1; // the selection wash
-    for (row.cells) |cell| {
+    var i: usize = 0;
+    while (i < row.cells.len) : (i += 1) {
+        const cell = row.cells[i];
         if (cell.wide == .spacer) continue;
         if (cell.bg != null) total += 1;
         if (cell.cp == 0) continue;
         if (box.isBoxDrawing(cell.cp)) {
-            total += 9; // eight geometry commands plus a possible underline
+            if (box.mergesHorizontally(cell.cp)) {
+                // A horizontally-merged run (a long `─` border) paints
+                // ONE geometry command plus a possible underline, no
+                // matter how wide — mirror the paint loop's merge (same
+                // code point, foreground, and underline) so the estimate
+                // does not charge nine per column for what collapses to
+                // two commands. Backgrounds still count per cell (their
+                // own run pass is separate).
+                var span: usize = 1;
+                while (i + span < row.cells.len) : (span += 1) {
+                    const next = row.cells[i + span];
+                    if (next.cp != cell.cp or !colorEql(next.fg, cell.fg) or next.underline != cell.underline) break;
+                    if (next.bg != null) total += 1;
+                }
+                total += 2; // the merged geometry plus a possible underline
+                i += span - 1;
+            } else {
+                total += 9; // a joint: up to eight geometry commands plus an underline
+            }
         } else {
             total += 2; // the text run plus its underline
         }
@@ -407,25 +457,25 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
     // paints its rows instead of reserving them all away. The epilogue
     // (cursor, caret, scrollbar thumb, clip pop) rides this fixed slack.
     const epilogue_reserve: usize = 8;
-    // The display-list TEXT store is a separate budget from the command
-    // count: a screen of multi-codepoint graphemes (emoji) can exhaust
-    // its bytes long before the command budget. Each row is emitted
-    // ATOMICALLY — its exact text-byte need is measured up front and the
-    // row is skipped WHOLE if it would not fit the remaining store — so
-    // the grid degrades to fewer complete rows, never a row torn midway
-    // by an allocation failure.
-    // The absolute ceiling on the builder's text store the grid may
-    // reach: the whole store minus the reserve held back for widgets
-    // AFTER the grid. `allocTextBytes` counts cumulatively across every
-    // widget in the builder (`builder.text_byte_len`), so the preflight
-    // compares against that live counter — NOT a grid-local zero — or a
-    // row measured against a fresh store would pass here and then have
-    // its runs silently dropped when the shared store, already partly
-    // spent by an earlier widget, cannot hold them.
+    // The per-view TEXT budget is a separate ceiling from the command
+    // count, and the runtime enforces it over EVERY `draw_text` in the
+    // finished display list (`CanvasResourceCounts`, 32 KiB) — referenced
+    // sibling text included, not just this builder's own `allocTextBytes`
+    // bytes. So the grid degrades against the running total of ALL text
+    // already in the list plus what it adds, minus the reserve held back
+    // for widgets emitted AFTER it. Each row is measured up front and
+    // skipped WHOLE if it would cross the ceiling — never torn midway.
     const text_ceiling: usize = if (canvas.max_display_list_text_bytes > options.text_reserve)
         canvas.max_display_list_text_bytes - options.text_reserve
     else
         0;
+    var text_total: usize = displayListTextBytes(builder.displayList());
+    // The per-view PATH-ELEMENT budget (2048), likewise enforced over the
+    // whole display list including static sibling paths (an icon's
+    // geometry) that never touch this builder's element store — so the
+    // rounded-corner preflight degrades against the running list total,
+    // not the builder-owned counter alone.
+    var path_total: usize = displayListPathElements(builder.displayList());
 
     // The glyph-atlas proxy budget (see `TerminalPaintOptions`): clamped
     // under half the probe table so insertion can never scan a full
@@ -457,16 +507,17 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
         // everything after it) is skipped whole — never started and torn.
         if (options.command_budget > 0 and
             builder.len + rowCommandCost(row) + epilogue_reserve > options.command_budget) break;
-        // Text-store stop, ATOMIC per row: measure this row's exact text
-        // bytes against the builder's LIVE cumulative counter (which the
-        // grid's own emitted runs and every earlier widget both advance)
-        // and stop BEFORE the row if the store cannot hold it — never
-        // emit a row's first runs and then fail mid-row.
-        if (builder.text_byte_len + rowTextBytes(row) > text_ceiling) break;
-        // Path-element stop, ATOMIC per row: rounded corners stroke into
-        // the builder's path-element store, so a row of them is skipped
-        // BEFORE the store cannot hold it rather than tearing mid-row.
-        if (builder.path_element_len + rowPathElements(row) > builder.path_elements.len) break;
+        // Text stop, ATOMIC per row, against the view-global running
+        // total (all draw_text already in the list plus this row's
+        // bytes) — stop BEFORE a row that would cross the per-view text
+        // ceiling, never emit its first runs and then have the frame
+        // rejected at commit.
+        if (text_total + rowTextBytes(row) > text_ceiling) break;
+        // Path-element stop, ATOMIC per row, against the view-global
+        // running total (static sibling paths included): a row of rounded
+        // corners is skipped BEFORE it would cross the per-view
+        // path-element budget.
+        if (path_total + rowPathElements(row) > builder.path_elements.len) break;
         // Glyph-budget stop, same row-atomic shape: stop BEFORE the row
         // whose new DISTINCT code points would cross the atlas proxy —
         // the frame degrades to fewer rows instead of failing whole on
@@ -702,6 +753,13 @@ pub fn paint(grid: TerminalGrid, builder: *canvas.Builder, options: TerminalPain
             builder.text_byte_len = row_start_text;
             break;
         }
+        // Advance the view-global running totals by exactly what this row
+        // added (the builder-owned deltas): the terminal's own text/path
+        // emissions all flow through `allocTextBytes`/`allocPathElements`,
+        // so the counter deltas are its contribution to the per-view
+        // budgets the next row's preflight checks.
+        text_total += builder.text_byte_len - row_start_text;
+        path_total += builder.path_element_len - row_start_paths;
         painted_rows = row_index + 1;
     }
 

@@ -325,6 +325,58 @@ test "the glyph budget stops before the row whose new code points cross it" {
     try testing.expect(!saw_b);
 }
 
+test "a wide row of mergeable box glyphs paints under the widget budget" {
+    // 320 identical `─` cells merge to ONE geometry command, so the cost
+    // estimate must not charge nine per column and skip the row.
+    var box_cells: [320]grid_model.TerminalCell = undefined;
+    for (&box_cells) |*c| c.* = .{ .cp = 0x2500, .fg = white };
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &box_cells }};
+
+    var commands: [2048]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 2600, 40),
+        .tokens = .{},
+        .command_budget = 1792,
+    });
+    var box_fills: usize = 0;
+    for (builder.displayList().commands) |command| {
+        if (command == .fill_rect) box_fills += 1;
+    }
+    // Background + the single merged bar (+ no wash: no selection). The
+    // row painted rather than being skipped for a bogus 2,880 estimate.
+    try testing.expect(box_fills >= 2);
+}
+
+test "the text preflight counts referenced sibling text already in the list" {
+    // A prior widget's REFERENCED draw_text (not builder-owned) counts
+    // against the per-view text budget, so the grid must degrade against
+    // it. Pre-emit a referenced-text command consuming most of the view
+    // budget, then a terminal row that would cross the ceiling drops.
+    const filler = "x" ** (canvas.max_display_list_text_bytes - 4);
+    const row = comptime asciiRow("cells", white);
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &row }};
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    // Referenced text (a slice not from allocTextBytes), as a sibling
+    // text widget emits.
+    try builder.drawText(.{ .id = 1, .font_id = 2, .size = 12, .origin = geometry.PointF.init(0, 0), .color = white, .text = filler });
+    try testing.expectEqual(@as(usize, 0), builder.text_byte_len); // referenced, not builder-owned
+
+    try grid_model.paint(baseGrid(&rows), &builder, .{
+        .frame = geometry.RectF.init(0, 0, 400, 100),
+        .tokens = .{},
+    });
+    // Only 4 bytes of headroom remained, so the 5-byte row dropped: no
+    // grid text command, and the frame's total text stays within budget.
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .draw_text => |t| try testing.expect(!std.mem.eql(u8, t.text, "cells")),
+            else => {},
+        }
+    }
+}
+
 test "the prologue budget check accounts for commands already in the builder" {
     // A builder already near an absolute command ceiling must degrade to
     // nothing rather than emit the prologue and overrun. Pre-fill the
