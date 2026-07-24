@@ -71,8 +71,23 @@ const outbound_buffer_bytes: usize = 256 * 1024;
 /// would be nondeterminism outside the effect boundary). macOS's login
 /// shell has been zsh since Catalina; Linux uses `/bin/sh`, the only
 /// interpreter POSIX guarantees present (a bare `/bin/bash` is absent on
-/// Alpine and other minimal installs).
-const default_shell: []const u8 = if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/sh";
+/// Alpine and other minimal installs); Windows uses cmd.exe, present on
+/// every install (PowerShell's location and edition vary).
+const default_shell: []const u8 = if (builtin.os.tag == .macos)
+    "/bin/zsh"
+else if (builtin.os.tag == .windows)
+    "cmd.exe"
+else
+    "/bin/sh";
+
+/// The spawn argv around that shell: the POSIX shells take `-i`
+/// (interactive even though stdin is a pty the shell might not
+/// recognize as a login session); cmd.exe is interactive by default
+/// and has no such flag.
+const default_shell_argv: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{default_shell}
+else
+    &.{ default_shell, "-i" };
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -217,7 +232,7 @@ fn spawnShell(model: *Model, fx: *Fx) void {
     model.session.refreshScreenText();
     fx.ptySpawn(.{
         .key = shell_key,
-        .argv = &.{ default_shell, "-i" },
+        .argv = default_shell_argv,
         .cols = model.cols,
         .rows = model.rows,
         .on_event = Fx.ptyMsg(.shell),
