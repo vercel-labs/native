@@ -599,6 +599,13 @@ pub fn TsCoreHost(comptime core: type) type {
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             event_tag: u8 = 0,
+            /// The engine occupancy this entry currently names, stamped
+            /// from `ptySpawn`'s returned handle. Carried into every
+            /// `ptyWriteChecked` call so a write queued against a table
+            /// index the bridge is about to reuse for a fresh spawn
+            /// cannot land on the new occupant (see `effects.zig`'s
+            /// `PtyHandle`/`ptyWriteChecked`).
+            generation: u64 = 0,
 
             fn wireKey(entry: *const PtyEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -1197,8 +1204,17 @@ pub fn TsCoreHost(comptime core: type) type {
                         const bytes = takeLongBytes(cmd, &at);
                         // TS `Cmd.ptyWrite` is fire-and-forget: a refusal
                         // counts into the exit's dropped_writes, so the
-                        // acceptance result is ignored here.
-                        if (findPty(key)) |index| _ = fx.ptyWrite(pty_key_base + index, bytes);
+                        // acceptance result is ignored here. Checked
+                        // against the entry's stamped generation so a
+                        // write still in this dispatch's command buffer
+                        // cannot land on a fresh spawn that reused this
+                        // table index (see `PtyEntry.generation`).
+                        if (findPty(key)) |index| {
+                            _ = fx.ptyWriteChecked(.{
+                                .key = pty_key_base + index,
+                                .generation = ptys[index].generation,
+                            }, bytes);
+                        }
                     },
                     // pty_resize [op][key_len][key][cols f64 LE][rows f64 LE]
                     0x1B => {
@@ -1847,7 +1863,13 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
             entry.event_tag = event_tag;
-            if (term.len == 0) {
+            // The returned handle's generation is stamped onto the entry
+            // so `pty_write` command handling can address this exact
+            // occupancy (`ptyWriteChecked`) rather than the bare, reusable
+            // table index. A `null` return (synchronous rejection) leaves
+            // the entry at its zero default: the engine never assigned a
+            // slot, so no write can find one under this key either way.
+            const handle = if (term.len == 0)
                 // Wire "" = "the engine's default TERM" — the record
                 // never bakes the default in (the fetch-timeout rule).
                 fx.ptySpawn(.{
@@ -1856,8 +1878,8 @@ pub fn TsCoreHost(comptime core: type) type {
                     .cols = ptyDimension(cols),
                     .rows = ptyDimension(rows),
                     .on_event = ptyEventMsg,
-                });
-            } else {
+                })
+            else
                 fx.ptySpawn(.{
                     .key = pty_key_base + index,
                     .argv = argv,
@@ -1866,7 +1888,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     .term = term,
                     .on_event = ptyEventMsg,
                 });
-            }
+            if (handle) |h| entry.generation = h.generation;
         }
 
         /// The wire carries the app's f64; the transport's grid is u16.

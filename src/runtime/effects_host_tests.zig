@@ -6,6 +6,13 @@
 //! pin: a session driving requests and fx timers through a full UiApp
 //! journals `.host` results and replays to identical state without a
 //! host call.
+//!
+//! The real-executor cases include the genuinely async path
+//! `HostCallBinding`'s own doc comment calls out: `request_fn` returns
+//! without answering, and `feedHostResult` arrives LATER from a separate,
+//! host-marshaled call (outside `request_fn`'s own call stack) — plus
+//! that path racing a `cancel_fn` notice, mirroring the fake executor's
+//! "cancelHostRequest drops silently" coverage for the real binding.
 
 const std = @import("std");
 const geometry = @import("geometry");
@@ -447,6 +454,80 @@ test "real-mode host calls ride the binding and answer through the feed" {
     try h.wake();
     try std.testing.expectEqual(@as(usize, 1), Stub.cancel_count);
     try std.testing.expectEqual(other_key, Stub.last_cancelled);
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
+}
+
+test "real-mode: request_fn defers the answer, which arrives later and can race a cancel" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    const Stub = struct {
+        var bound: ?*HostEffects = null;
+        var deferred_key: ?u64 = null;
+        var cancel_count: usize = 0;
+        var last_cancelled: u64 = 0;
+        fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
+            _ = context;
+            _ = name;
+            _ = payload;
+        }
+        // Neither branch answers inline: both requests stay in flight
+        // until the test itself feeds a result from outside this
+        // function's call stack, standing in for a host that marshals
+        // the answer back through its own event loop instead of
+        // resolving synchronously.
+        fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
+            _ = context;
+            _ = name;
+            _ = payload;
+            deferred_key = key;
+        }
+        fn cancelNotice(context: *anyopaque, key: u64) void {
+            _ = context;
+            cancel_count += 1;
+            last_cancelled = key;
+        }
+    };
+    Stub.bound = fx;
+    Stub.deferred_key = null;
+    Stub.cancel_count = 0;
+    var context: u8 = 0;
+    fx.bindHostCalls(.{
+        .context = &context,
+        .send_fn = Stub.send,
+        .request_fn = Stub.request,
+        .cancel_fn = Stub.cancelNotice,
+    });
+
+    // The request returns with no answer yet: nothing has delivered.
+    test_payload = "hello";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .ask);
+    try h.wake();
+    try std.testing.expectEqual(ask_key, Stub.deferred_key.?);
+    try std.testing.expectEqual(@as(u32, 0), h.app_state.model.result_count);
+
+    // The host answers later, off `request_fn`'s own call stack: the
+    // deferred result still delivers on the next wake.
+    try fx.feedHostResult(ask_key, true, "deferred-answer");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("deferred-answer", h.app_state.model.bytesPrefix());
+
+    // A second deferred request races a cancel: the host is notified,
+    // and a late answer that arrives after the cancel notice reports
+    // `error.EffectNotFound` for the real executor too (the fake
+    // executor's equivalent is pinned by "cancelHostRequest drops
+    // silently, and the generic cancel routes to it" above).
+    try h.app_state.dispatch(&h.harness.runtime, 1, .ask_other);
+    try h.wake();
+    try std.testing.expectEqual(other_key, Stub.deferred_key.?);
+    fx.cancelHostRequest(other_key);
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), Stub.cancel_count);
+    try std.testing.expectEqual(other_key, Stub.last_cancelled);
+    try std.testing.expectError(error.EffectNotFound, fx.feedHostResult(other_key, true, "too-late"));
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
 }
 
