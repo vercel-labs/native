@@ -102,6 +102,22 @@ export function next(f: Filter): Filter { return f === "all" ? "active" : "done"
   assert.match(zig, /f == \.all/);
 });
 
+test("R5 string-literal union with 257+ members emits enum(u16)", () => {
+  const members = Array.from({ length: 257 }, (_, i) => `m${i}`);
+  const source = `export type Big = ${members.map((m) => `"${m}"`).join(" | ")};\nexport function first(b: Big): Big { return b; }`;
+  const zig = emit(source);
+  assert.match(zig, /pub const Big = enum\(u16\) \{/);
+  assert.match(zig, /m0 = 0,/);
+  assert.match(zig, /m256 = 256,/);
+});
+
+test("R5 string-literal union with exactly 256 members stays enum(u8)", () => {
+  const members = Array.from({ length: 256 }, (_, i) => `m${i}`);
+  const source = `export type Boundary = ${members.map((m) => `"${m}"`).join(" | ")};\nexport function first(b: Boundary): Boundary { return b; }`;
+  const zig = emit(source);
+  assert.match(zig, /pub const Boundary = enum\(u8\) \{/);
+});
+
 test("R5 number-literal union keeps its integer repr", () => {
   const zig = emit(`
 type RunClass = 0 | 1 | 2;
