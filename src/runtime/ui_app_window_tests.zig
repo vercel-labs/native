@@ -17,6 +17,9 @@ const support = @import("test_support.zig");
 const canvas_label = "panel-canvas";
 const settings_canvas_label = "settings-canvas";
 const settings_window_label = "settings";
+/// A second view inside the MAIN window — the pane `fx.focusView`
+/// moves focus to, standing in for a shell's terminal or webview pane.
+const side_view_label = "side-pane";
 
 const PanelModel = struct {
     settings_open: bool = false,
@@ -678,6 +681,8 @@ const VerbMsg = union(enum) {
     show_settings,
     quit,
     settings_closed,
+    focus_side_view,
+    focus_missing_view,
 };
 
 const VerbApp = ui_app_model.UiApp(VerbModel, VerbMsg);
@@ -692,6 +697,8 @@ fn verbUpdate(model: *VerbModel, msg: VerbMsg, fx: *VerbApp.Effects) void {
         .show_settings => fx.showWindow(settings_window_label),
         .quit => fx.quitApp(),
         .settings_closed => model.settings_open = false,
+        .focus_side_view => fx.focusView("main", side_view_label),
+        .focus_missing_view => fx.focusView("main", "no-such-view"),
     }
 }
 
@@ -821,6 +828,77 @@ test "window-action effects resolve labels to live windows and drive the real ve
     const shutdown_event = harness.null_platform.takeQueuedQuit() orelse return error.TestUnexpectedResult;
     try std.testing.expect(harness.null_platform.takeQueuedQuit() == null);
     try harness.runtime.dispatchPlatformEvent(app, shutdown_event);
+}
+
+test "fx.focusView moves keyboard focus between views from a pure update" {
+    // The shape this exists for: a shell whose window holds a canvas
+    // beside other panes cannot use AppKit's key-view loop to cycle
+    // them (it does not span a webview, and a focused terminal keeps
+    // Tab for its child), so it owns focus policy itself — from
+    // `update`, which never sees the Runtime.
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-focus-view",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Panel",
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+        .scale_factor = 2,
+        .open = true,
+        .focused = true,
+    } });
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = side_view_label,
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 150, 400, 150),
+    });
+
+    // Focus starts on the app's canvas: the side pane is mounted and
+    // unfocused, which is the state a pane-cycling chord acts on.
+    try harness.runtime.focusView(1, canvas_label);
+    try std.testing.expect(!viewFocused(&harness.runtime, 1, side_view_label));
+
+    // The effect crosses from `update` to the real verb: the view takes
+    // focus, the canvas loses it, and the mirror carries BOTH labels —
+    // the window and the view together are the whole request.
+    try app_state.dispatch(&harness.runtime, 1, .focus_side_view);
+    try std.testing.expect(viewFocused(&harness.runtime, 1, side_view_label));
+    try std.testing.expect(!viewFocused(&harness.runtime, 1, canvas_label));
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().focus_view_count);
+    try std.testing.expectEqualStrings("main", app_state.effects.windowActionState().lastLabel());
+    try std.testing.expectEqualStrings(side_view_label, app_state.effects.windowActionState().lastViewLabel());
+
+    // An unknown view label is a no-op, not a crash and not a focus
+    // move — `Runtime.focusView` owns the refusal and the
+    // fire-and-forget contract swallows it. The mirror still counts the
+    // request, exactly like a close of a window that is not there.
+    try app_state.dispatch(&harness.runtime, 1, .focus_missing_view);
+    try std.testing.expect(viewFocused(&harness.runtime, 1, side_view_label));
+    try std.testing.expectEqual(@as(u32, 2), app_state.effects.windowActionState().focus_view_count);
+}
+
+/// The runtime's own focus flag for a view — where `setFocusedView`
+/// writes, and what the canvas render state reads.
+fn viewFocused(runtime: anytype, window_id: support.platform.WindowId, label: []const u8) bool {
+    for (runtime.views[0..runtime.view_count]) |view| {
+        if (view.window_id != window_id) continue;
+        if (std.mem.eql(u8, view.label, label)) return view.focused;
+    }
+    return false;
 }
 
 test "the .hide close then showWindow round-trip: tray Open brings the hidden window back" {
