@@ -193,6 +193,14 @@ pub const terminal_state_field_names = [_][]const u8{
     "scrollback", "history", "cols", "rows",
 };
 
+/// Terminal-state fields a declared record MAY carry but need not: a
+/// transpiled core written before `pty` existed still matches, and one
+/// that wants to know which pane reported declares it. Required fields
+/// stay required — a record missing `cols` is not a terminal state.
+pub const terminal_state_optional_field_names = [_][]const u8{
+    "pty",
+};
+
 /// The RETIRED one-axis scroll-state vocabulary, kept only to recognize
 /// a pre-two-axis mirror and teach the migration by name (see
 /// `declaredLegacyScrollStateRecord`). Nothing dispatches through these
@@ -205,6 +213,40 @@ pub const legacy_scroll_state_field_names = [_][]const u8{
 pub const legacy_scroll_state_field_names_ts = [_][]const u8{
     "offset", "velocity", "viewportExtent", "contentExtent",
 };
+
+/// The same structural match, with a set of fields the record MAY also
+/// carry: every required name must be present, every declared field must
+/// be required-or-optional, and all of them numeric. One spelling only
+/// (the words are single), so there is no TS variant to match against.
+fn declaredRecordMatchesVocabularyWithOptional(
+    comptime T: type,
+    comptime required_names: []const []const u8,
+    comptime optional_names: []const []const u8,
+) bool {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len < required_names.len) return false;
+    if (info.fields.len > required_names.len + optional_names.len) return false;
+    inline for (required_names) |name| {
+        if (!@hasField(T, name)) return false;
+    }
+    inline for (info.fields) |field| {
+        if (!isNumeric(field.type)) return false;
+        const known = comptime blk: {
+            for (required_names) |name| {
+                if (std.mem.eql(u8, field.name, name)) break :blk true;
+            }
+            for (optional_names) |name| {
+                if (std.mem.eql(u8, field.name, name)) break :blk true;
+            }
+            break :blk false;
+        };
+        if (!known) return false;
+    }
+    return true;
+}
 
 fn declaredRecordMatchesVocabulary(comptime T: type, comptime canvas_names: []const []const u8, comptime ts_names: []const []const u8) bool {
     const info = switch (@typeInfo(T)) {
@@ -253,7 +295,11 @@ pub fn declaredScrollStateRecord(comptime T: type) bool {
 /// of exactly the four field names (scrollback/history/cols/rows — one
 /// spelling, the words are single), each numeric.
 pub fn declaredTerminalStateRecord(comptime T: type) bool {
-    return declaredRecordMatchesVocabulary(T, &terminal_state_field_names, &terminal_state_field_names);
+    return declaredRecordMatchesVocabularyWithOptional(
+        T,
+        &terminal_state_field_names,
+        &terminal_state_optional_field_names,
+    );
 }
 
 /// A mirror of the RETIRED one-axis scroll state — `{offset, velocity,

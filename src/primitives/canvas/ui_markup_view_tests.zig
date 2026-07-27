@@ -3010,7 +3010,10 @@ test "the terminal element binds its pty key, scrollback echo, and view-state ha
 
     // The view-state handler resolves through the tree and carries the
     // applied state.
-    const msg = tree.msgForTerminal(widget.id, .{ .scrollback = 12, .history = 40, .cols = 80, .rows = 24 }) orelse return error.TestExpectedHandler;
+    const msg = tree.msgForTerminal(widget.id, .{ .pty = 7, .scrollback = 12, .history = 40, .cols = 80, .rows = 24 }) orelse return error.TestExpectedHandler;
+    // The bound key rides the payload: `on-terminal` takes a bare tag,
+    // so this is how the app learns WHICH terminal reported.
+    try testing.expectEqual(@as(u64, 7), msg.term_state.pty);
     try testing.expectEqual(@as(u32, 12), msg.term_state.scrollback);
     try testing.expectEqual(@as(u32, 40), msg.term_state.history);
     try testing.expectEqual(@as(u16, 80), msg.term_state.cols);
