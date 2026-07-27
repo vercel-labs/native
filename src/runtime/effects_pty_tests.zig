@@ -131,6 +131,18 @@ test "pty admission: every refused spawn delivers exactly one rejected exit" {
     fx.ptySpawn(.{ .key = 5, .argv = &.{"sh"}, .term = long_term, .on_event = DirectFx.ptyMsg(.pty) });
     _ = try expectExit(&fx, 5, .rejected);
 
+    // A cwd that is empty, over its bound, or carries a NUL — the same
+    // three refusals argv and TERM take, for the same reason: a path
+    // truncated at a NUL would enter a DIFFERENT directory than the
+    // caller named, silently.
+    fx.ptySpawn(.{ .key = 51, .argv = &.{"sh"}, .cwd = "", .on_event = DirectFx.ptyMsg(.pty) });
+    _ = try expectExit(&fx, 51, .rejected);
+    const long_cwd = "/d" ** effects_mod.max_effect_pty_cwd_bytes;
+    fx.ptySpawn(.{ .key = 52, .argv = &.{"sh"}, .cwd = long_cwd, .on_event = DirectFx.ptyMsg(.pty) });
+    _ = try expectExit(&fx, 52, .rejected);
+    fx.ptySpawn(.{ .key = 53, .argv = &.{"sh"}, .cwd = "/tmp\x00/etc", .on_event = DirectFx.ptyMsg(.pty) });
+    _ = try expectExit(&fx, 53, .rejected);
+
     // A duplicate active key.
     fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
     fx.ptySpawn(.{ .key = 6, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
@@ -674,6 +686,67 @@ test "live pty end to end: output, coalescing, and the exit code" {
     try testing.expect(result.records <= 3);
     try testing.expectEqual(@as(i32, 4), result.exit.code);
     try testing.expectEqual(effects_mod.EffectExitReason.exited, result.exit.reason);
+}
+
+test "live pty cwd: the child starts in the requested directory" {
+    if (comptime !live_posix) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    // `/` is the one directory every posix host has, and it is not the
+    // test process's own — so a child that ignored `cwd` prints
+    // something else and the assertion fails rather than passing by
+    // coincidence.
+    fx.ptySpawn(.{
+        .key = 61,
+        .argv = &.{ "/bin/sh", "-c", "pwd" },
+        .cwd = "/",
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var result = try drainUntilExit(&fx, 5_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expectEqual(@as(i32, 0), result.exit.code);
+    try testing.expect(std.mem.startsWith(u8, result.output.items, "/\r\n"));
+}
+
+test "live pty cwd: an unenterable directory fails the spawn, never a child elsewhere" {
+    if (comptime !live_posix) return;
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+
+    // The whole point of entering the directory in the CHILD: the
+    // failure has to reach the app as this spawn's terminal. A parent
+    // that could not chdir would either move every other spawn's
+    // directory too or silently start the child in the wrong place.
+    fx.ptySpawn(.{
+        .key = 62,
+        .argv = &.{ "/bin/sh", "-c", "pwd" },
+        .cwd = "/no/such/directory/native-sdk-cwd-test",
+        .on_event = DirectFx.ptyMsg(.pty),
+    });
+    var result = try drainUntilExit(&fx, 5_000);
+    defer result.output.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), result.output.items.len);
+    try testing.expect(result.exit.code != 0);
+}
+
+test "a fake pty mirrors the requested cwd, and null means inherit" {
+    var fx = DirectFx.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    fx.ptySpawn(.{ .key = 71, .argv = &.{"sh"}, .cwd = "/tmp", .on_event = DirectFx.ptyMsg(.pty) });
+    fx.ptySpawn(.{ .key = 72, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
+
+    const with_cwd = fx.pendingPtyAt(0) orelse return error.TestExpectedRequest;
+    try testing.expectEqual(@as(u64, 71), with_cwd.key);
+    try testing.expectEqualStrings("/tmp", with_cwd.cwd orelse return error.TestExpectedRequest);
+    // Null is not the empty string: "inherit the app's directory" and
+    // "start in the filesystem root of a relative path" are different
+    // requests, and a test that pinned "" could not tell them apart.
+    const without_cwd = fx.pendingPtyAt(1) orelse return error.TestExpectedRequest;
+    try testing.expectEqual(@as(u64, 72), without_cwd.key);
+    try testing.expect(without_cwd.cwd == null);
 }
 
 test "live pty back-pressure is lossless past the staging ring" {

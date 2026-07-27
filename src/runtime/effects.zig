@@ -949,6 +949,9 @@ pub const max_effect_pty_outbound_bytes: usize = 64 * 1024;
 pub const max_effect_pty_write_records: usize = 256;
 /// Longest TERM value `ptySpawn` accepts.
 pub const max_effect_pty_term_bytes: usize = 32;
+/// Longest `cwd` path `ptySpawn` accepts. The slot stores the request
+/// inline like argv and TERM, so this is a fixed cost per pty slot.
+pub const max_effect_pty_cwd_bytes: usize = 1024;
 /// Bytes of `ptyWrite` input a FAKE pty retains for test assertions
 /// (`ptyWrittenBytes`) — the scriptable pty's inspection window, not a
 /// delivery bound: writes beyond it drop oldest-first, exactly what a
@@ -2899,6 +2902,16 @@ pub fn Effects(comptime Msg: type) type {
             /// Initial grid size the child observes via TIOCGWINSZ.
             cols: u16 = 80,
             rows: u16 = 24,
+            /// The child's initial working directory, at most
+            /// `max_effect_pty_cwd_bytes`. Null (the default) inherits
+            /// the app process's, which is what a pty child got before
+            /// this existed. Entered in the CHILD immediately before
+            /// exec, so a directory that cannot be entered fails the
+            /// spawn through the same `.exit` terminal a failed exec
+            /// reports through — never a child silently running
+            /// somewhere else. `argv[0]` still resolves against PATH
+            /// from the app's own directory.
+            cwd: ?[]const u8 = null,
             /// The TERM the child starts with. The rest of the child's
             /// environment is the spawn policy verbatim: the bound host
             /// environ (`bindEnviron`), nothing else — a pty is a spawn
@@ -2920,6 +2933,9 @@ pub fn Effects(comptime Msg: type) type {
             cols: u16,
             rows: u16,
             term: []const u8,
+            /// The requested working directory, or null where the
+            /// child inherits the app's.
+            cwd: ?[]const u8 = null,
         };
 
         /// How one pty table slot advances: `.running` from the
@@ -2969,6 +2985,10 @@ pub fn Effects(comptime Msg: type) type {
             argv_count: usize = 0,
             term_storage: [max_effect_pty_term_bytes]u8 = undefined,
             term_len: usize = 0,
+            cwd_storage: [max_effect_pty_cwd_bytes]u8 = undefined,
+            /// 0 means "no cwd requested" — an empty path is refused at
+            /// the seam, so the length carries the optionality.
+            cwd_len: usize = 0,
             /// Session replay only: the pending-order reservation this
             /// parked spawn holds (see `ParkOrderState` — the channel
             /// park dance, pty-shaped: a fed start-failure terminal
@@ -2984,6 +3004,11 @@ pub fn Effects(comptime Msg: type) type {
 
             fn requestTerm(slot: *const PtySlot) []const u8 {
                 return slot.term_storage[0..slot.term_len];
+            }
+
+            fn requestCwd(slot: *const PtySlot) ?[]const u8 {
+                if (slot.cwd_len == 0) return null;
+                return slot.cwd_storage[0..slot.cwd_len];
             }
         };
 
@@ -6797,6 +6822,7 @@ pub fn Effects(comptime Msg: type) type {
                         .cols = slot.cols,
                         .rows = slot.rows,
                         .term = slot.requestTerm(),
+                        .cwd = slot.requestCwd(),
                     };
                 }
                 seen += 1;
@@ -6864,6 +6890,17 @@ pub fn Effects(comptime Msg: type) type {
             // truncate it at the C boundary, so a spawn that "succeeded"
             // would hand the child a different TERM than requested.
             if (std.mem.indexOfScalar(u8, options.term, 0) != null) return self.rejectPty(options.key, options.on_event, true);
+            // The cwd rides the same regenerating-validation rule: an
+            // empty path is not a directory, an over-bound one does not
+            // fit the slot, and an embedded NUL would enter a DIFFERENT
+            // directory than the caller named. All three refuse here so
+            // the fake executor and replay refuse identically.
+            if (options.cwd) |dir| {
+                if (dir.len == 0 or dir.len > max_effect_pty_cwd_bytes) {
+                    return self.rejectPty(options.key, options.on_event, true);
+                }
+                if (std.mem.indexOfScalar(u8, dir, 0) != null) return self.rejectPty(options.key, options.on_event, true);
+            }
             if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectPty(options.key, options.on_event, true);
             const slot_index = self.findIdlePtySlot() orelse return self.rejectPty(options.key, options.on_event, true);
             // Table capacity obeys the replay-hold invariant, the
@@ -6911,6 +6948,10 @@ pub fn Effects(comptime Msg: type) type {
             }
             @memcpy(slot.term_storage[0..options.term.len], options.term);
             slot.term_len = options.term.len;
+            if (options.cwd) |dir| {
+                @memcpy(slot.cwd_storage[0..dir.len], dir);
+                slot.cwd_len = dir.len;
+            } else slot.cwd_len = 0;
 
             if (slot.fake) {
                 // Session replay: PARK — the fake-slot discipline. The
@@ -11064,6 +11105,7 @@ pub fn Effects(comptime Msg: type) type {
                 .argv = slot.requestArgv(),
                 .env = env,
                 .term = slot.requestTerm(),
+                .cwd = slot.requestCwd(),
                 .cols = slot.cols,
                 .rows = slot.rows,
             }) catch {
