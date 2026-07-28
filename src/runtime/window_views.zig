@@ -146,6 +146,46 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             try self.options.platform.services.minimizeWindow(window_id);
         }
 
+        /// Programmatic window placement for overlay apps (anchoring a
+        /// companion window, following the pointer), in the platform's
+        /// window coordinate space. The runtime mirror updates
+        /// immediately; the host's frame-changed event echoes the same
+        /// rect afterwards.
+        pub fn setWindowFrame(self: *Runtime, window_id: platform.WindowId, frame: geometry.RectF) anyerror!void {
+            const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            try self.options.platform.services.setWindowFrame(window_id, frame);
+            self.windows[index].info.frame = frame;
+            self.invalidated = true;
+        }
+
+        /// Show/hide a tracked window after create. `activate=false`
+        /// shows without taking key or activating the app — companion
+        /// windows appear beside the user's work without stealing focus.
+        pub fn setWindowVisible(self: *Runtime, window_id: platform.WindowId, visible: bool, activate: bool) anyerror!void {
+            if (Self.findWindowIndexById(self, window_id) == null) return error.WindowNotFound;
+            try self.options.platform.services.setWindowVisible(window_id, visible, activate);
+        }
+
+        /// Runtime toggle for `WindowOptions.click_through` — overlays
+        /// flip it as the pointer enters/leaves their visible content.
+        pub fn setWindowClickThrough(self: *Runtime, window_id: platform.WindowId, click_through: bool) anyerror!void {
+            if (Self.findWindowIndexById(self, window_id) == null) return error.WindowNotFound;
+            try self.options.platform.services.setWindowClickThrough(window_id, click_through);
+        }
+
+        /// Global pointer in the window coordinate space, or null when
+        /// the platform cannot report one (headless). Click-through
+        /// windows receive no pointer events; overlays poll this.
+        pub fn pointerPosition(self: *Runtime) ?geometry.PointF {
+            return self.options.platform.services.pointerPosition();
+        }
+
+        /// The primary display's usable area in the window coordinate
+        /// space; zero-sized when the platform has no screen concept.
+        pub fn screenWorkArea(self: *Runtime) geometry.RectF {
+            return self.options.platform.services.screenWorkArea();
+        }
+
         /// The real OS show verb: unhide + activate — the counterpart
         /// to a `close_policy = .hide` hide, and what a tray "Open"
         /// action resolves to. Like `closeWindow`, the runtime flag

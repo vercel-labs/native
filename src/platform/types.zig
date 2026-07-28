@@ -566,6 +566,22 @@ pub const WindowShowMode = enum {
     on_first_present,
 };
 
+/// The window's stacking band. `.normal` is every ordinary app window.
+/// The raised bands exist for OVERLAY surfaces (heads-up companions,
+/// screen annotations, pointer followers) that must stay above other
+/// apps' windows: `.floating` sits above normal windows of the frontmost
+/// app (macOS `NSFloatingWindowLevel`), `.status` above the menu bar
+/// band (`NSStatusWindowLevel`), `.screen_saver` above everything
+/// including fullscreen video (`NSScreenSaverWindowLevel`). Platforms
+/// without distinct bands map every raised level to their single
+/// always-on-top flag.
+pub const WindowLevel = enum {
+    normal,
+    floating,
+    status,
+    screen_saver,
+};
+
 /// What the user's close affordance (the red traffic light, cmd+W, the
 /// caption X) does to this window.
 /// `.quit` is the default and today's behavior unchanged: the window
@@ -604,6 +620,44 @@ pub const WindowOptions = struct {
     /// What the user's close affordance does — see `WindowClosePolicy`.
     /// Fixed at create like the titlebar: it is host window state.
     close_policy: WindowClosePolicy = .quit,
+    /// Overlay-window shape (desktop companions, pointer followers,
+    /// screen annotations). `transparent` makes the window surface
+    /// non-opaque with a clear background — the page/canvas alpha is
+    /// the window's alpha — and the window's main WebView inherits the
+    /// treatment so an engine-drawn white page background cannot defeat
+    /// it. Pair with `.titlebar = .chromeless`; a transparent window
+    /// with OS chrome is an affordance lie.
+    transparent: bool = false,
+    /// OS drop shadow. Transparent overlays normally disable it — the
+    /// shadow re-draws the window's rectangle the transparency hides.
+    shadow: bool = true,
+    /// Stacking band; see `WindowLevel`.
+    level: WindowLevel = .normal,
+    /// Start with pointer events falling through to whatever is under
+    /// the window (macOS `ignoresMouseEvents`). Toggle at runtime via
+    /// `setWindowClickThrough` — overlays flip this as the pointer
+    /// enters/leaves their visible content.
+    click_through: bool = false,
+    /// Join every Space and stay visible beside fullscreen apps
+    /// (macOS `NSWindowCollectionBehaviorCanJoinAllSpaces` +
+    /// `FullScreenAuxiliary`). An overlay that vanishes on Space switch
+    /// is not an overlay.
+    all_workspaces: bool = false,
+    /// Created hidden when false; show later with `setWindowVisible`.
+    /// Anchored companion windows (a bubble positioned against another
+    /// window) create hidden and appear only once placed.
+    visible: bool = true,
+    /// When false the window is ordered front WITHOUT becoming key or
+    /// activating the app (macOS `orderFrontRegardless`) — showing it
+    /// never steals focus from what the user is doing. The window can
+    /// still become key when the user clicks into it.
+    activate: bool = true,
+    /// JavaScript injected into this window's MAIN webview at document
+    /// start (the content-script shape — observe the page, relay through
+    /// the bridge). Set from Zig only; the analogue of
+    /// `WebViewOptions.user_script` for a window's own webview rather
+    /// than a layered child. Empty = none.
+    user_script: []const u8 = "",
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -673,6 +727,17 @@ pub const WindowCreateOptions = struct {
     min_height: f32 = 0,
     /// See `WindowOptions.close_policy`.
     close_policy: WindowClosePolicy = .quit,
+    /// Overlay-window shape; see the `WindowOptions` fields of the same
+    /// names for the semantics.
+    transparent: bool = false,
+    shadow: bool = true,
+    level: WindowLevel = .normal,
+    click_through: bool = false,
+    all_workspaces: bool = false,
+    visible: bool = true,
+    activate: bool = true,
+    /// Main-webview content script; see `WindowOptions.user_script`.
+    user_script: []const u8 = "",
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -689,6 +754,14 @@ pub const WindowCreateOptions = struct {
             .min_width = self.min_width,
             .min_height = self.min_height,
             .close_policy = self.close_policy,
+            .transparent = self.transparent,
+            .shadow = self.shadow,
+            .level = self.level,
+            .click_through = self.click_through,
+            .all_workspaces = self.all_workspaces,
+            .visible = self.visible,
+            .activate = self.activate,
+            .user_script = self.user_script,
         };
     }
 };
@@ -701,6 +774,13 @@ pub const WebViewOptions = struct {
     layer: i32 = 0,
     transparent: bool = false,
     bridge_enabled: bool = false,
+    /// JavaScript source injected into the WebView's MAIN frame at
+    /// document start, before the page's own scripts — the native
+    /// equivalent of a browser extension's content script (observe the
+    /// page, relay through the bridge). Set from Zig only; it is never
+    /// exposed to page JS or the builtin bridge commands, so remote
+    /// content cannot inject into a sibling WebView.
+    user_script: []const u8 = "",
 };
 
 pub const WebViewInfo = struct {
@@ -2327,6 +2407,23 @@ pub const PlatformServices = struct {
     /// the queued shape. Platforms without the concept leave this
     /// null.
     quit_app_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    /// Programmatic window placement, in the platform's window
+    /// coordinate space (the same space `WindowState.frame` reports —
+    /// AppKit bottom-left screen points on macOS). Overlays anchor
+    /// companion windows and follow the pointer with this.
+    set_window_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, frame: geometry.RectF) anyerror!void = null,
+    /// Show/hide a window after create. `activate=false` orders the
+    /// window front without making it key or activating the app.
+    set_window_visible_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, visible: bool, activate: bool) anyerror!void = null,
+    /// Runtime toggle for `WindowOptions.click_through`.
+    set_window_click_through_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, click_through: bool) anyerror!void = null,
+    /// Global pointer position in the window coordinate space. Overlay
+    /// pointer-followers and hover hit-tests poll this; click-through
+    /// windows receive no pointer events of their own.
+    pointer_position_fn: ?*const fn (context: ?*anyopaque) geometry.PointF = null,
+    /// The primary display's usable area (excluding menu bar/Dock/task
+    /// bar), in the window coordinate space.
+    screen_work_area_fn: ?*const fn (context: ?*anyopaque) geometry.RectF = null,
     /// Hand the ACTIVE pointer-down to the platform as a window-drag
     /// gesture (the hidden-titlebar drag-region channel): the window
     /// moves once the pointer actually moves — a plain click moves
@@ -2731,6 +2828,34 @@ pub const PlatformServices = struct {
     pub fn quitApp(self: PlatformServices) anyerror!void {
         const quit_fn = self.quit_app_fn orelse return error.UnsupportedService;
         return quit_fn(self.context);
+    }
+
+    pub fn setWindowFrame(self: PlatformServices, window_id: WindowId, frame: geometry.RectF) anyerror!void {
+        const set_fn = self.set_window_frame_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, window_id, frame);
+    }
+
+    pub fn setWindowVisible(self: PlatformServices, window_id: WindowId, visible: bool, activate: bool) anyerror!void {
+        const set_fn = self.set_window_visible_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, window_id, visible, activate);
+    }
+
+    pub fn setWindowClickThrough(self: PlatformServices, window_id: WindowId, click_through: bool) anyerror!void {
+        const set_fn = self.set_window_click_through_fn orelse return error.UnsupportedService;
+        return set_fn(self.context, window_id, click_through);
+    }
+
+    /// Null when the platform cannot report a global pointer (headless,
+    /// tests) — callers treat that as "pointer unknown", never (0,0).
+    pub fn pointerPosition(self: PlatformServices) ?geometry.PointF {
+        const pointer_fn = self.pointer_position_fn orelse return null;
+        return pointer_fn(self.context);
+    }
+
+    /// Zero-sized when the platform has no screen-geometry concept.
+    pub fn screenWorkArea(self: PlatformServices) geometry.RectF {
+        const area_fn = self.screen_work_area_fn orelse return geometry.RectF.init(0, 0, 0, 0);
+        return area_fn(self.context);
     }
 
     pub fn startWindowDrag(self: PlatformServices, window_id: WindowId) anyerror!void {

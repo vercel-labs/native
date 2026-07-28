@@ -418,6 +418,65 @@ test "null platform records webview lifecycle" {
     try std.testing.expectEqual(@as(usize, 0), null_platform.webview_count);
 }
 
+test "null platform records overlay window options and control calls" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    // Overlay shape survives to the create seam, and a visible:false
+    // window is created hidden — it appears only on setWindowVisible.
+    _ = try services.createWindow(.{
+        .id = 7,
+        .label = "bubble",
+        .title = "Bubble",
+        .default_frame = geometry.RectF.init(40, 50, 560, 200),
+        .resizable = false,
+        .titlebar = .chromeless,
+        .transparent = true,
+        .shadow = false,
+        .level = .screen_saver,
+        .click_through = true,
+        .all_workspaces = true,
+        .visible = false,
+        .activate = false,
+    });
+    const index: usize = null_platform.window_count - 1;
+    const overlay = null_platform.window_overlay[index];
+    try std.testing.expect(overlay.transparent);
+    try std.testing.expect(!overlay.shadow);
+    try std.testing.expectEqual(types.WindowLevel.screen_saver, overlay.level);
+    try std.testing.expect(overlay.click_through);
+    try std.testing.expect(overlay.all_workspaces);
+    try std.testing.expect(!overlay.visible);
+    try std.testing.expect(!overlay.activate);
+    try std.testing.expect(!null_platform.window_visible[index]);
+
+    // Show WITHOUT activate: visible flips, focus does not move.
+    try services.setWindowVisible(7, true, false);
+    try std.testing.expect(null_platform.window_visible[index]);
+    try std.testing.expect(!null_platform.windows[index].focused);
+    try std.testing.expect(!null_platform.window_show_activate[index]);
+
+    // Programmatic placement lands in the recorded frame.
+    try services.setWindowFrame(7, geometry.RectF.init(100, 120, 560, 300));
+    try std.testing.expectEqual(@as(f32, 120), null_platform.windows[index].frame.y);
+    try std.testing.expectEqual(@as(u32, 1), null_platform.window_set_frame_count[index]);
+
+    // Click-through toggles at runtime (pointer enters the pet).
+    try services.setWindowClickThrough(7, false);
+    try std.testing.expect(!null_platform.window_click_through[index]);
+
+    // Staged pointer/work-area answer the overlay placement queries.
+    null_platform.pointer_point = .{ .x = 12, .y = 34 };
+    null_platform.work_area = geometry.RectF.init(0, 25, 1512, 920);
+    try std.testing.expectEqual(@as(f32, 34), services.pointerPosition().?.y);
+    try std.testing.expectEqual(@as(f32, 1512), services.screenWorkArea().width);
+
+    // Unknown ids fail loudly, like every other window verb.
+    try std.testing.expectError(error.WindowNotFound, services.setWindowFrame(99, geometry.RectF.init(0, 0, 1, 1)));
+    try std.testing.expectError(error.WindowNotFound, services.setWindowVisible(99, true, true));
+    try std.testing.expectError(error.WindowNotFound, services.setWindowClickThrough(99, true));
+}
+
 test "null platform rejects invalid native view parents" {
     var null_platform = NullPlatform.init(.{});
     const services = null_platform.platform().services;

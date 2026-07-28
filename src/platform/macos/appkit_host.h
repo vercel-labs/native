@@ -447,12 +447,32 @@ int native_sdk_appkit_start_window_drag(native_sdk_appkit_host_t *host, uint64_t
 // fullscreen report all-zero. Returns 0 when the window id is unknown
 // (out-params untouched).
 int native_sdk_appkit_window_chrome_insets(native_sdk_appkit_host_t *host, uint64_t window_id, double *top, double *left, double *bottom, double *right, double *buttons_x, double *buttons_y, double *buttons_width, double *buttons_height);
+/* Overlay-window surface: config staged before a window's create call
+ * (consumed inside the create so transparency/level/visibility apply
+ * before first order-front), an existing-window variant for the startup
+ * window (created before any overlay call can be staged but not ordered
+ * front until the run loop starts), programmatic frame / visibility /
+ * click-through control, and the global pointer + primary-display
+ * work-area queries overlay placement math needs. All geometry is AppKit
+ * screen coordinates — the same space window-frame events report. Levels:
+ * 0 normal, 1 floating, 2 status, 3 screen-saver. Each returns 1 on
+ * success, 0 when the window id is unknown (query out-params untouched). */
+// App-supplied content script for a window's MAIN webview, staged at
+// create and injected when the lazy webview is built (empty clears it).
+int native_sdk_appkit_set_window_user_script(native_sdk_appkit_host_t *host, uint64_t window_id, const char *script, size_t script_len);
+int native_sdk_appkit_set_pending_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces, int visible, int activate);
+int native_sdk_appkit_configure_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces);
+int native_sdk_appkit_set_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double x, double y, double width, double height);
+int native_sdk_appkit_set_window_visible(native_sdk_appkit_host_t *host, uint64_t window_id, int visible, int activate);
+int native_sdk_appkit_set_window_click_through(native_sdk_appkit_host_t *host, uint64_t window_id, int click_through);
+int native_sdk_appkit_pointer_position(native_sdk_appkit_host_t *host, double *x, double *y);
+int native_sdk_appkit_screen_work_area(native_sdk_appkit_host_t *host, double *x, double *y, double *width, double *height);
 /* Per-window child WebViews. Both hosts implement these; declaring them
  * here keeps the definitions on C linkage (the Objective-C++ Chromium
  * host would otherwise mangle them and break the platform layer's extern
  * bindings). Each returns 1 on success, 0 when the window or webview is
  * unknown. */
-int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled);
+int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled, const char *user_script, size_t user_script_len);
 int native_sdk_appkit_set_webview_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height);
 int native_sdk_appkit_navigate_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len);
 int native_sdk_appkit_set_webview_zoom(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double zoom);

@@ -699,6 +699,15 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NativeSdkBridgeScriptHandler *bridgeScriptHandler;
 @property(nonatomic, strong) NativeSdkAssetSchemeHandler *assetSchemeHandler;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSWindow *> *windows;
+/// Overlay config staged BEFORE a window's create call
+/// (`native_sdk_appkit_set_pending_window_overlay`), consumed inside
+/// `createWindowWithId:` so transparency/level/visibility apply before the
+/// window is ever ordered front — configuring after create would flash an
+/// opaque, focus-stealing window for a frame.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *pendingWindowOverlays;
+/// Per-window MAIN-webview content script (WindowOptions.user_script),
+/// staged at create and consumed when the lazy main webview is built.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowMainUserScripts;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, WKWebView *> *webViews;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkWindowDelegate *> *delegates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkBridgeScriptHandler *> *bridgeScriptHandlers;
@@ -957,7 +966,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)viewIsAdoptedSurfaceDescendant:(NSView *)view;
 - (void)installAdoptedSurfaceClickMonitor;
 - (BOOL)releaseViewSurfaceInWindow:(uint64_t)windowId label:(NSString *)label;
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled;
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled userScript:(NSString *)userScript;
+- (void)applyWindowOverlay:(NSDictionary *)overlay toWindow:(NSWindow *)window;
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor;
 - (BOOL)setWebViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)navigateWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url;
@@ -1246,6 +1256,15 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 @end
 
 @implementation NativeSdkWebView
+
+// Overlay/companion windows belong to an app that is usually NOT frontmost
+// (a desktop pet floating over the user's editor). Without this, the first
+// click on such a window is consumed as an app-activation click and never
+// reaches the web content — the window appears dead until it is already
+// focused. Accepting first mouse delivers that click straight to the page.
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return YES;
+}
 
 - (BOOL)pointIsCovered:(NSPoint)point {
     for (NSValue *value in self.coveredMouseRects) {
@@ -7154,6 +7173,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     self.iconPath = iconPath ?: @"";
     self.windowLabel = windowLabel.length > 0 ? windowLabel : @"main";
     self.windows = [[NSMutableDictionary alloc] init];
+    self.pendingWindowOverlays = [[NSMutableDictionary alloc] init];
+    self.windowMainUserScripts = [[NSMutableDictionary alloc] init];
     self.webViews = [[NSMutableDictionary alloc] init];
     self.delegates = [[NSMutableDictionary alloc] init];
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
@@ -7309,15 +7330,59 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
             [weakSelf showDeferredWindowIfPending:windowId reason:"fallback-deadline"];
         });
     }
+    // Overlay config staged before create applies here — after the window
+    // exists, before it is ever ordered front — and steers the ordering:
+    // `visible:NO` windows stay ordered out for a later
+    // `setWindowVisible`, `activate:NO` windows come up front without
+    // becoming key or activating the app (companion bubbles must never
+    // steal focus from what the user is typing in).
+    NSDictionary *overlay = self.pendingWindowOverlays[key];
+    if (overlay) {
+        [self.pendingWindowOverlays removeObjectForKey:key];
+        [self applyWindowOverlay:overlay toWindow:window];
+    }
+    BOOL overlayVisible = overlay[@"visible"] ? [overlay[@"visible"] boolValue] : YES;
+    BOOL overlayActivate = overlay[@"activate"] ? [overlay[@"activate"] boolValue] : YES;
     if (makeMain) {
         self.window = window;
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
-    } else if (showPolicy != 1) {
-        [window makeKeyAndOrderFront:nil];
-        [NSApp activate];
+    } else if (showPolicy != 1 && overlayVisible) {
+        if (overlayActivate) {
+            [window makeKeyAndOrderFront:nil];
+            [NSApp activate];
+        } else {
+            [window orderFrontRegardless];
+        }
     }
     return YES;
+}
+
+/// The visual half of an overlay config (the visibility half rides the
+/// create/show paths). Transparent windows keep their shadow off-switch
+/// separate: a shadow would re-draw the rectangle the transparency hides,
+/// but opaque raised-level windows may still want theirs.
+- (void)applyWindowOverlay:(NSDictionary *)overlay toWindow:(NSWindow *)window {
+    if ([overlay[@"transparent"] boolValue]) {
+        window.opaque = NO;
+        window.backgroundColor = NSColor.clearColor;
+    }
+    if (overlay[@"shadow"] && ![overlay[@"shadow"] boolValue]) {
+        window.hasShadow = NO;
+    }
+    switch ([overlay[@"level"] intValue]) {
+        case 1: window.level = NSFloatingWindowLevel; break;
+        case 2: window.level = NSStatusWindowLevel; break;
+        case 3: window.level = NSScreenSaverWindowLevel; break;
+        default: break;
+    }
+    if ([overlay[@"clickThrough"] boolValue]) {
+        window.ignoresMouseEvents = YES;
+    }
+    if ([overlay[@"allWorkspaces"] boolValue]) {
+        window.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces |
+            NSWindowCollectionBehaviorFullScreenAuxiliary;
+    }
 }
 
 // Order a deferred-show window front exactly once — from the first
@@ -7585,6 +7650,15 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
                                                         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                      forMainFrameOnly:YES];
     [userContentController addUserScript:bridgeScript];
+    // App-supplied content script for this window's main webview (a
+    // remote page loaded here can be observed + relayed through the
+    // bridge, e.g. the CursorBuddy account page reporting a connection).
+    NSString *mainUserScript = self.windowMainUserScripts[key];
+    if (mainUserScript.length > 0) {
+        [userContentController addUserScript:[[WKUserScript alloc] initWithSource:mainUserScript
+                                                                   injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                                forMainFrameOnly:YES]];
+    }
     configuration.userContentController = userContentController;
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
         [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
@@ -8240,7 +8314,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     return YES;
 }
 
-- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
+- (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled userScript:(NSString *)userScript {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
     if (!window || !window.contentView) return NO;
@@ -8258,14 +8332,22 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     if (assetSchemeHandler) {
         [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"zero"];
     }
-    if (bridgeEnabled) {
+    if (bridgeEnabled || userScript.length > 0) {
         WKUserContentController *controller = [[WKUserContentController alloc] init];
-        NativeSdkBridgeScriptHandler *handler = [[NativeSdkBridgeScriptHandler alloc] init];
-        handler.host = self;
-        handler.windowId = windowId;
-        handler.webViewLabel = label;
-        [controller addScriptMessageHandler:handler name:@"nativeSdkBridge"];
-        [controller addUserScript:[[WKUserScript alloc] initWithSource:NativeSdkAppKitBridgeScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+        if (bridgeEnabled) {
+            NativeSdkBridgeScriptHandler *handler = [[NativeSdkBridgeScriptHandler alloc] init];
+            handler.host = self;
+            handler.windowId = windowId;
+            handler.webViewLabel = label;
+            [controller addScriptMessageHandler:handler name:@"nativeSdkBridge"];
+            [controller addUserScript:[[WKUserScript alloc] initWithSource:NativeSdkAppKitBridgeScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+        }
+        if (userScript.length > 0) {
+            // The app's content-script equivalent: page world, document
+            // start, main frame only — it observes the page and relays
+            // through the bridge; subframes never see it.
+            [controller addUserScript:[[WKUserScript alloc] initWithSource:userScript injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+        }
         configuration.userContentController = controller;
     }
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
@@ -11932,11 +12014,121 @@ int native_sdk_appkit_update_widget_accessibility(native_sdk_appkit_host_t *host
     return [object updateWidgetAccessibilityInWindow:window_id label:labelString ?: @"" nodes:nodes count:node_count] ? 1 : 0;
 }
 
-int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
+int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled, const char *user_script, size_t user_script_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0] ? 1 : 0;
+    NSString *userScriptString = NativeSdkStringFromBytes(user_script, user_script_len) ?: @"";
+    return [object createWebViewInWindow:window_id label:labelString ?: @"" url:urlString ?: @"" x:x y:y width:width height:height layer:layer transparent:transparent != 0 bridgeEnabled:bridge_enabled != 0 userScript:userScriptString] ? 1 : 0;
+}
+
+int native_sdk_appkit_set_window_user_script(native_sdk_appkit_host_t *host, uint64_t window_id, const char *script, size_t script_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *value = NativeSdkStringFromBytes(script, script_len) ?: @"";
+    // Staged for the window's lazily-created main webview
+    // (ensureMainWebViewForWindowId consumes it). Empty clears any prior.
+    if (value.length > 0) {
+        object.windowMainUserScripts[@(window_id)] = value;
+    } else {
+        [object.windowMainUserScripts removeObjectForKey:@(window_id)];
+    }
+    return 1;
+}
+
+int native_sdk_appkit_set_pending_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces, int visible, int activate) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    // Staged for the UPCOMING create call — createWindowWithId: consumes it
+    // before the window is ever ordered front. See pendingWindowOverlays.
+    object.pendingWindowOverlays[@(window_id)] = @{
+        @"transparent" : @(transparent != 0),
+        @"shadow" : @(shadow != 0),
+        @"level" : @(level),
+        @"clickThrough" : @(click_through != 0),
+        @"allWorkspaces" : @(all_workspaces != 0),
+        @"visible" : @(visible != 0),
+        @"activate" : @(activate != 0),
+    };
+    return 1;
+}
+
+int native_sdk_appkit_configure_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    // The EXISTING-window path — the main window is created inside
+    // native_sdk_appkit_create before any overlay call can be staged, but
+    // it is not ordered front until the run loop starts, so configuring it
+    // here (before run) is still flash-free.
+    [object applyWindowOverlay:@{
+        @"transparent" : @(transparent != 0),
+        @"shadow" : @(shadow != 0),
+        @"level" : @(level),
+        @"clickThrough" : @(click_through != 0),
+        @"allWorkspaces" : @(all_workspaces != 0),
+    } toWindow:window];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double x, double y, double width, double height) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    // AppKit screen coordinates, exactly the space window-frame events
+    // report — callers needing a top-left-origin convention convert on
+    // their side of the boundary.
+    [window setFrame:NSMakeRect(x, y, width, height) display:YES];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_visible(native_sdk_appkit_host_t *host, uint64_t window_id, int visible, int activate) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    if (!visible) {
+        [window orderOut:nil];
+    } else if (activate) {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    } else {
+        // Show WITHOUT stealing focus: companion bubbles appear beside the
+        // user's work; they become key only when clicked into.
+        [window orderFrontRegardless];
+    }
+    return 1;
+}
+
+int native_sdk_appkit_set_window_click_through(native_sdk_appkit_host_t *host, uint64_t window_id, int click_through) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    window.ignoresMouseEvents = click_through != 0;
+    return 1;
+}
+
+int native_sdk_appkit_pointer_position(native_sdk_appkit_host_t *host, double *x, double *y) {
+    (void)host;
+    // Global pointer in AppKit screen coordinates (the window-frame space).
+    // Click-through overlay windows receive no pointer events of their own,
+    // so followers and hover hit-tests poll this instead.
+    NSPoint location = [NSEvent mouseLocation];
+    if (x) *x = location.x;
+    if (y) *y = location.y;
+    return 1;
+}
+
+int native_sdk_appkit_screen_work_area(native_sdk_appkit_host_t *host, double *x, double *y, double *width, double *height) {
+    (void)host;
+    // The PRIMARY display (screens[0] — the one owning the menu bar), not
+    // mainScreen (the key window's screen): overlay placement math needs a
+    // stable reference frame regardless of where focus sits.
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (!primary) return 0;
+    NSRect visible = primary.visibleFrame;
+    if (x) *x = visible.origin.x;
+    if (y) *y = visible.origin.y;
+    if (width) *width = visible.size.width;
+    if (height) *height = visible.size.height;
+    return 1;
 }
 
 int native_sdk_appkit_set_webview_frame(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, double width, double height) {

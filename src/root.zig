@@ -155,6 +155,7 @@ pub const WindowInfo = platform.WindowInfo;
 pub const WindowState = platform.WindowState;
 pub const WindowRestorePolicy = platform.WindowRestorePolicy;
 pub const WindowTitlebarStyle = platform.WindowTitlebarStyle;
+pub const WindowLevel = platform.WindowLevel;
 pub const WindowChrome = platform.WindowChrome;
 pub const FormFactor = platform.FormFactor;
 pub const WindowDragRegion = platform.WindowDragRegion;

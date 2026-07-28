@@ -2493,7 +2493,106 @@ int native_sdk_appkit_window_chrome_insets(native_sdk_appkit_host_t *host, uint6
     return 1;
 }
 
-int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled) {
+static void NativeSdkChromiumApplyWindowOverlay(NSWindow *window, int transparent, int shadow, int level, int click_through, int all_workspaces) {
+    if (transparent) {
+        window.opaque = NO;
+        window.backgroundColor = NSColor.clearColor;
+    }
+    if (!shadow) window.hasShadow = NO;
+    switch (level) {
+        case 1: window.level = NSFloatingWindowLevel; break;
+        case 2: window.level = NSStatusWindowLevel; break;
+        case 3: window.level = NSScreenSaverWindowLevel; break;
+        default: break;
+    }
+    if (click_through) window.ignoresMouseEvents = YES;
+    if (all_workspaces) {
+        window.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces |
+            NSWindowCollectionBehaviorFullScreenAuxiliary;
+    }
+}
+
+int native_sdk_appkit_set_window_user_script(native_sdk_appkit_host_t *host, uint64_t window_id, const char *script, size_t script_len) {
+    // Unsupported on the Chromium host (no WKUserScript equivalent wired up).
+    (void)host; (void)window_id; (void)script; (void)script_len;
+    return 0;
+}
+
+int native_sdk_appkit_set_pending_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces, int visible, int activate) {
+    // Unsupported on the Chromium host: its create path does not consume
+    // staged overlay config, so pretending to accept it would flash an
+    // opaque focus-stealing window. Callers see 0 and can fall back to
+    // configure-after-create.
+    (void)host; (void)window_id; (void)transparent; (void)shadow; (void)level;
+    (void)click_through; (void)all_workspaces; (void)visible; (void)activate;
+    return 0;
+}
+
+int native_sdk_appkit_configure_window_overlay(native_sdk_appkit_host_t *host, uint64_t window_id, int transparent, int shadow, int level, int click_through, int all_workspaces) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    NativeSdkChromiumApplyWindowOverlay(window, transparent, shadow, level, click_through, all_workspaces);
+    return 1;
+}
+
+int native_sdk_appkit_set_window_frame(native_sdk_appkit_host_t *host, uint64_t window_id, double x, double y, double width, double height) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    [window setFrame:NSMakeRect(x, y, width, height) display:YES];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_visible(native_sdk_appkit_host_t *host, uint64_t window_id, int visible, int activate) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    if (!visible) {
+        [window orderOut:nil];
+    } else if (activate) {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    } else {
+        [window orderFrontRegardless];
+    }
+    return 1;
+}
+
+int native_sdk_appkit_set_window_click_through(native_sdk_appkit_host_t *host, uint64_t window_id, int click_through) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    window.ignoresMouseEvents = click_through != 0;
+    return 1;
+}
+
+int native_sdk_appkit_pointer_position(native_sdk_appkit_host_t *host, double *x, double *y) {
+    (void)host;
+    NSPoint location = [NSEvent mouseLocation];
+    if (x) *x = location.x;
+    if (y) *y = location.y;
+    return 1;
+}
+
+int native_sdk_appkit_screen_work_area(native_sdk_appkit_host_t *host, double *x, double *y, double *width, double *height) {
+    (void)host;
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (!primary) return 0;
+    NSRect visible = primary.visibleFrame;
+    if (x) *x = visible.origin.x;
+    if (y) *y = visible.origin.y;
+    if (width) *width = visible.size.width;
+    if (height) *height = visible.size.height;
+    return 1;
+}
+
+int native_sdk_appkit_create_webview(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const char *url, size_t url_len, double x, double y, double width, double height, int layer, int transparent, int bridge_enabled, const char *user_script, size_t user_script_len) {
+    // Accepted for ABI parity; the Chromium host has no user-script
+    // injection path yet (WKUserScript is a WebKit concept — the CEF
+    // equivalent is a render-process hook this host does not wire up).
+    (void)user_script;
+    (void)user_script_len;
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *urlString = url ? [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding] : @"";

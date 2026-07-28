@@ -180,6 +180,14 @@ extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_in
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_set_window_close_policy(host: *AppKitHost, window_id: u64, close_policy: c_int) c_int;
+extern fn native_sdk_appkit_set_window_user_script(host: *AppKitHost, window_id: u64, script: [*]const u8, script_len: usize) c_int;
+extern fn native_sdk_appkit_set_pending_window_overlay(host: *AppKitHost, window_id: u64, transparent: c_int, shadow: c_int, level: c_int, click_through: c_int, all_workspaces: c_int, visible: c_int, activate: c_int) c_int;
+extern fn native_sdk_appkit_configure_window_overlay(host: *AppKitHost, window_id: u64, transparent: c_int, shadow: c_int, level: c_int, click_through: c_int, all_workspaces: c_int) c_int;
+extern fn native_sdk_appkit_set_window_frame(host: *AppKitHost, window_id: u64, x: f64, y: f64, width: f64, height: f64) c_int;
+extern fn native_sdk_appkit_set_window_visible(host: *AppKitHost, window_id: u64, visible: c_int, activate: c_int) c_int;
+extern fn native_sdk_appkit_set_window_click_through(host: *AppKitHost, window_id: u64, click_through: c_int) c_int;
+extern fn native_sdk_appkit_pointer_position(host: *AppKitHost, x: *f64, y: *f64) c_int;
+extern fn native_sdk_appkit_screen_work_area(host: *AppKitHost, x: *f64, y: *f64, width: *f64, height: *f64) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
 extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -220,7 +228,7 @@ extern fn native_sdk_appkit_present_gpu_surface_packet_binary(host: *AppKitHost,
 extern fn native_sdk_appkit_upload_gpu_surface_image(host: *AppKitHost, image_id: u64, width: usize, height: usize, rgba8: [*]const u8, rgba8_len: usize) c_int;
 extern fn native_sdk_appkit_remove_gpu_surface_image(host: *AppKitHost, image_id: u64) c_int;
 extern fn native_sdk_appkit_update_widget_accessibility(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, nodes: [*]const AppKitWidgetAccessibilityNode, node_count: usize) c_int;
-extern fn native_sdk_appkit_create_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
+extern fn native_sdk_appkit_create_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int, user_script: [*]const u8, user_script_len: usize) c_int;
 extern fn native_sdk_appkit_set_webview_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_appkit_navigate_webview(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_appkit_set_webview_zoom(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, zoom: f64) c_int;
@@ -624,6 +632,15 @@ pub const MacPlatform = struct {
         // .hide threads through here so the STARTUP window's red
         // button hides from the first frame on.
         applyWindowClosePolicy(host, window_options.id, window_options.close_policy);
+
+        // The startup window exists before any overlay config could be
+        // staged, but it is not ordered front until the run loop starts —
+        // configuring it here is still flash-free. (visible/activate are
+        // create-ordering concerns; the run path owns the main window's
+        // first show.)
+        if (windowHasOverlayOptions(window_options)) {
+            _ = native_sdk_appkit_configure_window_overlay(host, window_options.id, if (window_options.transparent) 1 else 0, if (window_options.shadow) 1 else 0, windowLevelInt(window_options.level), if (window_options.click_through) 1 else 0, if (window_options.all_workspaces) 1 else 0);
+        }
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -701,6 +718,11 @@ pub const MacPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
+                .set_window_frame_fn = setWindowFrame,
+                .set_window_visible_fn = setWindowVisible,
+                .set_window_click_through_fn = setWindowClickThrough,
+                .pointer_position_fn = pointerPosition,
+                .screen_work_area_fn = screenWorkArea,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .create_view_fn = createView,
@@ -1220,6 +1242,24 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     };
 }
 
+fn windowLevelInt(level: platform_mod.WindowLevel) c_int {
+    return switch (level) {
+        .normal => 0,
+        .floating => 1,
+        .status => 2,
+        .screen_saver => 3,
+    };
+}
+
+/// True when any overlay-shape option departs from the plain-window
+/// defaults — only then is config staged/applied, so ordinary windows
+/// keep the exact legacy create path.
+fn windowHasOverlayOptions(options: platform_mod.WindowOptions) bool {
+    return options.transparent or !options.shadow or options.level != .normal or
+        options.click_through or options.all_workspaces or !options.visible or
+        !options.activate;
+}
+
 fn closePolicyInt(policy: platform_mod.WindowClosePolicy) c_int {
     return switch (policy) {
         .quit => 0,
@@ -1251,6 +1291,18 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
+    // Overlay config must be staged BEFORE the create call — the host
+    // consumes it inside createWindowWithId: so transparency/level apply
+    // before the window is ever ordered front, and visible:false /
+    // activate:false windows never flash or steal focus at create.
+    if (windowHasOverlayOptions(options)) {
+        _ = native_sdk_appkit_set_pending_window_overlay(self.host, options.id, if (options.transparent) 1 else 0, if (options.shadow) 1 else 0, windowLevelInt(options.level), if (options.click_through) 1 else 0, if (options.all_workspaces) 1 else 0, if (options.visible) 1 else 0, if (options.activate) 1 else 0);
+    }
+    // Stage the main-webview content script BEFORE create so the lazily
+    // built webview picks it up on first load.
+    if (options.user_script.len > 0) {
+        _ = native_sdk_appkit_set_window_user_script(self.host, options.id, options.user_script.ptr, options.user_script.len);
+    }
     if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
@@ -1278,6 +1330,39 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn setWindowFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, frame: geometry.RectF) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_frame(self.host, window_id, frame.x, frame.y, frame.width, frame.height) == 0) return error.WindowNotFound;
+}
+
+fn setWindowVisible(context: ?*anyopaque, window_id: platform_mod.WindowId, visible: bool, activate: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_visible(self.host, window_id, if (visible) 1 else 0, if (activate) 1 else 0) == 0) return error.WindowNotFound;
+}
+
+fn setWindowClickThrough(context: ?*anyopaque, window_id: platform_mod.WindowId, click_through: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_click_through(self.host, window_id, if (click_through) 1 else 0) == 0) return error.WindowNotFound;
+}
+
+fn pointerPosition(context: ?*anyopaque) geometry.PointF {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var x: f64 = 0;
+    var y: f64 = 0;
+    _ = native_sdk_appkit_pointer_position(self.host, &x, &y);
+    return .{ .x = @floatCast(x), .y = @floatCast(y) };
+}
+
+fn screenWorkArea(context: ?*anyopaque) geometry.RectF {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var width: f64 = 0;
+    var height: f64 = 0;
+    if (native_sdk_appkit_screen_work_area(self.host, &x, &y, &width, &height) == 0) return geometry.RectF.init(0, 0, 0, 0);
+    return geometry.RectF.init(@floatCast(x), @floatCast(y), @floatCast(width), @floatCast(height));
 }
 
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -1932,7 +2017,7 @@ fn appKitCursor(cursor: platform_mod.Cursor) c_int {
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const frame = options.frame;
-    if (native_sdk_appkit_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, if (options.bridge_enabled) 1 else 0) == 0) return error.CreateFailed;
+    if (native_sdk_appkit_create_webview(self.host, options.window_id, options.label.ptr, options.label.len, options.url.ptr, options.url.len, frame.x, frame.y, frame.width, frame.height, options.layer, if (options.transparent) 1 else 0, if (options.bridge_enabled) 1 else 0, options.user_script.ptr, options.user_script.len) == 0) return error.CreateFailed;
 }
 
 fn setWebViewFrame(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, frame: geometry.RectF) anyerror!void {

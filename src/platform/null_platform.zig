@@ -282,6 +282,18 @@ pub const NullAudio = struct {
     }
 };
 
+/// The overlay-shape half of `WindowOptions`, captured at the create
+/// seam (see `NullPlatform.window_overlay`).
+pub const WindowOverlayRecord = struct {
+    transparent: bool = false,
+    shadow: bool = true,
+    level: types.WindowLevel = .normal,
+    click_through: bool = false,
+    all_workspaces: bool = false,
+    visible: bool = true,
+    activate: bool = true,
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -385,6 +397,25 @@ pub const NullPlatform = struct {
     /// seam-regression purpose as `window_resizable`.
     window_min_width: [max_windows]f32 = [_]f32{0} ** max_windows,
     window_min_height: [max_windows]f32 = [_]f32{0} ** max_windows,
+    /// Captured overlay-shape options per created window
+    /// (`WindowOptions.transparent/shadow/level/click_through/
+    /// all_workspaces/visible/activate`), indexed like `windows` — the
+    /// observable seam overlay-window tests pin.
+    window_overlay: [max_windows]WindowOverlayRecord = [_]WindowOverlayRecord{.{}} ** max_windows,
+    /// Live click-through state per window: starts as the created
+    /// option, flips on `set_window_click_through_fn` — overlays toggle
+    /// it as the pointer crosses their visible content.
+    window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
+    /// setWindowFrame calls per window; `windows[i].frame` holds the
+    /// last applied rect.
+    window_set_frame_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Last `set_window_visible_fn` activate flag per window — the
+    /// "shown without stealing focus" seam.
+    window_show_activate: [max_windows]bool = [_]bool{true} ** max_windows,
+    /// Test-staged global pointer and primary work area answered by
+    /// `pointer_position_fn`/`screen_work_area_fn`.
+    pointer_point: geometry.PointF = .{},
+    work_area: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     /// Live visibility per window, modeling the macOS host: immediate
     /// windows are visible at create; `.on_first_present` windows stay
     /// hidden until their first gpu-surface present (or an explicit
@@ -803,6 +834,11 @@ pub const NullPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
+                .set_window_frame_fn = setWindowFrame,
+                .set_window_visible_fn = setWindowVisible,
+                .set_window_click_through_fn = setWindowClickThrough,
+                .pointer_position_fn = pointerPosition,
+                .screen_work_area_fn = screenWorkArea,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
                 .set_window_drag_regions_fn = setWindowDragRegions,
@@ -1053,13 +1089,31 @@ pub const NullPlatform = struct {
         self.window_close_policy[self.window_count] = options.close_policy;
         self.window_min_width[self.window_count] = options.min_width;
         self.window_min_height[self.window_count] = options.min_height;
+        self.window_overlay[self.window_count] = .{
+            .transparent = options.transparent,
+            .shadow = options.shadow,
+            .level = options.level,
+            .click_through = options.click_through,
+            .all_workspaces = options.all_workspaces,
+            .visible = options.visible,
+            .activate = options.activate,
+        };
+        self.window_click_through[self.window_count] = options.click_through;
+        self.window_set_frame_count[self.window_count] = 0;
+        self.window_show_activate[self.window_count] = options.activate;
         self.window_first_present_seq[self.window_count] = 0;
         // Present-before-show: deferred windows are created hidden and
-        // become visible on their first gpu-surface present.
-        if (options.show == .immediate) {
+        // become visible on their first gpu-surface present. An overlay
+        // window declared `visible:false` is also created hidden — it
+        // appears only on an explicit `setWindowVisible` (the real hosts
+        // skip its order-front inside create).
+        if (options.show == .immediate and options.visible) {
             self.window_visible[self.window_count] = true;
             self.show_op_seq += 1;
             self.window_shown_seq[self.window_count] = self.show_op_seq;
+        } else if (options.show == .immediate) {
+            self.window_visible[self.window_count] = false;
+            self.window_shown_seq[self.window_count] = 0;
         } else {
             self.window_visible[self.window_count] = false;
             self.window_shown_seq[self.window_count] = 0;
@@ -1160,6 +1214,48 @@ pub const NullPlatform = struct {
         self.windows[index].focused = false;
         self.window_minimize_count[index] += 1;
         self.window_occluded[index] = true;
+    }
+
+    fn setWindowFrame(context: ?*anyopaque, window_id: WindowId, frame: geometry.RectF) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        self.windows[index].frame = frame;
+        self.window_set_frame_count[index] += 1;
+    }
+
+    fn setWindowVisible(context: ?*anyopaque, window_id: WindowId, visible: bool, activate: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        if (visible and !self.window_visible[index]) {
+            self.show_op_seq += 1;
+            self.window_shown_seq[index] = self.show_op_seq;
+        }
+        self.window_visible[index] = visible;
+        self.window_show_activate[index] = activate;
+        // Showing WITHOUT activate never takes key (orderFrontRegardless);
+        // showing with it does, mirroring makeKeyAndOrderFront.
+        if (visible and activate) {
+            for (self.windows[0..self.window_count], 0..) |*window, scan| {
+                window.focused = scan == index;
+            }
+        }
+        if (!visible) self.windows[index].focused = false;
+    }
+
+    fn setWindowClickThrough(context: ?*anyopaque, window_id: WindowId, click_through: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        self.window_click_through[index] = click_through;
+    }
+
+    fn pointerPosition(context: ?*anyopaque) geometry.PointF {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.pointer_point;
+    }
+
+    fn screenWorkArea(context: ?*anyopaque) geometry.RectF {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.work_area;
     }
 
     fn showWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
