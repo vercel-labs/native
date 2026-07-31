@@ -425,6 +425,7 @@ struct NativeView {
     std::vector<uint8_t> gpu_bgra;
     int gpu_buf_width = 0;
     int gpu_buf_height = 0;
+    double gpu_scale = 0;
     /* ONE frame-event scheduler per surface (the macOS design): every
      * producer that wants a frame event — runtime frame requests, pixel
      * presents (the completion analog), the pre-first-present placeholder
@@ -2680,7 +2681,64 @@ static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view) {
     }
 }
 
-static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
+struct GpuPixelRect {
+    int left;
+    int top;
+    int right;
+    int bottom;
+
+    constexpr bool empty() const {
+        return left >= right || top >= bottom;
+    }
+};
+
+static constexpr double clampGpuPixelCoord(double value, int extent) {
+    return value < 0 ? 0 : (value > extent ? extent : value);
+}
+
+static constexpr int floorGpuPixelCoord(double value) {
+    return static_cast<int>(value);
+}
+
+static constexpr int ceilGpuPixelCoord(double value) {
+    const int whole = static_cast<int>(value);
+    return whole + (static_cast<double>(whole) < value ? 1 : 0);
+}
+
+static constexpr GpuPixelRect gpuPixelDirtyRect(
+    int width,
+    int height,
+    double scale,
+    double x,
+    double y,
+    double dirty_width,
+    double dirty_height
+) {
+    const double x0 = clampGpuPixelCoord((dirty_width < 0 ? x + dirty_width : x) * scale, width);
+    const double y0 = clampGpuPixelCoord((dirty_height < 0 ? y + dirty_height : y) * scale, height);
+    const double x1 = clampGpuPixelCoord((dirty_width < 0 ? x : x + dirty_width) * scale, width);
+    const double y1 = clampGpuPixelCoord((dirty_height < 0 ? y : y + dirty_height) * scale, height);
+    return {
+        floorGpuPixelCoord(x0),
+        floorGpuPixelCoord(y0),
+        ceilGpuPixelCoord(x1),
+        ceilGpuPixelCoord(y1),
+    };
+}
+
+static_assert(
+    gpuPixelDirtyRect(100, 100, 1.25, 0.4, 0.4, 1, 1).left == 0 &&
+    gpuPixelDirtyRect(100, 100, 1.25, 0.4, 0.4, 1, 1).right == 2,
+    "dirty bounds must round outward at fractional scale");
+static_assert(
+    gpuPixelDirtyRect(100, 100, 1, -10, -2, 12, 4).left == 0 &&
+    gpuPixelDirtyRect(100, 100, 1, -10, -2, 12, 4).bottom == 2,
+    "dirty bounds must clamp to the retained surface");
+static_assert(
+    gpuPixelDirtyRect(100, 100, 1, 100, 20, 10, 10).empty(),
+    "off-surface dirty bounds must remain empty");
+
+static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc, const RECT &paint_rect) {
     if (view.gpu_bgra.empty() || view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return;
     RECT rect = {};
     GetClientRect(hwnd, &rect);
@@ -2700,7 +2758,21 @@ static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
     info.bmiHeader.biCompression = BI_RGB;
 
     if (client_width == view.gpu_buf_width && client_height == view.gpu_buf_height) {
-        SetDIBitsToDevice(dc, 0, 0, view.gpu_buf_width, view.gpu_buf_height, 0, 0, 0, view.gpu_buf_height, view.gpu_bgra.data(), &info, DIB_RGB_COLORS);
+        RECT clipped = {};
+        if (!IntersectRect(&clipped, &paint_rect, &rect)) return;
+        const int width = clipped.right - clipped.left;
+        const int height = clipped.bottom - clipped.top;
+        /* SetDIBitsToDevice supports banded output: point it at the first
+         * dirty row and describe that slice as its own top-down DIB.
+         * Keeping the band source at y=0 avoids the nonzero-y source crop
+         * that duplicated unrelated rows during scroll paints. */
+        BITMAPINFO band_info = info;
+        band_info.bmiHeader.biHeight = -height;
+        const size_t band_offset =
+            static_cast<size_t>(clipped.top) *
+            static_cast<size_t>(view.gpu_buf_width) *
+            4;
+        SetDIBitsToDevice(dc, clipped.left, clipped.top, width, height, clipped.left, 0, 0, height, view.gpu_bgra.data() + band_offset, &band_info, DIB_RGB_COLORS);
         return;
     }
     /* Mid-resize frames where the buffer is stale stretch until the next
@@ -2982,7 +3054,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             PAINTSTRUCT paint = {};
             HDC dc = BeginPaint(hwnd, &paint);
             if (dc) {
-                paintGpuSurface(*view, hwnd, dc);
+                paintGpuSurface(*view, hwnd, dc, paint.rcPaint);
                 /* Hidden-titlebar parents: yield the caption-button
                  * cluster back to the DWM (see the helper's comment). */
                 punchHiddenCaptionButtonHole(host, *view, hwnd, dc);
@@ -6479,21 +6551,36 @@ int native_sdk_windows_show_context_menu(Host *host, uint64_t window_id, const c
 }
 
 int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
-    (void)scale;
-    (void)has_dirty_rect;
-    (void)dirty_x;
-    (void)dirty_y;
-    (void)dirty_width;
-    (void)dirty_height;
     if (!host || label_len == 0) return 0;
     auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
     if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
-    if (!rgba8 || width == 0 || height == 0) return 0;
+    if (!rgba8 || width == 0 || height == 0 || !std::isfinite(scale) || scale <= 0) return 0;
     if (width > INT_MAX || height > INT_MAX) return 0;
     if (rgba8_len != width * height * 4) return 0;
     NativeView &view = found->second;
     auto owner = host->windows.find(view.window_id);
     const bool transparent_window = owner != host->windows.end() && owner->second.transparent;
+    const bool retained_compatible =
+        view.gpu_buf_width == static_cast<int>(width) &&
+        view.gpu_buf_height == static_cast<int>(height) &&
+        view.gpu_scale == scale &&
+        view.gpu_bgra.size() == rgba8_len;
+    const bool valid_dirty_rect =
+        has_dirty_rect &&
+        std::isfinite(dirty_x) &&
+        std::isfinite(dirty_y) &&
+        std::isfinite(dirty_width) &&
+        std::isfinite(dirty_height);
+    const GpuPixelRect update = retained_compatible && valid_dirty_rect
+        ? gpuPixelDirtyRect(
+            static_cast<int>(width),
+            static_cast<int>(height),
+            scale,
+            dirty_x,
+            dirty_y,
+            dirty_width,
+            dirty_height)
+        : GpuPixelRect{0, 0, static_cast<int>(width), static_cast<int>(height)};
 
     /* Straight RGBA8 -> top-down BGRA rows for a BI_RGB 32bpp DIB. The
      * surface is opaque (alpha_mode "opaque"), so no premultiply is
@@ -6503,19 +6590,22 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * the redirection surface's alpha is 0 — the app's pixels must read
      * as opaque there or the whole header band would vanish under DWM
      * chrome (only the punched button hole yields on purpose). */
-    view.gpu_bgra.resize(width * height * 4);
+    if (!retained_compatible) view.gpu_bgra.resize(width * height * 4);
     uint8_t *dst = view.gpu_bgra.data();
-    const size_t pixel_count = width * height;
-    for (size_t index = 0; index < pixel_count; index++) {
-        const uint8_t *src = rgba8 + index * 4;
-        const uint32_t alpha = transparent_window ? src[3] : 255;
-        dst[index * 4 + 0] = transparent_window ? (uint8_t)((src[2] * alpha + 127) / 255) : src[2];
-        dst[index * 4 + 1] = transparent_window ? (uint8_t)((src[1] * alpha + 127) / 255) : src[1];
-        dst[index * 4 + 2] = transparent_window ? (uint8_t)((src[0] * alpha + 127) / 255) : src[0];
-        dst[index * 4 + 3] = (uint8_t)alpha;
+    for (int y = update.top; y < update.bottom; y++) {
+        for (int x = update.left; x < update.right; x++) {
+            const size_t index = static_cast<size_t>(y) * width + static_cast<size_t>(x);
+            const uint8_t *src = rgba8 + index * 4;
+            const uint32_t alpha = transparent_window ? src[3] : 255;
+            dst[index * 4 + 0] = transparent_window ? (uint8_t)((src[2] * alpha + 127) / 255) : src[2];
+            dst[index * 4 + 1] = transparent_window ? (uint8_t)((src[1] * alpha + 127) / 255) : src[1];
+            dst[index * 4 + 2] = transparent_window ? (uint8_t)((src[0] * alpha + 127) / 255) : src[0];
+            dst[index * 4 + 3] = (uint8_t)alpha;
+        }
     }
     view.gpu_buf_width = (int)width;
     view.gpu_buf_height = (int)height;
+    view.gpu_scale = scale;
 
     /* Hidden-titlebar windows: keep the DWM caption material behind the
      * button cluster matched to the header the app just presented. */
@@ -6532,7 +6622,10 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     }
 
     const bool layered_presented = owner != host->windows.end() && presentTransparentWindow(host, owner->second);
-    if (!layered_presented) InvalidateRect(view.hwnd, nullptr, FALSE);
+    if (!layered_presented && !update.empty()) {
+        const RECT dirty = {update.left, update.top, update.right, update.bottom};
+        InvalidateRect(view.hwnd, &dirty, FALSE);
+    }
     /* A present is the completion producer on the surface's single
      * frame-event scheduler: the completion event it arms is what
      * drives the runtime's frame loop (an armed animation presents,

@@ -685,6 +685,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var render_memo = native_sdk.canvas.ReferenceRenderMemo.init(std.heap.page_allocator);
+    defer render_memo.deinit();
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -703,6 +705,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .js_window_api = options.js_window_api,
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
+        .pixel_present_retained_baseline = true,
+        .pixel_present_render_memo = &render_memo,
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,

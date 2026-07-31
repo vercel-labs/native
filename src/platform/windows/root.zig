@@ -1919,6 +1919,21 @@ test "windows passive canvas creation does not focus its child hwnd" {
     ) != null);
 }
 
+test "windows dirty pixel paints keep the retained DIB at a stable origin" {
+    const host_source = @embedFile("webview2_host.cpp");
+    const paint_at = std.mem.indexOf(u8, host_source, "static void paintGpuSurface(") orelse return error.TestExpectedEqual;
+    const paint_tail = host_source[paint_at..];
+    const paint_end = std.mem.indexOf(u8, paint_tail, "static constexpr uint8_t compositePremultipliedChannel") orelse return error.TestExpectedEqual;
+    const paint = paint_tail[0..paint_end];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        paint,
+        "SetDIBitsToDevice(dc, clipped.left, clipped.top, width, height, clipped.left, 0, 0, height",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, paint, "band_info.bmiHeader.biHeight = -height;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "InvalidateRect(view.hwnd, &dirty, FALSE);") != null);
+}
+
 test "windows click-through uses a layered surface even when visually opaque" {
     const host_source = @embedFile("webview2_host.cpp");
     try std.testing.expect(std.mem.indexOf(

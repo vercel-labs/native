@@ -1,0 +1,1 @@
+improvement: **Incremental Windows canvas presents**: retained software-canvas frames now convert only the damaged pixel rectangle after the first full frame while keeping dirty repaint bands aligned during scrolling.

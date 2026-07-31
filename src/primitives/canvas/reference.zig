@@ -251,17 +251,20 @@ pub const ReferenceRenderSurface = struct {
 
     pub fn clearRect(self: ReferenceRenderSurface, rect: geometry.RectF, color: Color) void {
         const pixel_rect = referencePixelRect(rect, self.width, self.height) orelse return;
-        const pixel = colorToRgba8(color);
-        var y = pixel_rect.y;
-        while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
-            var x = pixel_rect.x;
-            while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                const index = (y * self.width + x) * 4;
-                self.pixels[index + 0] = pixel[0];
-                self.pixels[index + 1] = pixel[1];
-                self.pixels[index + 2] = pixel[2];
-                self.pixels[index + 3] = pixel[3];
-            }
+        self.overwriteRect(pixel_rect, colorToRgba8(color));
+    }
+
+    fn overwriteRect(self: ReferenceRenderSurface, pixel_rect: ReferencePixelRect, pixel: [4]u8) void {
+        const first_offset = (pixel_rect.y * self.width + pixel_rect.x) * 4;
+        const row_len = pixel_rect.width * 4;
+        var index = first_offset;
+        while (index < first_offset + row_len) : (index += 4) {
+            self.pixels[index..][0..4].* = pixel;
+        }
+        var row: usize = 1;
+        while (row < pixel_rect.height) : (row += 1) {
+            const offset = ((pixel_rect.y + row) * self.width + pixel_rect.x) * 4;
+            @memcpy(self.pixels[offset .. offset + row_len], self.pixels[first_offset .. first_offset + row_len]);
         }
     }
 
@@ -318,6 +321,14 @@ pub const ReferenceRenderSurface = struct {
         // the pixel it writes, so no apron rows join the key.
         const probe = self.memoProbe(pixel_rect, 0, referenceMemoParamsHash(1, command, value));
         if (self.memoReplay(probe, pixel_rect)) return;
+        switch (value.fill) {
+            .color => |color| if (color.a * std.math.clamp(command.opacity, 0, 1) >= 1) {
+                self.overwriteRect(pixel_rect, colorToRgba8(color));
+                self.memoStore(probe, pixel_rect);
+                return;
+            },
+            .linear_gradient => {},
+        }
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -1654,6 +1665,7 @@ fn rgba8ToColor(pixel: [4]u8) Color {
 
 fn blendRgba8(dst: [4]u8, src: Color, opacity: f32) [4]u8 {
     const src_a = std.math.clamp(src.a * std.math.clamp(opacity, 0, 1), 0, 1);
+    if (src_a >= 1) return colorToRgba8(src);
     const dst_a = @as(f32, @floatFromInt(dst[3])) / 255.0;
     const out_a = src_a + dst_a * (1 - src_a);
     if (out_a <= 0) return .{ 0, 0, 0, 0 };
