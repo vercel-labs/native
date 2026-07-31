@@ -151,6 +151,12 @@ For apps with [web content](/frontend), build with `-Ddebug-overlay=true` to ena
 native dev -Ddebug-overlay=true
 ```
 
+## Web Inspector
+
+On macOS, apps that declare web content get a WebKit inspector entry in the native View menu. Run the app, focus the WebView window, then choose **View > Toggle Web Inspector** or press <kbd>⌥</kbd><kbd>⌘</kbd><kbd>I</kbd>. Canvas-only apps do not show the item because there is no WebView to inspect.
+
+The inspector is for the web surface: DOM, console, network, storage, and frontend JavaScript. For native-rendered UI state, use [Automation](/automation) snapshots and widget driving instead.
+
 See also [native doctor](/debugging/doctor) for a full diagnostic tool reference.
 
 ## Environment variables
