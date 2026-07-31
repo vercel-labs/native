@@ -12556,6 +12556,7 @@ pub fn Effects(comptime Msg: type) type {
                 .stdin = if (ctx.stdin_len > 0) .pipe else .ignore,
                 .stdout = .pipe,
                 .stderr = if (ctx.output_mode == .collect) .pipe else .ignore,
+                .create_no_window = builtin.os.tag == .windows,
                 // POSIX: land the child in its OWN process group (id ==
                 // its pid, set before exec) so `killPublishedChild` can
                 // signal the whole descendant tree. Killing only the
