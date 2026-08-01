@@ -2,6 +2,8 @@
 
 For apps that [embed web content](/frontend), the bridge connects JavaScript in the WebView to native Zig handlers via JSON messages. Native-rendered apps have no bridge — markup dispatches typed messages straight into `update` (see [App Model](/app-model)).
 
+The complete working reference is [`examples/webview`](https://github.com/vercel-labs/native/tree/main/examples/webview): it registers a custom `native.ping` Zig handler, calls it from inline JavaScript with `window.zero.invoke(...)`, and tests the bridge response through the headless runtime.
+
 ## Architecture
 
 ```
@@ -33,17 +35,56 @@ The handler writes its JSON result into the provided `output` buffer (max 12 KiB
 return native_sdk.bridge.writeJsonStringValue(output, user_supplied_name);
 ```
 
+`invocation.request.payload` is the raw JSON payload string from JavaScript. Parse it when the handler needs structured input; ignore it for simple commands like `native.ping`.
+
 ## Wiring the dispatcher
 
 ```zig
-fn bridge(self: *App) native_sdk.BridgeDispatcher {
-    self.handlers = .{.{ .name = "native.ping", .context = self, .invoke_fn = ping }};
-    return .{
-        .policy = .{ .enabled = true, .commands = &policies },
-        .registry = .{ .handlers = &self.handlers },
-    };
+const bridge_origins = [_][]const u8{
+    "zero://inline",
+    "zero://app",
+    "http://127.0.0.1:5173",
+};
+const bridge_policies = [_]native_sdk.BridgeCommandPolicy{
+    .{ .name = "native.ping", .origins = &bridge_origins },
+};
+
+const App = struct {
+    ping_count: u32 = 0,
+    bridge_handlers: [1]native_sdk.BridgeHandler = undefined,
+
+    // ...
+
+    fn bridge(self: *App) native_sdk.BridgeDispatcher {
+        self.bridge_handlers = .{.{ .name = "native.ping", .context = self, .invoke_fn = ping }};
+        return .{
+            .policy = .{ .enabled = true, .commands = &bridge_policies },
+            .registry = .{ .handlers = &self.bridge_handlers },
+        };
+    }
+};
+```
+
+Pass the dispatcher into the generated runner or directly into `Runtime.initAt`:
+
+```zig
+pub fn main(init: std.process.Init) !void {
+    var app = App{};
+    try runner.runWithOptions(app.app(), .{
+        .app_name = "my-app",
+        .window_title = "My App",
+        .bundle_id = "dev.example.my-app",
+        .bridge = app.bridge(),
+        .security = .{
+            .navigation = .{ .allowed_origins = &bridge_origins },
+        },
+    }, init);
 }
 ```
+
+For larger apps, keep the handlers array on your app state. The dispatcher stores pointers to the handler table, so the array must outlive `runtime.run(...)`.
+
+When using `native dev`, add the origin from your frontend dev URL to the bridge policy and navigation allow-list too. For example, Vite commonly uses `http://127.0.0.1:5173`; Next.js commonly uses `http://127.0.0.1:3000`. If the origin is missing, the shell may deny navigation or `window.zero.invoke(...)` may reject an otherwise trusted page.
 
 ## Calling from JavaScript
 
@@ -51,6 +92,8 @@ fn bridge(self: *App) native_sdk.BridgeDispatcher {
 const result = await window.zero.invoke("native.ping", { source: "webview" });
 console.log(result); // { message: "pong from Zig", count: 1 }
 ```
+
+The generated web-frontend templates expose `window.zero` inside the trusted WebView. Browser-only development, such as `npm run dev` in the frontend folder, does not have the native bridge injected; guard optional UI with `if (window.zero)`.
 
 ## Invocation
 
