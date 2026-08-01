@@ -391,6 +391,15 @@ pub const Exit = struct {
 /// child does nothing but exec.
 pub const SpawnOptions = struct {
     argv: []const []const u8,
+    /// The child's initial working directory. Null inherits the
+    /// parent's, which is what a pty child got before this existed.
+    /// Applied in the child with `chdir` immediately before `execve`
+    /// (async-signal-safe, like every other post-fork call here), so a
+    /// directory that cannot be entered fails the spawn through the
+    /// exec self-pipe rather than starting the child somewhere else.
+    /// Note that `argv[0]` still resolves against PATH in the PARENT —
+    /// a relative command is resolved before this `chdir`.
+    cwd: ?[]const u8 = null,
     /// The child's environment. When null the child inherits nothing but
     /// `TERM` (a clean environment, like the fallback spawn environ).
     env: ?[]const EnvVar = null,
@@ -435,6 +444,12 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     for (options.argv) |arg| {
         if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.PtyArgvInvalid;
     }
+    // Same rule for the cwd, and for the same reason: `chdir` reads to
+    // the first NUL, so an embedded one would silently enter a
+    // DIFFERENT directory rather than fail.
+    if (options.cwd) |dir| {
+        if (dir.len == 0 or std.mem.indexOfScalar(u8, dir, 0) != null) return error.PtyArgvInvalid;
+    }
 
     // Resolve argv[0] to an absolute path in the PARENT so the child's
     // only post-fork calls are login_tty/execve/_exit — execve needs a
@@ -451,6 +466,10 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
     const resolved_z = arena.dupeZ(u8, resolved) catch return error.PtyEnvironTooLarge;
     const argv_z = buildArgvZ(arena, options.argv) catch return error.PtyEnvironTooLarge;
     const envp_z = buildEnvpZ(arena, options.env, options.term) catch return error.PtyEnvironTooLarge;
+    const cwd_z: ?[:0]const u8 = if (options.cwd) |dir|
+        arena.dupeZ(u8, dir) catch return error.PtyEnvironTooLarge
+    else
+        null;
 
     const ws: Winsize = .{
         .row = if (options.rows == 0) 24 else options.rows,
@@ -458,7 +477,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         .xpixel = 0,
         .ypixel = 0,
     };
-    const pair = try spawnPair(resolved_z, argv_z, envp_z, ws);
+    const pair = try spawnPair(resolved_z, argv_z, envp_z, cwd_z, ws);
     // A failure byte, EOF, or the timeout resolves the probe. A real
     // exec failure writes its byte into the pipe buffer INSTANTLY (the
     // child's write lands before its _exit), so a byte always means
@@ -513,6 +532,7 @@ fn spawnPair(
     resolved_z: [:0]const u8,
     argv_z: [:null]const ?[*:0]const u8,
     envp_z: [:null]const ?[*:0]const u8,
+    cwd_z: ?[:0]const u8,
     ws: Winsize,
 ) Error!SpawnedPair {
     pty_spawn_mutex.lock();
@@ -651,6 +671,15 @@ fn spawnPair(
         _ = c.close(parent);
         _ = c.close(exec_pipe[0]);
         if (c.login_tty(child_fd) != 0) reportExecFailure(exec_pipe[1]);
+        // The requested cwd, entered here and not in the parent: the
+        // parent's directory is shared by every other spawn on the
+        // process, and a `chdir` there would be a data race with them.
+        // A directory that cannot be entered reports through the SAME
+        // self-pipe an exec failure uses — "the pty forked but the
+        // program could not start" is exactly this case.
+        if (cwd_z) |dir| {
+            if (c.chdir(dir.ptr) != 0) reportExecFailure(exec_pipe[1]);
+        }
         _ = c.execve(resolved_z.ptr, argv_z.ptr, envp_z.ptr);
         reportExecFailure(exec_pipe[1]);
     }
@@ -949,6 +978,7 @@ const c = struct {
     extern "c" fn write(fd: c_int, buf: [*]const u8, len: usize) isize;
     extern "c" fn close(fd: c_int) c_int;
     extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+    extern "c" fn chdir(path: [*:0]const u8) c_int;
     extern "c" fn _exit(code: c_int) noreturn;
     extern "c" fn kill(pid: c_int, sig: c_int) c_int;
     extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;

@@ -728,6 +728,16 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         error.InvalidWtf8 => return error.PtyEnvironTooLarge,
         error.OutOfMemory => return error.PtyEnvironTooLarge,
     };
+    // `lpCurrentDirectory` is the whole posix `chdir` on this side —
+    // CreateProcess sets the child's directory itself, so nothing here
+    // touches the parent's. Null keeps the inherit-the-parent default.
+    const cwd_w: ?[*:0]const u16 = if (options.cwd) |dir| cwd: {
+        if (dir.len == 0 or std.mem.indexOfScalar(u8, dir, 0) != null) return error.PtyArgvInvalid;
+        const len = std.unicode.calcWtf16LeLen(dir) catch return error.PtyArgvInvalid;
+        const wide = arena.allocSentinel(u16, len, 0) catch return error.PtyEnvironTooLarge;
+        _ = std.unicode.wtf8ToWtf16Le(wide, dir) catch return error.PtyArgvInvalid;
+        break :cwd wide.ptr;
+    } else null;
 
     // The pipe pair. Parent ends are overlapped named-pipe servers (the
     // one Windows pipe flavor that can join an event wait); the conhost
@@ -811,7 +821,7 @@ pub fn spawn(gpa: std.mem.Allocator, options: SpawnOptions) Error!Pty {
         0,
         win.EXTENDED_STARTUPINFO_PRESENT | win.CREATE_UNICODE_ENVIRONMENT,
         env_block_w.ptr,
-        null,
+        cwd_w,
         &siex.StartupInfo,
         &pi,
     ) == 0) {

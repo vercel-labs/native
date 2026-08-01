@@ -171,7 +171,7 @@ The full app lives in [`examples/terminal`](https://github.com/native-sdk/native
   <tbody>
     <tr>
       <td><code>ptySpawn</code></td>
-      <td>Open a pty, fork <code>argv</code> onto it as its controlling terminal, and stream output back through <code>on_event</code>. Initial <code>cols</code>/<code>rows</code> and an optional <code>term</code> (default <code>xterm-256color</code>).</td>
+      <td>Open a pty, fork <code>argv</code> onto it as its controlling terminal, and stream output back through <code>on_event</code>. Initial <code>cols</code>/<code>rows</code>, an optional <code>term</code> (default <code>xterm-256color</code>), and an optional <code>cwd</code> (default: inherit the app's).</td>
     </tr>
     <tr>
       <td><code>ptyWrite</code></td>
@@ -187,6 +187,8 @@ The full app lives in [`examples/terminal`](https://github.com/native-sdk/native
     </tr>
   </tbody>
 </table>
+
+`cwd` is entered in the CHILD, immediately before exec — so a directory that cannot be entered fails that spawn through its own `.exit` terminal (`code != 0`), and no other pty's directory moves. `argv[0]` still resolves against PATH from the app's own directory. Without it, per-directory terminals have to smuggle the change into the command line (`sh -c "cd '<path>' && exec <shell> -i"`), which turns a path into a shell word and breaks on a quote.
 
 A pty is **a spawn with a different transport**, so it rides the same seams as `Cmd.spawn`: the same `command` permission in [`app.zon`](/app-zon), the same environment policy (the child inherits the host environment the app bound, plus `TERM`), the same argv budgets, and the same one key space as spawns, fetches, and channels — a pty key is occupied from spawn until its exit Msg delivers.
 
