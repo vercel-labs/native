@@ -265,6 +265,10 @@ pub const WindowActionBinding = struct {
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
+    /// Move keyboard focus to a VIEW inside a window, both named by
+    /// their declared labels — the effect-channel route to
+    /// `Runtime.focusView`, which `update` cannot reach directly.
+    focus_view_fn: *const fn (context: *anyopaque, window_label: []const u8, view_label: []const u8) bool,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -291,30 +295,46 @@ pub const HostCallBinding = struct {
 };
 
 /// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`/
-/// `showWindow`): the mirror copies the last requested label so tests
-/// can pin it.
+/// `showWindow`/`focusView`): the mirror copies the last requested label
+/// so tests can pin it.
 pub const max_window_action_label = 64;
 
 /// The window-action mirror: observable state for every close/minimize/
-/// show/quit request made through the channel, recorded before the
-/// runtime call (and INSTEAD of it under the fake executor — hermetic
-/// tests pin the counts, live runs also perform the verb).
+/// show/quit/focus-view request made through the channel, recorded
+/// before the runtime call (and INSTEAD of it under the fake executor —
+/// hermetic tests pin the counts, live runs also perform the verb).
 pub const WindowActionState = struct {
     close_count: u32 = 0,
     minimize_count: u32 = 0,
     show_count: u32 = 0,
     quit_count: u32 = 0,
+    focus_view_count: u32 = 0,
     last_label_buffer: [max_window_action_label]u8 = @splat(0),
     last_label_len: usize = 0,
+    /// `focusView`'s second label. The window label rides
+    /// `lastLabel` with every other verb's, so the two together are
+    /// the whole request.
+    last_view_label_buffer: [max_window_action_label]u8 = @splat(0),
+    last_view_label_len: usize = 0,
 
     pub fn lastLabel(self: *const WindowActionState) []const u8 {
         return self.last_label_buffer[0..self.last_label_len];
+    }
+
+    pub fn lastViewLabel(self: *const WindowActionState) []const u8 {
+        return self.last_view_label_buffer[0..self.last_view_label_len];
     }
 
     fn record(self: *WindowActionState, label: []const u8) void {
         const len = @min(label.len, max_window_action_label);
         @memcpy(self.last_label_buffer[0..len], label[0..len]);
         self.last_label_len = len;
+    }
+
+    fn recordView(self: *WindowActionState, label: []const u8) void {
+        const len = @min(label.len, max_window_action_label);
+        @memcpy(self.last_view_label_buffer[0..len], label[0..len]);
+        self.last_view_label_len = len;
     }
 };
 
@@ -7789,6 +7809,31 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return;
             const binding = self.window_actions orelse return;
             _ = binding.show_fn(binding.context, window_label);
+        }
+
+        /// Move keyboard focus to a view by its declared label — the
+        /// effect-channel route to `Runtime.focusView`, and the only
+        /// one a pure `update` has. The seam behind app-owned pane
+        /// cycling: a shell that mounts a canvas beside `<terminal>`
+        /// panes and a webview owns focus policy itself, because
+        /// AppKit's key-view loop does not span them and a focused
+        /// terminal deliberately keeps Tab for its child.
+        ///
+        /// Fire-and-forget, same contract as `closeWindow`: an unknown
+        /// window or view label is a no-op, a view that refuses focus
+        /// (hidden, disabled) is a no-op, and the fake executor only
+        /// records the request in the mirror
+        /// (`windowActionState().focus_view_count` /
+        /// `lastLabel()` / `lastViewLabel()`). The focus change itself
+        /// is observable the way every focus change is — through the
+        /// view's `focused` flag.
+        pub fn focusView(self: *Self, window_label: []const u8, view_label: []const u8) void {
+            self.window_action_state.focus_view_count += 1;
+            self.window_action_state.record(window_label);
+            self.window_action_state.recordView(view_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.focus_view_fn(binding.context, window_label, view_label);
         }
 
         /// Quit the app for real — the graceful terminate, and the tray

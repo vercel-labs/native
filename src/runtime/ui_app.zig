@@ -1361,6 +1361,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .minimize_fn = effectsMinimizeWindowByLabel,
                 .show_fn = effectsShowWindowByLabel,
                 .quit_fn = effectsQuitApp,
+                .focus_view_fn = effectsFocusViewByLabel,
             });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
@@ -5968,6 +5969,16 @@ fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool 
     // resolution close/minimize use finds it.
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.showWindow(window_id) catch return false;
+    return true;
+}
+
+fn effectsFocusViewByLabel(context: *anyopaque, window_label: []const u8, view_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    // `Runtime.focusView` owns every refusal — unknown view, a view the
+    // platform will not focus — and reports it as an error, which the
+    // fire-and-forget contract turns into a no-op here.
+    runtime.focusView(window_id, view_label) catch return false;
     return true;
 }
 
