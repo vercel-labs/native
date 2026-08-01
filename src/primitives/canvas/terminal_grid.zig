@@ -170,6 +170,13 @@ pub const TerminalGrid = struct {
 /// layout-derived grid it may display; emulator internals (cell state,
 /// modes, selection pins) stay framework-owned and never surface here.
 pub const TerminalState = struct {
+    /// WHICH terminal this state belongs to: the model-owned pty key
+    /// bound by `<terminal pty={key}>`, the same u64 the app's
+    /// `ptySpawn` named. 0 on an unbound terminal. `on-terminal` takes
+    /// a bare Msg tag — an authored payload is refused — so with more
+    /// than one `<terminal>` mounted this is the ONLY thing that tells
+    /// the app which pane just reported.
+    pty: u64 = 0,
     /// Rows the viewport sits above the live screen; 0 is pinned to the
     /// bottom (the live view). Echo it into `scrollback` and the
     /// runtime-owned position survives rebuilds; move it model-side to

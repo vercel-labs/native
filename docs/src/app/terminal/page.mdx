@@ -47,10 +47,12 @@ pub fn view(ui: *Ui, model: *const Model) Ui.Node {
 
 pub fn update(model: *Model, msg: Msg) void {
     switch (msg) {
-        // canvas.TerminalState: scrollback, history, cols, rows — the
-        // app-visible view state. Echo scrollback back under the same
-        // source-wins rule scroll offsets follow; the emulator's cell
-        // state stays framework-owned.
+        // canvas.TerminalState: pty, scrollback, history, cols, rows —
+        // the app-visible view state. `pty` is the bound key, so an app
+        // with several <terminal> elements mounted knows WHICH one
+        // reported. Echo scrollback back under the same source-wins
+        // rule scroll offsets follow; the emulator's cell state stays
+        // framework-owned.
         .term_state => |state| model.scrollback = state.scrollback,
     }
 }
@@ -59,6 +61,8 @@ pub fn update(model: *Model, msg: Msg) void {
 </CodeToggle>
 
 `pty` is the model-owned pty key — one `{binding}`, never a markup literal, exactly like `<media-surface surface>` and `<image image>`. A `<terminal>` without it is refused at validation the way a `<media-surface>` without `surface` is: dead markup can never attach a session. The grid derives its `cols`/`rows` from the frame the layout gives it, so size the element like any leaf (`grow`, or a definite `width`/`height`); the runtime pushes the derived size to the pty with `ptyResize`.
+
+`on-terminal` takes a **bare Msg tag** — an authored payload is refused — so the reported `canvas.TerminalState` is the whole message. That is why it names its own `pty`: with N terminals mounted, every one of them dispatches the same tag with the same payload type, and the key is what distinguishes them. A transpiled core's declared mirror may add `pty` to `{scrollback, history, cols, rows}` to receive it, or leave it out and keep the four.
 
 Behind the binding, the runtime owns the session: it feeds the key's output batches into the emulator as they are journaled, encodes the focused element's keys and committed IME text back through `ptyWrite`, answers the device queries a program sends (cursor position, device attributes), scrolls history on the wheel, and reports the applied view state through `on-terminal`. Pointer selection follows terminal conventions: drag selects cells, double-click selects a word, triple-click selects a line, and Cmd/Ctrl+C copies the emulator's selected text instead of forwarding the chord to the child. Because every byte in both directions crosses the journaled effect boundary, a recorded session replays to the same screen with no shell present — the same guarantee the raw vocabulary gives, through the element.
 

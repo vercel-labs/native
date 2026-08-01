@@ -334,6 +334,44 @@ test "reconcile resizes the emulator, pushes ptyResize, and reports the state on
     try testing.expectEqual(@as(usize, 30), grid.rows.len);
 }
 
+test "every reported state names its pty, so N mounted terminals stay distinguishable" {
+    if (comptime !terminal_session.enabled) return error.SkipZigTest;
+    var store = TerminalSessions.init(testing.allocator);
+    defer store.deinit();
+    var gw = TestGateway{ .gpa = testing.allocator };
+    defer gw.deinit();
+    store.setGateway(gw.gateway());
+    store.beginBuild(.{});
+
+    // Two panes with the SAME geometry: without the key their states
+    // are byte-identical, which is exactly the case an app cannot
+    // attribute. `on-terminal` takes a bare Msg tag — an authored
+    // payload is refused — so the payload is the app's only channel.
+    const first = store.reconcile(11, 0, 80, 24) orelse return error.TestExpectedState;
+    const second = store.reconcile(12, 0, 80, 24) orelse return error.TestExpectedState;
+    try testing.expectEqual(@as(u64, 11), first.pty);
+    try testing.expectEqual(@as(u64, 12), second.pty);
+    try testing.expectEqual(first.scrollback, second.scrollback);
+    try testing.expectEqual(first.cols, second.cols);
+
+    // The wheel path reports through `currentState`, and carries the
+    // key too — the pane the pointer was over, not "some pane".
+    var line: [16]u8 = undefined;
+    for (0..30) |index| {
+        feedOutput(&store, 12, std.fmt.bufPrint(&line, "line {d}\r\n", .{index}) catch unreachable);
+    }
+    try testing.expect(store.wheel(12, 18 * 3));
+    const scrolled = store.currentState(12) orelse return error.TestExpectedState;
+    try testing.expectEqual(@as(u64, 12), scrolled.pty);
+    try testing.expectEqual(@as(u32, 3), scrolled.scrollback);
+
+    // The untouched pane still reports its own key and its own
+    // (unmoved) position.
+    const untouched = store.currentState(11) orelse return error.TestExpectedState;
+    try testing.expectEqual(@as(u64, 11), untouched.pty);
+    try testing.expectEqual(@as(u32, 0), untouched.scrollback);
+}
+
 test "wheel scrollback windows the viewport and the declared echo follows source-wins" {
     if (comptime !terminal_session.enabled) return error.SkipZigTest;
     var store = TerminalSessions.init(testing.allocator);

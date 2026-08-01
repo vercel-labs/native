@@ -428,7 +428,12 @@ const EnabledStore = struct {
             // caller re-emits the display list.
             session.rebuildSnapshot(self.tokens) catch {};
         }
-        const state = session.currentState();
+        // The key is stamped HERE, at the store's public seam, because
+        // this is where it is known: a `Session` is found BY key and
+        // does not carry one, and every path that reaches an app —
+        // reconcile and the wheel — comes through these two functions.
+        var state = session.currentState();
+        state.pty = pty;
         if (session.last_reported == null or !stateEql(session.last_reported.?, state)) {
             session.last_reported = state;
             return state;
@@ -438,7 +443,8 @@ const EnabledStore = struct {
 
     pub fn currentState(self: *EnabledStore, pty: u64) ?canvas.TerminalState {
         const session = self.find(pty) orelse return null;
-        const state = session.currentState();
+        var state = session.currentState();
+        state.pty = pty;
         session.last_reported = state;
         return state;
     }
